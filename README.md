@@ -189,6 +189,25 @@ It has Python, Node, C/C++, Java, Go, Ruby, PHP and Rust available. Rust install
 `rustup` is loaded by the remote benchmark script via `~/.cargo/env`, so `rustc` works
 over noninteractive `gh codespace ssh` calls.
 
+## Background cloud solver foundation
+
+The background path is scaffolded as a focused solving feature, not a stealth
+mode and not a full IDE. Supabase now has queue tables for cloud Council jobs,
+ordered screenshots, progress events, Council reports and registered iOS
+notification devices. The desktop bridge can read those jobs back for history.
+
+The first worker entrypoint is:
+
+```bash
+node scripts/cloud-worker.mjs --once
+```
+
+It claims queued jobs, records progress and sends APNs notifications when the
+server has APNs credentials. Real cloud Council execution is the next
+implementation layer; until then the worker marks claimed jobs as
+`needs_attention` with an explicit `executor_pending` phase rather than storing a
+fake answer. See `docs/background-cloud-solver.md`.
+
 ---
 
 ## Keys and privacy
@@ -198,8 +217,11 @@ them when it builds a request; the JavaScript can only ask *whether* a key exist
 what it is. Every network call happens in Rust, which also sidesteps browser CORS —
 Anthropic in particular refuses direct calls from a webview without an explicit opt-in.
 
-Your images and prompts go to the providers you enable. Nowhere else. There is no
-backend.
+For ordinary desktop runs, your images and prompts go to the providers you
+enable. For background cloud jobs, screenshots and job events are stored in your
+Supabase project and the worker uses server-side credentials. macOS Screen
+Recording permission, process visibility and network activity are respected, not
+bypassed.
 
 ---
 

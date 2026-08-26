@@ -197,6 +197,9 @@ pub fn run() {
             sessions::screenshot_reorder,
             sessions::screenshots_purge,
             sessions::run_save,
+            sessions::solve_job_list,
+            sessions::solve_job_event_list,
+            sessions::council_report_get,
             runner::run_code,
             runner::runnable_languages,
         ])

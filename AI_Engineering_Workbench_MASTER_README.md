@@ -340,6 +340,11 @@ misdiagnosed as the broken direct one.
   remote benchmark environment is `turbo-cod-qr9p57v5x5ph6wpj`, with Python,
   Node, C/C++, Java, Go, Ruby, PHP and Rust available over noninteractive
   `gh codespace ssh`.
+- The background cloud solver foundation is in place: Supabase queue tables for
+  Council jobs, ordered job screenshots, progress events, Council reports and
+  iOS notification devices; typed desktop read APIs for job history; a tested
+  background batch contract; and a worker scaffold that claims jobs and records
+  `executor_pending` until cloud Council execution is wired.
 - The settings dialog was recovered after an accidental pasted search-output
   overwrite, and the app now builds cleanly again.
 - The strongest tested foundation today is the non-UI logic: consensus parsing,
@@ -353,7 +358,8 @@ misdiagnosed as the broken direct one.
 - The next unproven surface is the real desktop workflow: live capture under
   macOS Screen Recording permissions, model probing from the settings UI, a
   smoke Run with Council off, then a full Council run with Codespaces benchmark
-  evidence enabled.
+  evidence enabled. After that, the next implementation layer is write-side
+  background job submission and real cloud Council execution.
 
 **The architectural fork, now resolved**
 

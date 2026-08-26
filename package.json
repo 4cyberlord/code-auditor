@@ -12,7 +12,7 @@
     "inspect": "node scripts/inspect-db.mjs",
     "test:storage": "node scripts/test-storage.mjs",
     "test:vision": "node scripts/test-vision.mjs",
-    "test": "node tests/consensus.test.ts && node tests/extraction.test.ts && node tests/sql.test.ts && node tests/bridge.test.ts && node tests/preflight.test.ts && node tests/payload.test.ts && node tests/highlight.test.ts && node tests/verdict.test.ts && node tests/image.test.ts && node tests/manifest.test.ts && node tests/reading.test.ts && node tests/when.test.ts && node tests/title.test.ts && node tests/council.test.ts && node tests/knowledge.test.ts && node tests/probeFit.test.ts",
+    "test": "node tests/consensus.test.ts && node tests/extraction.test.ts && node tests/sql.test.ts && node tests/bridge.test.ts && node tests/preflight.test.ts && node tests/payload.test.ts && node tests/highlight.test.ts && node tests/verdict.test.ts && node tests/image.test.ts && node tests/manifest.test.ts && node tests/reading.test.ts && node tests/when.test.ts && node tests/title.test.ts && node tests/council.test.ts && node tests/knowledge.test.ts && node tests/probeFit.test.ts && node tests/cloudJobs.test.ts && node tests/backgroundBatch.test.ts",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml",
     "check": "npm run typecheck && npm run lint && npm test && npm run check:rust",
     "tauri": "tauri",

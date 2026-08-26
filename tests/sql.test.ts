@@ -67,13 +67,18 @@ for (const m of schemaSql.matchAll(
 }
 
 console.log("\n1. the schema parses");
-check("eight tables found", tables.size === 8, [...tables.keys()].join(", "));
+check("thirteen tables found", tables.size === 13, [...tables.keys()].join(", "));
 for (const t of [
   "sessions",
   "screenshots",
   "runs",
   "agent_responses",
   "verdicts",
+  "solve_jobs",
+  "solve_job_images",
+  "solve_job_events",
+  "council_reports",
+  "notification_devices",
   "settings",
   "intelligence_sources",
   "intelligence_records",

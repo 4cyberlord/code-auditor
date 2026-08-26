@@ -104,8 +104,59 @@ pub struct VerdictIn {
     pub judge_text: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolveJob {
+    pub id: String,
+    pub session_id: String,
+    pub mode: String,
+    pub status: String,
+    pub progress_phase: String,
+    pub settings_snapshot: serde_json::Value,
+    pub error: Option<String>,
+    pub result_summary: String,
+    pub created_at: String,
+    pub claimed_at: String,
+    pub started_at: String,
+    pub finished_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolveJobEvent {
+    pub id: String,
+    pub job_id: String,
+    pub level: String,
+    pub phase: String,
+    pub message: String,
+    pub payload: serde_json::Value,
+    pub created_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CouncilReportSummary {
+    pub id: String,
+    pub job_id: String,
+    pub session_id: String,
+    pub winner: Option<String>,
+    pub synthesis: String,
+    pub markdown: String,
+    pub report: serde_json::Value,
+    pub created_at: String,
+}
+
 fn ts(row: &sqlx::postgres::PgRow, col: &str) -> String {
     row.try_get::<chrono::DateTime<chrono::Utc>, _>(col)
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_default()
+}
+
+fn ts_opt(row: &sqlx::postgres::PgRow, col: &str) -> String {
+    row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(col)
+        .ok()
+        .flatten()
         .map(|t| t.to_rfc3339())
         .unwrap_or_default()
 }
@@ -525,4 +576,128 @@ pub async fn run_save(
     ));
 
     Ok(run_id.to_string())
+}
+
+// ------------------------------------------------------------- solve jobs
+
+#[tauri::command]
+pub async fn solve_job_list(
+    db: tauri::State<'_, Db>,
+    status: String,
+) -> Result<Vec<SolveJob>, String> {
+    if ![
+        "queued",
+        "running",
+        "needs_attention",
+        "failed",
+        "completed",
+        "cancelled",
+        "all",
+    ]
+    .contains(&status.as_str())
+    {
+        return Err(format!("\"{status}\" is not a solve job status."));
+    }
+
+    let p = pool(&db).await?;
+    let rows = if status == "all" {
+        sqlx::query(
+            "select id, session_id, mode, status, progress_phase, settings_snapshot,
+                    error, result_summary, created_at, claimed_at, started_at,
+                    finished_at, updated_at
+               from solve_jobs order by created_at desc limit 100",
+        )
+        .fetch_all(&p)
+        .await
+    } else {
+        sqlx::query(
+            "select id, session_id, mode, status, progress_phase, settings_snapshot,
+                    error, result_summary, created_at, claimed_at, started_at,
+                    finished_at, updated_at
+               from solve_jobs where status = $1 order by created_at desc limit 100",
+        )
+        .bind(&status)
+        .fetch_all(&p)
+        .await
+    }
+    .map_err(|e| format!("Could not list solve jobs: {e}"))?;
+
+    Ok(rows
+        .iter()
+        .map(|r| SolveJob {
+            id: r.get::<Uuid, _>("id").to_string(),
+            session_id: r.get::<Uuid, _>("session_id").to_string(),
+            mode: r.get("mode"),
+            status: r.get("status"),
+            progress_phase: r.get("progress_phase"),
+            settings_snapshot: r
+                .try_get("settings_snapshot")
+                .unwrap_or_else(|_| serde_json::json!({})),
+            error: r.try_get("error").ok().flatten(),
+            result_summary: r.get("result_summary"),
+            created_at: ts(r, "created_at"),
+            claimed_at: ts_opt(r, "claimed_at"),
+            started_at: ts_opt(r, "started_at"),
+            finished_at: ts_opt(r, "finished_at"),
+            updated_at: ts(r, "updated_at"),
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn solve_job_event_list(
+    db: tauri::State<'_, Db>,
+    job_id: String,
+) -> Result<Vec<SolveJobEvent>, String> {
+    let jid = parse_id(&job_id, "solve job")?;
+    let p = pool(&db).await?;
+    let rows = sqlx::query(
+        "select id, job_id, level, phase, message, payload, created_at
+           from solve_job_events where job_id = $1 order by created_at",
+    )
+    .bind(jid)
+    .fetch_all(&p)
+    .await
+    .map_err(|e| format!("Could not list solve job events: {e}"))?;
+
+    Ok(rows
+        .iter()
+        .map(|r| SolveJobEvent {
+            id: r.get::<Uuid, _>("id").to_string(),
+            job_id: r.get::<Uuid, _>("job_id").to_string(),
+            level: r.get("level"),
+            phase: r.get("phase"),
+            message: r.get("message"),
+            payload: r.try_get("payload").unwrap_or_else(|_| serde_json::json!({})),
+            created_at: ts(r, "created_at"),
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn council_report_get(
+    db: tauri::State<'_, Db>,
+    job_id: String,
+) -> Result<Option<CouncilReportSummary>, String> {
+    let jid = parse_id(&job_id, "solve job")?;
+    let p = pool(&db).await?;
+    let row = sqlx::query(
+        "select id, job_id, session_id, winner, synthesis, markdown, report, created_at
+           from council_reports where job_id = $1",
+    )
+    .bind(jid)
+    .fetch_optional(&p)
+    .await
+    .map_err(|e| format!("Could not load the council report: {e}"))?;
+
+    Ok(row.map(|r| CouncilReportSummary {
+        id: r.get::<Uuid, _>("id").to_string(),
+        job_id: r.get::<Uuid, _>("job_id").to_string(),
+        session_id: r.get::<Uuid, _>("session_id").to_string(),
+        winner: r.try_get("winner").ok().flatten(),
+        synthesis: r.get("synthesis"),
+        markdown: r.get("markdown"),
+        report: r.try_get("report").unwrap_or_else(|_| serde_json::json!({})),
+        created_at: ts(&r, "created_at"),
+    }))
 }

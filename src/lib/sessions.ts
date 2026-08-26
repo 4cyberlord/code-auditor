@@ -83,6 +83,51 @@ export interface VerdictIn {
   judgeText: string | null;
 }
 
+export type SolveJobStatus =
+  | "queued"
+  | "running"
+  | "needs_attention"
+  | "failed"
+  | "completed"
+  | "cancelled";
+
+export interface SolveJob {
+  id: string;
+  sessionId: string;
+  mode: "council";
+  status: SolveJobStatus;
+  progressPhase: string;
+  settingsSnapshot: Record<string, unknown>;
+  error: string | null;
+  resultSummary: string;
+  createdAt: string;
+  claimedAt: string;
+  startedAt: string;
+  finishedAt: string;
+  updatedAt: string;
+}
+
+export interface SolveJobEvent {
+  id: string;
+  jobId: string;
+  level: "info" | "warn" | "error";
+  phase: string;
+  message: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface CouncilReportSummary {
+  id: string;
+  jobId: string;
+  sessionId: string;
+  winner: string | null;
+  synthesis: string;
+  markdown: string;
+  report: Record<string, unknown>;
+  createdAt: string;
+}
+
 // ------------------------------------------------------------------ sessions
 
 export async function listSessions(status: "active" | "archived"): Promise<Session[]> {
@@ -171,4 +216,25 @@ export async function saveRun(args: {
 }): Promise<string> {
   if (!inTauri()) throw new Error(NO_SHELL);
   return invoke<string>("run_save", args);
+}
+
+// ------------------------------------------------------------- solve jobs
+
+export async function listSolveJobs(
+  status: SolveJobStatus | "all" = "all"
+): Promise<SolveJob[]> {
+  if (!inTauri()) return [];
+  return invoke<SolveJob[]>("solve_job_list", { status });
+}
+
+export async function listSolveJobEvents(jobId: string): Promise<SolveJobEvent[]> {
+  if (!inTauri()) return [];
+  return invoke<SolveJobEvent[]>("solve_job_event_list", { jobId });
+}
+
+export async function getCouncilReport(
+  jobId: string
+): Promise<CouncilReportSummary | null> {
+  if (!inTauri()) return null;
+  return invoke<CouncilReportSummary | null>("council_report_get", { jobId });
 }

@@ -92,6 +92,100 @@ drop trigger if exists intelligence_records_touch on intelligence_records;
 create trigger intelligence_records_touch before update on intelligence_records
   for each row execute function touch_updated_at();
 
+-- Phase 11: background capture-to-council jobs. The desktop app can be closed
+-- while an approved helper uploads captures and a cloud worker claims queued
+-- work. The queue records progress and evidence; secrets stay in Keychain or
+-- server-side worker environment variables, never in these rows.
+create table if not exists solve_jobs (
+  id                uuid primary key default gen_random_uuid(),
+  session_id        uuid        not null references sessions (id) on delete cascade,
+  mode              text        not null default 'council'
+                      check (mode in ('council')),
+  status            text        not null default 'queued'
+                      check (status in ('queued', 'running', 'needs_attention',
+                                        'failed', 'completed', 'cancelled')),
+  progress_phase    text        not null default 'queued',
+  settings_snapshot jsonb       not null default '{}'::jsonb,
+  error             text,
+  result_summary    text        not null default '',
+  created_at        timestamptz not null default now(),
+  claimed_at        timestamptz,
+  started_at        timestamptz,
+  finished_at       timestamptz,
+  updated_at        timestamptz not null default now()
+);
+
+create index if not exists solve_jobs_status_created_idx
+  on solve_jobs (status, created_at);
+
+create index if not exists solve_jobs_session_idx
+  on solve_jobs (session_id, created_at desc);
+
+create table if not exists solve_job_images (
+  id             uuid primary key default gen_random_uuid(),
+  job_id         uuid        not null references solve_jobs (id) on delete cascade,
+  session_id     uuid        not null references sessions (id) on delete cascade,
+  position       integer     not null,
+  storage_bucket text        not null,
+  storage_path   text        not null,
+  file_name      text        not null,
+  bytes          integer     not null default 0,
+  mime           text        not null default 'image/png',
+  width          integer,
+  height         integer,
+  captured_at    timestamptz not null default now(),
+  unique (job_id, position)
+);
+
+create index if not exists solve_job_images_job_idx
+  on solve_job_images (job_id, position);
+
+create table if not exists solve_job_events (
+  id         uuid primary key default gen_random_uuid(),
+  job_id     uuid        not null references solve_jobs (id) on delete cascade,
+  level      text        not null default 'info'
+               check (level in ('info', 'warn', 'error')),
+  phase      text        not null default 'queued',
+  message    text        not null,
+  payload    jsonb       not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists solve_job_events_job_idx
+  on solve_job_events (job_id, created_at);
+
+create table if not exists council_reports (
+  id         uuid primary key default gen_random_uuid(),
+  job_id     uuid        not null unique references solve_jobs (id) on delete cascade,
+  session_id uuid        not null references sessions (id) on delete cascade,
+  winner     text,
+  synthesis  text        not null default '',
+  markdown   text        not null default '',
+  report     jsonb       not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists council_reports_session_idx
+  on council_reports (session_id, created_at desc);
+
+create table if not exists notification_devices (
+  id           uuid primary key default gen_random_uuid(),
+  platform     text        not null check (platform in ('ios')),
+  device_token text        not null unique,
+  label        text        not null default '',
+  enabled      boolean     not null default true,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+
+drop trigger if exists solve_jobs_touch on solve_jobs;
+create trigger solve_jobs_touch before update on solve_jobs
+  for each row execute function touch_updated_at();
+
+drop trigger if exists notification_devices_touch on notification_devices;
+create trigger notification_devices_touch before update on notification_devices
+  for each row execute function touch_updated_at();
+
 insert into intelligence_sources (id, title, url, trust, note, tags)
 values
   ('node-perf-hooks', 'Node.js perf_hooks', 'https://nodejs.org/api/perf_hooks.html', 'official', 'Official Node.js performance measurement API.', array['node', 'javascript', 'benchmark', 'runtime']),
