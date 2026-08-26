@@ -1,0 +1,44 @@
+{
+  "name": "code-auditor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "inspect": "node scripts/inspect-db.mjs",
+    "test:storage": "node scripts/test-storage.mjs",
+    "test:vision": "node scripts/test-vision.mjs",
+    "test": "node tests/consensus.test.ts && node tests/extraction.test.ts && node tests/sql.test.ts && node tests/bridge.test.ts && node tests/preflight.test.ts && node tests/payload.test.ts && node tests/highlight.test.ts && node tests/verdict.test.ts && node tests/image.test.ts && node tests/manifest.test.ts && node tests/reading.test.ts && node tests/when.test.ts && node tests/title.test.ts && node tests/council.test.ts && node tests/knowledge.test.ts && node tests/probeFit.test.ts",
+    "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "check": "npm run typecheck && npm run lint && npm test && npm run check:rust",
+    "tauri": "tauri",
+    "app:dev": "tauri dev",
+    "app:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.1.1",
+    "@tauri-apps/plugin-opener": "^2.2.2",
+    "next": "15.5.23",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.2.0",
+    "@tauri-apps/cli": "^2.2.5",
+    "@types/node": "^22.10.7",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "eslint": "^9.18.0",
+    "eslint-config-next": "15.5.23",
+    "typescript": "^5.7.3"
+  },
+  "overrides": {
+    "postcss": "^8.5.26",
+    "sharp": "^0.35.3"
+  }
+}
