@@ -1,23 +1,6 @@
 {
   "name": "Code Auditor Benchmark",
   "image": "mcr.microsoft.com/devcontainers/universal:2-linux",
-  "features": {
-    "ghcr.io/devcontainers/features/node:1": {
-      "version": "22"
-    },
-    "ghcr.io/devcontainers/features/python:1": {
-      "version": "3.12"
-    },
-    "ghcr.io/devcontainers/features/go:1": {
-      "version": "latest"
-    },
-    "ghcr.io/devcontainers/features/rust:1": {
-      "version": "latest"
-    },
-    "ghcr.io/devcontainers/features/java:1": {
-      "version": "21"
-    }
-  },
   "customizations": {
     "vscode": {
       "extensions": [
@@ -27,5 +10,5 @@
       ]
     }
   },
-  "postCreateCommand": "node --version && python3 --version && go version && rustc --version && c++ --version | head -1"
+  "postCreateCommand": "node --version && python3 --version && go version && rustc --version && java -version && c++ --version | head -1"
 }
