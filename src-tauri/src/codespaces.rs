@@ -246,6 +246,7 @@ fn remote_script(language: &str, code: &str, stdin_text: &str) -> String {
     let language = shell_single(language);
     format!(
         r#"set -u
+if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
 tmp="$(mktemp -d "${{TMPDIR:-/tmp}}/code-auditor-bench.XXXXXX")" || exit 98
 cleanup() {{ rm -rf "$tmp"; }}
 trap cleanup EXIT
