@@ -233,6 +233,14 @@ that no run has yet put through its paces.
   So Filesystem and Network under section 25 stay unticked, a test records the
   gap, and the Run button says it plainly before the first press.
 
+  **Latest Mac result:** `cargo test --lib exec` now runs on this Mac and passes
+  27 of 29 exec tests. Two failures remain and keep this section unticked:
+  the fork-loop test exits early with `main.sh: fork: Resource temporarily
+  unavailable` instead of proving the wall-clock/group-kill path, and the
+  unbounded Python allocation succeeds despite the intended virtual-memory cap.
+  That means macOS resource-limit behaviour is the next sandbox task, not a box
+  to mark done.
+
   Nothing runs automatically. This is code a language model wrote, executing on
   your own machine, and the decision to run it has to be a person's — however
   unanimous the panel was.
@@ -331,8 +339,8 @@ misdiagnosed as the broken direct one.
   tiling and status/probe classification.
 - The main unproven surface is the real desktop workflow: live capture under
   macOS Screen Recording permissions, model probing from the settings UI, the
-  execution sandbox on this Mac, screenshot-to-session wiring and production app
-  packaging.
+  remaining macOS execution-sandbox limits, screenshot-to-session wiring and
+  production app packaging.
 
 **The architectural fork, now resolved**
 
@@ -361,9 +369,9 @@ only possible because that was written down.
 1. Run one live coding audit with the new Knowledge/RAG pack visible in the
    prompt path, and confirm the final answer uses the relevant pattern and
    reports runtime professionally.
-2. Press *Test these models*, then run `cd src-tauri && cargo test --lib exec` on
-   this Mac. Together those settle the model-health/vision questions and earn
-   most of the execution-sandbox confidence.
+2. Fix or redesign the two macOS execution-sandbox failures from
+   `cargo test --lib exec`: memory limiting and the fork-loop containment proof.
+   Only then should sections 24-25 move toward checked.
 3. Wire screenshots into sessions end to end: call `screenshot_add`,
    `screenshot_remove`, `screenshot_reorder` and `screenshots_purge` from the UI,
    then persist the screenshot IDs with each run record.
