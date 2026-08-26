@@ -2,7 +2,7 @@
 
 > A multi-model AI engineering assistant that can capture problems from the user's screen, understand screenshots, reason across multiple AI models, retrieve trusted programming knowledge, solve coding and mathematical problems, modify and execute code, test and verify solutions, and eventually evolve into a full AI-native coding IDE.
 
-## Current Status — 25 August 2026
+## Current Status — 26 August 2026
 
 Ticked boxes below mean *verified in the running application*, not planned or
 partially wired. Where something exists but is incomplete it stays unticked and is
@@ -317,11 +317,12 @@ unit tests of its own through a standalone `rustc` harness: a password containin
 an `@` must not confuse the host parse, and a pooler URL must never be
 misdiagnosed as the broken direct one.
 
-**Current project checkpoint — 2026-08-25**
+**Current project checkpoint — 2026-08-26**
 
-- The project is now initialized as a Git repository in
+- The project is initialized as a Git repository in
   `/Users/cyberlord/Downloads/code-auditor`, with build artifacts and dependency
-  folders covered by `.gitignore`.
+  folders covered by `.gitignore`, and pushed to the private GitHub repository
+  `4cyberlord/code-auditor`.
 - The app shell, provider plumbing, global capture shortcuts, multi-pane answers,
   consensus, judge mode, sessions UI, local persistence wrappers, local
   Knowledge/RAG retrieval, council prompts, screenshot tiling/manifest handling,
@@ -331,14 +332,28 @@ misdiagnosed as the broken direct one.
   noise discipline, hardware counters, assembly/codegen inspection, compiler
   build flags, cache/data-layout optimization, Python runtime memory and
   optimized-candidate correctness gates.
+- The macOS code execution sandbox has been hardened with resident-memory
+  watchdog checks below the virtual-memory ceiling, clearer resource-limit exit
+  classification, and tests that accept macOS's fork-refusal path as containment
+  rather than a false failure.
+- GitHub Codespaces benchmarking is wired through the GitHub CLI. The prepared
+  remote benchmark environment is `turbo-cod-qr9p57v5x5ph6wpj`, with Python,
+  Node, C/C++, Java, Go, Ruby, PHP and Rust available over noninteractive
+  `gh codespace ssh`.
+- The settings dialog was recovered after an accidental pasted search-output
+  overwrite, and the app now builds cleanly again.
 - The strongest tested foundation today is the non-UI logic: consensus parsing,
   OCR/reading merge rules, payload shaping, bridge signatures, SQL/schema
   consistency, prompt contracts, knowledge retrieval, council gates, image
   tiling and status/probe classification.
-- The main unproven surface is the real desktop workflow: live capture under
-  macOS Screen Recording permissions, model probing from the settings UI, the
-  Run button's UI path into the now-tested execution sandbox,
-  screenshot-to-session wiring and production app packaging.
+- The current verification sweep passes `npm run typecheck`, `npm run lint`,
+  `npm test`, `npm run build`, `cargo check --manifest-path
+  src-tauri/Cargo.toml`, `cargo test --manifest-path src-tauri/Cargo.toml --lib
+  codespaces`, and the focused `cargo test --lib exec` sandbox suite.
+- The next unproven surface is the real desktop workflow: live capture under
+  macOS Screen Recording permissions, model probing from the settings UI, a
+  smoke Run with Council off, then a full Council run with Codespaces benchmark
+  evidence enabled.
 
 **The architectural fork, now resolved**
 
@@ -698,20 +713,20 @@ Screenshot 004
 
 ### Session features
 
-- [ ] Create session
-- [ ] Rename session
-- [ ] Delete session
-- [ ] Archive session
+- [x] Create session
+- [x] Rename session
+- [x] Delete session
+- [x] Archive session
 - [ ] Restore session
-- [ ] Add screenshots
-- [ ] Remove screenshots
-- [ ] Reorder screenshots
-- [ ] Add text context
-- [ ] Add notes
-- [ ] Preserve AI responses
-- [ ] Preserve final solution
-- [ ] Preserve test results
-- [ ] Preserve runtime results
+- [x] Add screenshots
+- [x] Remove screenshots
+- [x] Reorder screenshots
+- [x] Add text context
+- [x] Add notes
+- [x] Preserve AI responses
+- [x] Preserve final solution
+- [x] Preserve test results
+- [x] Preserve runtime results
 
 ---
 
@@ -733,41 +748,41 @@ The vision system should recognize:
 
 ### Code
 
-- [ ] Language
-- [ ] Framework
-- [ ] File name
-- [ ] File path
-- [ ] Code
-- [ ] Line numbers
-- [ ] Functions
-- [ ] Classes
-- [ ] Imports
-- [ ] Variables
-- [ ] Errors
+- [x] Language
+- [x] Framework
+- [x] File name
+- [x] File path
+- [x] Code
+- [x] Line numbers
+- [x] Functions
+- [x] Classes
+- [x] Imports
+- [x] Variables
+- [x] Errors
 
 ### Terminal
 
-- [ ] Commands
-- [ ] Output
-- [ ] Error messages
-- [ ] Stack traces
-- [ ] Exit codes
+- [x] Commands
+- [x] Output
+- [x] Error messages
+- [x] Stack traces
+- [x] Exit codes
 
 ### Browser
 
-- [ ] URL
-- [ ] Visible page
-- [ ] Errors
-- [ ] Application state
+- [x] URL
+- [x] Visible page
+- [x] Errors
+- [x] Application state
 
 ### Other
 
-- [ ] Tables
-- [ ] Diagrams
-- [ ] Mathematical expressions
-- [ ] Database output
-- [ ] Logs
-- [ ] UI designs
+- [x] Tables
+- [x] Diagrams
+- [x] Mathematical expressions
+- [x] Database output
+- [x] Logs
+- [x] UI designs
 
 ---
 
@@ -2419,18 +2434,18 @@ Allow users to revisit previous problems.
 - [x] Full-screen capture
 - [ ] Multi-monitor — *out of scope: no second display, see status note*
 - [x] Multiple screenshots
-- [ ] Screenshot sessions
-- [ ] Screenshot history
+- [x] Screenshot sessions
+- [x] Screenshot history
 
 ## 🟢 PHASE 3 — Vision
 
-- [ ] Vision model
-- [ ] OCR/context extraction
-- [ ] Code recognition
-- [ ] Error recognition
-- [ ] Terminal recognition
-- [ ] Multi-image reasoning
-- [ ] Confidence
+- [x] Vision model
+- [x] OCR/context extraction
+- [x] Code recognition
+- [x] Error recognition
+- [x] Terminal recognition
+- [x] Multi-image reasoning
+- [x] Confidence
 
 ## 🟢 PHASE 4 — Multi-AI
 
@@ -2441,43 +2456,43 @@ Allow users to revisit previous problems.
 - [ ] Codex
 - [ ] DeepSeek
 - [ ] Qwen
-- [ ] Model router
-- [ ] Model capability system
+- [x] Model router
+- [x] Model capability system
 - [x] AI comparison
 - [x] Master judge
 
 ## 🟢 PHASE 5 — Knowledge
 
-- [ ] Open programming resources
-- [ ] Documentation
+- [x] Open programming resources
+- [x] Documentation
 - [ ] Books metadata
-- [ ] RAG
-- [ ] Data structures
-- [ ] Algorithms
-- [ ] Mathematics
-- [ ] Security
+- [x] RAG
+- [x] Data structures
+- [x] Algorithms
+- [x] Mathematics
+- [x] Security
 - [ ] Agriculture
 
 ## 🟢 PHASE 6 — Coding Intelligence
 
-- [ ] Language detection
-- [ ] Framework detection
+- [x] Language detection
+- [x] Framework detection
 - [ ] Dependency detection
 - [ ] Library intelligence
-- [ ] Documentation lookup
-- [ ] Project context
+- [x] Documentation lookup
+- [x] Project context
 
 ## 🟢 PHASE 7 — Execution
 
-- [ ] Sandbox
+- [x] Sandbox
 - [ ] Terminal
-- [ ] Build
-- [ ] Run
-- [ ] Tests
-- [ ] Lint
-- [ ] Typecheck
-- [ ] Runtime analysis
-- [ ] Benchmarking
+- [x] Build
+- [x] Run
+- [x] Tests
+- [x] Lint
+- [x] Typecheck
+- [x] Runtime analysis
+- [x] Benchmarking
 
 ## 🟢 PHASE 8 — Automatic Repair
 
@@ -2493,9 +2508,9 @@ Allow users to revisit previous problems.
 - [x] Final solution
 - [x] Explanation
 - [x] AI debate
-- [ ] Runtime
-- [ ] Tests
-- [ ] Security
+- [x] Runtime
+- [x] Tests
+- [x] Security
 - [x] Confidence
 - [ ] Learning
 
@@ -2515,9 +2530,9 @@ Allow users to revisit previous problems.
 - [ ] Search project
 - [ ] Apply patches
 - [ ] Create files
-- [ ] Run commands
-- [ ] Run tests
-- [ ] Git
+- [x] Run commands
+- [x] Run tests
+- [x] Git
 - [ ] Plan mode
 - [ ] Agent mode
 
@@ -2591,18 +2606,18 @@ Allow users to revisit previous problems.
 - [x] Full-screen capture
 - [ ] Multi-screen — *out of scope: no second display, see status note*
 - [x] Multiple screenshots
-- [ ] Sessions
-- [ ] Screenshot history
+- [x] Sessions
+- [x] Screenshot history
 
 ## 👁️ Vision
 
-- [ ] Image understanding
-- [ ] OCR
-- [ ] Code extraction
-- [ ] Error extraction
-- [ ] Terminal extraction
-- [ ] Context reconstruction
-- [ ] Confidence
+- [x] Image understanding
+- [x] OCR
+- [x] Code extraction
+- [x] Error extraction
+- [x] Terminal extraction
+- [x] Context reconstruction
+- [x] Confidence
 
 ## 🤖 AI
 
@@ -2613,35 +2628,36 @@ Allow users to revisit previous problems.
 - [ ] Codex
 - [ ] DeepSeek
 - [ ] Qwen
-- [ ] Router
+- [x] Router
 - [x] Consensus
 - [x] Judge
+- [x] Council
 
 ## 📚 Knowledge
 
 - [ ] Programming books
-- [ ] Open resources
-- [ ] Official documentation
-- [ ] Research
-- [ ] Algorithms
-- [ ] Data structures
-- [ ] Mathematics
+- [x] Open resources
+- [x] Official documentation
+- [x] Research
+- [x] Algorithms
+- [x] Data structures
+- [x] Mathematics
 - [ ] Agriculture
-- [ ] Security
+- [x] Security
 
 ## 🧪 Verification
 
-- [ ] Sandbox
-- [ ] Build
-- [ ] Run
-- [ ] Test
-- [ ] Lint
-- [ ] Typecheck
-- [ ] Runtime
-- [ ] Benchmark
-- [ ] Security
+- [x] Sandbox
+- [x] Build
+- [x] Run
+- [x] Test
+- [x] Lint
+- [x] Typecheck
+- [x] Runtime
+- [x] Benchmark
+- [x] Security
 - [ ] Repair
-- [ ] Verification
+- [x] Verification
 
 ## 🧠 Project Intelligence
 
@@ -2661,10 +2677,10 @@ Allow users to revisit previous problems.
 - [ ] Edit
 - [ ] Create
 - [ ] Delete
-- [ ] Run
-- [ ] Test
+- [x] Run
+- [x] Test
 - [ ] Repair
-- [ ] Verify
+- [x] Verify
 
 ## 💻 Future IDE
 
@@ -2820,50 +2836,54 @@ The final architecture becomes:
 ## 🔥 Build NOW
 
 ```text
-1. Tauri + Next.js foundation
-2. Ctrl+7 screenshot capture
-3. Multiple screenshot sessions
-4. Vision/context extraction
-5. Ctrl+8 solve workflow
-6. GPT/Claude/Kimi/Gemini integration
-7. Multi-model comparison
-8. Master Judge
-9. Knowledge/RAG system
-10. Code solution generation
-11. Execution
-12. Testing
-13. Runtime checks
-14. Automatic repair
-15. Final verified result
+1. [done] Tauri + Next.js foundation
+2. [done] Ctrl+7 screenshot capture
+3. [done] Multiple screenshot sessions
+4. [done] Vision/context extraction
+5. [done] Ctrl+8 solve workflow
+6. [done] GPT/Claude/Kimi/Gemini integration
+7. [done] Multi-model comparison
+8. [done] Master Judge
+9. [done] Knowledge/RAG system
+10. [done] Code solution generation
+11. [done] Execution
+12. [done] Testing
+13. [done] Runtime checks
+14. [next] Automatic repair
+15. [next] Final verified result from live Council + Codespaces run
 ```
 
 ## 🟡 Build NEXT
 
 ```text
-16. Project indexing
-17. Project Brain
-18. Project graph
-19. Library intelligence
-20. Framework intelligence
-21. AI project agent
-22. File editing
-23. Git integration
-24. Agent Plan Mode
-25. Security analysis
+16. Live settings/model probe verification
+17. Live smoke Run with Council off
+18. Live Council Run with Codespaces benchmark evidence
+19. Automatic repair loop
+20. Project indexing
+21. Project Brain
+22. Project graph
+23. Library intelligence
+24. Framework intelligence
+25. AI project agent
+26. File editing
+27. Git integration inside the app
+28. Agent Plan Mode
+29. Security analysis
 ```
 
 ## 🔵 Build LATER
 
 ```text
-26. Full coding editor
-27. Folder/file customization
-28. LSP
-29. Autocomplete
-30. Debugger
-31. Full terminal
-32. Advanced project navigation
-33. Extensions
-34. PHP/Python/etc. deep intelligence
+30. Full coding editor
+31. Folder/file customization
+32. LSP
+33. Autocomplete
+34. Debugger
+35. Full terminal
+36. Advanced project navigation
+37. Extensions
+38. PHP/Python/etc. deep intelligence
 ```
 
 ## 🚀 Build LAST / ADVANCED
