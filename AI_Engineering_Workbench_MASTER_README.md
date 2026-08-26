@@ -1,6 +1,6 @@
 # AI Engineering Workbench — Master README
 
-> A multi-model AI engineering assistant that can capture problems from the user's screen, understand screenshots, reason across multiple AI models, retrieve trusted programming knowledge, solve coding and mathematical problems, modify and execute code, test and verify solutions, and eventually evolve into a full AI-native coding IDE.
+> A multi-model AI engineering assistant that can capture problems from the user's screen, understand screenshots, reason across multiple AI models, retrieve trusted programming knowledge, solve coding and mathematical problems, execute and benchmark candidate code, repair failures, and deliver verified solutions.
 
 ## Current Status — 26 August 2026
 
@@ -379,15 +379,13 @@ only possible because that was written down.
 
 **The next three things, in order**
 
-1. Run one live coding audit with the new Knowledge/RAG pack visible in the
-   prompt path, and confirm the final answer uses the relevant pattern and
-   reports runtime professionally.
-2. Press Run on an answer that contains code and confirm the UI path correctly
-   invokes the now-tested execution sandbox, displays stdout/stderr, and records
-   the result.
-3. Wire screenshots into sessions end to end: call `screenshot_add`,
-   `screenshot_remove`, `screenshot_reorder` and `screenshots_purge` from the UI,
-   then persist the screenshot IDs with each run record.
+1. Verify Settings in the running desktop app: gateway key, model probes,
+   context mode, reader route, Council roster and Codespaces name.
+2. Run one live coding audit with Council off, confirm the Knowledge/RAG pack is
+   visible in the prompt path, and confirm the final answer reports runtime
+   professionally.
+3. Run one full Council audit with Codespaces benchmarks enabled, then use that
+   evidence trail as the baseline for the automatic repair loop.
 
 ---
 
@@ -401,33 +399,43 @@ only possible because that was written down.
 6. [Phase 1 — Screenshot Capture](#6-phase-1--screenshot-capture)
 7. [Phase 2 — Screenshot Sessions](#7-phase-2--screenshot-sessions)
 8. [Phase 3 — Vision & Context Extraction](#8-phase-3--vision--context-extraction)
-9. [Phase 4 — Multi-Model AI](#9-phase-4--multi-model-ai)
-10. [Phase 5 — AI Consensus & Judge](#10-phase-5--ai-consensus--judge)
-11. [Phase 6 — Knowledge Engine](#11-phase-6--knowledge-engine)
-12. [Phase 7 — Coding Intelligence](#12-phase-7--coding-intelligence)
-13. [Phase 8 — Code Execution & Verification](#13-phase-8--code-execution--verification)
-14. [Phase 9 — Automatic Repair](#14-phase-9--automatic-repair)
-15. [Phase 10 — Final Results](#15-phase-10--final-results)
-16. [Phase 11 — Project Intelligence](#16-phase-11--project-intelligence)
-17. [Phase 12 — AI Agent](#17-phase-12--ai-agent)
-18. [Phase 13 — Full Coding Editor — Secondary Roadmap](#18-phase-13--full-coding-editor--secondary-roadmap)
-19. [Phase 14 — Language & Library Intelligence](#19-phase-14--language--library-intelligence)
-20. [Phase 15 — Advanced Autonomous Engineering](#20-phase-15--advanced-autonomous-engineering)
-21. [Programming Knowledge Library](#21-programming-knowledge-library)
-22. [Data Structures & Algorithms](#22-data-structures--algorithms)
-23. [Mathematics Engine](#23-mathematics-engine)
-24. [Agriculture Intelligence](#24-agriculture-intelligence)
-25. [Security](#25-security)
-26. [Privacy](#26-privacy)
-27. [Model & API Architecture](#27-model--api-architecture)
-28. [Database & Storage](#28-database--storage)
-29. [UI/UX](#29-uiux)
-30. [Testing](#30-testing)
-31. [Performance](#31-performance)
-32. [Project Structure](#32-project-structure)
-33. [Master Feature Checklist](#33-master-feature-checklist)
-34. [Definition of Done](#34-definition-of-done)
-35. [Ultimate Product Vision](#35-ultimate-product-vision)
+9. [Structured Problem Context](#9-structured-problem-context)
+10. [Multi-Screenshot Understanding](#10-multi-screenshot-understanding)
+11. [Phase 4 — Multi-Model AI](#11-phase-4--multi-model-ai)
+12. [Model Capability Registry](#12-model-capability-registry)
+13. [Model Router](#13-model-router)
+14. [Phase 5 — AI Consensus & Judge](#14-phase-5--ai-consensus--judge)
+15. [AI Debate](#15-ai-debate)
+16. [Phase 6 — Knowledge Engine](#16-phase-6--knowledge-engine)
+17. [Programming Books & Resources](#17-programming-books--resources)
+18. [Documentation Intelligence](#18-documentation-intelligence)
+19. [Retrieval-Augmented Generation](#19-retrieval-augmented-generation)
+20. [Phase 7 — Coding Intelligence](#20-phase-7--coding-intelligence)
+21. [Language Intelligence](#21-language-intelligence)
+22. [Framework Intelligence](#22-framework-intelligence)
+23. [Library Intelligence](#23-library-intelligence)
+24. [Phase 8 — Code Execution & Verification](#24-phase-8--code-execution--verification)
+25. [Execution Sandbox](#25-execution-sandbox)
+26. [Build & Test Pipeline](#26-build--test-pipeline)
+27. [Runtime Analysis](#27-runtime-analysis)
+28. [Benchmarking](#28-benchmarking)
+29. [Complexity Analysis](#29-complexity-analysis)
+30. [Phase 9 — Automatic Repair](#30-phase-9--automatic-repair)
+31. [Phase 10 — Final Results](#31-phase-10--final-results)
+32. [Result Tabs](#32-result-tabs)
+33. [Explanation System](#33-explanation-system)
+34. [Learning System](#34-learning-system)
+35. [Phase 11 — Solution Context](#35-phase-11--solution-context)
+36. [Solution Workspace](#36-solution-workspace)
+37. [Phase 12 — Solver Agent](#37-phase-12--solver-agent)
+38. [Solver Tools](#38-solver-tools)
+39. [Repair Plan Mode](#39-repair-plan-mode)
+40. [Phase 13 — Language & Library Intelligence](#40-phase-13--language--library-intelligence)
+41. [Phase 14 — Advanced Solving Automation](#41-phase-14--advanced-solving-automation)
+42. [Out of Scope](#42-out-of-scope)
+43. [Master Feature Checklist](#66-master-feature-checklist)
+44. [Definition of Done](#67-definition-of-done)
+45. [Ultimate Product Vision](#68-ultimate-product-vision)
 
 ---
 
@@ -456,7 +464,9 @@ The application should eventually allow a user to:
 - explain the solution
 - preserve the entire history
 
-Eventually, the application should also become a **full AI-native coding environment** where an entire software project can be opened and understood.
+The application is intentionally **not** a full programming IDE. Its editor-like
+surface is a solution workspace: enough space to inspect, edit, run and verify a
+candidate answer, not a replacement for VS Code, Cursor or Xcode.
 
 ---
 
@@ -478,14 +488,12 @@ AI ENGINEERING WORKBENCH
 ├── Testing Engine
 ├── Verification Engine
 ├── Repair Engine
-├── AI Agent
-├── Project Intelligence
-└── Future Full IDE
+├── Solver Agent
+└── Solution Context
 ```
 
-The **Full Coding Editor/IDE is intentionally a secondary/later feature**.
-
-The initial product should focus on the AI engineering workflow.
+The product should stay centered on the solving workflow. Project context is
+allowed only when it improves a specific captured problem or candidate solution.
 
 ---
 
@@ -1547,383 +1555,132 @@ Then provide:
 
 ---
 
-# 35. Phase 11 — Project Intelligence
+# 35. Phase 11 — Solution Context
 
-This is the bridge toward your future IDE.
+Solution context is intentionally narrower than project intelligence.
 
-The user should eventually be able to:
-
-```text
-Open Project
-```
-
-and have the application understand it.
-
-The system scans:
+The app may inspect or store context only when it helps solve a specific problem:
 
 ```text
-Files
-Dependencies
-Architecture
-Git
-Tests
-Configuration
-Database
-APIs
-Documentation
+Problem statement
+Screenshots
+User notes
+Candidate code
+Compiler/runtime output
+Test failures
+Relevant docs
+Retrieved knowledge
+Prior attempts in the same session
 ```
+
+It should not try to index an entire project, maintain a project graph, answer
+general project-wide questions, or become the user's source-code navigator. Those
+jobs belong to a real IDE.
 
 ---
 
-# 36. Project Brain
+# 36. Solution Workspace
 
-Every project gets a persistent:
+The code surface exists to work on candidate answers.
 
-```text
-PROJECT BRAIN
-```
+It should support:
 
-Containing:
+- [x] show generated code
+- [x] preserve the final solution
+- [x] run candidate code in the sandbox
+- [x] show stdout, stderr, exit status and runtime
+- [x] benchmark accepted candidates locally or in Codespaces
+- [ ] edit a candidate solution before rerun
+- [ ] compare original, revised and winning candidates
+- [ ] save verified solution history
 
-```text
-Architecture
-Dependencies
-Coding conventions
-Important files
-APIs
-Database
-Known issues
-Previous solutions
-Tests
-Documentation
-Project decisions
-```
+It should not support:
 
-The AI doesn't start from zero every time.
-
----
-
-# 37. Project Graph
-
-Create relationships:
-
-```text
-File
-Class
-Function
-Component
-API
-Database
-Package
-```
-
-Connections:
-
-```text
-imports
-calls
-uses
-extends
-implements
-renders
-queries
-depends-on
-```
-
-Example:
-
-```text
-LoginPage
-   ↓
-AuthService
-   ↓
-API
-   ↓
-Database
-```
+- opening folders as projects
+- file explorers
+- tabs or split editors
+- LSP, autocomplete or debugger integration
+- project-wide refactoring
+- extension/plugin marketplaces
+- Git workflows beyond preserving this app's own repository
 
 ---
 
-# 38. AI Project Agent
+# 37. Phase 12 — Solver Agent
 
-Add a right-side AI agent:
+The solver agent is not a general coding agent. It operates inside one problem
+session and has one job: move from proposed answer to verified answer.
 
-```text
-┌──────────────────────────────┐
-│        AI PROJECT AGENT      │
-├──────────────────────────────┤
-│                              │
-│ I understand this project.   │
-│                              │
-│ Files indexed: 342           │
-│ Dependencies: 47             │
-│ Tests: 126                   │
-│                              │
-│ What should I do?            │
-│                              │
-│ Analyze                      │
-│ Fix                          │
-│ Explain                      │
-│ Refactor                     │
-│ Test                         │
-└──────────────────────────────┘
-```
-
----
-
-# 39. Project-Wide Questions
-
-Eventually users can ask:
-
-> Where is authentication handled?
-
-> Where is this API called?
-
-> What files depend on this class?
-
-> What happens when a user logs in?
-
-> Which files use Stripe?
-
-> Can I safely delete this function?
-
-> Why is this component rendering twice?
-
-> Explain the architecture of this application.
-
----
-
-# 40. Phase 12 — AI Agent
-
-The agent should support:
+It can:
 
 ### Ask
 
-Read-only.
+Ask clarifying questions or request missing context.
 
 ### Suggest
 
-Propose changes.
+Explain a candidate change before it is tested.
 
-### Agent
+### Repair
 
-Perform approved changes.
+Use failures, tests, benchmarks and council feedback to revise a candidate.
 
-### Autonomous
+### Verify
 
-Work through a defined task within strict boundaries.
+Run the verification chain and label the result honestly.
 
 ---
 
-# 41. Agent Tools
+# 38. Solver Tools
 
-Eventually provide tools such as:
+Provide tools that support the solution lifecycle:
 
 ```text
-read_file
-write_file
-search_project
-search_symbol
-run_command
-run_tests
-run_build
-inspect_git
-apply_patch
-create_file
-delete_file
 query_knowledge
 query_documentation
+run_candidate
+run_tests
 benchmark
+compare_candidates
+inspect_failure
+repair_candidate
+save_verified_solution
 ```
 
-Every dangerous operation should have appropriate permissions.
+The agent does not need general-purpose file write/delete tools for the focused
+solver product.
 
 ---
 
-# 42. Agent Plan Mode
+# 39. Repair Plan Mode
 
-Before making large changes:
-
-```text
-PLAN
-
-1. Inspect project
-2. Identify affected files
-3. Understand dependencies
-4. Design solution
-5. Implement
-6. Test
-7. Verify
-```
-
-Then:
+Before changing a candidate solution:
 
 ```text
-Approve Plan
+REPAIR PLAN
+
+1. Read failure evidence
+2. Identify the likely defect
+3. Choose the smallest correction
+4. Rerun tests
+5. Rerun benchmark if performance matters
+6. Report whether the candidate is verified
 ```
+
+The plan is scoped to the candidate answer, not to an arbitrary source tree.
 
 ---
 
-# 43. Phase 13 — Full Coding Editor — SECONDARY ROADMAP
+# 40. Phase 13 — Language & Library Intelligence
 
-> **This phase should come later. It is NOT required for the first versions of the product.**
-
-The goal is eventually to allow the user to open and work on an entire software project inside your application.
-
----
-
-# 44. Full Editor
-
-Eventually support:
-
-- [ ] Open Folder
-- [ ] Open Project
-- [ ] File explorer
-- [ ] Tabs
-- [ ] Multiple editors
-- [ ] Split editors
-- [ ] Search
-- [ ] Search/replace
-- [ ] Go to definition
-- [ ] Find references
-- [ ] Go to symbol
-- [ ] Code folding
-- [ ] Syntax highlighting
-- [ ] Autocomplete
-- [ ] Diagnostics
-- [ ] Code actions
-- [ ] Terminal
-- [ ] Git
-- [ ] Diff
-- [ ] Debugging
-- [ ] Extensions/plugin architecture
-
-The goal is eventually to provide **the important capabilities developers expect from modern professional editors**, while not attempting to reproduce every feature on day one.
-
----
-
-# 45. Editor Visual Customization
-
-Your editor should have its own identity.
-
-### Folder colors
-
-Allow:
-
-```text
-📁 src
-📁 components
-📁 database
-📁 services
-📁 tests
-```
-
-to have customizable colors.
-
-### Folder icons
-
-Allow custom icons.
-
-### File icons
-
-Use language-aware icons.
-
-### Status indicators
-
-Examples:
-
-```text
-✓ Tested
-⚠ Warning
-● Modified
-🤖 AI Working
-🔐 Security-sensitive
-```
-
----
-
-# 46. Editor AI
-
-The AI panel can sit beside the editor.
-
-User can select code and ask:
-
-```text
-Explain
-Fix
-Refactor
-Optimize
-Test
-Document
-Security Review
-```
-
-The AI automatically receives:
-
-```text
-Selected code
-Current file
-Related symbols
-Relevant project context
-Relevant documentation
-```
-
----
-
-# 47. AI-Aware Code Navigation
-
-Eventually:
-
-> "Show me where this function is used."
-
-The AI can navigate the editor to the relevant locations.
-
-Or:
-
-> "Open the code responsible for authentication."
-
-The editor can locate the appropriate files.
-
----
-
-# 48. Project-Wide AI Refactoring
-
-Eventually support:
-
-```text
-AI → Refactor Project
-```
-
-The agent:
-
-```text
-Analyze
- ↓
-Create plan
- ↓
-Identify affected files
- ↓
-Apply changes
- ↓
-Run tests
- ↓
-Repair
- ↓
-Show diff
-```
-
----
-
-# 49. Phase 14 — Language & Library Intelligence
-
-This can be expanded alongside the editor.
+This supports generated solutions and captured debugging problems, not a full
+editor.
 
 Each language gets:
 
 ```text
 Syntax Intelligence
 Semantic Intelligence
-LSP
 Documentation
 Package Intelligence
 Framework Intelligence
@@ -1958,22 +1715,41 @@ Python
 
 ---
 
-# 50. Phase 15 — Advanced Autonomous Engineering
+# 41. Phase 14 — Advanced Solving Automation
 
 Long-term features:
 
-- [ ] Autonomous coding tasks
-- [ ] Project-wide refactoring
-- [ ] Automatic test generation
-- [ ] Automatic documentation
-- [ ] Dependency upgrades
-- [ ] Security audits
+- [ ] Automatic test generation for candidate answers
+- [ ] Automatic counterexample search
+- [ ] Automatic repair from failing tests
+- [ ] Multi-language solution comparison
+- [ ] Local and Codespaces benchmark comparison
+- [ ] Security checks for generated code
 - [ ] Performance optimization
-- [ ] Architecture analysis
-- [ ] Continuous verification
+- [ ] Continuous verification inside the session
 - [ ] Model performance learning
 - [ ] Intelligent model routing
-- [ ] Long-running engineering tasks
+- [ ] Long-running Council deliberations
+
+---
+
+# 42. Out of Scope
+
+These are intentionally removed from the product direction:
+
+- full coding editor
+- opening and managing whole projects
+- folder/file customization
+- project graph and persistent project brain
+- source-tree navigation
+- LSP
+- autocomplete
+- debugger
+- full terminal
+- extension marketplaces
+- autonomous project-wide refactoring
+- dependency-upgrade agent
+- architecture-analysis agent
 
 ---
 
@@ -2514,52 +2290,31 @@ Allow users to revisit previous problems.
 - [x] Confidence
 - [ ] Learning
 
-## 🟡 PHASE 10 — Project Intelligence
+## 🟡 PHASE 10 — Solution Context
 
-- [ ] Open projects
-- [ ] Project indexing
-- [ ] Project graph
-- [ ] Project Brain
-- [ ] Dependency graph
-- [ ] Architecture analysis
-- [ ] Project-wide questions
+- [x] Problem sessions
+- [x] Screenshot history
+- [x] User notes
+- [x] Candidate answer history
+- [x] Runtime evidence
+- [x] Benchmark evidence
+- [ ] Editable candidate workspace
+- [ ] Candidate diff view
+- [ ] Verified solution library
 
-## 🟡 PHASE 11 — AI Agent
+## 🟡 PHASE 11 — Solver Agent
 
-- [ ] Read files
-- [ ] Search project
-- [ ] Apply patches
-- [ ] Create files
-- [x] Run commands
+- [ ] Ask for missing problem context
+- [ ] Propose candidate repairs
+- [ ] Explain repair plan
+- [x] Run candidate code
 - [x] Run tests
-- [x] Git
-- [ ] Plan mode
-- [ ] Agent mode
+- [x] Use Git for this app repository
+- [ ] Compare candidates
+- [ ] Repair from failures
+- [x] Verify with evidence
 
-## 🔵 PHASE 12 — FULL CODING EDITOR — LATER
-
-- [ ] Open Folder
-- [ ] Full file explorer
-- [ ] Tabs
-- [ ] Split editors
-- [ ] Syntax highlighting
-- [ ] Autocomplete
-- [ ] LSP
-- [ ] Go-to-definition
-- [ ] Find references
-- [ ] Code actions
-- [ ] Diagnostics
-- [ ] Terminal
-- [ ] Git
-- [ ] Debugging
-- [ ] Diff
-- [ ] Editor themes
-- [ ] Folder colors
-- [ ] Folder icons
-- [ ] Custom workspace appearance
-- [ ] Extensions
-
-## 🟣 PHASE 13 — ADVANCED IDE INTELLIGENCE
+## 🔵 PHASE 12 — LANGUAGE INTELLIGENCE
 
 - [ ] PHP intelligence
 - [ ] Python intelligence
@@ -2570,22 +2325,34 @@ Allow users to revisit previous problems.
 - [ ] Dart intelligence
 - [ ] Java intelligence
 - [ ] C/C++ intelligence
-- [ ] Framework intelligence
-- [ ] Library intelligence
-- [ ] Documentation intelligence
+- [ ] Framework-specific solving packs
+- [x] Library/documentation retrieval
+- [x] Performance intelligence
+- [x] Security intelligence
 
-## 🔴 PHASE 14 — AUTONOMOUS ENGINEERING
+## 🔴 PHASE 13 — ADVANCED SOLVING AUTOMATION
 
-- [ ] Autonomous coding
-- [ ] Large refactoring
-- [ ] Test generation
-- [ ] Documentation generation
-- [ ] Dependency upgrades
-- [ ] Security auditing
-- [ ] Performance optimization
-- [ ] Architecture optimization
-- [ ] Long-running tasks
-- [ ] Intelligent model selection
+- [ ] Automatic test generation
+- [ ] Automatic counterexample search
+- [ ] Automatic repair from failures
+- [ ] Multi-language solution comparison
+- [ ] Local and Codespaces benchmark comparison
+- [ ] Security checks for generated code
+- [x] Performance optimization knowledge
+- [ ] Long-running Council deliberations
+- [ ] Intelligent model routing
+
+## ⚪ OUT OF SCOPE — FULL IDE
+
+- [ ] Open folders as editable projects
+- [ ] File explorer
+- [ ] Tabs and split editors
+- [ ] LSP
+- [ ] Autocomplete
+- [ ] Debugger
+- [ ] Full terminal
+- [ ] Extension marketplace
+- [ ] Project-wide refactoring
 
 ---
 
@@ -2659,45 +2426,35 @@ Allow users to revisit previous problems.
 - [ ] Repair
 - [x] Verification
 
-## 🧠 Project Intelligence
+## 🧠 Solution Context
 
-- [ ] Project indexing
-- [ ] Project graph
-- [ ] Project Brain
-- [ ] Dependency intelligence
-- [ ] Library intelligence
-- [ ] Framework intelligence
-- [ ] Documentation intelligence
+- [x] Problem sessions
+- [x] Screenshot history
+- [x] Notes
+- [x] Runtime evidence
+- [x] Benchmark evidence
+- [x] Library intelligence
+- [x] Documentation intelligence
+- [ ] Editable candidate workspace
+- [ ] Candidate comparison view
+- [ ] Verified solution library
 
-## 🤖 Agent
+## 🤖 Solver Agent
 
-- [ ] Read
-- [ ] Search
-- [ ] Plan
-- [ ] Edit
-- [ ] Create
-- [ ] Delete
+- [ ] Ask for missing context
+- [ ] Plan candidate repair
+- [ ] Explain proposed repair
 - [x] Run
 - [x] Test
 - [ ] Repair
 - [x] Verify
 
-## 💻 Future IDE
+## 🚫 Out of Scope
 
-- [ ] Full editor
-- [ ] File explorer
-- [ ] Tabs
-- [ ] Split view
-- [ ] LSP
-- [ ] Autocomplete
-- [ ] Diagnostics
-- [ ] Git
-- [ ] Terminal
-- [ ] Debugger
-- [ ] Folder colors
-- [ ] Folder icons
-- [ ] Themes
-- [ ] Extensions
+- [x] Full IDE removed from roadmap
+- [x] Project-wide refactoring removed from roadmap
+- [x] LSP/autocomplete/debugger removed from roadmap
+- [x] File explorer/full terminal removed from roadmap
 
 ---
 
@@ -2769,13 +2526,13 @@ The final architecture becomes:
           ┌────────────────────────┼─────────────────────────┐
           │                        │                         │
           ▼                        ▼                         ▼
-   SCREENSHOT ENGINE        KNOWLEDGE ENGINE          PROJECT ENGINE
+   SCREENSHOT ENGINE        KNOWLEDGE ENGINE        SOLUTION EVIDENCE
           │                        │                         │
           ▼                        ▼                         ▼
-       VISION                   BOOKS                    PROJECT
-          │                    DOCS                     GRAPH
-          │                    RFCs                     FILES
-          │                    RESEARCH                 DEPENDENCIES
+       VISION                   DOCS                    RUNS
+          │                    RFCs                     TESTS
+          │                    RESEARCH                 BENCHMARKS
+          │                    PATTERNS                 FAILURES
           └───────────────┬───────────────┬───────────────┘
                           ▼               ▼
                      CONTEXT ENGINE
@@ -2793,10 +2550,10 @@ The final architecture becomes:
                      MASTER JUDGE
                           │
                           ▼
-                       AI AGENT
+                    SOLVER AGENT
                           │
                           ▼
-                     CODE ENGINE
+                 SOLUTION WORKSPACE
                           │
                           ▼
                        SANDBOX
@@ -2827,7 +2584,7 @@ The final architecture becomes:
 
 # 69. The Product in One Sentence
 
-> **An AI-native engineering workbench that can see what you're seeing, understand your project, consult multiple AI experts and trusted technical knowledge, solve problems, write and execute code, test and repair it, and ultimately verify the result — with a full professional coding environment added later.**
+> **An AI-native solving workbench that can see the problem in front of you, consult multiple AI experts and trusted technical knowledge, execute and benchmark candidate code, repair failures, and deliver a verified answer with evidence.**
 
 ---
 
@@ -2860,70 +2617,61 @@ The final architecture becomes:
 17. Live smoke Run with Council off
 18. Live Council Run with Codespaces benchmark evidence
 19. Automatic repair loop
-20. Project indexing
-21. Project Brain
-22. Project graph
-23. Library intelligence
-24. Framework intelligence
-25. AI project agent
-26. File editing
-27. Git integration inside the app
-28. Agent Plan Mode
-29. Security analysis
+20. Editable candidate workspace
+21. Candidate comparison view
+22. Verified solution library
+23. Framework-specific solving packs
+24. Counterexample search
+25. Security analysis for generated code
 ```
 
-## 🔵 Build LATER
+## 🔵 Keep Out Of Scope
 
 ```text
-30. Full coding editor
-31. Folder/file customization
-32. LSP
-33. Autocomplete
-34. Debugger
-35. Full terminal
-36. Advanced project navigation
-37. Extensions
-38. PHP/Python/etc. deep intelligence
+26. Full coding editor
+27. Opening folders as editable projects
+28. File explorer
+29. LSP
+30. Autocomplete
+31. Debugger
+32. Full terminal
+33. Extension marketplace
+34. Project-wide refactoring
 ```
 
 ## 🚀 Build LAST / ADVANCED
 
 ```text
-35. Autonomous engineering
-36. Project-wide refactoring
-37. Automatic dependency upgrades
-38. Continuous verification
-39. Intelligent model routing
-40. Long-running autonomous agents
-41. Advanced performance optimization
-42. Advanced model-selection learning
+35. Continuous session verification
+36. Intelligent model routing
+37. Long-running Council deliberations
+38. Advanced performance optimization
+39. Advanced model-selection learning
 ```
 
 ---
 
 # 71. Final Architectural Principle
 
-**Do not build the full VS Code replacement first.**
+**Do not build a VS Code replacement.**
 
-Build the **AI engineering brain first**.
-
-Then make the coding editor a second layer around that brain.
+Build the **solver brain** and keep the interface wrapped around solving.
 
 ```text
-                    YOUR AI BRAIN
+                    SOLVER BRAIN
                          │
         ┌────────────────┼────────────────┐
         ▼                ▼                ▼
-   Screenshot         Project           Knowledge
-   Intelligence      Intelligence       Intelligence
+   Screenshot        Candidate          Knowledge
+   Intelligence      Evidence           Intelligence
         │                │                │
         └────────────────┼────────────────┘
                          ▼
-                    AI AGENT
+                  SOLVER AGENT
                          │
               ┌──────────┴──────────┐
               ▼                     ▼
-         FUTURE EDITOR          TERMINAL
+     SOLUTION WORKSPACE       SANDBOX
               │                     │
               └──────────┬──────────┘
                          ▼
@@ -2933,6 +2681,5 @@ Then make the coding editor a second layer around that brain.
                     VERIFICATION
 ```
 
-The editor should eventually become a **window into the intelligence already built**, rather than the entire project being dependent on first recreating VS Code.
-
-This gives the project a clear development path: build the core AI engineering system first, then progressively add project intelligence, agent capabilities, and finally the full professional coding environment.
+The workspace should make candidate answers easier to inspect and verify. It
+should never become the product's center of gravity.
