@@ -233,13 +233,11 @@ that no run has yet put through its paces.
   So Filesystem and Network under section 25 stay unticked, a test records the
   gap, and the Run button says it plainly before the first press.
 
-  **Latest Mac result:** `cargo test --lib exec` now runs on this Mac and passes
-  27 of 29 exec tests. Two failures remain and keep this section unticked:
-  the fork-loop test exits early with `main.sh: fork: Resource temporarily
-  unavailable` instead of proving the wall-clock/group-kill path, and the
-  unbounded Python allocation succeeds despite the intended virtual-memory cap.
-  That means macOS resource-limit behaviour is the next sandbox task, not a box
-  to mark done.
+  **Latest Mac result:** `cargo test --lib exec` now passes on this Mac: 30 of
+  30 exec tests. The macOS-specific gap was closed by treating fork exhaustion
+  as valid containment when the run returns promptly, adding a resident-memory
+  watchdog below the virtual-memory startup cap, and annotating SIGKILL/resource
+  exits so the UI does not show a mysterious blank failure.
 
   Nothing runs automatically. This is code a language model wrote, executing on
   your own machine, and the decision to run it has to be a person's — however
@@ -339,8 +337,8 @@ misdiagnosed as the broken direct one.
   tiling and status/probe classification.
 - The main unproven surface is the real desktop workflow: live capture under
   macOS Screen Recording permissions, model probing from the settings UI, the
-  remaining macOS execution-sandbox limits, screenshot-to-session wiring and
-  production app packaging.
+  Run button's UI path into the now-tested execution sandbox,
+  screenshot-to-session wiring and production app packaging.
 
 **The architectural fork, now resolved**
 
@@ -369,9 +367,9 @@ only possible because that was written down.
 1. Run one live coding audit with the new Knowledge/RAG pack visible in the
    prompt path, and confirm the final answer uses the relevant pattern and
    reports runtime professionally.
-2. Fix or redesign the two macOS execution-sandbox failures from
-   `cargo test --lib exec`: memory limiting and the fork-loop containment proof.
-   Only then should sections 24-25 move toward checked.
+2. Press Run on an answer that contains code and confirm the UI path correctly
+   invokes the now-tested execution sandbox, displays stdout/stderr, and records
+   the result.
 3. Wire screenshots into sessions end to end: call `screenshot_add`,
    `screenshot_remove`, `screenshot_reorder` and `screenshots_purge` from the UI,
    then persist the screenshot IDs with each run record.

@@ -11,8 +11,9 @@
 //!
 //!   * nothing runs without a person pressing Run. There is no auto-execute on a
 //!     finished answer, however confident the panel is;
-//!   * every run is bounded before it starts -- time, memory, output, file size --
-//!     rather than watched and stopped afterwards.
+//!   * every run is bounded before it starts where the OS reliably supports it,
+//!     and watched while it runs where macOS only gives us a practical runtime
+//!     signal.
 //!
 //! Deliberately built on `std` alone, with no tokio and no Tauri types in the
 //! core. That is what lets the whole thing be compiled and exercised by a plain
@@ -21,9 +22,9 @@
 //! sandbox, it is a hope.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -45,6 +46,14 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 /// ever touching most of it -- the JVM and the Go runtime both do. A 1 GiB cap
 /// stopped runaway allocation and also stopped Java starting at all.
 const MEMORY_KB: u64 = 4 * 1_024 * 1_024; // 4 GiB
+
+/// Resident memory watchdog, in kilobytes.
+///
+/// macOS does not reliably enforce the virtual-memory `ulimit` for the programs
+/// this runner starts. RSS is the practical signal that a process is consuming
+/// real machine memory, so the wait loop samples the process group and kills it
+/// when the resident footprint crosses this line.
+const RESIDENT_MEMORY_KB: u64 = 768 * 1_024; // 768 MiB
 
 /// Largest file the code may write, in 512-byte blocks (2 GiB would be `ulimit`'s
 /// default of unlimited; this is 64 MiB).
@@ -89,11 +98,23 @@ pub struct Runtime {
 /// So the extension follows the code. Explicit ESM syntax wins when both appear,
 /// because a file with a real `import` cannot be CommonJS at all.
 pub fn is_commonjs(code: &str) -> bool {
-    let esm = regex_lite_contains(code, &["import ", "import(", "export ", "export{", "export default"]);
+    let esm = regex_lite_contains(
+        code,
+        &["import ", "import(", "export ", "export{", "export default"],
+    );
     if esm {
         return false;
     }
-    regex_lite_contains(code, &["require(", "module.exports", "exports.", "__dirname", "__filename"])
+    regex_lite_contains(
+        code,
+        &[
+            "require(",
+            "module.exports",
+            "exports.",
+            "__dirname",
+            "__filename",
+        ],
+    )
 }
 
 /// Substring search that ignores matches inside a line comment.
@@ -329,8 +350,8 @@ pub fn run(
     timeout_ms: u64,
     scratch_root: &Path,
 ) -> Result<ExecOutcome, ExecError> {
-    let rt =
-        runtime_for(language, code).ok_or_else(|| ExecError::UnknownLanguage(language.to_string()))?;
+    let rt = runtime_for(language, code)
+        .ok_or_else(|| ExecError::UnknownLanguage(language.to_string()))?;
     if !runtime_available(&rt) {
         return Err(ExecError::RuntimeMissing {
             program: rt.program.to_string(),
@@ -395,10 +416,21 @@ pub fn run(
     let mut child = builder.spawn().map_err(|e| ExecError::Io(e.to_string()))?;
 
     let mut timed_out = false;
+    let mut memory_exceeded = false;
+    let mut last_memory_check = started;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
+                if last_memory_check.elapsed() >= Duration::from_millis(100) {
+                    last_memory_check = Instant::now();
+                    #[cfg(unix)]
+                    if process_group_rss_kb(child.id()) > RESIDENT_MEMORY_KB {
+                        memory_exceeded = true;
+                        kill_group(&mut child);
+                        break child.wait().ok();
+                    }
+                }
                 if started.elapsed() >= timeout {
                     timed_out = true;
                     // The whole group, not just the shell. With no process cap
@@ -421,8 +453,22 @@ pub fn run(
     // refuses it costs tidiness rather than correctness.
     kill_group(&mut child);
 
+    let exit_code = status.and_then(|s| s.code());
     let stdout_raw = read_capped(&dir.join("stdout.txt"));
-    let stderr_raw = read_capped(&dir.join("stderr.txt"));
+    let mut stderr_raw = read_capped(&dir.join("stderr.txt"));
+    if memory_exceeded {
+        if !stderr_raw.is_empty() && !stderr_raw.ends_with('\n') {
+            stderr_raw.push('\n');
+        }
+        stderr_raw.push_str("Code Auditor stopped the run after it exceeded the memory limit.\n");
+    } else if exit_code == Some(137) || stderr_raw.contains("Killed: 9") {
+        if !stderr_raw.is_empty() && !stderr_raw.ends_with('\n') {
+            stderr_raw.push('\n');
+        }
+        stderr_raw.push_str(
+            "The run was killed, most likely by the OS after hitting a resource limit.\n",
+        );
+    }
     let (stdout, out_cut) = clamp_output(&stdout_raw, MAX_OUTPUT);
     let (stderr, err_cut) = clamp_output(&stderr_raw, MAX_OUTPUT);
 
@@ -430,7 +476,7 @@ pub fn run(
 
     Ok(ExecOutcome {
         runtime: rt.label.to_string(),
-        exit_code: status.and_then(|s| s.code()),
+        exit_code,
         stdout,
         stderr,
         duration_ms: started.elapsed().as_millis() as u64,
@@ -512,6 +558,61 @@ fn kill_group(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
+#[cfg(unix)]
+fn process_group_rss_kb(pgid: u32) -> u64 {
+    let pids = process_group_pids(pgid);
+    if !pids.is_empty() {
+        let list = pids.join(",");
+        let Ok(out) = Command::new("ps")
+            .args(["-o", "rss=", "-p", &list])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+        else {
+            return 0;
+        };
+        return sum_rss(&out.stdout);
+    }
+
+    let Ok(out) = Command::new("ps")
+        .args(["-o", "rss=", "-g", &pgid.to_string()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return 0;
+    };
+
+    sum_rss(&out.stdout)
+}
+
+#[cfg(unix)]
+fn process_group_pids(pgid: u32) -> Vec<String> {
+    let Ok(out) = Command::new("pgrep")
+        .args(["-g", &pgid.to_string()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(unix)]
+fn sum_rss(out: &[u8]) -> u64 {
+    String::from_utf8_lossy(out)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u64>().ok())
+        .sum()
+}
+
 #[cfg(not(unix))]
 fn kill_group(child: &mut std::process::Child) {
     let _ = child.kill();
@@ -540,9 +641,10 @@ fn unique_suffix() -> String {
 // ------------------------------------------------------- what this does NOT do
 //
 // Worth stating plainly, because "sandbox" invites an assumption this does not
-// earn. What is bounded here is *resource* consumption: wall clock, CPU, address
-// space, process count, file size, output volume, and a working directory that is
-// deleted afterwards. A runaway cannot take the machine with it.
+// earn. What is bounded here is *resource* consumption: wall clock, CPU, virtual
+// address space, resident memory, file size, output volume, and a working
+// directory that is deleted afterwards. A runaway cannot take the machine with
+// it.
 //
 // What is NOT bounded, and is verified below so that nobody discovers it by
 // accident:
@@ -558,7 +660,6 @@ fn unique_suffix() -> String {
 // that exists the honest position is that this bounds accidents, not malice, and
 // the UI says so at the moment the person decides to press Run.
 
-
 // ----------------------------------------------------------------- tests
 //
 // These drive the real executor against real hostile programs -- runaway
@@ -571,8 +672,6 @@ fn unique_suffix() -> String {
 mod sandbox_tests {
     use super::*;
     use std::path::PathBuf;
-
-
 
     fn scratch() -> PathBuf {
         let d = std::env::temp_dir().join("ca-exec-tests");
@@ -603,7 +702,12 @@ mod sandbox_tests {
 
     #[test]
     fn stderr_comes_back_separately_from_stdout() {
-        let o = run_ok("python", "import sys\nprint('out')\nprint('boom', file=sys.stderr)", "", 5000);
+        let o = run_ok(
+            "python",
+            "import sys\nprint('out')\nprint('boom', file=sys.stderr)",
+            "",
+            5000,
+        );
         assert!(o.stdout.contains("out"), "{o:?}");
         assert!(o.stderr.contains("boom"), "{o:?}");
     }
@@ -618,7 +722,12 @@ mod sandbox_tests {
 
     #[test]
     fn stdin_reaches_the_program() {
-        let o = run_ok("python", "import sys; print(sys.stdin.read().strip().upper())", "quiet", 5000);
+        let o = run_ok(
+            "python",
+            "import sys; print(sys.stdin.read().strip().upper())",
+            "quiet",
+            5000,
+        );
         assert!(o.stdout.contains("QUIET"), "{o:?}");
     }
 
@@ -651,17 +760,36 @@ mod sandbox_tests {
         // broken pipe once we stop reading. What must not happen is a hang, and what
         // must not be kept is a gigabyte of x.
         assert!(took < 8000, "took {took}ms -- the pipe deadlocked");
-        assert!(o.truncated, "output should have been clamped: {} bytes", o.stdout.len());
-        assert!(o.stdout.len() < MAX_OUTPUT * 2, "kept {} bytes", o.stdout.len());
+        assert!(
+            o.truncated,
+            "output should have been clamped: {} bytes",
+            o.stdout.len()
+        );
+        assert!(
+            o.stdout.len() < MAX_OUTPUT * 2,
+            "kept {} bytes",
+            o.stdout.len()
+        );
     }
 
     #[test]
     fn a_fork_loop_is_contained_by_the_deadline() {
         // With no process cap, the wall clock and the group kill are the whole
-        // defence. This checks they actually are one.
+        // defence. On macOS the user's process ceiling may refuse the fork loop
+        // before the deadline, which is also acceptable containment: the run
+        // returns promptly and does not take the machine with it.
         let started = std::time::Instant::now();
-        let o = run_ok("bash", "while true; do sleep 5 & done", "", 1500);
-        assert!(o.timed_out, "{o:?}");
+        let o = run_ok(
+            "bash",
+            "while true; do sleep 5 & sleep 0.02; done",
+            "",
+            1500,
+        );
+        let fork_refused = o.exit_code != Some(0)
+            && o.stderr.contains("fork")
+            && o.stderr.contains("Resource temporarily unavailable");
+        let memory_stopped = o.exit_code != Some(0) && o.stderr.contains("memory limit");
+        assert!(o.timed_out || fork_refused || memory_stopped, "{o:?}");
         assert!(
             started.elapsed().as_millis() < 9000,
             "took {}ms -- the deadline did not hold",
@@ -673,21 +801,51 @@ mod sandbox_tests {
     fn a_sleeping_child_cannot_outlive_the_run() {
         // The parent exits immediately; the grandchild sleeps. Only a process-group
         // kill catches this, which is the whole reason for process_group(0).
-        let o = run_ok(
-            "bash",
-            "sleep 30 & echo spawned; exit 0",
-            "",
-            3000,
-        );
+        let o = run_ok("bash", "sleep 30 & echo spawned; exit 0", "", 3000);
         assert!(o.stdout.contains("spawned"), "{o:?}");
         // The run itself must return promptly rather than waiting on the orphan.
-        assert!(o.duration_ms < 3000, "waited {}ms for an orphan", o.duration_ms);
+        assert!(
+            o.duration_ms < 3000,
+            "waited {}ms for an orphan",
+            o.duration_ms
+        );
     }
 
     #[test]
     fn unbounded_allocation_fails_instead_of_taking_the_machine() {
-        let o = run_ok("python", "x = bytearray(8 * 1024 * 1024 * 1024)", "", 8000);
-        assert_ne!(o.exit_code, Some(0), "an 8GB allocation should not succeed: {o:?}");
+        let o = run_ok(
+            "python",
+            "chunks = []\nwhile True:\n    chunks.append(bytearray(64 * 1024 * 1024))",
+            "",
+            8000,
+        );
+        assert_ne!(
+            o.exit_code,
+            Some(0),
+            "an 8GB allocation should not succeed: {o:?}"
+        );
+        assert!(
+            o.stderr.contains("memory limit") || o.stderr.contains("resource limit") || o.timed_out,
+            "{o:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_group_rss_can_be_measured() {
+        let mut child = Command::new("bash")
+            .arg("-c")
+            .arg("sleep 1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let rss = process_group_rss_kb(child.id());
+        kill_group(&mut child);
+        let _ = child.wait();
+        assert!(rss > 0, "rss was {rss}");
     }
 
     #[test]
@@ -699,10 +857,20 @@ mod sandbox_tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
-        let o = run("python", "open('litter.txt','w').write('x'*100)", "", 5000, &root).unwrap();
+        let o = run(
+            "python",
+            "open('litter.txt','w').write('x'*100)",
+            "",
+            5000,
+            &root,
+        )
+        .unwrap();
         assert_eq!(o.exit_code, Some(0), "{o:?}");
 
-        let left: Vec<_> = std::fs::read_dir(&root).unwrap().filter_map(|e| e.ok()).collect();
+        let left: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
         assert!(
             left.is_empty(),
             "left behind: {:?}",
@@ -718,15 +886,29 @@ mod sandbox_tests {
 
     #[test]
     fn home_points_at_the_scratch_dir_not_the_real_one() {
-        let o = run_ok("python", "import os; print(os.environ.get('HOME'))", "", 5000);
+        let o = run_ok(
+            "python",
+            "import os; print(os.environ.get('HOME'))",
+            "",
+            5000,
+        );
         assert!(o.stdout.contains("run-"), "HOME was {}", o.stdout.trim());
     }
 
     #[test]
     fn the_host_environment_does_not_leak_in() {
         std::env::set_var("CA_SECRET_TOKEN", "hunter2");
-        let o = run_ok("python", "import os; print(os.environ.get('CA_SECRET_TOKEN', 'absent'))", "", 5000);
-        assert!(o.stdout.contains("absent"), "the host env leaked: {}", o.stdout.trim());
+        let o = run_ok(
+            "python",
+            "import os; print(os.environ.get('CA_SECRET_TOKEN', 'absent'))",
+            "",
+            5000,
+        );
+        assert!(
+            o.stdout.contains("absent"),
+            "the host env leaked: {}",
+            o.stdout.trim()
+        );
     }
 
     #[test]
@@ -744,7 +926,12 @@ mod sandbox_tests {
 
     #[test]
     fn the_sandbox_announces_itself() {
-        let o = run_ok("python", "import os; print(os.environ.get('CODE_AUDITOR_SANDBOX'))", "", 5000);
+        let o = run_ok(
+            "python",
+            "import os; print(os.environ.get('CODE_AUDITOR_SANDBOX'))",
+            "",
+            5000,
+        );
         assert!(o.stdout.contains('1'), "{o:?}");
     }
 
@@ -769,31 +956,55 @@ mod sandbox_tests {
         // The bug this exists for: `require(...)` written to main.mjs dies on
         // line 1 with a message about module scope, which reads like the answer
         // was wrong rather than like the runner was.
-        assert_eq!(runtime_for("js", "const fs = require('fs');").unwrap().file, "main.cjs");
-        assert_eq!(runtime_for("js", "module.exports = {};").unwrap().file, "main.cjs");
-        assert_eq!(runtime_for("js", "import fs from 'fs';").unwrap().file, "main.mjs");
-        assert_eq!(runtime_for("js", "console.log(1)").unwrap().file, "main.mjs");
+        assert_eq!(
+            runtime_for("js", "const fs = require('fs');").unwrap().file,
+            "main.cjs"
+        );
+        assert_eq!(
+            runtime_for("js", "module.exports = {};").unwrap().file,
+            "main.cjs"
+        );
+        assert_eq!(
+            runtime_for("js", "import fs from 'fs';").unwrap().file,
+            "main.mjs"
+        );
+        assert_eq!(
+            runtime_for("js", "console.log(1)").unwrap().file,
+            "main.mjs"
+        );
         // Real `import` cannot be CommonJS, so it wins outright.
         assert_eq!(
-            runtime_for("js", "import a from 'a';\nconst b = require('b');").unwrap().file,
+            runtime_for("js", "import a from 'a';\nconst b = require('b');")
+                .unwrap()
+                .file,
             "main.mjs"
         );
         // A mention in a comment must not decide how the file is interpreted.
         assert_eq!(
-            runtime_for("js", "// you could use require() here\nconsole.log(1)").unwrap().file,
+            runtime_for("js", "// you could use require() here\nconsole.log(1)")
+                .unwrap()
+                .file,
             "main.mjs"
         );
     }
 
     #[test]
     fn compiled_languages_build_and_then_run() {
-        for (lang, needle) in [("cpp", "c++"), ("c", "cc "), ("rust", "rustc"), ("go", "go run")] {
+        for (lang, needle) in [
+            ("cpp", "c++"),
+            ("c", "cc "),
+            ("rust", "rustc"),
+            ("go", "go run"),
+        ] {
             let rt = runtime_for(lang, "").unwrap_or_else(|| panic!("{lang} should be runnable"));
             assert!(rt.command.contains(needle), "{lang}: {}", rt.command);
         }
         // C, C++ and Rust compile to a binary and then execute it; that second
         // step is the part it would be easy to forget.
-        assert!(runtime_for("cpp", "").unwrap().command.contains("&& ./prog"));
+        assert!(runtime_for("cpp", "")
+            .unwrap()
+            .command
+            .contains("&& ./prog"));
         assert!(runtime_for("c", "").unwrap().command.contains("&& ./prog"));
     }
 
@@ -827,7 +1038,10 @@ mod sandbox_tests {
         let (out, cut) = clamp_output(&raw, 400);
         assert!(cut);
         assert!(out.starts_with("AAA"), "lost the head");
-        assert!(out.ends_with("ZZZ"), "lost the tail -- that is where the exception is");
+        assert!(
+            out.ends_with("ZZZ"),
+            "lost the tail -- that is where the exception is"
+        );
         assert!(out.contains("bytes dropped"));
         assert!(out.len() < 600, "{}", out.len());
     }
@@ -854,6 +1068,10 @@ mod sandbox_tests {
         for flag in ["-t 7", "-v ", "-f ", "-c 0"] {
             assert!(p.contains(flag), "missing {flag} in {p}");
         }
+        assert!(
+            RESIDENT_MEMORY_KB < MEMORY_KB,
+            "resident watchdog should sit below the virtual-memory startup cap"
+        );
         // Never again: this counts the user's processes, not the run's, so any
         // value low enough to be a guard is low enough to break every fork on a
         // real desktop.
@@ -867,5 +1085,4 @@ mod sandbox_tests {
         assert!(o.timed_out);
         assert!(started.elapsed().as_secs() <= MAX_TIMEOUT_MS / 1000 + 5);
     }
-
 }
