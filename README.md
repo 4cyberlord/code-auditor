@@ -168,6 +168,27 @@ deliberating is still evidence.
 The roster lives in Settings as two free-text lists, one gateway model id per line. Any
 model the key can reach works; nothing is recompiled when you change it.
 
+### Remote Codespaces benchmarks
+
+Remote benchmarking uses the GitHub CLI, not a GitHub token stored in this app.
+
+```bash
+gh auth refresh -h github.com -s codespace
+gh codespace list
+gh codespace ssh -c <codespace-name> -- 'python3 --version && c++ --version | head -1'
+```
+
+In the app, open Settings › Council, set **Remote benchmark** to **Codespaces**, press
+Refresh, and choose a Codespace name. The currently prepared benchmark Codespace is:
+
+```text
+turbo-cod-qr9p57v5x5ph6wpj
+```
+
+It has Python, Node, C/C++, Java, Go, Ruby, PHP and Rust available. Rust installed through
+`rustup` is loaded by the remote benchmark script via `~/.cargo/env`, so `rustc` works
+over noninteractive `gh codespace ssh` calls.
+
 ---
 
 ## Keys and privacy
