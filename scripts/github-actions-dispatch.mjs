@@ -1,12 +1,38 @@
 #!/usr/bin/env node
 
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+
+function loadDotEnv(file) {
+  if (!existsSync(file)) return;
+  const text = readFileSync(file, "utf8");
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    let value = rawValue.trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (!process.env[key]) process.env[key] = value;
+  }
+}
+
+loadDotEnv(path.join(process.cwd(), ".development.env"));
+
 const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
 const repo = process.env.GITHUB_REPOSITORY;
 const workflow = process.env.CODE_AUDITOR_GITHUB_WORKFLOW || "cloud-benchmark.yml";
+const WAIT = process.argv.includes("--wait");
 
 function usage() {
   console.log(`Usage:
-  GH_TOKEN=... GITHUB_REPOSITORY=owner/repo node scripts/github-actions-dispatch.mjs <job-id> <language> <artifact-key>
+  GH_TOKEN=... GITHUB_REPOSITORY=owner/repo node scripts/github-actions-dispatch.mjs <job-id> <language> <program-file> [artifact-key] [--wait]
 
 Environment:
   CODE_AUDITOR_GITHUB_WORKFLOW   Default: cloud-benchmark.yml
@@ -23,7 +49,28 @@ if (!token || !repo) {
   process.exit(2);
 }
 
-const [jobId, language, artifactKey] = process.argv.slice(2);
+const positional = process.argv.slice(2).filter((arg) => arg !== "--wait");
+const [jobId, language, programFile, artifactKey = ""] = positional;
+const program = readFileSync(path.resolve(process.cwd(), programFile), "utf8");
+const programB64 = Buffer.from(program, "utf8").toString("base64");
+const dispatchedAfter = new Date(Date.now() - 5000).toISOString();
+
+async function github(pathname, init = {}) {
+  const res = await fetch(`https://api.github.com/repos/${repo}/${pathname}`, {
+    ...init,
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-github-api-version": "2022-11-28",
+      ...(init.headers || {}),
+    },
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${text}`);
+  return text ? JSON.parse(text) : null;
+}
+
 const res = await fetch(
   `https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`,
   {
@@ -39,6 +86,7 @@ const res = await fetch(
       inputs: {
         job_id: jobId,
         language,
+        program_b64: programB64,
         artifact_key: artifactKey,
       },
     }),
@@ -51,3 +99,24 @@ if (!res.ok) {
 }
 
 console.log(`Dispatched ${workflow} for job ${jobId}.`);
+
+if (WAIT) {
+  const title = `Benchmark ${jobId} (${language})`;
+  let run = null;
+  for (let i = 0; i < 60; i++) {
+    const runs = await github(`actions/workflows/${workflow}/runs?event=workflow_dispatch&per_page=10`);
+    run = runs.workflow_runs?.find(
+      (candidate) =>
+        candidate.display_title === title &&
+        new Date(candidate.created_at).toISOString() >= dispatchedAfter
+    );
+    if (run?.status === "completed") break;
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+  if (!run) {
+    console.log("Dispatch accepted, but the run did not appear before the wait timeout.");
+  } else {
+    console.log(`Run ${run.id}: ${run.status}/${run.conclusion || "pending"} ${run.html_url}`);
+    process.exit(run.conclusion === "success" ? 0 : 1);
+  }
+}

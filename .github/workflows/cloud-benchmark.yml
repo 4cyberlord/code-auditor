@@ -1,4 +1,5 @@
 name: Cloud Benchmark
+run-name: Benchmark ${{ inputs.job_id }} (${{ inputs.language }})
 
 on:
   workflow_dispatch:
@@ -9,9 +10,12 @@ on:
       language:
         description: Candidate language
         required: true
-      artifact_key:
-        description: Storage key or worker lookup key for the benchmark payload
+      program_b64:
+        description: Base64 encoded benchmark program
         required: true
+      artifact_key:
+        description: Optional external benchmark payload key
+        required: false
 
 jobs:
   benchmark:
@@ -23,7 +27,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "22"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -35,10 +39,65 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - run: npm ci
-      - name: Record benchmark handoff
+      - name: Run benchmark program
+        id: bench
+        shell: bash
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          LANGUAGE: ${{ inputs.language }}
+          PROGRAM_B64: ${{ inputs.program_b64 }}
+          ARTIFACT_KEY: ${{ inputs.artifact_key }}
         run: |
-          echo "GitHub Actions benchmark handoff"
-          echo "job_id=${{ inputs.job_id }}"
-          echo "language=${{ inputs.language }}"
-          echo "artifact_key=${{ inputs.artifact_key }}"
+          set -u
+          tmp="$(mktemp -d)"
+          cleanup() { rm -rf "$tmp"; }
+          trap cleanup EXIT
+          cd "$tmp"
+
+          printf '%s' "$PROGRAM_B64" | base64 -d > code.txt
+
+          lang="$(printf '%s' "$LANGUAGE" | tr '[:upper:]' '[:lower:]')"
+          case "$lang" in
+            python|python3|py|py3) file=main.py; cp code.txt "$file"; command='python3 main.py'; runtime='github-actions python3' ;;
+            javascript|js|node|nodejs|mjs) file=main.mjs; cp code.txt "$file"; command='node main.mjs'; runtime='github-actions node esm' ;;
+            cjs) file=main.cjs; cp code.txt "$file"; command='node main.cjs'; runtime='github-actions node commonjs' ;;
+            typescript|ts) file=main.ts; cp code.txt "$file"; command='node --experimental-strip-types main.ts'; runtime='github-actions node type stripping' ;;
+            bash|sh|shell) file=main.sh; cp code.txt "$file"; command='bash main.sh'; runtime='github-actions bash' ;;
+            ruby|rb) file=main.rb; cp code.txt "$file"; command='ruby main.rb'; runtime='github-actions ruby' ;;
+            php) file=main.php; cp code.txt "$file"; command='php main.php'; runtime='github-actions php' ;;
+            c) file=main.c; cp code.txt "$file"; command='cc -std=c17 -O2 main.c -o prog -lm && ./prog'; runtime='github-actions cc -O2' ;;
+            cpp|c++|cc|cxx) file=main.cpp; cp code.txt "$file"; command='c++ -std=c++20 -O2 main.cpp -o prog && ./prog'; runtime='github-actions c++ -O2' ;;
+            java) file=Main.java; cp code.txt "$file"; command='java Main.java'; runtime='github-actions java' ;;
+            go|golang) file=main.go; cp code.txt "$file"; command='go run main.go'; runtime='github-actions go' ;;
+            rust|rs) file=main.rs; cp code.txt "$file"; command='rustc -O main.rs -o prog 2>&1 && ./prog'; runtime='github-actions rustc -O' ;;
+            *) echo "Unsupported benchmark language: $LANGUAGE" >&2; exit 97 ;;
+          esac
+
+          status=0
+          started_ms="$(python3 - <<'PY'
+          import time
+          print(int(time.time() * 1000))
+          PY
+          )"
+          if command -v /usr/bin/time >/dev/null 2>&1; then
+            /usr/bin/time -f 'CA_METRICS elapsed_s=%e maxrss_kb=%M' bash -lc "$command" >stdout.txt 2>stderr.txt || status=$?
+          else
+            bash -lc "$command" >stdout.txt 2>stderr.txt || status=$?
+          fi
+          finished_ms="$(python3 - <<'PY'
+          import time
+          print(int(time.time() * 1000))
+          PY
+          )"
+
+          python3 "$GITHUB_WORKSPACE/scripts/github-benchmark-result.py" \
+            "$JOB_ID" "$LANGUAGE" "$runtime" "$status" "$((finished_ms - started_ms))" \
+            "$ARTIFACT_KEY" stdout.txt stderr.txt > "$GITHUB_WORKSPACE/benchmark-result.json"
+
+          cat "$GITHUB_WORKSPACE/benchmark-result.json"
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-result-${{ inputs.job_id }}
+          path: benchmark-result.json
