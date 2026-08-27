@@ -249,7 +249,7 @@ export default function DatabaseCard() {
 
       <p className="hint">
         {note ??
-          "The tables are created automatically the first time the app reaches the database — there is no SQL to run by hand. The connection string holds your password, so it lives in the macOS Keychain and is read only inside the app process, never in the web view."}
+          "The app creates the tables automatically. Your connection string contains the database password, so it is stored in the macOS Keychain and read only by the app, never the web view."}
       </p>
     </div>
   );

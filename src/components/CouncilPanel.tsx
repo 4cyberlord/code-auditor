@@ -23,6 +23,18 @@ const PHASE_LABEL: Record<string, string> = {
 type CouncilTab = "summary" | "decision" | "evidence" | "chat" | "reading";
 type ChatScope = "all" | "solvers" | "judges" | "selected";
 
+const LABELS: Record<CouncilTab | ChatScope, string> = {
+  summary: "Summary",
+  decision: "Final",
+  evidence: "Evidence",
+  chat: "Chat",
+  reading: "Reading",
+  all: "All",
+  solvers: "Solvers",
+  judges: "Judges",
+  selected: "Selected",
+};
+
 function extractLine(text: string, label: string): string {
   const m = text.match(new RegExp(`^\\s*${label}\\s*:\\s*(.+)$`, "im"));
   return m?.[1]?.trim() ?? "";
@@ -159,7 +171,7 @@ export default function CouncilPanel() {
       <div className="council-tabs">
         {(["summary", "decision", "evidence", "chat", "reading"] as CouncilTab[]).map((name) => (
           <button key={name} data-on={tab === name} onClick={() => setTab(name)}>
-            {name === "decision" ? "Final" : name}
+            {LABELS[name]}
           </button>
         ))}
       </div>
@@ -286,7 +298,7 @@ export default function CouncilPanel() {
               <div className="segmented">
                 {(["all", "solvers", "judges", "selected"] as ChatScope[]).map((scope) => (
                   <button key={scope} data-on={chatScope === scope} onClick={() => setChatScope(scope)}>
-                    {scope}
+                    {LABELS[scope]}
                   </button>
                 ))}
               </div>

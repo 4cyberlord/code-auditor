@@ -812,7 +812,7 @@ textarea.field {
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-faint);
-  text-transform: lowercase;
+  text-transform: none;
 }
 .codeblock pre {
   margin: 0;
@@ -1250,14 +1250,16 @@ textarea.field {
   flex: none;
 }
 .chat-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
-  align-items: end;
 }
 .chat-form textarea {
   min-height: 76px;
   resize: vertical;
+}
+.chat-form > button {
+  align-self: flex-end;
 }
 
 /* ----------------------------------------------------------------- modal */
@@ -1717,7 +1719,8 @@ textarea.field {
 .sessions[data-open="true"] {
   /* Height comes from the drag handle above it; the cap stops a drag from
      squeezing the verdict out of existence entirely. */
-  height: var(--sessions-h, 280px);
+  flex: 0 1 var(--sessions-h, 280px);
+  height: auto;
   max-height: 62%;
 }
 
@@ -3275,6 +3278,12 @@ body[data-dragging="row"] * {
   overflow: visible;
   gap: 0;
   padding-bottom: 0;
+}
+
+.solution-divider {
+  height: 1px;
+  margin: -2px 14px 8px;
+  background: var(--line);
 }
 
 /* The header stays put while the body scrolls under it -- the status badge is

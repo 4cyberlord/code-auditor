@@ -173,11 +173,9 @@ function StorageCard() {
       </div>
 
       <p className="hint">
-        Every screenshot is uploaded to a private <span className="mono">{STORAGE.bucket}</span>{" "}
-        bucket in your own Supabase project, and the copy on this machine is deleted as soon as the
-        row exists. That is what makes a session openable from another device later. Needs{" "}
-        {STORAGE.requires} — the anon key cannot write to a private bucket. The project URL is
-        worked out from your database connection string, so there is nothing else to paste.
+        Screenshots go to the private <span className="mono">{STORAGE.bucket}</span> bucket in
+        your Supabase project, then are deleted from this Mac. This lets sessions open on another
+        device. You need {STORAGE.requires}; the project URL comes from your database connection.
       </p>
 
       {note && (
@@ -244,11 +242,9 @@ function TimeZoneCard() {
         </div>
       </div>
       <p className="hint">
-        Stored rather than detected fresh each time, so a session captured at home still reads as
-        home time when the laptop is somewhere else. Nashville is Central —{" "}
-        <span className="mono">America/Chicago</span> — not Eastern. A display setting only: every
-        timestamp is stored as an instant, so changing this re-reads history rather than rewriting
-        it.
+          Your chosen zone is saved, so history keeps using your home time. Nashville is Central:
+          <span className="mono"> America/Chicago</span>. Changing this only changes display; saved
+          timestamps are not rewritten.
       </p>
     </div>
   );
@@ -664,10 +660,9 @@ function GatewayCard() {
       )}
 
       <p className="hint">
-        {note ??
-          (active
-            ? "All four panes go through this one endpoint, including any that also have their own vendor key \u2014 one route for the whole panel, so a disagreement between two answers is about the models rather than about how they were reached."
-            : "Set this up and one key reaches GPT, Claude, Kimi and Gemini together. Without it each pane needs its own vendor key, and the panes without one will not run.")}
+        {note ?? (active
+          ? "All panes use this endpoint, even those with their own vendor key. A shared route keeps model disagreements separate from routing differences."
+          : "One key reaches GPT, Claude, Kimi, and Gemini. Without it, each pane needs its own vendor key.")}
         {" "}
         <button
           className="link"
@@ -818,13 +813,12 @@ function ProviderCard({ id }: { id: ProviderId }) {
           note
         ) : routed ? (
           <>
-            This pane is reached through {GATEWAY.label}, so the key and model above are
-            not in use. They are kept rather than cleared, so switching the router off
-            puts this pane straight back on its own credential.
+            This pane uses {GATEWAY.label}, so its key and model are inactive but preserved. Turn
+            the gateway off to restore this pane&apos;s own credential.
           </>
         ) : (
           <>
-            Keys are written to the macOS Keychain and read only inside the app process.{" "}
+            Keys are stored in the macOS Keychain and read only by the app.{" "}
             <button
               className="link"
               onClick={() => {
@@ -845,7 +839,7 @@ const CONTEXT_MODES = [
     id: "auto" as const,
     label: "Auto",
     blurb:
-      "Each pane gets whatever it can use. Models that can see get the screenshot and read it themselves; text-only models get a transcription instead, and one is only made when somebody actually needs it. No configuration, and no paying for a reading pass a panel of vision models did not need.",
+      "Each pane gets what it can use. Vision models see the screenshot; text-only models get a transcription only when needed. No extra setup or unnecessary reading pass.",
   },
   {
     id: "images" as const,
@@ -857,7 +851,7 @@ const CONTEXT_MODES = [
     id: "extract" as const,
     label: "Reading",
     blurb:
-      "Two vision models transcribe the screenshot, their readings are compared, and the agents work from the agreed text. This is what lets a model that cannot see — DeepSeek, Qwen, Codex through the Router — join the panel. It costs two extra calls, and adds a step where one misread character becomes everyone's.",
+      "Two vision models transcribe and compare the screenshot. Other agents use the agreed text, so text-only models can join. This adds two calls and can spread a transcription mistake.",
   },
   {
     id: "both" as const,
@@ -993,7 +987,7 @@ function AppearanceCard() {
         <span className="name">Appearance & Theme</span>
       </div>
       <p className="hint" style={{ marginTop: 0, marginBottom: 14 }}>
-        Select your preferred display theme. System mode adapts automatically as your operating system switches between daylight and dark hours.
+        Choose a light, dark, or system-controlled theme.
       </p>
 
       <div className="theme-options-grid">
@@ -1150,13 +1144,9 @@ function CouncilCard() {
         </div>
       </div>
       <p className="hint">
-        After the panel answers, the council independently re-solves the problem with the
-        roster below, executes every code candidate against a harness one model writes,
-        has every solver review every anonymised candidate, revise, and then hands the
-        whole record to the bench and a synthesizer. A candidate that fails its tests
-        cannot win, whatever the voting says — execution evidence is the gate, not a
-        weight. Expect roughly three dozen extra requests per run, paced by the
-        gateway limit, so a 5-per-minute plan is a slow council, not a broken one.
+        The council re-solves the problem, tests each code candidate, reviews the results, and
+        produces a final recommendation. Failed tests cannot win. Expect about 36 extra requests
+        per run, so low gateway limits make council runs slower.
       </p>
 
       <div className="row">
@@ -1214,10 +1204,9 @@ function CouncilCard() {
             <span className="vendor">seconds</span>
           </div>
           <p className="hint">
-            Runs generated candidate harnesses in isolated E2B Linux sandboxes.
-            The worker needs <span className="mono">E2B_API_KEY</span>; only
-            stdout, stderr, timing, memory and sandbox id are written back to
-            history.
+            Runs candidate tests in isolated E2B Linux sandboxes. The worker needs{" "}
+            <span className="mono">E2B_API_KEY</span>. Only output, timing, memory, and the
+            sandbox ID are saved.
           </p>
         </>
       )}
@@ -1295,10 +1284,9 @@ function CouncilCard() {
             <span className="vendor">seconds</span>
           </div>
           <p className="hint">
-            Runs passing council candidates on GitHub Actions and attaches the runner
-            pass/fail, time and memory evidence to the Council report. Production workers
-            should use a server-side GitHub App or Actions-write token; the desktop app
-            should not depend on a local <span className="mono">gh</span> login.
+            Runs passing candidates on GitHub Actions and adds pass/fail, time, and memory results
+            to the Council report. Production workers should use a server-side GitHub App or
+            Actions token, not a local <span className="mono">gh</span> login.
           </p>
         </>
       )}
@@ -1324,10 +1312,8 @@ function CouncilCard() {
         />
       </div>
       <p className="hint">
-        One gateway model id per line, 2–10. An id alone uses chat-completions;
-        add <span className="mono">/responses</span> to it for a model that lives on the
-        Responses API (Codex is the one in the defaults). The panel&rsquo;s own models are
-        never duplicated — their answers already stand as its seats.
+        Enter 2–10 gateway model IDs, one per line. Add <span className="mono">/responses</span>{" "}
+        for Responses API models such as Codex. Panel models are not requested twice.
       </p>
 
       <div className="row" style={{ alignItems: "start" }}>
@@ -1348,8 +1334,8 @@ function CouncilCard() {
         />
       </div>
       <p className="hint">
-        One per line as <span className="mono">model/emphasis</span>. Every judge reviews
-        the whole record; the emphasis is only what it looks at hardest. 1–7 seats.
+        Enter one <span className="mono">model/emphasis</span> per line. Each judge reviews the
+        full record, with extra focus on its emphasis. Use 1–7 seats.
       </p>
 
       <div className="row">
@@ -1440,9 +1426,8 @@ function CouncilCard() {
             );
           })}
           <p className="hint">
-            The built-in list is what the router said your key can reach. Anything
-            marked <b>Not on key</b> needs enabling at TokenRouter (or the id fixing here)
-            before that seat can answer.
+            This list shows what your key can reach. A <b>Not on key</b> model must be enabled at
+            TokenRouter or corrected here before it can answer.
           </p>
         </>
       )}
@@ -1515,9 +1500,8 @@ function CaptureCard() {
           <span className="vendor">{helper?.installed ? "installed" : "not installed"}</span>
         </div>
         <p className="hint" style={{ marginTop: 0 }}>
-          Runs the approved helper for start/capture/submit hotkeys after the window is closed.
-          It uses macOS Screen Recording permission and stays visible to the OS, network tools,
-          and security software.
+          Keeps start, capture, and submit shortcuts working after the window closes. It needs
+          macOS Screen Recording permission and remains visible to system and security tools.
         </p>
         <div className="row">
           <label>State</label>
@@ -1606,9 +1590,8 @@ function CaptureCard() {
           />
         </div>
         <p className="hint">
-          Every image goes to every enabled agent, so this multiplies: {maxImages}{" "}
-          {maxImages === 1 ? "image" : "images"} across five panes is {maxImages * 5} image
-          uploads in one press. Captures are saved to{" "}
+          Each image goes to every enabled agent: {maxImages} {maxImages === 1 ? "image" : "images"}{" "}
+          means up to {maxImages * 5} uploads. Captures are also saved to{" "}
           <span style={{ fontFamily: "var(--font-mono)" }}>~/Pictures/Council Editor</span>{" "}
           regardless, so lowering this never loses a grab.
         </p>
@@ -1629,13 +1612,12 @@ function CaptureCard() {
           </div>
         ))}
         <p className="hint">
-          These work whether or not the window is open, because they are claimed by the
-          Rust process rather than the page. To change one, set its environment variable
-          before launching \u2014 for example{" "}
+          These work when the window is closed because the Rust process owns them. To change one,
+          set its environment variable before launch, for example{" "}
           <span style={{ fontFamily: "var(--font-mono)" }}>
             CODE_AUDITOR_SOLVE_KEY=&quot;Control+Alt+J&quot;
           </span>
-          . If a shortcut stops working, another app has claimed the same combination.
+          . If one stops working, another app may use the same combination.
         </p>
       </div>
     </>
@@ -1764,9 +1746,8 @@ export default function SettingsDialog() {
               />
             </div>
             <p className="hint">
-              Applies per agent, per run. Reasoning models spend part of this budget thinking, so
-              leave headroom for long solutions. Clamped to {MAX_TOKENS_RANGE.min}–
-              {MAX_TOKENS_RANGE.max}.
+              Applies to each agent and run. Reasoning models use part of this budget to think.
+              Allowed range: {MAX_TOKENS_RANGE.min}–{MAX_TOKENS_RANGE.max}.
             </p>
 
             {/* The number that decides whether a run answers or 429s. It is a
@@ -1790,11 +1771,9 @@ export default function SettingsDialog() {
               />
             </div>
             <p className="hint">
-              A run is one request per pane, plus one per screenshot reader and one for the judge.
-              Above this rate they queue instead of failing, so a run gets slower rather than
-              losing panes to <span className="mono">429 Too Many Requests</span>. TokenRouter&rsquo;s
-              free tier is 5 a minute; if a 429 arrives anyway the app lowers this itself and
-              keeps the lower figure.
+              Pane, reader, and judge requests use this rate. Extra requests queue instead of
+              failing with <span className="mono">429 Too Many Requests</span>, so runs may take
+              longer. TokenRouter&rsquo;s free tier allows 5 requests per minute.
             </p>
           </div>
           )}

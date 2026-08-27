@@ -172,6 +172,7 @@ function Workbench() {
         <div className="rail" data-sessions={sessionsOpen} data-history={historyOpen}>
           <CouncilPanel />
           <SolutionCard />
+          <div className="solution-divider" aria-hidden="true" />
           <ConsensusPanel />
           <BackgroundJobsPanel />
           <HistoryPanel />

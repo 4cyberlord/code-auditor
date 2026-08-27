@@ -21,6 +21,29 @@ type Block =
   | { t: "hr" }
   | { t: "p"; text: string };
 
+function inferredLanguage(text: string): string {
+  if (/\b(def|elif|None|True|False|print)\b|:\s*$/.test(text)) return "python";
+  if (/\b(func|package|fmt\.Print)\b/.test(text)) return "go";
+  if (/\b(fn|let mut|println!|impl|use std::)\b/.test(text)) return "rust";
+  if (/\b(public static void|System\.out|extends)\b/.test(text)) return "java";
+  if (/\b(SELECT|FROM|WHERE|INSERT INTO|CREATE TABLE)\b/i.test(text)) return "sql";
+  if (/\b(const|let|var|function|interface|console\.log|import .* from)\b/.test(text)) return "typescript";
+  return "";
+}
+
+function looksLikeCode(lines: string[]): boolean {
+  const source = lines.join("\n").trim();
+  if (!source || source.length > 6000) return false;
+  const signals = [
+    /[{};]/,
+    /(?:=>|===|!==|:=|\+\+|--)/,
+    /^\s*(?:const|let|var|function|class|def|fn|func|import|from|return|if|for|while|switch|public|private|SELECT|CREATE)\b/m,
+    /\b(?:console\.log|print|println!|System\.out)\s*\(/,
+  ];
+  const matched = signals.filter((signal) => signal.test(source)).length;
+  return matched >= 2;
+}
+
 function parseBlocks(src: string): Block[] {
   const lines = src.replace(/\r\n/g, "\n").split("\n");
   const blocks: Block[] = [];
@@ -28,7 +51,12 @@ function parseBlocks(src: string): Block[] {
 
   const flushPara = () => {
     if (para.length) {
-      blocks.push({ t: "p", text: para.join("\n") });
+      const text = para.join("\n");
+      blocks.push(
+        looksLikeCode(para)
+          ? { t: "code", lang: inferredLanguage(text), text, open: false }
+          : { t: "p", text }
+      );
       para = [];
     }
   };

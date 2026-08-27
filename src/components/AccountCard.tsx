@@ -159,10 +159,9 @@ export default function AccountCard() {
       )}
 
       <p className="hint" style={{ margin: 0 }}>
-        The PIN is stored as an Argon2id hash in your own database, peppered with a secret that
-        stays in this Mac&rsquo;s Keychain — so a copy of the database is not enough to work it out.
-        Five wrong tries start an escalating lockout. There is no recovery: if you forget it, delete
-        the row in <span className="mono">app_users</span> and set the account up again.
+        Your PIN is stored as an Argon2id hash in your database and protected by a secret in this
+        Mac&rsquo;s Keychain. Five wrong tries trigger a longer lockout. There is no recovery: if you
+        forget it, delete the <span className="mono">app_users</span> row and set up the account again.
       </p>
     </div>
   );
