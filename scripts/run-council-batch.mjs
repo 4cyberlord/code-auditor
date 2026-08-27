@@ -172,10 +172,12 @@ async function runOne(file, index, total) {
       settings_snapshot: {
         mode: "auto",
         maxTokens: Number(process.env.CODE_AUDITOR_BATCH_MAX_TOKENS || 4096),
-        // local | e2b — CODE_AUDITOR_BATCH_EXECUTION=e2b runs the generated
-        // benchmarks in an E2B sandbox instead of on this Mac. Check the
-        // sandbox has a C++ toolchain first: node scripts/test-e2b.mjs
-        executionProvider: process.env.CODE_AUDITOR_BATCH_EXECUTION || "local",
+        // e2b | local — E2B is the default when a key is present because it
+        // keeps untrusted generated code off this Mac and returns isolated
+        // timing evidence. Check the template first: node scripts/test-e2b.mjs
+        executionProvider:
+          process.env.CODE_AUDITOR_BATCH_EXECUTION ||
+          (process.env.E2B_API_KEY ? "e2b" : "local"),
         // Whatever the question is written in — the default the app now ships.
         outputLanguage: process.env.CODE_AUDITOR_BATCH_LANGUAGE || "",
         benchmarkBackend: process.env.CODE_AUDITOR_BATCH_BACKEND || "actions",

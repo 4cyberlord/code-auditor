@@ -29,7 +29,7 @@ solver workbench; it does not become a full IDE.
   with ordered job-image rows and refreshes history.
 - `scripts/cloud-worker.mjs` can claim queued jobs, download ordered screenshots,
   run a compact cloud Council through TokenRouter chat models, generate benchmark
-  harnesses only when runnable code candidates exist, run remote-worker or E2B
+  harnesses only when runnable code candidates exist, run E2B or local-worker
   verification, optionally mirror passing runs into Codespaces, collect reviewer
   passes and judge reports, write `council_reports`, mark jobs completed, record
   progress events, and send APNs notifications when APNs credentials are

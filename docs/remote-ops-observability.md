@@ -74,8 +74,9 @@ the worker environment.
   not the Mac app. `Dockerfile.worker` installs the runtimes currently used by
   `scripts/cloud-worker.mjs`: Node, Python, bash, Ruby, PHP, C/C++, Java, Go and
   Rust.
-- E2B is configured as an optional synchronous sandbox backend when
-  `CODE_AUDITOR_EXECUTION_PROVIDER=e2b` and `E2B_API_KEY` are set.
+- E2B is configured as the preferred generated-code execution backend when
+  `E2B_API_KEY` is set. Use `CODE_AUDITOR_EXECUTION_PROVIDER=local` only for
+  local debugging.
 - GitHub Actions is configured as a heavier asynchronous benchmark path through
   `.github/workflows/cloud-benchmark.yml` and
   `scripts/github-actions-dispatch.mjs`. It is best for reproducible, slower

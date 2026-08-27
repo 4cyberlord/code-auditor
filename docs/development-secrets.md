@@ -97,10 +97,34 @@ Create an API key in the E2B dashboard:
 ```bash
 E2B_API_KEY=
 CODE_AUDITOR_EXECUTION_PROVIDER=e2b
+CODE_AUDITOR_E2B_TEMPLATE=code-editor-runners
 ```
 
 Use E2B only when a job actually needs runnable code validation. MCQ, math and
 plain research questions should use Council reasoning and skip benchmarks.
+
+The worker now prefers E2B automatically when `E2B_API_KEY` exists:
+
+```bash
+CODE_AUDITOR_EXECUTION_PROVIDER=e2b
+CODE_AUDITOR_BATCH_EXECUTION=e2b
+CODE_AUDITOR_SMOKE_EXECUTION=e2b
+```
+
+Run this before depending on it for Council gates:
+
+```bash
+npm run test:e2b
+```
+
+The stock `code-interpreter-v1` template is enough for Python, Node, Java and
+C/C++, but the current stock sandbox does not include Rust/Cargo, Go, or
+`/usr/bin/time`. Build the project template once when you want Rust `cargo
+build --release`, Go, and memory timing:
+
+```bash
+npm run e2b:template
+```
 
 ## GitHub Actions
 
@@ -133,8 +157,8 @@ The smoke test loads `.development.env` itself, so the file does not need to be
 valid shell syntax. It uploads a fixture screenshot to Supabase Storage, signs
 and downloads it, checks APNs key signing, sends a Telegram dev alert when
 Telegram credentials are present, and queues one small cloud Council job when
-TokenRouter is configured. It keeps E2B optional by forcing the local execution
-provider for the smoke run.
+TokenRouter is configured. When `E2B_API_KEY` is present, the solve smoke uses
+E2B for generated-code execution.
 
 Useful variants:
 

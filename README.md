@@ -168,15 +168,30 @@ deliberating is still evidence.
 The roster lives in Settings as two free-text lists, one gateway model id per line. Any
 model the key can reach works; nothing is recompiled when you change it.
 
-### Remote GitHub Actions benchmarks
+### E2B program tests and GitHub Actions evidence
 
-Remote benchmarking now defaults to GitHub Actions. Codespaces can still be
-kept as a legacy/manual backend, but it is no longer the recommended background
-solver path because a cold Codespace can take too long to wake up while the
-Council is waiting for benchmark evidence.
+Generated candidate programs now run in E2B by default when the worker has
+`E2B_API_KEY`. That is the safer default for AI-written code: the benchmark
+harness runs in an isolated Linux sandbox, and only stdout, stderr, timing,
+memory and sandbox id come back into the Supabase history rows.
 
-In the app, open Settings › Council, set **Remote benchmark** to **GitHub
-Actions**, then fill:
+The stock E2B code-interpreter template currently covers Python, Node, Java and
+C/C++ well. For Rust `cargo build --release`, Go, and memory timing, build the
+project template once and set `CODE_AUDITOR_E2B_TEMPLATE=code-editor-runners`:
+
+```bash
+npm run e2b:template
+```
+
+GitHub Actions remains available as optional extra remote evidence after a
+candidate passes its generated tests. Codespaces can still be kept as a
+legacy/manual backend, but it is no longer the recommended background solver
+path because a cold Codespace can take too long to wake up while the Council is
+waiting for benchmark evidence.
+
+In the app, open Settings › Council, set **Program tests** to **E2B sandbox**.
+If you also want the extra Actions evidence, set **Remote benchmark** to
+**GitHub Actions**, then fill:
 
 | Field | Example |
 |---|---|
@@ -185,9 +200,10 @@ Actions**, then fill:
 | Ref | `main` |
 | Remote timeout | `300` seconds |
 
-The worker dispatches `.github/workflows/cloud-benchmark.yml`, waits for the
-run, downloads its `benchmark-result.json` artifact and attaches the runner
-pass/fail, runtime and memory evidence to the Council report.
+The worker first runs the generated tests in E2B. If the candidate passes and
+GitHub Actions is enabled, it dispatches `.github/workflows/cloud-benchmark.yml`,
+waits for the run, downloads its `benchmark-result.json` artifact and attaches
+the runner pass/fail, runtime and memory evidence to the Council report.
 
 For production, do not bundle a local `gh` login. Give the deployed worker a
 server-side GitHub App installation token or fine-grained token with Actions
@@ -230,7 +246,7 @@ node scripts/cloud-worker.mjs --once
 It claims queued jobs, records progress and sends APNs notifications when the
 server has APNs credentials. It now runs a compact cloud Council through
 TokenRouter chat models: independent solver calls, benchmark harness generation,
-local worker verification, optional GitHub Actions benchmark evidence, reviewer
+E2B or local verification, optional GitHub Actions benchmark evidence, reviewer
 passes, judge reports and a synthesis pass, then writes a `council_reports` row
 and marks the job completed. Revision rounds are still the next worker layer.
 See `docs/background-cloud-solver.md`.

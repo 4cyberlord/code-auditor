@@ -449,6 +449,15 @@ interface Settings {
    */
   outputLanguage: string;
   /**
+   * Where generated candidate programs are actually executed.
+   *
+   * E2B is the default for cloud work because it keeps untrusted generated code
+   * off the user's Mac while still returning timing and memory evidence.
+   */
+  executionProvider: "e2b" | "local";
+  /** Wall-clock ceiling for one E2B command, after sandbox creation. */
+  e2bTimeoutMs: number;
+  /**
    * Which machine benchmarks a passing council candidate.
    *
    * Actions by default, because latency is the point: a dispatched workflow is
@@ -706,6 +715,8 @@ const defaultSettings = (): Settings => ({
   synthesisModel: "openai/gpt-5.6-sol",
   councilIncludePanel: true,
   outputLanguage: "",
+  executionProvider: "e2b",
+  e2bTimeoutMs: 120_000,
   benchmarkBackend: "actions",
   githubRepository: "",
   githubWorkflow: "cloud-benchmark.yml",
@@ -853,6 +864,12 @@ function normalizeSettings(s: Settings): Settings {
     // deciding what counts as a language.
     outputLanguage:
       typeof s.outputLanguage === "string" ? s.outputLanguage.trim() : base.outputLanguage,
+    executionProvider: (["e2b", "local"] as const).includes(
+      s.executionProvider as "e2b"
+    )
+      ? s.executionProvider
+      : base.executionProvider,
+    e2bTimeoutMs: Math.round(clampTo(s.e2bTimeoutMs, 30_000, 300_000, base.e2bTimeoutMs)),
     benchmarkBackend: (["actions", "codespaces", "off"] as const).includes(
       s.benchmarkBackend as "actions"
     )

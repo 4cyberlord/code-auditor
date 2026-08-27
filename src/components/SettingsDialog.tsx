@@ -1199,6 +1199,48 @@ function CouncilCard() {
       </div>
 
       <div className="row">
+        <label htmlFor="execution-provider">Program tests</label>
+        <div className="segmented" style={{ flex: 1 }}>
+          {(["e2b", "local"] as const).map((v) => (
+            <button
+              key={String(v)}
+              data-on={settings.executionProvider === v}
+              style={{ flex: 1 }}
+              onClick={() => patch({ executionProvider: v })}
+            >
+              {v === "e2b" ? "E2B sandbox" : "Local"}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {settings.executionProvider === "e2b" && (
+        <>
+          <div className="row">
+            <label htmlFor="e2b-timeout">E2B timeout</label>
+            <input
+              id="e2b-timeout"
+              className="field"
+              type="number"
+              min={30}
+              max={300}
+              step={15}
+              value={Math.round(settings.e2bTimeoutMs / 1000)}
+              onChange={(e) => patch({ e2bTimeoutMs: Number(e.target.value) * 1000 })}
+              style={{ flex: 1 }}
+            />
+            <span className="vendor">seconds</span>
+          </div>
+          <p className="hint">
+            Runs generated candidate harnesses in isolated E2B Linux sandboxes.
+            The worker needs <span className="mono">E2B_API_KEY</span>; only
+            stdout, stderr, timing, memory and sandbox id are written back to
+            history.
+          </p>
+        </>
+      )}
+
+      <div className="row">
         <label htmlFor="benchmark-backend">Remote benchmark</label>
         <div className="segmented" style={{ flex: 1 }}>
           {(["actions", "off"] as const).map((v) => (

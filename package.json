@@ -13,6 +13,7 @@
     "test:storage": "node scripts/test-storage.mjs",
     "test:vision": "node scripts/test-vision.mjs",
     "test:e2b": "node scripts/test-e2b.mjs",
+    "e2b:template": "node scripts/build-e2b-template.mjs",
     "smoke:live": "node scripts/live-smoke.mjs",
     "test": "node tests/auth.test.ts && node tests/consensus.test.ts && node tests/extraction.test.ts && node tests/sql.test.ts && node tests/bridge.test.ts && node tests/preflight.test.ts && node tests/payload.test.ts && node tests/highlight.test.ts && node tests/verdict.test.ts && node tests/image.test.ts && node tests/manifest.test.ts && node tests/reading.test.ts && node tests/when.test.ts && node tests/title.test.ts && node tests/council.test.ts && node tests/knowledge.test.ts && node tests/probeFit.test.ts && node tests/prune.test.ts && node tests/cloudJobs.test.ts && node tests/backgroundBatch.test.ts && node tests/cloudWorker.test.mjs && node tests/language.test.ts && node tests/answerLanguage.test.ts && node tests/benchmarkBackend.test.mjs && node tests/unzip.test.mjs",
     "helper:build": "cargo build --manifest-path src-tauri/Cargo.toml --bin cloud-sync-helper",

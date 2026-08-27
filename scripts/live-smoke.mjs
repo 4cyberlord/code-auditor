@@ -321,7 +321,9 @@ async function createSmokeJob() {
       settings_snapshot: {
         mode: "auto",
         maxTokens: 1200,
-        executionProvider: "local",
+        executionProvider:
+          mustEnv("CODE_AUDITOR_SMOKE_EXECUTION") ||
+          (mustEnv("E2B_API_KEY") ? "e2b" : "local"),
         benchmarkBackend: "actions",
         githubRepository: mustEnv("GITHUB_REPOSITORY") || mustEnv("CODE_AUDITOR_GITHUB_REPOSITORY"),
         githubWorkflow: mustEnv("CODE_AUDITOR_GITHUB_WORKFLOW") || "cloud-benchmark.yml",
@@ -408,7 +410,7 @@ ok(".development.env loaded", loaded);
 ok("SUPABASE_URL present", Boolean(mustEnv("SUPABASE_URL")));
 ok("Supabase service role present", Boolean(serviceKey()));
 ok("APNs path file present", !mustEnv("APNS_PRIVATE_KEY_PATH") || existsSync(path.resolve(ROOT, mustEnv("APNS_PRIVATE_KEY_PATH"))));
-if (!mustEnv("E2B_API_KEY")) warn("E2B key", "not needed while execution provider is local");
+if (!mustEnv("E2B_API_KEY")) warn("E2B key", "missing; smoke solve will fall back to local execution");
 
 section("2. external services");
 if (mustEnv("SUPABASE_URL") && serviceKey()) {

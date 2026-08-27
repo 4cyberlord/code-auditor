@@ -1,14 +1,12 @@
 #!/usr/bin/env node
 /**
- * Does an E2B sandbox actually have a C++ toolchain, and can it measure one?
+ * Does an E2B sandbox actually have the toolchain the Council expects?
  *
  *   node scripts/test-e2b.mjs
  *
- * Worth asking before the Council depends on it. E2B's code-interpreter template
- * is built for Python and JavaScript; C++ is the language this project puts
- * first, and `/usr/bin/time` is what every memory number ultimately comes from.
- * If either is missing, the sandbox will happily accept a C++ candidate and then
- * report it as a failure that has nothing to do with the candidate's code.
+ * Worth asking before the Council depends on it. The stock E2B
+ * code-interpreter template can run common languages, but production Rust/Go
+ * support should come from CODE_AUDITOR_E2B_TEMPLATE.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -34,10 +32,11 @@ if (!process.env.E2B_API_KEY?.trim()) {
 const g = (s) => `\x1b[32m${s}\x1b[0m`;
 const r = (s) => `\x1b[31m${s}\x1b[0m`;
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const shellSingle = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
 const PROBE = String.raw`
 echo "--- toolchain"
-for tool in c++ g++ gcc cc python3 node rustc go java /usr/bin/time; do
+for tool in c++ g++ gcc cc python3 node rustc cargo go java /usr/bin/time; do
   if command -v "$tool" >/dev/null 2>&1; then echo "ok      $tool -> $(command -v "$tool")"; else echo "MISSING $tool"; fi
 done
 
@@ -66,27 +65,68 @@ if c++ -std=c++20 -O2 main.cpp -o prog 2>compile.log; then
 else
   echo "COMPILE FAILED:"; cat compile.log
 fi
+
+echo "--- rust cargo build and run"
+tmp="$(mktemp -d)"; cd "$tmp"
+if command -v cargo >/dev/null 2>&1 && command -v rustc >/dev/null 2>&1; then
+  cargo new --bin smoke_rust >/dev/null 2>&1
+  cd smoke_rust
+  cat > src/main.rs <<'RS'
+fn main() {
+    let sum: i64 = (0..1000).sum();
+    println!("PASS rust sum={}", sum);
+}
+RS
+  if cargo build --release >/tmp/rust-build.log 2>&1; then
+    ./target/release/smoke_rust
+  else
+    echo "RUST BUILD FAILED:"; cat /tmp/rust-build.log
+  fi
+else
+  echo "MISSING cargo/rustc"
+fi
+
+echo "--- go build and run"
+tmp="$(mktemp -d)"; cd "$tmp"
+if command -v go >/dev/null 2>&1; then
+  cat > main.go <<'GO'
+package main
+import "fmt"
+func main() { fmt.Println("PASS go") }
+GO
+  go run main.go
+else
+  echo "MISSING go"
+fi
 `;
 
 const started = Date.now();
-console.log("Creating an E2B sandbox…");
+const template = process.env.CODE_AUDITOR_E2B_TEMPLATE?.trim();
+console.log(`Creating an E2B sandbox${template ? ` from ${template}` : ""}…`);
 const { Sandbox } = await import("@e2b/code-interpreter");
-const sandbox = await Sandbox.create({ timeoutMs: 120_000, metadata: { app: "code-auditor", purpose: "toolchain-probe" } });
+const opts = { timeoutMs: 120_000, metadata: { app: "code-editor", purpose: "toolchain-probe", template: template || "stock" } };
+const sandbox = template ? await Sandbox.create(template, opts) : await Sandbox.create(opts);
 console.log(dim(`  sandbox ${sandbox.sandboxId} up in ${((Date.now() - started) / 1000).toFixed(1)}s`));
 
 try {
-  const res = await sandbox.commands.run(`bash -lc ${JSON.stringify(PROBE)}`, { timeoutMs: 90_000 });
+  const res = await sandbox.commands.run(`bash -lc ${shellSingle(PROBE)}`, { timeoutMs: 90_000 });
   const text = `${res.stdout || ""}\n${res.stderr || ""}`;
   console.log(text.trim());
 
   const hasCpp = /ok\s+c\+\+/.test(text);
+  const hasRust = /ok\s+rustc/.test(text) && /ok\s+cargo/.test(text);
+  const hasGo = /ok\s+go/.test(text);
   const hasTime = /ok\s+\/usr\/bin\/time/.test(text);
   const ran = /PASS sum=499999500000/.test(text);
+  const ranRust = /PASS rust sum=499500/.test(text);
+  const ranGo = /PASS go/.test(text);
   const mem = /maxrss_kb=(\d+)/.exec(text);
 
   console.log("\nVerdict");
   console.log(`  C++ compiler       ${hasCpp ? g("present") : r("MISSING")}`);
   console.log(`  program ran right  ${ran ? g("yes") : r("no")}`);
+  console.log(`  Rust/Cargo         ${hasRust && ranRust ? g("ready") : r("missing or failed")}`);
+  console.log(`  Go                 ${hasGo && ranGo ? g("ready") : r("missing or failed")}`);
   console.log(`  /usr/bin/time      ${hasTime ? g("present") : r("MISSING — no memory numbers")}`);
   if (mem) console.log(`  peak memory        ${(Number(mem[1]) / 1024).toFixed(1)} MB`);
   console.log(
@@ -94,6 +134,10 @@ try {
       ? g("\nE2B can run the Council's C++ benchmarks.\n")
       : r("\nE2B cannot run C++ as-is — it needs a custom template with build-essential.\n")
   );
+  if (template && (!hasRust || !ranRust || !hasGo || !ranGo || !hasTime)) {
+    console.log(r("The configured E2B template is not ready for Rust/Go/memory timing yet.\n"));
+    process.exit(1);
+  }
   process.exit(hasCpp && ran ? 0 : 1);
 } finally {
   await sandbox.kill().catch(() => {});

@@ -584,18 +584,32 @@ async function runRemoteCode(codespace, language, code, timeoutMs = REMOTE_RUN_T
 async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
   const started = Date.now();
   const { Sandbox } = await import("@e2b/code-interpreter");
-  const sandbox = await Sandbox.create({
+  const bootStarted = Date.now();
+  const template = String(process.env.CODE_AUDITOR_E2B_TEMPLATE || "").trim();
+  const opts = {
     timeoutMs: Math.max(timeoutMs + 30_000, 90_000),
     metadata: {
       app: "code-editor",
       workerId: WORKER_ID,
       purpose: "benchmark",
+      template: template || "code-interpreter-v1",
     },
-  });
+  };
+  const sandbox = template ? await Sandbox.create(template, opts) : await Sandbox.create(opts);
+  const bootMs = Date.now() - bootStarted;
   try {
-    const result = await sandbox.commands.run(`bash -lc ${shellSingle(remoteScript(language, code))}`, {
-      timeoutMs,
-    });
+    let result;
+    try {
+      result = await sandbox.commands.run(`bash -lc ${shellSingle(remoteScript(language, code))}`, {
+        timeoutMs,
+      });
+    } catch (err) {
+      if (err?.result) {
+        result = err.result;
+      } else {
+        throw err;
+      }
+    }
     const parsed = parseRemoteOutput(`${result.stdout || ""}\n${result.stderr || ""}`);
     const out = clampOutput(parsed.stdout || result.stdout || "");
     const err = clampOutput(parsed.stderr || result.stderr || "");
@@ -613,6 +627,7 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
       truncated: out.truncated || err.truncated,
       provider: "e2b",
       sandboxId: sandbox.sandboxId,
+      bootMs,
     };
   } finally {
     await sandbox.kill().catch(() => {});
@@ -620,10 +635,11 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
 }
 
 function executionProvider(settings) {
+  const fallback = process.env.E2B_API_KEY ? "e2b" : "local";
   return String(
     settings.executionProvider ||
       process.env.CODE_AUDITOR_EXECUTION_PROVIDER ||
-      "local"
+      fallback
   )
     .trim()
     .toLowerCase();
