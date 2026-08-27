@@ -71,12 +71,14 @@ node scripts/cloud-worker.mjs --once
 
 ## Next Implementation Layer
 
-1. Package/sign the helper binary inside the release `.app` instead of relying on
+1. Rename the public product from **Code Editor** to **Council Editor** before
+   App Store/TestFlight packaging.
+2. Package/sign the helper binary inside the release `.app` instead of relying on
    a separately built `target/*/cloud-sync-helper` during development.
-2. Add a helper status/history surface that shows pending batch count and the
+3. Add a helper status/history surface that shows pending batch count and the
    latest helper log/event inside Settings.
-3. Add server-side revision rounds to the worker so it matches the full in-app
+4. Add server-side revision rounds to the worker so it matches the full in-app
    Council evidence model.
-4. Turn the checked-in iOS SwiftUI companion source into a signed Xcode project
+5. Turn the checked-in iOS SwiftUI companion source into a signed Xcode project
    with the final bundle id, APNs entitlement and production provisioning
    profile.

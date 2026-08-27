@@ -36,6 +36,12 @@ something done because it looks done.
 | Worker HTTP server | `npm run worker:serve` exposes `/api/worker-tick` for cron-job.org/QStash and `/api/register-device` for iOS APNs token registration without putting Supabase service-role credentials on the phone. |
 | iOS companion foundation | `ios/CodeEditorCompanion` contains a native SwiftUI app foundation for APNs registration, Apple Watch mirrored notifications and Supabase job/event/report viewing. |
 
+**Tracked TODO**
+
+- Rename the public product from **Code Editor** to **Council Editor** before
+  App Store/TestFlight packaging, including desktop bundle display name, iOS
+  companion display name, docs, screenshots, notifications and release assets.
+
 **What the last session retired**
 
 The standing caveat — *"still unwatched: any model actually answering"* — is gone.
