@@ -115,3 +115,25 @@ CODE_AUDITOR_GITHUB_REF=main
 ```
 
 The workflow must exist on the default branch before dispatch works.
+
+## Local smoke test
+
+Once `.development.env` is filled in, run:
+
+```bash
+npm run smoke:live
+```
+
+The smoke test loads `.development.env` itself, so the file does not need to be
+valid shell syntax. It uploads a fixture screenshot to Supabase Storage, signs
+and downloads it, checks APNs key signing, sends a Telegram dev alert when
+Telegram credentials are present, and queues one small cloud Council job when
+TokenRouter is configured. It keeps E2B optional by forcing the local execution
+provider for the smoke run.
+
+Useful variants:
+
+```bash
+npm run smoke:live -- --no-solve
+npm run smoke:live -- --no-telegram
+```

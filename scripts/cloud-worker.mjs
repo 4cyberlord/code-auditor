@@ -197,34 +197,62 @@ function gatewayBaseUrl(settings) {
   return settings?.gatewayBaseUrl || "https://api.tokenrouter.com/v1";
 }
 
+function retryDelayMs(status, text, attempt) {
+  if (status !== 429) return 0;
+  const minuteLimit = /within\s+1\s+minutes?/i.test(text);
+  const explicit = /retry(?:\s|-)?after["':\s]+(\d+)/i.exec(text);
+  if (explicit) return Math.min(Number(explicit[1]) * 1000, 90_000);
+  return minuteLimit ? 65_000 : Math.min(10_000 * 2 ** attempt, 60_000);
+}
+
+async function sleep(ms) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxTokens = 4096 }) {
   const content = [{ type: "text", text: user }];
   for (const image of images) {
     content.push({ type: "image_url", image_url: { url: image.dataUrl } });
   }
 
-  const resp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${TOKENROUTER_API_KEY}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content },
-      ],
-      max_tokens: maxTokens,
-      temperature: 0.2,
-    }),
-  });
-  const text = await resp.text();
-  if (!resp.ok) throw new Error(`${model}: ${resp.status} ${resp.statusText}: ${text}`);
-  const json = JSON.parse(text);
-  const answer = json?.choices?.[0]?.message?.content;
-  if (!answer?.trim()) throw new Error(`${model}: empty model response`);
-  return answer;
+  let temperature = 0.2;
+  let last = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const resp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${TOKENROUTER_API_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content },
+        ],
+        max_tokens: maxTokens,
+        temperature,
+      }),
+    });
+    const text = await resp.text();
+    last = `${resp.status} ${resp.statusText}: ${text}`;
+    if (resp.ok) {
+      const json = JSON.parse(text);
+      const answer = json?.choices?.[0]?.message?.content;
+      if (!answer?.trim()) throw new Error(`${model}: empty model response`);
+      return answer;
+    }
+
+    if (/invalid temperature:\s*only\s*1\s*is\s*allowed/i.test(text) && temperature !== 1) {
+      temperature = 1;
+      continue;
+    }
+
+    const waitMs = retryDelayMs(resp.status, text, attempt);
+    if (!waitMs || attempt === 2) break;
+    await sleep(waitMs);
+  }
+  throw new Error(`${model}: ${last}`);
 }
 
 function winnerFromSynthesis(text) {
