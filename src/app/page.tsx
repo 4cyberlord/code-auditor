@@ -6,10 +6,12 @@ import BackgroundJobsPanel from "@/components/BackgroundJobsPanel";
 import ConsensusPanel from "@/components/ConsensusPanel";
 import SolutionCard from "@/components/SolutionCard";
 import CouncilPanel from "@/components/CouncilPanel";
+import HistoryPanel from "@/components/HistoryPanel";
 import InputBar from "@/components/InputBar";
 import ReadingPanel from "@/components/ReadingPanel";
 import SettingsDialog from "@/components/SettingsDialog";
 import SessionSidebar from "@/components/SessionSidebar";
+import StartupLoader from "@/components/StartupLoader";
 import Splitter from "@/components/Splitter";
 import { useAgentEvents } from "@/lib/useAgentEvents";
 import { useGlobalShortcuts } from "@/lib/shortcuts";
@@ -52,7 +54,7 @@ export default function Page() {
     });
   }, [gate, ready, status]);
 
-  if (gate === "loading") return <div className="auth-blank" />;
+  if (gate === "loading") return <StartupLoader />;
   if (gate === "connect" || gate === "login") {
     return <LoginScreen gate={gate} status={status} onChanged={apply} />;
   }
@@ -66,6 +68,7 @@ function Workbench() {
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const running = useStore((s) => s.running);
   const sessionsOpen = useStore((s) => s.settings.railPanel === "sessions");
+  const historyOpen = useStore((s) => s.settings.railPanel === "history");
 
   // Only enabled providers get a pane. With five to choose from, rendering the
   // switched-off ones as placeholders would spend half the screen on nothing --
@@ -107,7 +110,7 @@ function Workbench() {
     <div className="shell">
       <div className="titlebar" data-tauri-drag-region>
         <span className="brand" data-tauri-drag-region>
-          Code Editor
+          Council Editor
           <span data-tauri-drag-region>
             {running
               ? "running"
@@ -165,14 +168,13 @@ function Workbench() {
           invert
         />
 
-        {/* The verdict, and the history that produced it, in one column. Sessions
-            sits under the solution rather than beside the panes: it is something
-            you go and look at, not something you watch. */}
-        <div className="rail" data-sessions={sessionsOpen}>
+        {/* The verdict, and the drawers in one column. */}
+        <div className="rail" data-sessions={sessionsOpen} data-history={historyOpen}>
           <CouncilPanel />
           <SolutionCard />
           <ConsensusPanel />
           <BackgroundJobsPanel />
+          <HistoryPanel />
           {sessionsOpen && (
             <Splitter
               axis="row"

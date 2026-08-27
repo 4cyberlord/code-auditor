@@ -7,6 +7,6 @@ export function devLog(scope: string, message: string, data?: unknown) {
     window.localStorage.getItem(ENABLED_STORAGE_KEY) === "1";
   if (!enabled) return;
   const stamp = new Date().toISOString();
-  if (data === undefined) console.info(`[Code Editor dev ${stamp}] ${scope}: ${message}`);
-  else console.info(`[Code Editor dev ${stamp}] ${scope}: ${message}`, data);
+  if (data === undefined) console.info(`[Council Editor dev ${stamp}] ${scope}: ${message}`);
+  else console.info(`[Council Editor dev ${stamp}] ${scope}: ${message}`, data);
 }

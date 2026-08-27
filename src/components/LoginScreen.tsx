@@ -165,7 +165,7 @@ export default function LoginScreen({
             <img src="/app-icon.png" alt="" width={76} height={76} />
           </div>
 
-          <h1 className="auth-wordmark">Code Editor</h1>
+          <h1 className="auth-wordmark">Council Editor</h1>
           <p className="auth-tagline">
             Private solving workspace, locked to this Mac.
           </p>

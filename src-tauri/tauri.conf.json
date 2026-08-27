@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Code Editor",
+  "productName": "Council Editor",
   "mainBinaryName": "code-auditor",
   "version": "0.1.0",
   "identifier": "com.charles.codeauditor",
@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "Code Editor",
+        "title": "Council Editor",
         "width": 1500,
         "height": 980,
         "minWidth": 1080,

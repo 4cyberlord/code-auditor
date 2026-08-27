@@ -955,11 +955,71 @@ function ReadingCard() {
 const TABS = [
   { id: "models" as const, label: "Models" },
   { id: "council" as const, label: "Council" },
+  { id: "appearance" as const, label: "Appearance" },
   { id: "reading" as const, label: "Reading" },
   { id: "capture" as const, label: "Capture" },
   { id: "sessions" as const, label: "Sessions" },
   { id: "limits" as const, label: "Limits" },
 ];
+
+function AppearanceCard() {
+  const theme = useStore((s) => s.settings.theme || "system");
+  const patch = useStore((s) => s.patchSettings);
+
+  const options: Array<{ id: "system" | "light" | "dark"; label: string; desc: string; icon: string }> = [
+    {
+      id: "system",
+      label: "System Mode",
+      desc: "Automatically follows macOS and system light / dark preferences.",
+      icon: "💻",
+    },
+    {
+      id: "light",
+      label: "Light Mode",
+      desc: "Bright daylight theme with high readability and crisp borders.",
+      icon: "☀️",
+    },
+    {
+      id: "dark",
+      label: "Dark Mode",
+      desc: "Deep contrast dark palette designed for low-light focus.",
+      icon: "🌙",
+    },
+  ];
+
+  return (
+    <div className="provider-card">
+      <div className="top">
+        <span className="name">Appearance & Theme</span>
+      </div>
+      <p className="hint" style={{ marginTop: 0, marginBottom: 14 }}>
+        Select your preferred display theme. System mode adapts automatically as your operating system switches between daylight and dark hours.
+      </p>
+
+      <div className="theme-options-grid">
+        {options.map((opt) => {
+          const selected = theme === opt.id;
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              className="theme-option-card"
+              data-selected={selected}
+              onClick={() => patch({ theme: opt.id })}
+            >
+              <div className="theme-option-header">
+                <span className="theme-option-icon">{opt.icon}</span>
+                <span className="theme-option-title">{opt.label}</span>
+                {selected && <span className="chip" style={{ marginLeft: "auto", fontSize: 10 }}>Active</span>}
+              </div>
+              <p className="theme-option-desc">{opt.desc}</p>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 /**
  * The Council card: one switch and two rosters.
@@ -1549,7 +1609,7 @@ function CaptureCard() {
           Every image goes to every enabled agent, so this multiplies: {maxImages}{" "}
           {maxImages === 1 ? "image" : "images"} across five panes is {maxImages * 5} image
           uploads in one press. Captures are saved to{" "}
-          <span style={{ fontFamily: "var(--font-mono)" }}>~/Pictures/Code Editor</span>{" "}
+          <span style={{ fontFamily: "var(--font-mono)" }}>~/Pictures/Council Editor</span>{" "}
           regardless, so lowering this never loses a grab.
         </p>
       </div>
@@ -1663,6 +1723,8 @@ export default function SettingsDialog() {
           )}
 
           {tab === "council" && <CouncilCard />}
+
+          {tab === "appearance" && <AppearanceCard />}
 
           {tab === "reading" && <ReadingCard />}
 

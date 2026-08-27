@@ -216,7 +216,7 @@ pub fn run() {
         .setup(move |app| {
             #[cfg(desktop)]
             {
-                let show = MenuItem::with_id(app, "show", "Open Code Editor", true, None::<&str>)?;
+                let show = MenuItem::with_id(app, "show", "Open Council Editor", true, None::<&str>)?;
                 let capture =
                     MenuItem::with_id(app, "capture", "Capture Region", true, Some("Ctrl+Alt+R"))?;
                 let capture_screen = MenuItem::with_id(
@@ -228,7 +228,7 @@ pub fn run() {
                 )?;
                 let solve = MenuItem::with_id(app, "solve", "Solve", true, Some("Ctrl+Alt+A"))?;
                 let sep = PredefinedMenuItem::separator(app)?;
-                let quit = MenuItem::with_id(app, "quit", "Quit Code Editor", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "quit", "Quit Council Editor", true, None::<&str>)?;
                 let menu =
                     Menu::with_items(app, &[&show, &capture, &capture_screen, &solve, &sep, &quit])?;
 
@@ -239,7 +239,7 @@ pub fn run() {
                 TrayIconBuilder::with_id("main-tray")
                     .icon(icon)
                     .icon_as_template(true)
-                    .tooltip("Code Editor — ⌃⌥S screen, ⌃⌥R region, ⌃⌥A audit")
+                    .tooltip("Council Editor — ⌃⌥S screen, ⌃⌥R region, ⌃⌥A audit")
                     .menu(&menu)
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "show" => reveal(app),

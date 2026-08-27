@@ -101,7 +101,7 @@ import {
  * The drawers in the right-hand rail. "none" is a real choice — every drawer
  * shut, all the height to the panes.
  */
-export const RAIL_PANELS = ["solution", "consensus", "jobs", "sessions", "none"] as const;
+export const RAIL_PANELS = ["solution", "consensus", "jobs", "sessions", "history", "none"] as const;
 export type RailPanel = (typeof RAIL_PANELS)[number];
 
 export type AgentStatus = "idle" | "queued" | "streaming" | "done" | "error" | "cancelled";
@@ -414,6 +414,10 @@ interface Settings {
    * A single value makes "only one is open" a property of the data rather than
    * a rule some future toggle can forget to apply.
    */
+  /**
+   * The application appearance mode: system (follows OS), light, or dark.
+   */
+  theme: "system" | "light" | "dark";
   railPanel: RailPanel;
   /** Whether the Solution read-out is expanded. Remembered between runs. */
   /**
@@ -806,6 +810,7 @@ const defaultSettings = (): Settings => ({
   // five a minute the second one costs a pane. Claude reads screenshots most
   // reliably of the four, so when only one model can read, it is the one.
   extractors: ["anthropic"],
+  theme: "system",
   railPanel: "consensus",
   raiseOnCapture: false,
   maxImages: MAX_IMAGES,
@@ -939,6 +944,9 @@ function normalizeSettings(s: Settings): Settings {
     railPanel: RAIL_PANELS.includes(s.railPanel as RailPanel)
       ? (s.railPanel as RailPanel)
       : base.railPanel,
+    theme: (["system", "light", "dark"] as const).includes(s.theme as "system")
+      ? s.theme
+      : base.theme,
     raiseOnCapture:
       typeof s.raiseOnCapture === "boolean" ? s.raiseOnCapture : base.raiseOnCapture,
     maxImages: Math.round(clampTo(s.maxImages, 1, MAX_IMAGES, base.maxImages)),

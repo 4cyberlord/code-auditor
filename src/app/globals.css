@@ -1,11 +1,13 @@
 /* ---------------------------------------------------------------- tokens */
 
-:root {
+:root,
+[data-theme="dark"] {
   --bg: #0b0d11;
   --bg-raised: #12151b;
   --bg-sunken: #080a0d;
   --panel: #14181f;
   --panel-hover: #181d25;
+  --hover: rgba(255, 255, 255, 0.06);
   --line: rgba(255, 255, 255, 0.09);
   --line-strong: rgba(255, 255, 255, 0.16);
   --text: #e7ebf0;
@@ -24,16 +26,63 @@
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
   --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", "Menlo", monospace;
 
+  --t-comment: #6a7686;
+  --t-string: #7ec699;
+  --t-number: #d9a441;
+  --t-keyword: #c792ea;
+  --t-type: #4fb3d9;
+  --t-func: #6aa9ff;
+
+  --q-a: #14a085;
+  --q-b: #8b5cf6;
+  --q-c: #3b82f6;
+  --q-d: #dd7a55;
+
   color-scheme: dark;
 }
 
+[data-theme="light"] {
+  --bg: #f4f5f7;
+  --bg-raised: #ffffff;
+  --bg-sunken: #eceef1;
+  --panel: #ffffff;
+  --panel-hover: #f7f8fa;
+  --hover: rgba(0, 0, 0, 0.04);
+  --line: rgba(0, 0, 0, 0.1);
+  --line-strong: rgba(0, 0, 0, 0.18);
+  --text: #1a1d21;
+  --text-dim: #5b6472;
+  --text-faint: #8b95a3;
+  --accent: #2f6bff;
+  --good: #1a7f37;
+  --warn: #9a6700;
+  --bad: #cf222e;
+  --code-bg: #f6f8fa;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.08);
+
+  --t-comment: #8a94a6;
+  --t-string: #217a4b;
+  --t-number: #9a6114;
+  --t-keyword: #8b3fc4;
+  --t-type: #0b6f92;
+  --t-func: #2563c9;
+
+  --q-a: #0d826a;
+  --q-b: #7c3aed;
+  --q-c: #2563eb;
+  --q-d: #c25e38;
+
+  color-scheme: light;
+}
+
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme="dark"]) {
     --bg: #f4f5f7;
     --bg-raised: #ffffff;
     --bg-sunken: #eceef1;
     --panel: #ffffff;
     --panel-hover: #f7f8fa;
+    --hover: rgba(0, 0, 0, 0.04);
     --line: rgba(0, 0, 0, 0.1);
     --line-strong: rgba(0, 0, 0, 0.18);
     --text: #1a1d21;
@@ -45,6 +94,19 @@
     --bad: #cf222e;
     --code-bg: #f6f8fa;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.08);
+
+    --t-comment: #8a94a6;
+    --t-string: #217a4b;
+    --t-number: #9a6114;
+    --t-keyword: #8b3fc4;
+    --t-type: #0b6f92;
+    --t-func: #2563c9;
+
+    --q-a: #0d826a;
+    --q-b: #7c3aed;
+    --q-c: #2563eb;
+    --q-d: #c25e38;
+
     color-scheme: light;
   }
 }
@@ -1670,7 +1732,9 @@ textarea.field {
   padding-bottom: 8px;
 }
 
-.sessions[data-open="true"] .drawer-head {
+.sessions[data-open="true"] .drawer-head,
+.history-panel[data-open="true"] .drawer-head,
+.background-jobs[data-open="true"] .drawer-head {
   border-bottom: 1px solid var(--line);
 }
 
@@ -1712,7 +1776,9 @@ textarea.field {
 }
 
 /* Points down when open, right when shut -- the direction it will move. */
-.sessions[data-open="false"] .chev {
+.sessions[data-open="false"] .chev,
+.history-panel[data-open="false"] .chev,
+.background-jobs[data-open="false"] .chev {
   transform: rotate(-90deg);
 }
 
@@ -2176,29 +2242,6 @@ textarea.field {
 }
 
 /* ------------------------------------------------------------ syntax colour */
-/* Defined as tokens so the light theme can restate them rather than fight them.
-   Chosen for contrast against --code-bg first and prettiness second: this is
-   read at a glance, usually while comparing four panes at once. */
-:root {
-  --t-comment: #6a7686;
-  --t-string: #7ec699;
-  --t-number: #d9a441;
-  --t-keyword: #c792ea;
-  --t-type: #4fb3d9;
-  --t-func: #6aa9ff;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    --t-comment: #8a94a6;
-    --t-string: #217a4b;
-    --t-number: #9a6114;
-    --t-keyword: #8b3fc4;
-    --t-type: #0b6f92;
-    --t-func: #2563c9;
-  }
-}
-
 .t-comment {
   color: var(--t-comment);
   font-style: italic;
@@ -2815,14 +2858,198 @@ body[data-dragging="row"] * {
   }
 }
 
-/* Between "is there a lock?" and knowing the answer. A spinner would be wrong:
-   this resolves in a few milliseconds when the token is already good, and a
-   flash of anything is worse than a moment of the window's own background. */
-.auth-blank {
-  height: 100vh;
+/* ------------------------------------------------------------- startup screen */
+.startup-screen {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
   background: var(--bg);
+  color: var(--text);
+  z-index: 9999;
+  overflow: hidden;
 }
 
+.startup-ambient-glow {
+  position: absolute;
+  width: 460px;
+  height: 460px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--accent) 22%, transparent) 0%,
+    transparent 70%
+  );
+  filter: blur(44px);
+  pointer-events: none;
+  animation: startup-pulse 3.6s ease-in-out infinite alternate;
+}
+
+@keyframes startup-pulse {
+  from {
+    transform: scale(0.85);
+    opacity: 0.55;
+  }
+  to {
+    transform: scale(1.15);
+    opacity: 0.95;
+  }
+}
+
+.startup-card {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 38px 44px;
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+  max-width: 420px;
+  animation: startup-fade-in 0.35s ease-out;
+}
+
+@keyframes startup-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.startup-icon-wrapper {
+  position: relative;
+  display: inline-flex;
+  padding: 10px;
+  border-radius: 22px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25);
+  margin-bottom: 20px;
+}
+
+.startup-icon {
+  display: block;
+  border-radius: 17px;
+}
+
+.startup-title {
+  margin: 0 0 6px;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+
+.startup-subtitle {
+  margin: 0 0 24px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  max-width: 32ch;
+}
+
+.startup-status-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 18px;
+  border-radius: 9999px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+}
+
+.startup-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.startup-status-text {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+
+.startup-dots {
+  display: inline-block;
+  min-width: 14px;
+  text-align: left;
+}
+
+/* ------------------------------------------------------------- theme settings */
+.theme-options-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 8px;
+}
+
+@media (max-width: 600px) {
+  .theme-options-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.theme-option-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  padding: 14px 14px;
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  border: 1.5px solid var(--line);
+  color: inherit;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.theme-option-card:hover {
+  background: var(--panel-hover);
+  border-color: var(--line-strong);
+}
+
+.theme-option-card[data-selected="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-raised));
+}
+
+.theme-option-header {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.theme-option-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.theme-option-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.theme-option-desc {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
 
 /* The router catalogue: potentially a couple of hundred ids, so it scrolls in
    its own box rather than pushing the rest of Settings off screen. Each row is
@@ -2860,68 +3087,102 @@ body[data-dragging="row"] * {
   font-size: 12px;
 }
 
-
-/* The run history, under the session list. A row is a button because it does
-   something -- it replaces what the panes are showing -- and the thing you
-   scan for is what was asked, so that gets the weight and the meta goes quiet. */
-.history {
+/* ------------------------------------------------------------- history panel */
+.history-panel {
+  flex: none;
   border-top: 1px solid var(--line);
-  padding: 8px 10px 12px;
+  background: var(--bg-raised);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.history-panel[data-open="true"] {
+  max-height: 54%;
+  flex: 1;
+}
+
+.history-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 8px 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-height: 42vh;
-  overflow-y: auto;
 }
 
-.history-head {
+.history-inspecting-notice {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-  color: var(--text-faint);
-  padding: 2px 2px 6px;
+  justify-content: space-between;
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  font-size: 11.5px;
+  color: var(--accent);
 }
 
-.history-count { font-size: 11px; color: var(--text-faint); }
-
-.history-empty {
-  font-size: 12px;
-  color: var(--text-faint);
-  margin: 2px 2px 0;
-  line-height: 1.5;
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .history-row {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   align-items: flex-start;
   text-align: left;
   width: 100%;
-  padding: 7px 9px;
+  padding: 8px 10px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 8px;
   background: transparent;
   color: inherit;
   cursor: pointer;
   font: inherit;
+  transition: background 0.12s ease, border-color 0.12s ease;
 }
 
-.history-row:hover:not(:disabled) { background: var(--hover, rgba(127, 127, 127, .1)); }
-.history-row:disabled { opacity: .45; cursor: default; }
-.history-row:focus-visible { outline: 2px solid var(--accent, currentColor); outline-offset: 1px; }
+.history-row:hover:not(:disabled) {
+  background: var(--panel-hover);
+}
+
+.history-row:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.history-row:focus-visible {
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: 1px;
+}
 
 /* The run the panes are showing right now. */
 .history-row[data-current="true"] {
-  border-color: var(--accent, currentColor);
-  background: var(--hover, rgba(127, 127, 127, .1));
+  border-color: var(--accent);
+  background: var(--panel);
+}
+
+.history-row[data-current="true"]::before {
+  content: "";
+  position: absolute;
+  left: -1px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--accent);
 }
 
 .history-asked {
   font-size: 12.5px;
+  font-weight: 550;
   line-height: 1.35;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -2929,7 +3190,19 @@ body[data-dragging="row"] * {
   overflow: hidden;
 }
 
-.history-meta { font-size: 11px; color: var(--text-faint); }
+.history-meta {
+  font-size: 11px;
+  color: var(--text-faint);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.history-verdict {
+  color: var(--accent);
+  font-weight: 550;
+}
 
 
 /* Shown above the panes while they hold a saved run. Warm rather than red:
