@@ -17,3 +17,5 @@ src-tauri/binaries/*
 AuthKey_*.p8
 *.p8
 login-preview.html
+__pycache__/
+*.pyc

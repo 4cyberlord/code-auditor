@@ -115,6 +115,9 @@ CODE_AUDITOR_GITHUB_REF=main
 ```
 
 The workflow must exist on the default branch before dispatch works.
+During local development, `gh auth login` with `repo` and `workflow` scopes also
+works; the dispatch script falls back to `gh auth token` when an env token cannot
+dispatch workflows.
 
 ## Local smoke test
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 
 function loadDotEnv(file) {
@@ -25,7 +26,6 @@ function loadDotEnv(file) {
 
 loadDotEnv(path.join(process.cwd(), ".development.env"));
 
-const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
 const repo = process.env.GITHUB_REPOSITORY;
 const workflow = process.env.CODE_AUDITOR_GITHUB_WORKFLOW || "cloud-benchmark.yml";
 const WAIT = process.argv.includes("--wait");
@@ -44,8 +44,30 @@ if (process.argv.includes("--help") || process.argv.length < 5) {
   process.exit(process.argv.includes("--help") ? 0 : 2);
 }
 
-if (!token || !repo) {
-  console.error("GH_TOKEN/GITHUB_TOKEN and GITHUB_REPOSITORY are required.");
+function tokenCandidates() {
+  const tokens = [];
+  try {
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.GH_TOKEN;
+    delete cleanEnv.GITHUB_TOKEN;
+    const cli = execFileSync("gh", ["auth", "token"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      env: cleanEnv,
+    }).trim();
+    if (cli) tokens.push(cli);
+  } catch {
+    // gh is optional; explicit env tokens are enough in CI.
+  }
+  tokens.push(...[process.env.GH_TOKEN, process.env.GITHUB_TOKEN].filter(Boolean));
+  return [...new Set(tokens)];
+}
+
+const tokens = tokenCandidates();
+let activeToken = tokens[0] || "";
+
+if (!tokens.length || !repo) {
+  console.error("GH_TOKEN/GITHUB_TOKEN or a logged-in GitHub CLI, plus GITHUB_REPOSITORY, are required.");
   process.exit(2);
 }
 
@@ -60,7 +82,7 @@ async function github(pathname, init = {}) {
     ...init,
     headers: {
       accept: "application/vnd.github+json",
-      authorization: `Bearer ${token}`,
+      authorization: `Bearer ${activeToken}`,
       "content-type": "application/json",
       "x-github-api-version": "2022-11-28",
       ...(init.headers || {}),
@@ -71,30 +93,41 @@ async function github(pathname, init = {}) {
   return text ? JSON.parse(text) : null;
 }
 
-const res = await fetch(
-  `https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`,
-  {
-    method: "POST",
-    headers: {
-      accept: "application/vnd.github+json",
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      "x-github-api-version": "2022-11-28",
-    },
-    body: JSON.stringify({
-      ref: process.env.CODE_AUDITOR_GITHUB_REF || "main",
-      inputs: {
-        job_id: jobId,
-        language,
-        program_b64: programB64,
-        artifact_key: artifactKey,
+async function dispatchWith(token) {
+  const res = await fetch(
+    `https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "x-github-api-version": "2022-11-28",
       },
-    }),
-  }
-);
+      body: JSON.stringify({
+        ref: process.env.CODE_AUDITOR_GITHUB_REF || "main",
+        inputs: {
+          job_id: jobId,
+          language,
+          program_b64: programB64,
+          artifact_key: artifactKey,
+        },
+      }),
+    }
+  );
+  return { res, text: await res.text() };
+}
 
-if (!res.ok) {
-  console.error(`${res.status} ${res.statusText}: ${await res.text()}`);
+let last = null;
+for (const token of tokens) {
+  activeToken = token;
+  last = await dispatchWith(token);
+  if (last.res.ok) break;
+  if (last.res.status !== 403 && last.res.status !== 401) break;
+}
+
+if (!last?.res.ok) {
+  console.error(`${last?.res.status} ${last?.res.statusText}: ${last?.text}`);
   process.exit(1);
 }
 
