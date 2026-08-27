@@ -19,9 +19,13 @@ Development values:
 APNS_KEY_ID=
 APNS_TEAM_ID=
 APNS_BUNDLE_ID=com.charles.codeeditor
-APNS_PRIVATE_KEY="$(cat AuthKey_XXXXXX.p8)"
+APNS_PRIVATE_KEY_PATH=./AuthKey_XXXXXX.p8
 APNS_ENV=sandbox
 ```
+
+`APNS_PRIVATE_KEY` is still supported for deployment platforms that store
+multiline secrets directly. For local development, the path form is easier and
+keeps the `.p8` file out of shell history.
 
 ## Supabase
 

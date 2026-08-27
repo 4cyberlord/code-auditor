@@ -63,7 +63,7 @@ export GH_TOKEN="..."
 export APNS_KEY_ID="..."
 export APNS_TEAM_ID="..."
 export APNS_BUNDLE_ID="com.charles.codeeditor"
-export APNS_PRIVATE_KEY="$(cat AuthKey_XXXXXX.p8)"
+export APNS_PRIVATE_KEY_PATH="./AuthKey_XXXXXX.p8"
 export APNS_ENV="sandbox" # or production
 
 node scripts/cloud-worker.mjs --once

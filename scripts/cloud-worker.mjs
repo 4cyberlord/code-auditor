@@ -13,6 +13,7 @@
  */
 
 import { createSign } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -667,10 +668,21 @@ function b64url(input) {
     .replace(/=+$/g, "");
 }
 
+function apnsPrivateKey() {
+  const inline = process.env.APNS_PRIVATE_KEY?.replace(/\\n/g, "\n");
+  if (inline?.trim()) return inline;
+
+  const privateKeyPath = process.env.APNS_PRIVATE_KEY_PATH?.trim();
+  if (!privateKeyPath) return "";
+
+  const resolved = path.resolve(process.cwd(), privateKeyPath);
+  return readFileSync(resolved, "utf8");
+}
+
 function apnsToken() {
   const keyId = process.env.APNS_KEY_ID;
   const teamId = process.env.APNS_TEAM_ID;
-  const privateKey = process.env.APNS_PRIVATE_KEY?.replace(/\\n/g, "\n");
+  const privateKey = apnsPrivateKey();
   if (!keyId || !teamId || !privateKey) return null;
 
   const header = b64url(JSON.stringify({ alg: "ES256", kid: keyId }));
@@ -684,7 +696,15 @@ function apnsToken() {
 
 async function notify(jobId, title, body) {
   const bundleId = process.env.APNS_BUNDLE_ID;
-  const token = apnsToken();
+  let token;
+  try {
+    token = apnsToken();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    captureWorkerException(err, { jobId, phase: "notify" });
+    await addEvent(jobId, "warn", "notify", `APNs private key could not be loaded: ${message}`);
+    return;
+  }
   if (!bundleId || !token) {
     await addEvent(jobId, "warn", "notify", "APNs credentials are missing; notification skipped.");
     return;
