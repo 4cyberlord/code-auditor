@@ -80,16 +80,19 @@ export default function StartupLoader() {
           justifyContent: "center",
           textAlign: "center",
           margin: "auto",
-          maxWidth: 440,
+          maxWidth: 480,
           width: "90%",
+          background: "transparent",
+          border: "none",
+          boxShadow: "none",
         }}
       >
         <div className="startup-icon-wrapper">
           <Image
             src="/icon.png"
             alt="Council Editor"
-            width={76}
-            height={76}
+            width={82}
+            height={82}
             className="startup-icon"
             priority
           />
