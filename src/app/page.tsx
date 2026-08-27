@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import AgentPane from "@/components/AgentPane";
+import BackgroundJobsPanel from "@/components/BackgroundJobsPanel";
 import ConsensusPanel from "@/components/ConsensusPanel";
 import CouncilPanel from "@/components/CouncilPanel";
 import InputBar from "@/components/InputBar";
@@ -13,9 +14,51 @@ import { useAgentEvents } from "@/lib/useAgentEvents";
 import { useGlobalShortcuts } from "@/lib/shortcuts";
 import { useStore } from "@/lib/store";
 import Toasts from "@/components/Toasts";
+import LoginScreen from "@/components/LoginScreen";
 import { inTauri } from "@/lib/bridge";
+import { gateFor, useAuth } from "@/lib/auth";
+import { devLog } from "@/lib/devLog";
 
+/**
+ * The gate, and nothing else.
+ *
+ * `Workbench` below is the app as it was. It is a separate component rather than
+ * a branch inside one because every hook it owns -- the event listeners, the
+ * global shortcuts, the hydrate that reads settings out of Postgres -- assumes a
+ * signed-in session. Mounting it only once that is true means none of them need
+ * to learn about the lock, and none of them can fire against a database that
+ * will refuse them.
+ */
 export default function Page() {
+  const status = useAuth((s) => s.status);
+  const ready = useAuth((s) => s.ready);
+  const refresh = useAuth((s) => s.refresh);
+  const apply = useAuth((s) => s.apply);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const gate = gateFor(status, ready);
+
+  useEffect(() => {
+    devLog("gate", "state changed", {
+      gate,
+      ready,
+      authenticated: status?.authenticated ?? false,
+      dbConfigured: status?.dbConfigured ?? false,
+      problem: status?.problem ?? null,
+    });
+  }, [gate, ready, status]);
+
+  if (gate === "loading") return <div className="auth-blank" />;
+  if (gate === "connect" || gate === "login") {
+    return <LoginScreen gate={gate} status={status} onChanged={apply} />;
+  }
+  return <Workbench />;
+}
+
+function Workbench() {
   const agents = useStore((s) => s.agents);
   const hydrated = useStore((s) => s.hydrated);
   const hydrate = useStore((s) => s.hydrate);
@@ -32,6 +75,7 @@ export default function Page() {
   useGlobalShortcuts();
 
   useEffect(() => {
+    devLog("workbench", "hydrate started");
     void hydrate();
   }, [hydrate]);
 
@@ -55,7 +99,7 @@ export default function Page() {
     <div className="shell">
       <div className="titlebar" data-tauri-drag-region>
         <span className="brand" data-tauri-drag-region>
-          Code Auditor
+          Code Editor
           <span data-tauri-drag-region>
             {running
               ? "running"
@@ -103,6 +147,7 @@ export default function Page() {
         <div className="rail" data-sessions={sessionsOpen}>
           <CouncilPanel />
           <ConsensusPanel />
+          <BackgroundJobsPanel />
           {sessionsOpen && (
             <Splitter
               axis="row"

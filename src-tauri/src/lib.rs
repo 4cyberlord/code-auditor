@@ -1,4 +1,6 @@
+mod auth;
 mod capture;
+mod background_helper;
 mod codespaces;
 mod db;
 mod exec;
@@ -159,6 +161,10 @@ pub fn run() {
         .manage(RunRegistry::default())
         .manage(Db::default())
         .invoke_handler(tauri::generate_handler![
+            auth::auth_status,
+            auth::auth_login,
+            auth::auth_logout,
+            auth::auth_change_pin,
             keychain::set_api_key,
             keychain::delete_api_key,
             keychain::has_api_key,
@@ -177,6 +183,9 @@ pub fn run() {
             storage::storage_signed_url,
             storage::storage_remove,
             storage::forget_local_file,
+            background_helper::background_helper_status,
+            background_helper::background_helper_install,
+            background_helper::background_helper_uninstall,
             db::db_save_url,
             db::db_clear_url,
             db::db_has_url,
@@ -197,8 +206,10 @@ pub fn run() {
             sessions::screenshot_reorder,
             sessions::screenshots_purge,
             sessions::run_save,
+            sessions::solve_job_create,
             sessions::solve_job_list,
             sessions::solve_job_event_list,
+            sessions::solve_job_image_list,
             sessions::council_report_get,
             runner::run_code,
             runner::runnable_languages,
@@ -206,7 +217,7 @@ pub fn run() {
         .setup(move |app| {
             #[cfg(desktop)]
             {
-                let show = MenuItem::with_id(app, "show", "Open Code Auditor", true, None::<&str>)?;
+                let show = MenuItem::with_id(app, "show", "Open Code Editor", true, None::<&str>)?;
                 let capture =
                     MenuItem::with_id(app, "capture", "Capture Region", true, Some("Ctrl+Alt+R"))?;
                 let capture_screen = MenuItem::with_id(
@@ -218,7 +229,7 @@ pub fn run() {
                 )?;
                 let solve = MenuItem::with_id(app, "solve", "Solve", true, Some("Ctrl+Alt+A"))?;
                 let sep = PredefinedMenuItem::separator(app)?;
-                let quit = MenuItem::with_id(app, "quit", "Quit Code Auditor", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "quit", "Quit Code Editor", true, None::<&str>)?;
                 let menu =
                     Menu::with_items(app, &[&show, &capture, &capture_screen, &solve, &sep, &quit])?;
 
@@ -229,7 +240,7 @@ pub fn run() {
                 TrayIconBuilder::with_id("main-tray")
                     .icon(icon)
                     .icon_as_template(true)
-                    .tooltip("Code Auditor — ⌃⌥S screen, ⌃⌥R region, ⌃⌥A audit")
+                    .tooltip("Code Editor — ⌃⌥S screen, ⌃⌥R region, ⌃⌥A audit")
                     .menu(&menu)
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "show" => reveal(app),
@@ -283,7 +294,7 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while building Code Auditor");
+        .expect("error while building Code Editor");
 
     app.run(|app, event| {
         // Clicking the dock icon while every window is hidden should bring the

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDisplayName</key>
+  <string>Code Editor</string>
+  <key>CODE_EDITOR_SUPABASE_URL</key>
+  <string>https://PROJECT.supabase.co</string>
+  <key>CODE_EDITOR_SUPABASE_ANON_KEY</key>
+  <string>SUPABASE_ANON_KEY</string>
+  <key>CODE_EDITOR_DEVICE_REGISTRATION_URL</key>
+  <string>https://worker.example.com/api/register-device</string>
+  <key>CODE_EDITOR_DEVICE_REGISTRATION_TOKEN</key>
+  <string>registration-secret-not-service-role</string>
+</dict>
+</plist>

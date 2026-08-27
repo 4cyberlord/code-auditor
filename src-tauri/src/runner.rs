@@ -65,6 +65,7 @@ fn dirs_cache() -> Option<PathBuf> {
 /// automatically, however unanimous the panel was about it.
 #[tauri::command]
 pub async fn run_code(req: RunCodeRequest) -> Result<RunCodeResult, String> {
+    crate::auth::require()?;
     let root = scratch_root();
     std::fs::create_dir_all(&root)
         .map_err(|e| format!("Couldn't make a scratch folder to run in: {e}"))?;
@@ -99,6 +100,7 @@ pub async fn run_code(req: RunCodeRequest) -> Result<RunCodeResult, String> {
 /// offers a Run button at all.
 #[tauri::command]
 pub async fn runnable_languages() -> Result<Vec<String>, String> {
+    crate::auth::require()?;
     let names = [
         "python",
         "javascript",

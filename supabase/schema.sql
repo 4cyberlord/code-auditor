@@ -274,6 +274,42 @@ create index if not exists intelligence_sources_tags_idx
 
 -- ----------------------------------------------------------------- touched
 
+-- ------------------------------------------------------------------- auth
+
+-- The username and 4-digit PIN that unlock the app. See migrations.sql for the
+-- reasoning; in short, `pin_hash` is Argon2id over a Keychain-peppered PIN, and
+-- `failed_attempts` / `locked_until` are the defence that a short PIN actually
+-- depends on.
+create table if not exists app_users (
+  id              uuid        primary key default gen_random_uuid(),
+  username        text        not null,
+  pin_hash        text        not null,
+  failed_attempts integer     not null default 0,
+  locked_until    timestamptz,
+  last_login_at   timestamptz,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+
+create unique index if not exists app_users_username_idx
+  on app_users (lower(username));
+
+-- "Remember this Mac for 30 days": the SHA-256 of a token whose plaintext lives
+-- in the Keychain, so this table on its own is not a way in.
+create table if not exists app_sessions (
+  id           uuid        primary key default gen_random_uuid(),
+  user_id      uuid        not null references app_users (id) on delete cascade,
+  token_hash   text        not null unique,
+  label        text        not null default '',
+  expires_at   timestamptz not null,
+  last_seen_at timestamptz not null default now(),
+  revoked_at   timestamptz,
+  created_at   timestamptz not null default now()
+);
+
+create index if not exists app_sessions_user_idx
+  on app_sessions (user_id, expires_at desc);
+
 create or replace function touch_updated_at() returns trigger as $$
 begin
   new.updated_at = now();
@@ -303,4 +339,8 @@ create trigger intelligence_sources_touch before update on intelligence_sources
 
 drop trigger if exists intelligence_records_touch on intelligence_records;
 create trigger intelligence_records_touch before update on intelligence_records
+  for each row execute function touch_updated_at();
+
+drop trigger if exists app_users_touch on app_users;
+create trigger app_users_touch before update on app_users
   for each row execute function touch_updated_at();

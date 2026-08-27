@@ -392,3 +392,59 @@ on conflict (id) do update set
   target_runtime_ms = excluded.target_runtime_ms,
   target_memory_mb = excluded.target_memory_mb,
   source_urls = excluded.source_urls;
+
+-- ------------------------------------------------------------------ auth
+--
+-- A username and a 4-digit PIN, guarding a tool that holds API keys, screen
+-- captures and a code executor. Three things about this table matter more than
+-- its shape:
+--
+--   * `pin_hash` is an Argon2id PHC string, never the PIN. Verification happens
+--     in Rust; the hash is never handed to the webview.
+--   * the PIN is peppered before hashing with a secret that lives in the macOS
+--     Keychain and is deliberately NOT in this database. A 4-digit PIN is 10,000
+--     possibilities -- no KDF makes that safe on its own -- so the design
+--     assumption is that a stolen database dump is useless without the Mac.
+--   * `failed_attempts` and `locked_until` are the real defence, and they live
+--     here rather than in memory so that quitting the app is not a way to reset
+--     the counter.
+create table if not exists app_users (
+  id              uuid        primary key default gen_random_uuid(),
+  username        text        not null,
+  pin_hash        text        not null,
+  failed_attempts integer     not null default 0,
+  -- Set while the account is in a lockout window. Null means "not locked",
+  -- which is also true of a past timestamp -- readers compare against now().
+  locked_until    timestamptz,
+  last_login_at   timestamptz,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+
+-- Case-insensitive uniqueness without requiring the citext extension, which is
+-- not enabled on a stock Supabase project. The username is stored as typed so it
+-- can be shown back the way the owner wrote it.
+create unique index if not exists app_users_username_idx
+  on app_users (lower(username));
+
+-- "Remember this Mac for 30 days". The row holds the SHA-256 of the token; the
+-- token itself is in the Keychain, so this table cannot be replayed into a
+-- login. Revocation is a column rather than a delete so that signing out
+-- somewhere leaves a trace worth reading.
+create table if not exists app_sessions (
+  id           uuid        primary key default gen_random_uuid(),
+  user_id      uuid        not null references app_users (id) on delete cascade,
+  token_hash   text        not null unique,
+  label        text        not null default '',
+  expires_at   timestamptz not null,
+  last_seen_at timestamptz not null default now(),
+  revoked_at   timestamptz,
+  created_at   timestamptz not null default now()
+);
+
+create index if not exists app_sessions_user_idx
+  on app_sessions (user_id, expires_at desc);
+
+drop trigger if exists app_users_touch on app_users;
+create trigger app_users_touch before update on app_users
+  for each row execute function touch_updated_at();

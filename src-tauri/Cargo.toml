@@ -10,6 +10,14 @@ rust-version = "1.77"
 name = "code_auditor_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "code-auditor"
+path = "src/main.rs"
+
+[[bin]]
+name = "cloud-sync-helper"
+path = "src/bin/cloud-sync-helper.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -30,6 +38,15 @@ sqlx = { version = "0.8", default-features = false, features = [
   "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json",
 ] }
 uuid = { version = "1", features = ["v4", "serde"] }
+global-hotkey = "0.8"
+tao = "0.37"
+
+# Login. Argon2id for the PIN itself; HMAC-SHA256 to pepper it with a Keychain
+# secret first, so a stolen database dump is not an offline attack on four
+# digits. See src/auth.rs for why the pepper carries most of the weight here.
+argon2 = "0.5"
+hmac = "0.12"
+sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 
 # No mobile implementation exists, so keep it off the mobile targets entirely.

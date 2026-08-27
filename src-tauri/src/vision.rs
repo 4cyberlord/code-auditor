@@ -96,6 +96,7 @@ pub struct OcrResult {
 /// app.
 #[tauri::command]
 pub async fn ocr_images(images: Vec<ImageInput>) -> Result<OcrResult, String> {
+    crate::auth::require()?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut pages = Vec::with_capacity(images.len());
         for img in images {

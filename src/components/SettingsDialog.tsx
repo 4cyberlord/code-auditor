@@ -15,8 +15,9 @@ import {
 import { MAX_IMAGES, MAX_TOKENS_RANGE, useStore } from "@/lib/store";
 import { HOME_ZONE, detectZone, isUsableZone, zoneLabel } from "@/lib/when";
 import * as bridge from "@/lib/bridge";
+import AccountCard from "./AccountCard";
 import DatabaseCard from "./DatabaseCard";
-import { classifyProbeResult } from "@/lib/probeFit";
+import { classifyProbeResult, isPermanentlyUnreachable } from "@/lib/probeFit";
 
 /**
  * One probe truth badge.
@@ -329,6 +330,27 @@ function GatewayCard() {
     return roles;
   };
 
+  const pruneUnreachableSeats = useStore((st) => st.pruneUnreachableSeats);
+  const [pruneNote, setPruneNote] = useState<string | null>(null);
+
+  // Which roster seats the last probe proved dead. Derived rather than stored,
+  // so it disappears the moment a re-probe finds them again.
+  const unreachable = useMemo(() => {
+    const dead = new Set<string>();
+    for (const [model, p] of Object.entries(probes)) {
+      if (p.ok) continue;
+      if (isPermanentlyUnreachable(classifyProbeResult(model, false, p.error).reason)) {
+        dead.add(model);
+      }
+    }
+    const onRoster = new Set<string>([
+      ...councilModels.map((m) => m.id),
+      ...councilJudges.map((j) => j.model),
+      synthesisModel.trim(),
+    ]);
+    return [...dead].filter((m) => onRoster.has(m)).sort();
+  }, [probes, councilModels, councilJudges, synthesisModel]);
+
   const tested = modelsInUse.filter((m) => probes[m]).length;
   const working = modelsInUse.filter((m) => probes[m]?.ok).length;
 
@@ -503,6 +525,26 @@ function GatewayCard() {
             >
               {probing ? `Testing… ${tested}/${modelsInUse.length}` : "Test these models"}
             </button>
+            {/* Only offered once the probe has actually found dead seats. A
+                destructive button that is always available is one you press by
+                accident; one that appears with a count on it is a finding. */}
+            {unreachable.length > 0 && (
+              <button
+                className="btn tiny ghost"
+                onClick={() => {
+                  const removed = pruneUnreachableSeats();
+                  setPruneNote(
+                    removed.length
+                      ? `Removed ${removed.length}: ${removed.join(", ")}`
+                      : "Nothing to remove."
+                  );
+                }}
+                disabled={probing}
+                title={`These answered "no access" or "no such model": ${unreachable.join(", ")}. Rate limits and timeouts are never removed.`}
+              >
+                Remove {unreachable.length} unreachable
+              </button>
+            )}
             <button
               className="btn tiny ghost"
               onClick={() => void testModels(modelsInUse, true)}
@@ -516,6 +558,12 @@ function GatewayCard() {
           {probeError && (
             <p className="hint" style={{ margin: "0 0 6px", color: "var(--bad)" }}>
               {probeError}
+            </p>
+          )}
+
+          {pruneNote && (
+            <p className="hint" style={{ margin: "0 0 6px", color: "var(--text)" }}>
+              {pruneNote}
             </p>
           )}
 
@@ -1385,9 +1433,89 @@ function CaptureCard() {
   const raise = useStore((s) => s.settings.raiseOnCapture);
   const maxImages = useStore((s) => s.settings.maxImages);
   const patch = useStore((s) => s.patchSettings);
+  const [helper, setHelper] = useState<bridge.BackgroundHelperStatus | null>(null);
+  const [helperBusy, setHelperBusy] = useState(false);
+  const [helperNote, setHelperNote] = useState<string | null>(null);
+
+  const refreshHelper = useCallback(async () => {
+    try {
+      setHelper(await bridge.backgroundHelperStatus());
+    } catch (err) {
+      setHelperNote(String(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshHelper();
+  }, [refreshHelper]);
+
+  const setInstalled = async (install: boolean) => {
+    setHelperBusy(true);
+    setHelperNote(null);
+    try {
+      const next = install
+        ? await bridge.installBackgroundHelper()
+        : await bridge.uninstallBackgroundHelper();
+      setHelper(next);
+      setHelperNote(
+        install
+          ? "Installed. macOS can start the helper at login with normal visibility and permissions."
+          : "Removed. Helper-owned background capture will stop after the helper exits."
+      );
+    } catch (err) {
+      setHelperNote(String(err));
+    } finally {
+      setHelperBusy(false);
+    }
+  };
 
   return (
     <>
+      <div className="provider-card">
+        <div className="top">
+          <span className="name">Background helper</span>
+          <span className="spacer" />
+          <span className="vendor">{helper?.installed ? "installed" : "not installed"}</span>
+        </div>
+        <p className="hint" style={{ marginTop: 0 }}>
+          Runs the approved helper for start/capture/submit hotkeys after the window is closed.
+          It uses macOS Screen Recording permission and stays visible to the OS, network tools,
+          and security software.
+        </p>
+        <div className="row">
+          <label>LaunchAgent</label>
+          <span className="mono small">{helper?.plistPath || "desktop shell required"}</span>
+        </div>
+        <div className="row">
+          <label>Helper</label>
+          <span className="mono small">{helper?.helperPath || "desktop shell required"}</span>
+        </div>
+        <div className="row">
+          <label>App</label>
+          <span className="mono small">{helper?.appPath || "desktop shell required"}</span>
+        </div>
+        <div className="actions">
+          <button
+            className="btn"
+            disabled={helperBusy || helper?.installed === true}
+            onClick={() => void setInstalled(true)}
+          >
+            Install
+          </button>
+          <button
+            className="btn ghost"
+            disabled={helperBusy || helper?.installed !== true}
+            onClick={() => void setInstalled(false)}
+          >
+            Remove
+          </button>
+          <button className="btn ghost" disabled={helperBusy} onClick={() => void refreshHelper()}>
+            Refresh
+          </button>
+        </div>
+        {helperNote && <p className="hint">{helperNote}</p>}
+      </div>
+
       <div className="provider-card">
         <div className="top">
           <span className="name">After a capture</span>
@@ -1427,7 +1555,7 @@ function CaptureCard() {
           Every image goes to every enabled agent, so this multiplies: {maxImages}{" "}
           {maxImages === 1 ? "image" : "images"} across five panes is {maxImages * 5} image
           uploads in one press. Captures are saved to{" "}
-          <span style={{ fontFamily: "var(--font-mono)" }}>~/Pictures/Code Auditor</span>{" "}
+          <span style={{ fontFamily: "var(--font-mono)" }}>~/Pictures/Code Editor</span>{" "}
           regardless, so lowering this never loses a grab.
         </p>
       </div>
@@ -1548,6 +1676,9 @@ export default function SettingsDialog() {
 
           {tab === "sessions" && (
             <>
+              {/* The account lives in the database, so it belongs on the tab
+                  where the database does rather than in a tab of its own. */}
+              <AccountCard />
               <DatabaseCard />
               <StorageCard />
               <TimeZoneCard />

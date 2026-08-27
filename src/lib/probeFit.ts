@@ -10,6 +10,40 @@
  */
 
 export type ProbeStatus = "ok" | "failed" | "unsupported";
+
+/**
+ * Why a probe failed, as something code can branch on.
+ *
+ * `summary` and `detail` are for a person to read; matching on their wording
+ * from another module would make every copy-edit a behaviour change. This is
+ * the machine-readable half, and it exists for exactly one decision: whether a
+ * seat is unreachable *for good* — the key is not entitled, or the id is not a
+ * model any more — as opposed to unreachable *right now*, which a rate limit,
+ * a timeout or an empty reply all are.
+ */
+export type ProbeReason =
+  | "ok"
+  | "rate-limited"
+  | "concurrency"
+  | "wrong-endpoint"
+  | "unknown-model"
+  | "no-entitlement"
+  | "auth"
+  | "timeout"
+  | "empty"
+  | "unknown";
+
+/**
+ * Whether this failure means the seat should come off the roster.
+ *
+ * Only the two that no amount of waiting fixes. A rate limit is the council
+ * working as designed against a small plan; a timeout is a cold reasoning
+ * model. Deleting a seat for either would quietly shrink the bench for a
+ * reason that had already gone away by the time anyone looked.
+ */
+export function isPermanentlyUnreachable(reason: ProbeReason): boolean {
+  return reason === "no-entitlement" || reason === "unknown-model";
+}
 /** Which wire a model speaks; "chat" is everything not explicitly overridden. */
 export type EndpointOverride = "chat" | "responses";
 
@@ -42,6 +76,8 @@ export interface ProbeReport {
   suggestEndpoint?: EndpointOverride;
   /** The raw error text as the provider sent it, for the tooltip. Never lost. */
   raw: string;
+  /** The machine-readable half of `summary`. See `ProbeReason`. */
+  reason: ProbeReason;
 }
 
 /**
@@ -59,12 +95,14 @@ export function classifyProbeResult(
     return {
       status: "ok",
       summary: `${model} answered${ms ? ` in ${ms}ms` : ""}.`,
+      reason: "ok" as const,
       retryAfterMs: 0,
       raw: "",
     };
   }
   if (!raw) {
-    return { status: "failed", summary: `${model} failed for an unknown reason.`, retryAfterMs: 0, raw: "" };
+    return { status: "failed", summary: `${model} failed for an unknown reason.`,
+      reason: "unknown" as const, retryAfterMs: 0, raw: "" };
   }
 
   const lower = raw.toLowerCase();
@@ -83,6 +121,7 @@ export function classifyProbeResult(
     return {
       status: "failed",
       summary: base,
+      reason: "rate-limited" as const,
       detail: retryAfterMs > 0 ? `Retry in ${Math.round(retryAfterMs / 1000)}s (the server said so).` : "One moment and the governor will take it itself; manual retry is only worth it if this repeats.",
       retryAfterMs: retryAfterMs || 60_000,
       raw,
@@ -93,6 +132,7 @@ export function classifyProbeResult(
     return {
       status: "failed",
       summary: `${model} — the gateway is at its concurrency ceiling right now.`,
+      reason: "concurrency" as const,
       detail: "Not a rate limit you can wait out: a hard concurrent-slots refusal. Re-probe in a minute; if it persists, the plan is too small for the council's pace, not misconfigured.",
       retryAfterMs: 60_000,
       raw,
@@ -109,6 +149,7 @@ export function classifyProbeResult(
     return {
       status: "unsupported",
       summary: `${model} lives on a different endpoint.`,
+      reason: "wrong-endpoint" as const,
       detail: "This model answers on /v1/responses, not /v1/chat/completions. Point the seat at the Responses API and it should answer on the next probe.",
       retryAfterMs: 0,
       suggestEndpoint: "responses",
@@ -122,6 +163,7 @@ export function classifyProbeResult(
     return {
       status: "failed",
       summary: `${model} — model id not recognised.`,
+      reason: "unknown-model" as const,
       detail: "Check the exact id in the TokenRouter catalogue, then again on the key's allowed list. It is usually the suffix (e.g. -preview) or the key's group entitlements.",
       retryAfterMs: 0,
       raw,
@@ -136,6 +178,7 @@ export function classifyProbeResult(
     return {
       status: "failed",
       summary: `${model} — this key is not entitled to that model.`,
+      reason: "no-entitlement" as const,
       detail: "Go to tokenrouter.com → API Keys → edit the key → enable this model under Permissions. If the model is not in your plan, you may need to add it first under Models.",
       retryAfterMs: 0,
       raw,
@@ -148,6 +191,7 @@ export function classifyProbeResult(
     return {
       status: "failed",
       summary: `${model} — the key was refused.`,
+      reason: "auth" as const,
       detail: "Re-paste the key in Settings; if it still fails, it is disabled at TokenRouter for this model, not mistyped here.",
       retryAfterMs: 0,
       raw,
@@ -161,6 +205,7 @@ export function classifyProbeResult(
     return {
       status: "failed",
       summary: `${model} — gave no answer inside 90s.`,
+      reason: "timeout" as const,
       detail: "Reasoning models do legitimately think this long on a cold start. Retest later; if it repeats, the model is genuinely unreachable, not slow to warm.",
       retryAfterMs: 0,
       raw,
@@ -173,6 +218,7 @@ export function classifyProbeResult(
     return {
       status: "failed",
       summary: `${model} — the gateway answered but gave nothing back.`,
+      reason: "empty" as const,
       detail: "Almost always the router, not the model: it is listed as available but its backing route returned an empty reply. TokenRouter usually fixes it within minutes.",
       retryAfterMs: 30_000,
       raw,
@@ -184,6 +230,7 @@ export function classifyProbeResult(
     return {
       status: "failed",
       summary: `${model} — TokenRouter is overloaded.`,
+      reason: "unknown" as const,
       detail: "Not your key and not the model: the gateway itself said so. Wait and re-probe; this one costs nothing on our side to retry.",
       retryAfterMs: 30_000,
       raw,
@@ -193,6 +240,7 @@ export function classifyProbeResult(
   return {
     status: "failed",
     summary: `${model} failed.`,
+    reason: "unknown" as const,
     detail: "The provider did not categorise this error. The raw reason is on the panel row; copy it into a bug report if this keeps happening.",
     retryAfterMs: 0,
     raw,

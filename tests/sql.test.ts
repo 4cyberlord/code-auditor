@@ -67,7 +67,7 @@ for (const m of schemaSql.matchAll(
 }
 
 console.log("\n1. the schema parses");
-check("thirteen tables found", tables.size === 13, [...tables.keys()].join(", "));
+check("fifteen tables found", tables.size === 15, [...tables.keys()].join(", "));
 for (const t of [
   "sessions",
   "screenshots",
@@ -82,6 +82,8 @@ for (const t of [
   "settings",
   "intelligence_sources",
   "intelligence_records",
+  "app_users",
+  "app_sessions",
 ]) {
   check(`${t} present`, tables.has(t));
 }

@@ -38,7 +38,7 @@ const MIGRATIONS: &str = include_str!("../../supabase/migrations.sql");
 
 /// Tables the app expects. Reported individually so a partial schema is
 /// diagnosable rather than just "something is wrong".
-const EXPECTED_TABLES: [&str; 8] = [
+const EXPECTED_TABLES: [&str; 10] = [
     "sessions",
     "screenshots",
     "runs",
@@ -47,6 +47,11 @@ const EXPECTED_TABLES: [&str; 8] = [
     "settings",
     "intelligence_sources",
     "intelligence_records",
+    // Auth. Listed here so a database missing them is reported as a partial
+    // schema rather than failing later with "relation app_users does not exist"
+    // at the one moment the user cannot get past -- the login screen.
+    "app_users",
+    "app_sessions",
 ];
 
 #[derive(Default)]
@@ -74,8 +79,23 @@ fn entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new("com.charles.codeauditor", KEYCHAIN_ID).map_err(|e| e.to_string())
 }
 
+/// Guards the connection-string commands.
+///
+/// These have to work before anyone can sign in -- pointing the app at a
+/// database is step one, and the account lives inside that database. But once an
+/// account exists they must close, or the lock has a trivial bypass: point the
+/// app at a different database, become its first user, and you are in.
+fn require_auth_once_claimed() -> Result<(), String> {
+    if crate::auth::claimed() {
+        crate::auth::require()
+    } else {
+        Ok(())
+    }
+}
+
 #[tauri::command]
 pub async fn db_save_url(db: tauri::State<'_, Db>, url: String) -> Result<(), String> {
+    require_auth_once_claimed()?;
     let url = url.trim().to_string();
     if url.is_empty() {
         return db_clear_url(db).await;
@@ -96,6 +116,7 @@ pub async fn db_save_url(db: tauri::State<'_, Db>, url: String) -> Result<(), St
 
 #[tauri::command]
 pub async fn db_clear_url(db: tauri::State<'_, Db>) -> Result<(), String> {
+    require_auth_once_claimed()?;
     match entry()?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => {}
         Err(e) => return Err(e.to_string()),
@@ -155,10 +176,32 @@ fn describe(url: &str) -> String {
 
 // ---------------------------------------------------------------------- pool
 
+/// The pool, for anything that is not the login itself.
+///
+/// This is the chokepoint the lock hangs on. Every session, settings, screenshot
+/// and run command in the app reaches Postgres through here, so one check here
+/// covers all of them -- and, more importantly, cannot be forgotten when the
+/// next one is written.
+pub async fn pool(db: &Db) -> Result<PgPool, String> {
+    crate::auth::require()?;
+    pool_unchecked(db).await
+}
+
 /// Lazily builds the pool, then reuses it. A screen capture should never pay for
 /// a TLS handshake that a previous one already made.
-pub async fn pool(db: &Db) -> Result<PgPool, String> {
-    if let Some(p) = db.0.lock().await.as_ref() {
+///
+/// `pub(crate)` and unguarded, because the login has to read `app_users` before
+/// there is anyone to be. Nothing outside `auth` and the connection-setup
+/// commands below should call it.
+pub(crate) async fn pool_unchecked(db: &Db) -> Result<PgPool, String> {
+    // The guard is held across the whole build, not taken twice. Releasing it
+    // between the check and the store let two callers each build a pool and each
+    // run `ensure_schema`, and concurrent `create table if not exists` against
+    // one database is a unique-violation on Postgres's own catalogue. The login
+    // widened that window: `auth_status` now connects at launch, next to
+    // whatever the connect screen is doing.
+    let mut held = db.0.lock().await;
+    if let Some(p) = held.as_ref() {
         return Ok(p.clone());
     }
     let url = with_tls(&read_url()?);
@@ -174,7 +217,7 @@ pub async fn pool(db: &Db) -> Result<PgPool, String> {
     // there by the time anything tries to use them.
     ensure_schema(&built).await?;
 
-    *db.0.lock().await = Some(built.clone());
+    *held = Some(built.clone());
     Ok(built)
 }
 
@@ -429,7 +472,8 @@ pub async fn ensure_schema(p: &PgPool) -> Result<(), String> {
 /// Re-applies the schema on demand, for when a table has been dropped by hand.
 #[tauri::command]
 pub async fn db_migrate(db: tauri::State<'_, Db>) -> Result<DbHealth, String> {
-    let p = pool(&db).await?;
+    require_auth_once_claimed()?;
+    let p = pool_unchecked(&db).await?;
     // Force it, rather than relying on the has-everything shortcut.
     sqlx::raw_sql(SCHEMA)
         .execute(&p)
@@ -483,9 +527,10 @@ pub async fn settings_save(
 
 #[tauri::command]
 pub async fn db_test(db: tauri::State<'_, Db>) -> Result<DbHealth, String> {
+    require_auth_once_claimed()?;
     let url = read_url()?;
     let target = describe(&url);
-    let p = pool(&db).await?;
+    let p = pool_unchecked(&db).await?;
 
     let server_version: String = sqlx::query("select version()")
         .fetch_one(&p)

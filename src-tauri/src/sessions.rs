@@ -136,6 +136,23 @@ pub struct SolveJobEvent {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SolveJobImage {
+    pub id: String,
+    pub job_id: String,
+    pub session_id: String,
+    pub position: i32,
+    pub storage_bucket: String,
+    pub storage_path: String,
+    pub file_name: String,
+    pub bytes: i32,
+    pub mime: String,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub created_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CouncilReportSummary {
     pub id: String,
     pub job_id: String,
@@ -145,6 +162,26 @@ pub struct CouncilReportSummary {
     pub markdown: String,
     pub report: serde_json::Value,
     pub created_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewSolveJobImage {
+    pub storage_bucket: String,
+    pub storage_path: String,
+    pub file_name: String,
+    pub bytes: i32,
+    pub mime: String,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewSolveJob {
+    pub session_id: String,
+    pub settings_snapshot: serde_json::Value,
+    pub images: Vec<NewSolveJobImage>,
 }
 
 fn ts(row: &sqlx::postgres::PgRow, col: &str) -> String {
@@ -581,6 +618,84 @@ pub async fn run_save(
 // ------------------------------------------------------------- solve jobs
 
 #[tauri::command]
+pub async fn solve_job_create(
+    db: tauri::State<'_, Db>,
+    job: NewSolveJob,
+) -> Result<String, String> {
+    let sid = parse_id(&job.session_id, "session")?;
+    if job.images.is_empty() {
+        return Err("A background solve job needs at least one screenshot.".into());
+    }
+    if job.images.len() > 10 {
+        return Err("A background solve job can hold at most 10 screenshots.".into());
+    }
+
+    let p = pool(&db).await?;
+    let mut tx = p.begin().await.map_err(|e| e.to_string())?;
+
+    let row = sqlx::query(
+        "insert into solve_jobs
+             (session_id, mode, status, progress_phase, settings_snapshot)
+         values ($1, 'council', 'queued', 'queued', $2)
+         returning id",
+    )
+    .bind(sid)
+    .bind(&job.settings_snapshot)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| format!("Could not create the solve job: {e}"))?;
+    let job_id: Uuid = row.get("id");
+
+    for (position, image) in job.images.iter().enumerate() {
+        if !image.mime.starts_with("image/") {
+            return Err(format!("{} is not an image.", image.file_name));
+        }
+        if image.storage_path.trim().is_empty() {
+            return Err("Every job screenshot needs a storage path.".into());
+        }
+        sqlx::query(
+            "insert into solve_job_images
+                 (job_id, session_id, position, storage_bucket, storage_path,
+                  file_name, bytes, mime, width, height)
+             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+        )
+        .bind(job_id)
+        .bind(sid)
+        .bind(position as i32)
+        .bind(&image.storage_bucket)
+        .bind(&image.storage_path)
+        .bind(&image.file_name)
+        .bind(image.bytes)
+        .bind(&image.mime)
+        .bind(image.width)
+        .bind(image.height)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Could not attach {} to the solve job: {e}", image.file_name))?;
+    }
+
+    sqlx::query(
+        "insert into solve_job_events (job_id, level, phase, message, payload)
+         values ($1, 'info', 'queued', 'Background Council job queued.', $2)",
+    )
+    .bind(job_id)
+    .bind(serde_json::json!({ "imageCount": job.images.len() }))
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Could not record the solve job event: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Could not commit the solve job: {e}"))?;
+
+    crate::trace(&format!(
+        "solve job queued {job_id} ({} image(s)) for session {sid}",
+        job.images.len()
+    ));
+    Ok(job_id.to_string())
+}
+
+#[tauri::command]
 pub async fn solve_job_list(
     db: tauri::State<'_, Db>,
     status: String,
@@ -669,6 +784,42 @@ pub async fn solve_job_event_list(
             phase: r.get("phase"),
             message: r.get("message"),
             payload: r.try_get("payload").unwrap_or_else(|_| serde_json::json!({})),
+            created_at: ts(r, "created_at"),
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn solve_job_image_list(
+    db: tauri::State<'_, Db>,
+    job_id: String,
+) -> Result<Vec<SolveJobImage>, String> {
+    let jid = parse_id(&job_id, "solve job")?;
+    let p = pool(&db).await?;
+    let rows = sqlx::query(
+        "select id, job_id, session_id, position, storage_bucket, storage_path,
+                file_name, bytes, mime, width, height, created_at
+           from solve_job_images where job_id = $1 order by position",
+    )
+    .bind(jid)
+    .fetch_all(&p)
+    .await
+    .map_err(|e| format!("Could not list solve job images: {e}"))?;
+
+    Ok(rows
+        .iter()
+        .map(|r| SolveJobImage {
+            id: r.get::<Uuid, _>("id").to_string(),
+            job_id: r.get::<Uuid, _>("job_id").to_string(),
+            session_id: r.get::<Uuid, _>("session_id").to_string(),
+            position: r.get("position"),
+            storage_bucket: r.get("storage_bucket"),
+            storage_path: r.get("storage_path"),
+            file_name: r.get("file_name"),
+            bytes: r.get("bytes"),
+            mime: r.get("mime"),
+            width: r.try_get("width").ok().flatten(),
+            height: r.try_get("height").ok().flatten(),
             created_at: ts(r, "created_at"),
         })
         .collect())

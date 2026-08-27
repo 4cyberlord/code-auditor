@@ -1,4 +1,4 @@
-# Code Auditor
+# Code Editor
 
 Four frontier models read the same screenshot, solve it independently in four panes,
 and submit their answers to a solution box that tells you whether they agree.
@@ -194,7 +194,27 @@ over noninteractive `gh codespace ssh` calls.
 The background path is scaffolded as a focused solving feature, not a stealth
 mode and not a full IDE. Supabase now has queue tables for cloud Council jobs,
 ordered screenshots, progress events, Council reports and registered iOS
-notification devices. The desktop bridge can read those jobs back for history.
+notification devices. The desktop bridge can create Council-only jobs, attach
+ordered uploaded screenshots, read those jobs back for history, and show them in
+the Cloud Jobs rail panel. The panel can also queue the screenshots currently
+loaded in the workspace without duplicating normal session screenshot rows.
+
+Settings › Capture can install or remove the user LaunchAgent that opens the
+approved `cloud-sync-helper` at login. The helper owns start/capture/submit batch hotkeys,
+uses macOS `screencapture` for full-screen captures, stores pending state under
+Application Support, uploads through your saved Supabase Storage credential and
+queues Council jobs directly. This is explicit and removable; it does not hide
+from macOS process lists, Screen Recording permission, network tools or security
+software.
+
+Helper defaults are `Control+Alt+B` to start a batch, `Control+Alt+P` to add a
+full-screen capture and `Control+Alt+Enter` to submit.
+
+During development, build the helper once before installing it:
+
+```bash
+npm run helper:build
+```
 
 The first worker entrypoint is:
 
@@ -203,10 +223,77 @@ node scripts/cloud-worker.mjs --once
 ```
 
 It claims queued jobs, records progress and sends APNs notifications when the
-server has APNs credentials. Real cloud Council execution is the next
-implementation layer; until then the worker marks claimed jobs as
-`needs_attention` with an explicit `executor_pending` phase rather than storing a
-fake answer. See `docs/background-cloud-solver.md`.
+server has APNs credentials. It now runs a compact cloud Council through
+TokenRouter chat models: independent solver calls, benchmark harness generation,
+local worker verification, optional Codespaces benchmark mirrors, reviewer
+passes, judge reports and a synthesis pass, then writes a `council_reports` row
+and marks the job completed. Revision rounds are still the next worker layer.
+See `docs/background-cloud-solver.md`.
+
+---
+
+## Signing in
+
+The app is locked behind a username and a 4-digit PIN. The account lives in your own
+Postgres (`app_users`), so setting the database up comes first — on a fresh install the
+login screen asks for the connection string before it asks for anything else.
+
+There is **no sign-up screen**. This is a single-owner tool, so a registration form would
+only ever be a way for someone else to claim it. The first time the app reaches a database
+with an empty `app_users`, Rust provisions the owner itself:
+
+| | |
+|---|---|
+| username | `nimo` |
+| PIN | `3313` |
+
+That seed is a bootstrap, not a secret — it is in `src-tauri/src/auth.rs` for anyone who
+reads the repo, so the honest description of it is *the PIN until you change it*. Change it
+in **Settings → Sessions → Account**. `CODE_AUDITOR_ADMIN` and `CODE_AUDITOR_ADMIN_PIN`
+override the seed at launch if you would rather it were never in the source.
+
+The hash is computed on the machine that seeds it, because the PIN is peppered with a
+Keychain secret — so the same seed PIN on two Macs produces two different hashes, and
+moving to a new Mac means resetting the row rather than carrying it across.
+
+Four digits is only defensible because of what sits around it:
+
+* **The PIN is peppered, then hashed.** `app_users.pin_hash` is Argon2id (64 MiB, three
+  passes) over `HMAC-SHA256(pepper, pin)`, where the pepper is 32 random bytes in the
+  macOS Keychain and deliberately *not* in the database. A copy of your Postgres is
+  therefore not an offline attack on ten thousand possibilities — it is one that first
+  needs this Mac.
+* **The failure counter is a column, not memory.** Five wrong PINs, then 1 min → 5 min →
+  15 min → 1 hour → 24 hours. Quitting the app does not reset it.
+* **"Remember this Mac" stores a token, not the PIN.** Thirty-two random bytes in the
+  Keychain; only their SHA-256 reaches `app_sessions`. Signing out revokes both ends, and
+  changing the PIN revokes every remembered sign-in.
+
+The lock is enforced in Rust, not just in React. `auth::require()` guards two chokepoints —
+`db::pool()` and `keychain::read_api_key()` — which between them cover every database
+query, model call, gateway probe and upload, plus the capture, OCR, code-execution and
+helper commands individually. A locked app cannot spend money or read a screenshot even
+if the webview is reloaded.
+
+Change the PIN in **Settings → Sessions → Account**.
+
+### If you forget the PIN
+
+There is no recovery, by design. Delete the row and start again:
+
+```sql
+delete from app_users;   -- app_sessions cascades
+```
+
+The next launch provisions `nimo` / `3313` again. The same applies if the connection string rots
+while you are signed out — the string is only editable while signed in, so clear this
+Mac's record of the account instead and set it up against the new database:
+
+```sh
+security delete-generic-password -s com.charles.codeauditor -a auth-owner
+```
+
+That leaves the account in Postgres untouched; you will just be asked to sign in again.
 
 ---
 
@@ -238,12 +325,15 @@ src/
     consensus.ts  similarity, clustering, verdict
     council.ts    the council: candidates, harness parsing, prompts, the gate
     bridge.ts     typed wrapper over the Rust commands and events
+    auth.ts       the login, on this side of the bridge
+    pin.ts        PIN and username rules, and the lockout countdown (no imports, so it tests)
     store.ts      zustand state, run orchestration, the council pipeline
     image.ts      downscale, flatten, re-encode before the payload is built
     shortcuts.ts  listens for the hotkey and tray events
     useAgentEvents.ts  four token streams coalesced into one frame's state
 src-tauri/
   src/lib.rs        tray icon and menu, global shortcuts, close-hides-not-quits
+  src/auth.rs       the lock: Argon2id over a peppered PIN, lockout, remember-me
   src/keychain.rs   Keychain read/write, key never returned to JS
   src/capture.rs    interactive region capture via screencapture(1)
   src/providers.rs  SSE streaming for all four providers, cancellation, usage
@@ -263,8 +353,12 @@ The consensus engine has a standalone suite covering unanimous, majority, split,
 degraded input, and paraphrase cases:
 
 ```bash
-npm test
+npm test          # every JS suite
+npm run check     # typecheck, lint, JS suites, then cargo check
 ```
+
+`npm run check:rust` is the one that matters after touching `src-tauri/` — the login in
+particular, since its Argon2 and HMAC crates only arrive on the first build.
 
 ---
 

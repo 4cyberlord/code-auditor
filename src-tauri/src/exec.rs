@@ -460,7 +460,7 @@ pub fn run(
         if !stderr_raw.is_empty() && !stderr_raw.ends_with('\n') {
             stderr_raw.push('\n');
         }
-        stderr_raw.push_str("Code Auditor stopped the run after it exceeded the memory limit.\n");
+        stderr_raw.push_str("Code Editor stopped the run after it exceeded the memory limit.\n");
     } else if exit_code == Some(137) || stderr_raw.contains("Killed: 9") {
         if !stderr_raw.is_empty() && !stderr_raw.ends_with('\n') {
             stderr_raw.push('\n');

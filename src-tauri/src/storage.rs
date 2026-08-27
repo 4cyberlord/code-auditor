@@ -270,6 +270,7 @@ pub async fn storage_remove(path: String) -> Result<(), String> {
 /// back, which is the point at which losing the local copy costs nothing.
 #[tauri::command]
 pub fn forget_local_file(path: String) -> Result<(), String> {
+    crate::auth::require()?;
     if path.trim().is_empty() {
         return Ok(());
     }

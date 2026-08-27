@@ -2,8 +2,16 @@ node_modules/
 .next/
 out/
 src-tauri/target/
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
 *.log
 .DS_Store
 *.tsbuildinfo
 .eslintcache
 .qodo/
+.claude/
+.development.env
+.env
+.env.*
+!.env.example
+login-preview.html

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Code Auditor",
+  title: "Code Editor",
   description: "Four models solve the same problem independently, then get compared.",
 };
 

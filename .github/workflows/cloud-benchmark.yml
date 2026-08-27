@@ -1,0 +1,44 @@
+name: Cloud Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Supabase solve_jobs id
+        required: true
+      language:
+        description: Candidate language
+        required: true
+      artifact_key:
+        description: Storage key or worker lookup key for the benchmark payload
+        required: true
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: npm ci
+      - name: Record benchmark handoff
+        run: |
+          echo "GitHub Actions benchmark handoff"
+          echo "job_id=${{ inputs.job_id }}"
+          echo "language=${{ inputs.language }}"
+          echo "artifact_key=${{ inputs.artifact_key }}"

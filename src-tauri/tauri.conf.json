@@ -1,18 +1,19 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Code Auditor",
+  "productName": "Code Editor",
+  "mainBinaryName": "code-auditor",
   "version": "0.1.0",
   "identifier": "com.charles.codeauditor",
   "build": {
     "frontendDist": "../out",
     "devUrl": "http://localhost:3000",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "node scripts/prepare-tauri-build.mjs"
   },
   "app": {
     "windows": [
       {
-        "title": "Code Auditor",
+        "title": "Code Editor",
         "width": 1500,
         "height": 980,
         "minWidth": 1080,
@@ -33,7 +34,10 @@
       "dmg"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "Multi-agent code & research auditor",
+    "shortDescription": "Multi-agent code, math and research solver",
+    "externalBin": [
+      "binaries/cloud-sync-helper"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

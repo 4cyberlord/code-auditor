@@ -45,7 +45,7 @@ export default function ReadingPanel() {
   if (status === "idle") {
     return (
       <div className="reading" data-tone="idle">
-        <span className="section-label">Reading</span>
+        <span className="dot" title="Reading" />
         <span className="reading-line">
           {names.join(" and ")} will read the screenshot first; the panel reasons from
           what they agree on.
@@ -70,7 +70,7 @@ export default function ReadingPanel() {
   if (status === "running") {
     return (
       <div className="reading" data-tone="busy">
-        <span className="section-label">Reading</span>
+        <span className="dot" data-pulse="true" title="Reading the screenshot" />
         <span className="badge" data-tone="live">
           {names.join(" + ")}
         </span>
@@ -84,7 +84,7 @@ export default function ReadingPanel() {
   if (status === "error") {
     return (
       <div className="reading" data-tone="bad">
-        <span className="section-label">Reading</span>
+        <span className="dot" title="Reading" />
         <span className="reading-line" style={{ color: "var(--bad)" }}>
           {extraction.error}
         </span>
@@ -137,7 +137,7 @@ export default function ReadingPanel() {
   return (
     <div className="reading" data-tone={tone} data-open={open}>
       <div className="reading-head">
-        <span className="section-label">Reading</span>
+        <span className="dot" title="Reading" />
         <span className="badge" data-tone={tone}>
           {label}
         </span>

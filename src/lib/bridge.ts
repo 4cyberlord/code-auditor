@@ -89,7 +89,7 @@ export async function runOnce(req: RunRequest): Promise<string> {
 export interface Capture {
   /** PNG data URL, ready to hand to the downscale path. */
   dataUrl: string;
-  /** Where the grab was saved on disk, under ~/Pictures/Code Auditor. */
+  /** Where the grab was saved on disk, under ~/Pictures/Code Editor. */
   path: string;
 }
 
@@ -197,6 +197,35 @@ export async function settingsLoad<T>(key: string): Promise<T | null> {
 export async function settingsSave(key: string, value: unknown): Promise<void> {
   if (!inTauri()) return;
   await invoke("settings_save", { key, value });
+}
+
+export interface BackgroundHelperStatus {
+  installed: boolean;
+  plistPath: string;
+  appPath: string;
+  helperPath: string;
+}
+
+export async function backgroundHelperStatus(): Promise<BackgroundHelperStatus> {
+  if (!inTauri()) {
+    return {
+      installed: false,
+      plistPath: "",
+      appPath: "",
+      helperPath: "",
+    };
+  }
+  return invoke<BackgroundHelperStatus>("background_helper_status");
+}
+
+export async function installBackgroundHelper(): Promise<BackgroundHelperStatus> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  return invoke<BackgroundHelperStatus>("background_helper_install");
+}
+
+export async function uninstallBackgroundHelper(): Promise<BackgroundHelperStatus> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  return invoke<BackgroundHelperStatus>("background_helper_uninstall");
 }
 
 export async function setApiKey(provider: KeyId, key: string): Promise<void> {

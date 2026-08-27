@@ -1,0 +1,313 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { forgetLocalFile, signedUrl, uploadScreenshot } from "@/lib/bridge";
+import { CLOUD_SOLVER_MAX_IMAGES, sanitizedSettingsSnapshot } from "@/lib/cloudJobs";
+import {
+  createSolveJob,
+  getCouncilReport,
+  listSolveJobEvents,
+  listSolveJobImages,
+  listSolveJobs,
+  type CouncilReportSummary,
+  type SolveJob,
+  type SolveJobEvent,
+  type SolveJobImage,
+} from "@/lib/sessions";
+import { useStore } from "@/lib/store";
+import { formatWhen } from "@/lib/when";
+import { devLog } from "@/lib/devLog";
+
+const statusTone: Record<SolveJob["status"], "good" | "bad" | "warn" | "live"> = {
+  queued: "warn",
+  running: "live",
+  needs_attention: "warn",
+  failed: "bad",
+  completed: "good",
+  cancelled: "bad",
+};
+
+function readableStatus(value: string): string {
+  return value.replaceAll("_", " ");
+}
+
+function excerpt(text: string, max = 220): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  return clean.length > max ? `${clean.slice(0, max - 1)}...` : clean;
+}
+
+export default function BackgroundJobsPanel() {
+  const [open, setOpen] = useState(true);
+  const [jobs, setJobs] = useState<SolveJob[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [events, setEvents] = useState<SolveJobEvent[]>([]);
+  const [images, setImages] = useState<Array<SolveJobImage & { url?: string }>>([]);
+  const [report, setReport] = useState<CouncilReportSummary | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [queueing, setQueueing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const workspaceImages = useStore((s) => s.images);
+  const settings = useStore((s) => s.settings);
+  const storageKey = useStore((s) => s.storageKey);
+  const ensureSession = useStore((s) => s.ensureSession);
+  const zone = useStore((s) => s.settings.timeZone);
+  const selectSession = useStore((s) => s.selectSession);
+
+  const selectedJob = useMemo(
+    () => jobs.find((job) => job.id === selected) ?? jobs[0] ?? null,
+    [jobs, selected]
+  );
+
+  const refresh = async () => {
+    setLoading(true);
+    setError(null);
+    devLog("cloud-jobs", "refresh started");
+    try {
+      const next = await listSolveJobs("all");
+      setJobs(next);
+      setSelected((current) =>
+          current && next.some((job) => job.id === current) ? current : next[0]?.id ?? null
+      );
+      devLog("cloud-jobs", "refresh completed", { count: next.length });
+    } catch (err) {
+      setError(String(err));
+      devLog("cloud-jobs", "refresh failed", { error: String(err) });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 15000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const queueCurrent = async () => {
+    setQueueing(true);
+    setError(null);
+    devLog("cloud-jobs", "queue current started", { images: workspaceImages.length });
+    try {
+      if (!workspaceImages.length) throw new Error("Load at least one screenshot before queuing a cloud job.");
+      if (workspaceImages.length > CLOUD_SOLVER_MAX_IMAGES) {
+        throw new Error(`A cloud job can hold at most ${CLOUD_SOLVER_MAX_IMAGES} screenshots.`);
+      }
+      if (!storageKey) throw new Error("Save the Supabase Storage service-role key in Settings first.");
+      const sessionId = await ensureSession();
+      if (!sessionId) throw new Error("Set up the Supabase database connection before queuing cloud jobs.");
+
+      const survived = new Map<string, boolean>();
+      const jobImages = [];
+      for (const image of workspaceImages) {
+        const uploaded = await uploadScreenshot({
+          sessionId,
+          fileName: image.name,
+          mime: image.mime,
+          data: image.base64,
+        });
+        jobImages.push({
+          position: jobImages.length,
+          storageBucket: uploaded.bucket,
+          storagePath: uploaded.path,
+          fileName: image.name,
+          bytes: uploaded.bytes,
+          mime: image.mime,
+          width: image.sourceWidth ?? null,
+          height: image.sourceHeight ?? null,
+        });
+        if (image.localPath && !survived.has(image.localPath)) survived.set(image.localPath, true);
+      }
+
+      const jobId = await createSolveJob({
+        sessionId,
+        settingsSnapshot: sanitizedSettingsSnapshot({ ...settings }),
+        images: jobImages,
+      });
+      devLog("cloud-jobs", "job created", { jobId, images: jobImages.length });
+      for (const [path, ok] of survived) {
+        if (ok) void forgetLocalFile(path);
+      }
+      await refresh();
+      setSelected(jobId);
+    } catch (err) {
+      setError(String(err));
+      devLog("cloud-jobs", "queue current failed", { error: String(err) });
+    } finally {
+      setQueueing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedJob) {
+      setEvents([]);
+      setImages([]);
+      setReport(null);
+      return;
+    }
+    let live = true;
+    setError(null);
+    devLog("cloud-jobs", "detail load started", { jobId: selectedJob.id });
+    void Promise.all([
+      listSolveJobEvents(selectedJob.id),
+      listSolveJobImages(selectedJob.id),
+      getCouncilReport(selectedJob.id),
+    ])
+      .then(async ([nextEvents, nextImages, nextReport]) => {
+        const withUrls = await Promise.all(
+          nextImages.map(async (image) => {
+            try {
+              return { ...image, url: await signedUrl(image.storagePath, 900) };
+            } catch {
+              return image;
+            }
+          })
+        );
+        if (!live) return;
+        setEvents(nextEvents);
+        setImages(withUrls);
+        setReport(nextReport);
+        devLog("cloud-jobs", "detail load completed", {
+          jobId: selectedJob.id,
+          events: nextEvents.length,
+          images: withUrls.length,
+          hasReport: Boolean(nextReport),
+        });
+      })
+      .catch((err) => {
+        if (live) setError(String(err));
+        devLog("cloud-jobs", "detail load failed", { jobId: selectedJob.id, error: String(err) });
+      });
+    return () => {
+      live = false;
+    };
+  }, [selectedJob]);
+
+  return (
+    <section className="background-jobs" data-open={open}>
+      <div
+        className="side-head drawer-head"
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((v) => !v);
+          }
+        }}
+        title={open ? "Collapse" : "Show background jobs"}
+      >
+        <span className="chev" aria-hidden="true">
+          ▾
+        </span>
+        <h2>Cloud Jobs</h2>
+        {!open && jobs.length > 0 && <span className="chip">{jobs.length}</span>}
+        <span className="spacer" />
+        {open && (
+          <>
+          <button
+            className="btn tiny ghost"
+            disabled={queueing}
+            onClick={(e) => {
+              e.stopPropagation();
+              void queueCurrent();
+            }}
+          >
+            Queue current
+          </button>
+          <button
+            className="btn tiny"
+            disabled={loading}
+            onClick={(e) => {
+              e.stopPropagation();
+              void refresh();
+            }}
+          >
+            Refresh
+          </button>
+          </>
+        )}
+      </div>
+
+      {open && (
+        <div className="background-jobs-body">
+          {error && <div className="pane-error">{error}</div>}
+
+          {!error && !loading && jobs.length === 0 && (
+            <div className="empty">No cloud jobs yet.</div>
+          )}
+
+          {jobs.length > 0 && (
+            <div className="job-list">
+              {jobs.slice(0, 8).map((job) => (
+                <button
+                  key={job.id}
+                  className="job-row"
+                  data-current={job.id === selectedJob?.id}
+                  onClick={() => setSelected(job.id)}
+                >
+                  <span>
+                    <span className="job-title">{readableStatus(job.progressPhase || job.status)}</span>
+                    <span className="job-meta">{formatWhen(job.updatedAt, zone, "relative")}</span>
+                  </span>
+                  <span className="badge" data-tone={statusTone[job.status]}>
+                    {readableStatus(job.status)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {selectedJob && (
+            <div className="job-detail">
+              <div className="job-detail-head">
+                <span className="mono small">{selectedJob.id.slice(0, 8)}</span>
+                <button
+                  className="btn tiny ghost"
+                  onClick={() => void selectSession(selectedJob.sessionId)}
+                >
+                  Open session
+                </button>
+              </div>
+
+              {images.length > 0 && (
+                <div className="job-images">
+                  {images.map((image) =>
+                    image.url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img key={image.id} src={image.url} alt={image.fileName} />
+                    ) : (
+                      <div key={image.id} className="job-image-missing">
+                        {image.position + 1}
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+
+              {report ? (
+                <div className="job-report">
+                  <div className="job-title">{report.winner || "Council report"}</div>
+                  <p>{excerpt(report.synthesis || report.markdown)}</p>
+                </div>
+              ) : selectedJob.error ? (
+                <div className="pane-error">{selectedJob.error}</div>
+              ) : null}
+
+              <div className="job-events">
+                {events.slice(-6).map((event) => (
+                  <div className="job-event" key={event.id} data-level={event.level}>
+                    <span>{event.phase}</span>
+                    <p>{event.message}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}

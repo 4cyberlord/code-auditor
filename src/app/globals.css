@@ -218,6 +218,15 @@ select {
   font-size: 11.5px;
 }
 
+.mono {
+  font-family: var(--font-mono);
+}
+
+.small {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 textarea.field {
   height: auto;
   padding: 7px 9px;
@@ -263,7 +272,10 @@ textarea.field {
 
 .dropzone {
   flex: none;
-  width: 96px;
+  /* Wide enough for the two shortcut labels to sit on one line with room around
+     them. At 96px the strings wrapped mid-chord and the box read as cramped
+     against the question field beside it. */
+  width: 132px;
   min-height: 92px;
   border: 1.5px dashed var(--line-strong);
   border-radius: var(--radius);
@@ -274,7 +286,7 @@ textarea.field {
   justify-content: center;
   gap: 4px;
   text-align: center;
-  padding: 8px;
+  padding: 10px 14px;
   color: var(--text-faint);
   font-size: 10.5px;
   transition: border-color 0.15s ease, background 0.15s ease;
@@ -370,13 +382,13 @@ textarea.field {
   position: absolute;
   top: 3px;
   right: 3px;
-  width: 18px;
-  height: 18px;
+  width: 21px;
+  height: 21px;
   border-radius: 50%;
   border: 0;
-  background: rgba(0, 0, 0, 0.65);
+  background: rgba(0, 0, 0, 0.72);
   color: #fff;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1;
   display: grid;
   place-items: center;
@@ -421,6 +433,13 @@ textarea.field {
      the row used to run off the right edge of the window. */
   flex-wrap: wrap;
   row-gap: 6px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 /* -------------------------------------------------------------- pane grid */
@@ -1480,8 +1499,34 @@ textarea.field {
 .reading[data-tone="bad"]:not([data-open]) {
   flex-direction: row;
   align-items: center;
-  justify-content: center;
+  /* Left, in line with every other row in the window. Centering made the one
+     sentence float free of the strip's own left edge marker, which is the thing
+     that tells you what state the reading is in. */
+  justify-content: flex-start;
   gap: 10px;
+}
+
+/* The status dot replaces the "READING" label. The word was the same on every
+   run and said nothing the strip's position did not already say; the dot carries
+   the tone instead, and pulses while a reading is actually in flight. */
+.reading .dot {
+  background: var(--text-faint);
+}
+
+.reading[data-tone="busy"] .dot {
+  background: var(--accent);
+}
+
+.reading[data-tone="good"] .dot {
+  background: var(--good);
+}
+
+.reading[data-tone="warn"] .dot {
+  background: var(--warn);
+}
+
+.reading[data-tone="bad"] .dot {
+  background: var(--bad);
 }
 
 .reading[data-tone="good"] {
@@ -1513,13 +1558,6 @@ textarea.field {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* In the idle/busy states the whole strip is justified to center, so the
-   sentence must not stretch to the full width and re-left-align itself. */
-.reading[data-tone="idle"] .reading-line,
-.reading[data-tone="busy"] .reading-line {
-  flex: none;
 }
 
 .reading[data-tone="bad"] .reading-line {
@@ -1616,11 +1654,25 @@ textarea.field {
   background: var(--panel-hover);
 }
 
+/* The one control that says whether a drawer is open or shut, so it has to be
+   readable at a glance. At 10px in --text-faint the triangle was a smudge --
+   large enough to be a hit target only because the whole header is one. A fixed
+   square box keeps the glyph centred through the rotation instead of letting
+   its own bearings shift it a pixel sideways. */
 .drawer-head .chev {
-  display: inline-block;
-  font-size: 10px;
-  color: var(--text-faint);
-  transition: transform 0.15s ease;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-dim);
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+
+.drawer-head:hover .chev {
+  color: var(--text);
 }
 
 /* Points down when open, right when shut -- the direction it will move. */
@@ -1706,6 +1758,158 @@ textarea.field {
   padding: 5px 8px;
 }
 
+/* --------------------------------------------------------- background jobs */
+.background-jobs {
+  flex: none;
+  border-top: 1px solid var(--line);
+  background: var(--bg-raised);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.background-jobs[data-open="true"] {
+  max-height: 42%;
+}
+
+.background-jobs[data-open="false"] .chev {
+  transform: rotate(-90deg);
+}
+
+.background-jobs-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 8px 12px;
+}
+
+.job-list,
+.job-events {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.job-row {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  color: inherit;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  text-align: left;
+  cursor: default;
+}
+
+.job-row:hover,
+.job-row[data-current="true"] {
+  background: var(--panel);
+  border-color: var(--line);
+}
+
+.job-title {
+  display: block;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.25;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-meta {
+  display: block;
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.job-detail {
+  border-top: 1px solid var(--line);
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+.job-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.job-images {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.job-images img,
+.job-image-missing {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  object-fit: cover;
+}
+
+.job-image-missing {
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.job-report {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 8px 9px;
+  margin-bottom: 8px;
+}
+
+.job-report p {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.job-event {
+  border-left: 2px solid var(--line-strong);
+  padding-left: 8px;
+}
+
+.job-event[data-level="error"] {
+  border-left-color: var(--bad);
+}
+
+.job-event[data-level="warn"] {
+  border-left-color: var(--warn);
+}
+
+.job-event span {
+  display: block;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.job-event p {
+  margin: 1px 0 0;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--text-dim);
+}
+
 /* ------------------------------------------------------------------- tabs */
 .tabs {
   flex: none;
@@ -1765,10 +1969,6 @@ textarea.field {
 
 /* The gateway sits above the vendors it routes to, so it gets the edge marker
    that says "this decides for the ones below". */
-.provider-card[data-accent="gateway"] {
-  border-left: 3px solid #f2994a;
-}
-
 /* Marks a pane whose answer came over the gateway rather than straight from the
    vendor. Small on purpose: it is a caveat on the comparison, not a headline. */
 .pane-model .via {
@@ -2141,3 +2341,428 @@ body[data-dragging="row"] * {
   cursor: pointer;
 }
 .toast-close:hover { color: var(--text); }
+
+/* -------------------------------------------------------------------- auth */
+/* The login screen, which is the whole window until it is satisfied.
+   A split: the product on the left, the form on the right. The window is 1080px
+   at its narrowest, and a small centred card in that much space reads as a
+   dialog whose parent went missing -- a split fills it on purpose.
+   The left half is built from the app icon's own four quadrant colours, so the
+   door looks like the thing behind it. */
+
+.auth {
+  --q-a: #14a085; /* the icon's four tiles, clockwise from top-left */
+  --q-b: #8b5cf6;
+  --q-c: #3b82f6;
+  --q-d: #dd7a55;
+
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(420px, 0.95fr);
+  height: 100vh;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+/* An invisible strip across both halves. The window has no title bar of its
+   own (`titleBarStyle: Overlay`), so without something draggable up here a
+   locked app is a window that cannot be moved. */
+.auth-drag {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 38px;
+  z-index: 3;
+}
+
+/* ------------------------------------------------------------- left: brand */
+
+.auth-brand {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 26px;
+  padding: 56px 52px;
+  overflow: hidden;
+  background: #0a0c11;
+  border-right: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+/* Four washes, one per quadrant colour, sitting roughly where that tile sits in
+   the icon. Large and very dilute: this should read as light in a dark room,
+   not as four coloured blobs. */
+.auth-glow {
+  position: absolute;
+  inset: -25%;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--q-a) 28%, transparent), transparent 36%),
+    linear-gradient(225deg, color-mix(in srgb, var(--q-b) 24%, transparent), transparent 40%),
+    linear-gradient(315deg, color-mix(in srgb, var(--q-c) 24%, transparent), transparent 42%),
+    linear-gradient(45deg, color-mix(in srgb, var(--q-d) 20%, transparent), transparent 42%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 58%);
+  filter: blur(18px);
+  opacity: 0.72;
+  animation: auth-drift 26s ease-in-out infinite alternate;
+}
+
+/* Slow enough to be felt rather than watched. Anyone who sits on this screen is
+   waiting for something, and motion that asks for attention is motion that gets
+   turned off. */
+@keyframes auth-drift {
+  from {
+    transform: translate3d(-1.5%, -1%, 0) scale(1);
+  }
+  to {
+    transform: translate3d(1.5%, 1%, 0) scale(1.06);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-glow {
+    animation: none;
+  }
+}
+
+/* A technical surface under the light, so the gradient has something to sit on
+   and does not read as an empty smear. */
+.auth-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+  background-size: 44px 44px;
+  /* Faded out at the edges: a grid that runs into the border draws attention to
+     the border. */
+  mask-image: radial-gradient(72% 62% at 42% 46%, #000 30%, transparent 100%);
+}
+
+.auth-brand-body {
+  position: relative;
+  z-index: 1;
+  max-width: 460px;
+}
+
+/* The icon in a glass tile. It is already a rounded dark square, so the tile is
+   only a rim of light around it -- enough to lift it off the background without
+   drawing a second box around a box. */
+.auth-icon {
+  display: inline-flex;
+  padding: 10px;
+  margin-bottom: 22px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+}
+
+.auth-icon img {
+  display: block;
+  width: 76px;
+  height: 76px;
+  border-radius: 17px;
+}
+
+.auth-wordmark {
+  margin: 0 0 10px;
+  font-size: 30px;
+  font-weight: 680;
+  letter-spacing: 0;
+  color: #f2f5f9;
+}
+
+.auth-tagline {
+  margin: 0 0 26px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: rgba(226, 232, 240, 0.72);
+  max-width: 30ch;
+}
+
+.auth-status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.auth-status-strip span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.055);
+  color: rgba(226, 232, 240, 0.68);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.auth-points {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.auth-points li {
+  position: relative;
+  padding-left: 22px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: rgba(226, 232, 240, 0.6);
+}
+
+/* One dot per quadrant, in the icon's own order. Four claims, four colours, one
+   picture above them saying the same thing. */
+.auth-points li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 2.5px;
+  background: var(--q-a);
+}
+
+.auth-points li[data-q="b"]::before {
+  background: var(--q-b);
+}
+.auth-points li[data-q="c"]::before {
+  background: var(--q-c);
+}
+.auth-points li[data-q="d"]::before {
+  background: var(--q-d);
+}
+
+.auth-foot-note {
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  max-width: 44ch;
+  font-size: 11px;
+  line-height: 1.6;
+  color: rgba(226, 232, 240, 0.38);
+}
+
+/* ------------------------------------------------------------- right: form */
+
+.auth-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 40px;
+  background: var(--bg-raised);
+  overflow-y: auto;
+}
+
+.auth-form {
+  width: 100%;
+  max-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.auth-form h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 660;
+  letter-spacing: 0;
+}
+
+.auth-sub {
+  margin: -10px 0 4px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+.auth-test {
+  margin: -6px 0 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-sunken));
+  color: var(--text-muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.auth-field > span {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text-dim);
+}
+
+/* ---- the PIN: one input, four cells --------------------------------------
+   The boxes are painted by `.pin-cells` underneath, and the real field lies on
+   top with a transparent face. That keeps it a single focusable, pasteable,
+   password-manager-visible input while looking like four. */
+
+.pin {
+  position: relative;
+  display: block;
+  height: 56px;
+}
+
+.pin-input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  /* The text itself is never shown -- the cells below are the readout. Caret
+     included: a caret jumping between invisible glyph positions is worse than
+     no caret at all when the filled cell already says where you are. */
+  color: transparent;
+  caret-color: transparent;
+  font-size: 16px;
+  outline: none;
+  cursor: text;
+}
+
+.pin-cells {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  pointer-events: none;
+}
+
+.pin-cells i {
+  border: 1.5px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  display: grid;
+  place-items: center;
+  transition: border-color 0.14s ease, background 0.14s ease, transform 0.14s ease;
+}
+
+/* A filled cell shows a dot, not the digit. Same reason the field is a password
+   field: this is a screen-sharing tool, and the PIN is on screen. */
+.pin-cells i[data-on="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-sunken));
+}
+
+.pin-cells i[data-on="true"]::after {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* Where the next digit lands. The input's own focus ring would sit around all
+   four cells at once and say nothing about position. */
+.pin-input:focus + .pin-cells i[data-next="true"] {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.pin[data-locked="true"] {
+  opacity: 0.45;
+}
+
+.auth-remember {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.auth-remember input {
+  flex: none;
+  accent-color: var(--accent);
+}
+
+.auth-msg {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  /* Rust writes these, and the longest is a paragraph with a shell command in
+     the middle. Keeping its line breaks is the difference between a recovery
+     instruction and a wall. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 9px 11px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+}
+
+.auth-msg[data-tone="bad"] {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 32%, transparent);
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
+}
+
+.auth-msg[data-tone="warn"] {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 32%, transparent);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+.auth-msg[data-tone="good"] {
+  color: var(--good);
+  border-color: color-mix(in srgb, var(--good) 32%, transparent);
+  background: color-mix(in srgb, var(--good) 10%, transparent);
+}
+
+.auth-go {
+  width: 100%;
+  justify-content: center;
+  padding: 10px 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.auth-hint {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--text-faint);
+}
+
+/* Below the app's own minimum width this cannot happen, but `npm run dev` in a
+   browser can be any size, and a squeezed brand panel is worse than none. */
+@media (max-width: 880px) {
+  .auth {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .auth-brand {
+    display: none;
+  }
+}
+
+/* Between "is there a lock?" and knowing the answer. A spinner would be wrong:
+   this resolves in a few milliseconds when the token is already good, and a
+   flash of anything is worse than a moment of the window's own background. */
+.auth-blank {
+  height: 100vh;
+  background: var(--bg);
+}

@@ -40,7 +40,7 @@ import * as bridge from "./bridge.ts";
 import * as db from "./sessions.ts";
 import { detectZone, isUsableZone, formatWhen } from "./when.ts";
 import { titleFor, placeholderTitle, isPlaceholder } from "./title.ts";
-import { classifyProbeResult, probeToastText } from "./probeFit.ts";
+import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from "./probeFit.ts";
 import { knowledgePackFor } from "./knowledge.ts";
 import {
   COUNCIL_DEFAULT_JUDGES,
@@ -552,6 +552,20 @@ interface State {
 
   /** Tries every model the app might ask for and records what came back. */
   testModels: (models: string[], testVision?: boolean) => Promise<void>;
+  /**
+   * Drops council seats the last probe proved this key cannot reach.
+   *
+   * Evidence-driven rather than a hardcoded list of retired ids: the roster is
+   * free text and the catalogue changes under it, so the only durable answer to
+   * "is this seat real" is what the gateway said last time we asked. Only the
+   * two permanent reasons count — a rate-limited or slow model is the council
+   * working against a small plan, and deleting a seat for that would shrink the
+   * bench for a reason that had already passed.
+   *
+   * Returns what it removed, so the caller can say so rather than silently
+   * editing a roster the user spent time on.
+   */
+  pruneUnreachableSeats: () => string[];
   /**
    * One probe result, applied the moment it arrives. Kept separate from the
    * batch in `testModels` on purpose: that one resolves last, this one keeps
@@ -1536,15 +1550,48 @@ export const useStore = create<State>((set, get) => ({
 
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 
+  pruneUnreachableSeats: () => {
+    const { settings } = get();
+    const gone = new Set<string>();
+    for (const [model, p] of Object.entries(settings.probes)) {
+      if (p.ok) continue;
+      const { reason } = classifyProbeResult(model, false, p.error);
+      if (isPermanentlyUnreachable(reason)) gone.add(model);
+    }
+    if (!gone.size) return [];
+
+    const councilModels = settings.councilModels.filter((m) => !gone.has(m.id));
+    const councilJudges = settings.councilJudges.filter((j) => !gone.has(j.model));
+    // A synthesizer the key cannot reach is worse than none: the run would do
+    // all its work and then fail on the last call. Falling back to a seat that
+    // answered is better than leaving a hole.
+    const synthesisModel = gone.has(settings.synthesisModel)
+      ? councilModels[0]?.id ?? ""
+      : settings.synthesisModel;
+
+    get().patchSettings({ councilModels, councilJudges, synthesisModel });
+    return [...gone].sort();
+  },
+
   testModels: async (models, testVision = false) => {
     const { settings } = get();
     set({ probing: true, probeError: null });
     try {
-      // Roster models carry their wire; everything else is chat. The gateway
-      // will still tell us when a chat assumption was wrong, and the toast
-      // from that finding is the discoverable path to the override.
+      // Every model being probed, not just the roster ones.
+      //
+      // This used to map only `settings.councilModels`, which had two ways of
+      // being wrong at once. A model that is a pane or a judge but not a roster
+      // seat got no entry at all; and a *saved* roster entry with no `endpoint`
+      // field fell back to "chat", which actively overrode what
+      // `RESPONSES_MODELS` already knew. That is why `openai/gpt-5.3-codex`
+      // came back "not supported in the v1/chat/completions endpoint" — the
+      // app knew the right wire and then told Rust the wrong one.
+      //
+      // `endpointForModel` is the single place that answers this, and it
+      // consults the roster *and* the known-Responses set. Asking it for every
+      // model in the probe is the whole fix.
       const endpointByModel = Object.fromEntries(
-        settings.councilModels.map((m) => [m.id, m.endpoint ?? "chat"])
+        models.map((m) => [m, endpointForModel(settings, m)])
       );
       const results = await bridge.probeModels(models, settings.gatewayBaseUrl, testVision, endpointByModel);
       const at = Date.now();

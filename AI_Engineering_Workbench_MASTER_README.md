@@ -15,7 +15,7 @@ something done because it looks done.
 |---|---|
 | Tauri + Next.js shell, tray, background operation | The window closes to the menu bar and the process survives, so the shortcuts keep working. Quit lives in the tray. |
 | Global shortcuts | `Control+Option+S` screen, `Control+Option+R` region, `Control+Option+A` audit. Registered in Rust so they survive webview reloads. Confirmed firing in `~/Library/Logs/CodeAuditor/trace.log`. |
-| Full-screen and region capture | Saved to `~/Pictures/Code Auditor`, then loaded into the app. Whole chain confirmed: key, command, file on disk, thumbnail. |
+| Full-screen and region capture | Saved to `~/Pictures/Code Editor`, then loaded into the app. Whole chain confirmed: key, command, file on disk, thumbnail. |
 | Screenshot handling | Up to 10 per run, thumbnails, delete, full-size preview with arrow-key navigation. |
 | API keys | macOS Keychain. The webview can ask *whether* a key exists, never what it is. |
 | Multi-model fan-out | Six panes — GPT, Claude, Kimi, Gemini and two free models — streaming in parallel. Each vision pane reads the image itself. |
@@ -24,6 +24,17 @@ something done because it looks done.
 | Consensus and judge | Camps, pairwise agreement matrix, outlier flagging, and a judge that reasons rather than counts votes. |
 | A real answer, end to end | A captured coding problem went out, models answered, the FINAL blocks parsed, consensus ran, and the judge produced a verdict and a shipped solution that was read on screen. |
 | Postgres | Supabase connected, schema self-applied. Session sidebar lists, renames, archives and deletes. |
+| Background cloud job storage | Supabase now stores Council-only background solve jobs, ordered job screenshots, append-only job events, Council reports and notification device tokens. |
+| Background helper controls | Settings can install, remove and inspect the user LaunchAgent for the dedicated helper binary. This is quiet background operation, not stealth. |
+| Dedicated helper v1 | `cloud-sync-helper` owns start/capture/submit hotkeys, captures full-screen screenshots with macOS `screencapture`, stores pending batch state locally, uploads to Supabase Storage and queues Council jobs from Keychain credentials. |
+| Cloud Jobs history | The desktop rail can list queued/running/completed cloud jobs, queue the current workspace screenshots, show ordered screenshot thumbnails, recent events and final report summaries. |
+| Cloud worker v1 | `scripts/cloud-worker.mjs` claims queued jobs, downloads ordered screenshots, runs independent TokenRouter chat-model solvers, benchmark harness generation, local worker verification, optional Codespaces mirrors, reviewer passes, judge reports and synthesis, writes Council reports and marks jobs completed. |
+| Product rename | The release bundle, window title, login screen and tray labels now ship as **Code Editor**. Internal binary and keychain identifiers remain stable for migration safety. |
+| Remote ops scaffolding | cron-job.org, QStash, E2B and GitHub Actions integration entrypoints are documented and scaffolded so scheduling and heavy validation can move off the laptop. |
+| Worker observability | The cloud worker has optional Sentry breadcrumbs/errors and Telegram operations alerts for failed, needs-attention and slow jobs, with screenshots/prompts/answers stripped from telemetry. |
+| Packaged release | `npm run app:build` now produces `Code Editor.app` and `Code Editor_0.1.0_aarch64.dmg`; the app bundle contains the `cloud-sync-helper` sidecar. |
+| Worker HTTP server | `npm run worker:serve` exposes `/api/worker-tick` for cron-job.org/QStash and `/api/register-device` for iOS APNs token registration without putting Supabase service-role credentials on the phone. |
+| iOS companion foundation | `ios/CodeEditorCompanion` contains a native SwiftUI app foundation for APNs registration, Apple Watch mirrored notifications and Supabase job/event/report viewing. |
 
 **What the last session retired**
 
@@ -2612,23 +2623,23 @@ The final architecture becomes:
 11. [done] Execution
 12. [done] Testing
 13. [done] Runtime checks
-14. [next] Automatic repair
-15. [next] Final verified result from live Council + Codespaces run
+14. [done] Background cloud job schema and desktop history
+15. [done] Dedicated macOS helper binary with start/capture/submit batch hotkeys
+16. [done] Cloud worker v1 solver/benchmark/review/judge/synthesis Council reports
+17. [next] Final verified result from live Council + Codespaces run
 ```
 
 ## 🟡 Build NEXT
 
 ```text
-16. Live settings/model probe verification
-17. Live smoke Run with Council off
-18. Live Council Run with Codespaces benchmark evidence
-19. Automatic repair loop
-20. Editable candidate workspace
-21. Candidate comparison view
-22. Verified solution library
-23. Framework-specific solving packs
-24. Counterexample search
-25. Security analysis for generated code
+18. Live settings/model probe verification
+19. Live smoke Run with Council off
+20. Live Council Run with Codespaces benchmark evidence
+21. Package/sign helper binary inside the release app bundle
+22. Cloud worker revision rounds
+23. Native iOS APNs companion foundation
+24. Automatic repair loop
+25. Candidate comparison view
 ```
 
 ## 🔵 Keep Out Of Scope

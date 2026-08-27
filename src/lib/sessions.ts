@@ -117,6 +117,21 @@ export interface SolveJobEvent {
   createdAt: string;
 }
 
+export interface SolveJobImage {
+  id: string;
+  jobId: string;
+  sessionId: string;
+  position: number;
+  storageBucket: string;
+  storagePath: string;
+  fileName: string;
+  bytes: number;
+  mime: string;
+  width: number | null;
+  height: number | null;
+  createdAt: string;
+}
+
 export interface CouncilReportSummary {
   id: string;
   jobId: string;
@@ -126,6 +141,16 @@ export interface CouncilReportSummary {
   markdown: string;
   report: Record<string, unknown>;
   createdAt: string;
+}
+
+export interface NewSolveJobImage {
+  storageBucket: string;
+  storagePath: string;
+  fileName: string;
+  bytes: number;
+  mime: string;
+  width?: number | null;
+  height?: number | null;
 }
 
 // ------------------------------------------------------------------ sessions
@@ -220,6 +245,15 @@ export async function saveRun(args: {
 
 // ------------------------------------------------------------- solve jobs
 
+export async function createSolveJob(job: {
+  sessionId: string;
+  settingsSnapshot: Record<string, unknown>;
+  images: NewSolveJobImage[];
+}): Promise<string> {
+  if (!inTauri()) throw new Error(NO_SHELL);
+  return invoke<string>("solve_job_create", { job });
+}
+
 export async function listSolveJobs(
   status: SolveJobStatus | "all" = "all"
 ): Promise<SolveJob[]> {
@@ -230,6 +264,11 @@ export async function listSolveJobs(
 export async function listSolveJobEvents(jobId: string): Promise<SolveJobEvent[]> {
   if (!inTauri()) return [];
   return invoke<SolveJobEvent[]>("solve_job_event_list", { jobId });
+}
+
+export async function listSolveJobImages(jobId: string): Promise<SolveJobImage[]> {
+  if (!inTauri()) return [];
+  return invoke<SolveJobImage[]>("solve_job_image_list", { jobId });
 }
 
 export async function getCouncilReport(

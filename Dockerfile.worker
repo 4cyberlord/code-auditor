@@ -1,0 +1,28 @@
+FROM node:24-bookworm
+
+WORKDIR /app
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    bash \
+    build-essential \
+    ca-certificates \
+    git \
+    golang-go \
+    openjdk-17-jdk-headless \
+    php-cli \
+    python3 \
+    ruby \
+    rustc \
+    time \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY src ./src
+COPY scripts ./scripts
+
+ENV NODE_ENV=production
+EXPOSE 8787
+CMD ["node", "scripts/worker-server.mjs"]

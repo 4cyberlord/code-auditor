@@ -65,6 +65,7 @@ pub struct CodespaceBenchmarkResult {
 
 #[tauri::command]
 pub async fn codespaces_status() -> Result<CodespacesStatus, String> {
+    crate::auth::require()?;
     tokio::task::spawn_blocking(status)
         .await
         .map_err(|e| format!("Could not check GitHub Codespaces: {e}"))
@@ -74,6 +75,7 @@ pub async fn codespaces_status() -> Result<CodespacesStatus, String> {
 pub async fn codespace_benchmark(
     req: CodespaceBenchmarkRequest,
 ) -> Result<CodespaceBenchmarkResult, String> {
+    crate::auth::require()?;
     tokio::task::spawn_blocking(move || benchmark(req))
         .await
         .map_err(|e| format!("Could not schedule the Codespaces benchmark: {e}"))?

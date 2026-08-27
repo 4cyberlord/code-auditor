@@ -8,7 +8,7 @@
 //! A file rather than the clipboard, deliberately: going through the pasteboard
 //! would clobber whatever the user had copied.
 //!
-//! The file is kept, in `~/Pictures/Code Auditor`, rather than written to /tmp and
+//! The file is kept, in `~/Pictures/Code Editor`, rather than written to /tmp and
 //! deleted. A capture that exists only as a base64 string in a webview is
 //! invisible when something downstream fails -- you cannot tell "the grab never
 //! happened" from "the grab happened and the UI dropped it". On disk, you can.
@@ -101,6 +101,7 @@ fn dispatch(mode: Mode) -> Result<Option<Vec<Capture>>, String> {
 /// not an error: `screencapture` exits non-zero and writes nothing on Escape.
 #[tauri::command]
 pub async fn capture_selection() -> Result<Option<Vec<Capture>>, String> {
+    crate::auth::require()?;
     // `screencapture` blocks until the user finishes selecting, so it must not
     // run on an async runtime thread.
     tauri::async_runtime::spawn_blocking(|| dispatch(Mode::Region))
@@ -111,6 +112,7 @@ pub async fn capture_selection() -> Result<Option<Vec<Capture>>, String> {
 /// Whole-display capture, with no crosshair and nothing to aim.
 #[tauri::command]
 pub async fn capture_screen() -> Result<Option<Vec<Capture>>, String> {
+    crate::auth::require()?;
     tauri::async_runtime::spawn_blocking(|| dispatch(Mode::Screen))
         .await
         .map_err(|e| format!("Capture task failed: {e}"))?
@@ -123,6 +125,7 @@ pub async fn capture_screen() -> Result<Option<Vec<Capture>>, String> {
 /// exist should still open and read correctly instead of failing to load.
 #[tauri::command]
 pub async fn read_capture(path: String) -> Result<Option<Capture>, String> {
+    crate::auth::require()?;
     tauri::async_runtime::spawn_blocking(move || {
         let p = std::path::Path::new(&path);
         if !p.exists() {
@@ -291,27 +294,27 @@ mod fingerprint_tests {
 
     #[test]
     fn a_reading_is_named_after_its_capture() {
-        let dir = Path::new("/tmp/Code Auditor");
+        let dir = Path::new("/tmp/Code Editor");
         let got = reading_path(dir, Some("capture-1756000000000.png"), 7);
         assert_eq!(got, dir.join("capture-1756000000000.reading.md"));
     }
 
     #[test]
     fn a_pasted_image_gets_a_timestamped_name() {
-        let dir = Path::new("/tmp/Code Auditor");
+        let dir = Path::new("/tmp/Code Editor");
         assert_eq!(reading_path(dir, None, 7), dir.join("reading-7.md"));
     }
 
     #[test]
     fn only_a_bare_file_name_is_accepted() {
         // The whole point: the webview cannot aim this at anything it likes.
-        let dir = Path::new("/tmp/Code Auditor");
+        let dir = Path::new("/tmp/Code Editor");
         for hostile in [
             "/etc/passwd",
             "../../etc/crontab",
             "..",
             "nested/shot.png",
-            "/tmp/Code Auditor/capture-1.png",
+            "/tmp/Code Editor/capture-1.png",
             "~/.ssh/authorized_keys/x",
             "",
             ".",
@@ -325,7 +328,7 @@ mod fingerprint_tests {
     fn a_name_with_dots_in_it_still_works() {
         // "my.screen.shot.png" has a perfectly good stem; only separators and
         // parent segments are the problem.
-        let dir = Path::new("/tmp/Code Auditor");
+        let dir = Path::new("/tmp/Code Editor");
         assert_eq!(
             reading_path(dir, Some("my.screen.shot.png"), 7),
             dir.join("my.screen.shot.reading.md")
@@ -376,6 +379,7 @@ fn reading_path(dir: &Path, near: Option<&str>, stamp: u128) -> PathBuf {
 /// something you can debug.
 #[tauri::command]
 pub fn save_reading(markdown: String, near: Option<String>) -> Result<String, String> {
+    crate::auth::require()?;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     if markdown.trim().is_empty() {
@@ -396,7 +400,7 @@ pub fn save_reading(markdown: String, near: Option<String>) -> Result<String, St
 
 fn capture_dir() -> Result<std::path::PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("No HOME in the environment")?;
-    let dir = std::path::Path::new(&home).join("Pictures/Code Auditor");
+    let dir = std::path::Path::new(&home).join("Pictures/Code Editor");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
     Ok(dir)
