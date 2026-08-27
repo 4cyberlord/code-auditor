@@ -199,9 +199,41 @@ export async function settingsSave(key: string, value: unknown): Promise<void> {
   await invoke("settings_save", { key, value });
 }
 
+/**
+ * Ask a running worker to take one job now.
+ *
+ * The desktop cannot run the worker itself — it is a Node process with its own
+ * credentials — but it can knock on the door of one, and knocking is the whole
+ * difference between a queued job draining in seconds and sitting until someone
+ * remembers to start something. Returns null when no worker is configured, which
+ * is a fact the panel needs rather than an error it should raise.
+ */
+export async function pokeWorker(
+  url: string,
+  secret: string
+): Promise<{ worked: boolean; durationMs: number } | null> {
+  const endpoint = url.trim();
+  if (!endpoint) return null;
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(secret.trim() ? { authorization: `Bearer ${secret.trim()}` } : {}),
+    },
+    body: "{}",
+  });
+  if (!res.ok) {
+    throw new Error(`The worker answered ${res.status} ${res.statusText}.`);
+  }
+  const body = (await res.json()) as { worked?: boolean; durationMs?: number };
+  return { worked: Boolean(body.worked), durationMs: Number(body.durationMs ?? 0) };
+}
+
 export interface BackgroundHelperStatus {
   installed: boolean;
   plistPath: string;
+  loaded: boolean;
+  problem: string | null;
   appPath: string;
   helperPath: string;
 }
@@ -211,6 +243,8 @@ export async function backgroundHelperStatus(): Promise<BackgroundHelperStatus> 
     return {
       installed: false,
       plistPath: "",
+      loaded: false,
+      problem: null,
       appPath: "",
       helperPath: "",
     };
@@ -262,35 +296,6 @@ export interface RunCodeResult {
   ok: boolean;
 }
 
-export interface CodespaceInfo {
-  name: string;
-  displayName: string;
-  repository: string;
-  machineName: string;
-  state: string;
-}
-
-export interface CodespacesStatus {
-  ghAvailable: boolean;
-  authenticated: boolean;
-  codespaces: CodespaceInfo[];
-  error: string | null;
-}
-
-export interface CodespaceBenchmarkResult {
-  ok: boolean;
-  runtime: string;
-  exitCode: number | null;
-  stdout: string;
-  stderr: string;
-  durationMs: number;
-  remoteElapsedMs: number | null;
-  peakMemoryKb: number | null;
-  timedOut: boolean;
-  truncated: boolean;
-  codespace: string;
-}
-
 /**
  * Executes a block of model-written code in a bounded scratch directory.
  *
@@ -306,29 +311,6 @@ export async function runCode(args: {
 }): Promise<RunCodeResult> {
   if (!inTauri()) throw new Error(NOT_TAURI);
   return invoke<RunCodeResult>("run_code", { req: args });
-}
-
-export async function codespacesStatus(): Promise<CodespacesStatus> {
-  if (!inTauri()) {
-    return {
-      ghAvailable: false,
-      authenticated: false,
-      codespaces: [],
-      error: NOT_TAURI,
-    };
-  }
-  return invoke<CodespacesStatus>("codespaces_status");
-}
-
-export async function codespaceBenchmark(args: {
-  codespace: string;
-  language: string;
-  code: string;
-  stdin?: string;
-  timeoutMs?: number;
-}): Promise<CodespaceBenchmarkResult> {
-  if (!inTauri()) throw new Error(NOT_TAURI);
-  return invoke<CodespaceBenchmarkResult>("codespace_benchmark", { req: args });
 }
 
 /** Languages with an interpreter actually installed on this machine. */

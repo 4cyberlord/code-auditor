@@ -29,8 +29,32 @@ const MAX_IMAGES: usize = 10;
 const KC_PEPPER: &str = "auth-pepper";
 const KC_OWNER: &str = "auth-owner";
 const KC_TOKEN: &str = "auth-token";
-const SEED_USERNAME: &str = "nimo";
-const SEED_PIN: &str = "3313";
+// No credentials live in this file any more.
+//
+// This binary ships *inside* the .app bundle, and it carried a username and PIN
+// as compiled-in constants. `strings` on the sidecar printed the PIN, and
+// `--reset-auth` truncated app_users and recreated that account — so anyone
+// holding a copy of the app could take the account without ever seeing the
+// PIN prompt. The Tauri commands are all behind `auth::require()`; running the
+// sidecar directly walked around that entirely.
+//
+// The reset now exists only in debug builds, takes its credentials from the
+// environment, and refuses to invent any. The database is the authority on who
+// the owner is; nothing here should be able to overrule it in a shipped build.
+#[cfg(debug_assertions)]
+fn reset_credentials() -> Result<(String, String), String> {
+    let name = std::env::var("CODE_AUDITOR_ADMIN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or("Set CODE_AUDITOR_ADMIN to the owner username before resetting auth.")?;
+    let pin = std::env::var("CODE_AUDITOR_ADMIN_PIN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or("Set CODE_AUDITOR_ADMIN_PIN to the owner PIN before resetting auth.")?;
+    Ok((name, pin))
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -64,16 +88,34 @@ struct UploadedImage {
 
 fn main() {
     if std::env::args().any(|arg| arg == "--reset-auth") {
-        let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
-            eprintln!("Could not start reset runtime: {e}");
-            std::process::exit(1);
-        });
-        if let Err(e) = rt.block_on(reset_auth()) {
-            eprintln!("{e}");
-            std::process::exit(1);
+        #[cfg(not(debug_assertions))]
+        {
+            eprintln!(
+                "--reset-auth is a development tool and is not compiled into release builds. \
+                 Change the PIN from Settings, or clear app_users in the database."
+            );
+            std::process::exit(2);
         }
-        println!("Auth reset complete: {SEED_USERNAME} / {SEED_PIN}");
-        return;
+        #[cfg(debug_assertions)]
+        {
+            let (name, pin) = match reset_credentials() {
+                Ok(pair) => pair,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            };
+            let rt = tokio::runtime::Runtime::new().unwrap_or_else(|e| {
+                eprintln!("Could not start reset runtime: {e}");
+                std::process::exit(1);
+            });
+            if let Err(e) = rt.block_on(reset_auth(&name, &pin)) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+            println!("Auth reset complete for {name}. The PIN is the one you passed in.");
+            return;
+        }
     }
 
     if let Err(e) = run() {
@@ -384,6 +426,7 @@ fn write_keychain(account: &str, value: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+#[cfg(debug_assertions)]
 fn clear_keychain(account: &str) -> Result<(), String> {
     match keychain_entry(account)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -399,6 +442,7 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
+#[cfg(debug_assertions)]
 fn pepper() -> Result<String, String> {
     match keychain_entry(KC_PEPPER)?.get_password() {
         Ok(value) if !value.trim().is_empty() => Ok(value.trim().to_string()),
@@ -413,6 +457,7 @@ fn pepper() -> Result<String, String> {
     }
 }
 
+#[cfg(debug_assertions)]
 fn peppered(pin: &str) -> Result<String, String> {
     type H = Hmac<Sha256>;
     let mut mac = H::new_from_slice(pepper()?.as_bytes())
@@ -421,6 +466,7 @@ fn peppered(pin: &str) -> Result<String, String> {
     Ok(hex(&mac.finalize().into_bytes()))
 }
 
+#[cfg(debug_assertions)]
 fn hash_pin(pin: &str) -> Result<String, String> {
     let params = Params::new(64 * 1024, 3, 1, None)
         .map_err(|e| format!("Could not configure the hasher: {e}"))?;
@@ -432,7 +478,8 @@ fn hash_pin(pin: &str) -> Result<String, String> {
         .map_err(|e| format!("Could not hash the PIN: {e}"))
 }
 
-async fn reset_auth() -> Result<(), String> {
+#[cfg(debug_assertions)]
+async fn reset_auth(username: &str, pin: &str) -> Result<(), String> {
     let conn = read_keychain(DB_KEYCHAIN_ID)?;
     let pool = PgPoolOptions::new()
         .max_connections(2)
@@ -440,7 +487,8 @@ async fn reset_auth() -> Result<(), String> {
         .connect(&with_tls(&conn))
         .await
         .map_err(|e| format!("Could not connect to Supabase Postgres: {e}"))?;
-    let hash = tokio::task::spawn_blocking(|| hash_pin(SEED_PIN))
+    let owned = pin.to_string();
+    let hash = tokio::task::spawn_blocking(move || hash_pin(&owned))
         .await
         .map_err(|e| format!("Could not schedule PIN hashing: {e}"))??;
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
@@ -449,7 +497,7 @@ async fn reset_auth() -> Result<(), String> {
         .await
         .map_err(|e| format!("Could not clear auth tables: {e}"))?;
     sqlx::query("insert into app_users (username, pin_hash) values ($1, $2)")
-        .bind(SEED_USERNAME)
+        .bind(username)
         .bind(hash)
         .execute(&mut *tx)
         .await
@@ -458,7 +506,7 @@ async fn reset_auth() -> Result<(), String> {
         .await
         .map_err(|e| format!("Could not commit auth reset: {e}"))?;
     clear_keychain(KC_TOKEN)?;
-    write_keychain(KC_OWNER, SEED_USERNAME)?;
+    write_keychain(KC_OWNER, username)?;
     Ok(())
 }
 

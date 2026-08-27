@@ -184,12 +184,48 @@ export function imageManifest(images: ImageRef[]): string {
   return notes.join("\n");
 }
 
+/**
+ * Which language to reach for, and what to aim at, when the question does not say.
+ *
+ * This is a *default*, not an override, and the distinction is the whole point.
+ * When a screenshot shows a Python stub, the answer belongs in Python -- that is
+ * the language the question was asked in, and `answerLanguageRule` already says
+ * so. This applies only to the case the first rule leaves open: a problem stated
+ * with no language attached, where somebody still has to choose one.
+ *
+ * The targets are aims, not claims. The contract already forbids asserting a
+ * runtime or a memory figure that was not measured, and nothing here relaxes
+ * that -- an unmeasured "Runtime: 0ms" is still a lie whether or not it was the
+ * target.
+ */
+/** "20 MB", "512 KB" — a figure a person reads without doing arithmetic. */
+export function formatMemory(kb: number): string {
+  const value = Math.max(0, Math.round(kb));
+  return value >= 1024 ? `${Number((value / 1024).toFixed(value % 1024 === 0 ? 0 : 1))} MB` : `${value} KB`;
+}
+
+export function solutionPolicy(languages: string[] = ["C++", "Python"], memoryKb = 20480): string {
+  const list = languages.filter((l) => l.trim());
+  if (!list.length) return "";
+  const order =
+    list.length > 1
+      ? `${list.slice(0, -1).join(", ")} and then ${list[list.length - 1]}`
+      : list[0];
+  return [
+    `If the problem does not itself fix the language, write the solution in ${order}, in that order of preference.`,
+    `${list[0]} is preferred because the bar here is measured, not asserted: the targets are a runtime that rounds to 0ms and a peak resident set no larger than ${formatMemory(memoryKb)}.`,
+    "If you choose a language other than the first, say in one line why the first was unsuitable.",
+    "Do not state a runtime or a memory figure you did not measure — these are targets to design toward, not numbers to report.",
+  ].join(" ");
+}
+
 export function userPrompt(
   note: string,
   hasImage: boolean,
   extracted = "",
   images: ImageRef[] = [],
-  knowledge = ""
+  knowledge = "",
+  house = ""
 ): string {
   const parts: string[] = [];
   const context = extracted.trim();
@@ -226,6 +262,10 @@ export function userPrompt(
 
   if (knowledge.trim()) {
     parts.push(`--- LOCAL KNOWLEDGE / RAG ---\n${knowledge.trim()}\n--- END KNOWLEDGE ---`);
+  }
+
+  if (house.trim()) {
+    parts.push(`--- HOUSE RULES ---\n${house.trim()}\n--- END HOUSE RULES ---`);
   }
 
   if (note.trim()) {

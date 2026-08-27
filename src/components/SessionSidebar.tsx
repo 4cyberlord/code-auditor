@@ -25,13 +25,29 @@ export default function SessionSidebar() {
   const archive = useStore((s) => s.archiveSession);
   const remove = useStore((s) => s.removeSession);
 
+  const history = useStore((s) => s.history);
+  const historyLoading = useStore((s) => s.historyLoading);
+  const historyError = useStore((s) => s.historyError);
+  const viewingRunId = useStore((s) => s.viewingRunId);
+  const loadHistory = useStore((s) => s.loadHistory);
+  const openRun = useStore((s) => s.openRun);
+  const exitHistory = useStore((s) => s.exitHistory);
+  const running = useStore((s) => s.running);
+
   const openSettings = useStore((s) => s.setSettingsOpen);
-  const open = useStore((s) => s.settings.sessionsOpen);
-  const patch = useStore((s) => s.patchSettings);
+  const open = useStore((s) => s.settings.railPanel === "sessions");
+  const toggleRail = useStore((s) => s.toggleRailPanel);
 
   // "No database configured" is a setup step, not a fault. Printing it as a red
   // error box next to a Retry button that cannot help was the wrong shape.
   const needsSetup = !!error && /no database is configured/i.test(error);
+
+  // Every finished run has been written to the database since the first version
+  // of the app; nothing ever read them back. Fetched when the session changes
+  // and again when a run finishes, which is when the list is actually stale.
+  useEffect(() => {
+    void loadHistory();
+  }, [loadHistory, current, running]);
 
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -60,11 +76,11 @@ export default function SessionSidebar() {
         role="button"
         tabIndex={0}
         aria-expanded={open}
-        onClick={() => patch({ sessionsOpen: !open })}
+        onClick={() => toggleRail("sessions")}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            patch({ sessionsOpen: !open });
+            toggleRail("sessions");
           }
         }}
         title={open ? "Collapse" : "Show your sessions"}
@@ -208,6 +224,54 @@ export default function SessionSidebar() {
           </div>
         ))}
       </div>
+      )}
+
+      {open && current && (
+        <div className="history">
+          <div className="history-head">
+            <span>History</span>
+            <span className="spacer" />
+            {viewingRunId ? (
+              <button className="btn tiny" onClick={() => exitHistory()}>
+                Back to live
+              </button>
+            ) : (
+              <span className="history-count">
+                {historyLoading ? "…" : `${history.length} ${history.length === 1 ? "run" : "runs"}`}
+              </span>
+            )}
+          </div>
+
+          {historyError && <div className="pane-error">{historyError}</div>}
+
+          {!historyLoading && !history.length && !historyError && (
+            <p className="history-empty">
+              Nothing finished in this session yet. Every run is saved once it completes.
+            </p>
+          )}
+
+          {history.map((r) => (
+            <button
+              key={r.id}
+              className="history-row"
+              data-current={r.id === viewingRunId}
+              disabled={running}
+              title={running ? "Finish the current run first" : "Show this run in the panes"}
+              onClick={() => void openRun(r.id)}
+            >
+              <span className="history-asked">
+                {r.asked.trim() ? r.asked.trim().split("\n")[0] : "(no note — solved from the screenshot)"}
+              </span>
+              <span className="history-meta">
+                {formatWhen(r.startedAt, zone, "relative")}
+                {" · "}
+                {r.answered} {r.answered === 1 ? "answer" : "answers"}
+                {r.verdict ? ` · ${r.verdict}` : ""}
+                {r.reliability ? ` · ${r.reliability} reliability` : ""}
+              </span>
+            </button>
+          ))}
+        </div>
       )}
     </aside>
   );

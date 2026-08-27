@@ -17,6 +17,8 @@ export default function ConsensusPanel() {
   const settings = useStore((s) => s.settings);
   const running = useStore((s) => s.running);
   const patch = useStore((s) => s.patchSettings);
+  const open = useStore((s) => s.settings.railPanel === "consensus");
+  const toggleRail = useStore((s) => s.toggleRailPanel);
   const runJudge = useStore((s) => s.runJudge);
   const consensus = useStore((s) => s.consensus);
   const [answersOpen, setAnswersOpen] = useState(false);
@@ -44,16 +46,63 @@ export default function ConsensusPanel() {
 
   const ids = finished.map((a) => a.id);
 
+  /**
+   * Every pair, in a sentence.
+   *
+   * The score is still the same number the matrix showed; what changes is that
+   * it is spent on a plain reading rather than printed raw. "Said the same
+   * thing" and "went different ways" are the two things the number means, and
+   * the band in between is worth naming honestly as partial rather than
+   * rounding it to one or the other.
+   */
+  const pairSentences = ids.flatMap((a, i) =>
+    ids.slice(i + 1).map((b) => {
+      const score = scoreFor(a, b);
+      const agree = score != null && score >= threshold;
+      const said =
+        score == null
+          ? "could not be compared"
+          : agree
+            ? score >= threshold + 0.15
+              ? "said the same thing"
+              : "broadly agreed"
+            : score >= threshold - 0.15
+              ? "partly overlapped, but not enough to count as agreeing"
+              : "went different ways";
+      return { key: `${a}-${b}`, a: nameOf(a), b: nameOf(b), agree, said };
+    })
+  );
+
+  const answeredLabel = `${finished.length}/${agents.filter((a) => a.enabled).length} answered`;
+
   return (
-    <aside className="side">
-      <div className="side-head">
+    <aside className="side" data-open={open}>
+      {/* The whole row is the handle, matching every other drawer. The answered
+          count stays on it when collapsed — it is the one thing worth seeing
+          without opening the box. */}
+      <div
+        className="side-head drawer-head"
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={() => toggleRail("consensus")}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            toggleRail("consensus");
+          }
+        }}
+        title={open ? "Collapse" : "Show the solution box"}
+      >
+        <span className="chev" aria-hidden="true">
+          ▾
+        </span>
         <h2>Solution box</h2>
         <span className="spacer" />
-        <span style={{ fontSize: 11, color: "var(--text-faint)" }}>
-          {finished.length}/{agents.filter((a) => a.enabled).length} answered
-        </span>
+        <span style={{ fontSize: 11, color: "var(--text-faint)" }}>{answeredLabel}</span>
       </div>
 
+      {open && (
       <div className="side-body">
         <div className="verdict" data-v={result.verdict}>
           <h3>{result.headline}</h3>
@@ -90,51 +139,74 @@ export default function ConsensusPanel() {
         {ids.length > 1 && (
           <>
             <p className="section-label" style={{ marginTop: 16 }}>
-              Agreement matrix
+              Who agreed with whom
             </p>
-            <div style={{ overflowX: "auto" }}>
-              <table className="matrix">
-                <thead>
-                  <tr>
-                    <th />
-                    {ids.map((id) => (
-                      <th key={id}>{nameOf(id).slice(0, 6)}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {ids.map((a) => (
-                    <tr key={a}>
-                      <th>{nameOf(a).slice(0, 6)}</th>
-                      {ids.map((b) => {
-                        if (a === b) return <td key={b} style={{ color: "var(--text-faint)" }}>{"—"}</td>;
-                        const s = scoreFor(a, b);
-                        return (
-                          <td key={b} data-agree={s != null && s >= threshold}>
-                            {s == null ? "-" : s.toFixed(2)}
-                          </td>
-                        );
-                      })}
+
+            {/* This was a grid of pair scores to two decimal places, which is
+                the right shape for tuning a threshold and the wrong shape for
+                the question people actually have: did these two say the same
+                thing? A sentence per pair, in words, answers that without
+                anyone having to learn what 0.63 means. */}
+            <ul className="pairings">
+              {pairSentences.map((p) => (
+                <li key={p.key} data-agree={p.agree}>
+                  <span className="pair-mark" aria-hidden="true">{p.agree ? "=" : "\u2260"}</span>
+                  <span className="pair-who">
+                    <b>{p.a}</b> and <b>{p.b}</b>
+                  </span>
+                  <span className="pair-said">{p.said}</span>
+                </li>
+              ))}
+            </ul>
+
+            <details className="pair-detail">
+              <summary>Show the numbers</summary>
+              <div style={{ overflowX: "auto" }}>
+                <table className="matrix">
+                  <thead>
+                    <tr>
+                      <th />
+                      {ids.map((id) => (
+                        <th key={id}>{nameOf(id).slice(0, 6)}</th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-              <span style={{ fontSize: 10.5, color: "var(--text-faint)" }}>match at</span>
-              <input
-                type="range"
-                min={0.2}
-                max={0.9}
-                step={0.01}
-                value={threshold}
-                onChange={(e) => patch({ threshold: Number(e.target.value) })}
-                style={{ flex: 1, accentColor: "var(--accent)" }}
-              />
-              <span style={{ fontSize: 10.5, fontFamily: "var(--font-mono)", color: "var(--text-dim)" }}>
-                {threshold.toFixed(2)}
-              </span>
-            </div>
+                  </thead>
+                  <tbody>
+                    {ids.map((a) => (
+                      <tr key={a}>
+                        <th>{nameOf(a).slice(0, 6)}</th>
+                        {ids.map((b) => {
+                          if (a === b) {
+                            return <td key={b} style={{ color: "var(--text-faint)" }}>{"\u2014"}</td>;
+                          }
+                          const sc = scoreFor(a, b);
+                          return (
+                            <td key={b} data-agree={sc != null && sc >= threshold}>
+                              {sc == null ? "-" : sc.toFixed(2)}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 14, marginBottom: 10 }}>
+                <span style={{ fontSize: 10.5, color: "var(--text-faint)" }}>Match at</span>
+                <input
+                  type="range"
+                  min={0.2}
+                  max={0.9}
+                  step={0.01}
+                  value={threshold}
+                  onChange={(e) => patch({ threshold: Number(e.target.value) })}
+                  style={{ flex: 1, accentColor: "var(--accent)" }}
+                />
+                <span style={{ fontSize: 10.5, fontFamily: "var(--font-mono)", color: "var(--text-dim)" }}>
+                  {threshold.toFixed(2)}
+                </span>
+              </div>
+            </details>
           </>
         )}
 
@@ -150,12 +222,12 @@ export default function ConsensusPanel() {
                   {agentSpec(a.provider).label}
                   {result.representative === a.id && (
                     <span className="badge" data-tone="good">
-                      representative
+                      Representative
                     </span>
                   )}
                   {result.outliers.includes(a.id) && (
                     <span className="badge" data-tone="warn">
-                      outlier
+                      Outlier
                     </span>
                   )}
                   <span className="spacer" />
@@ -260,6 +332,7 @@ export default function ConsensusPanel() {
           </>
         )}
       </div>
+      )}
     </aside>
   );
 }

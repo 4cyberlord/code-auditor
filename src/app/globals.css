@@ -464,11 +464,27 @@ textarea.field {
   border-left: 1px solid var(--line);
 }
 
-/* The verdict takes whatever the drawer is not using. */
+/* The verdict takes whatever the drawer is not using -- unless it is collapsed,
+   in which case it is a header and should be exactly a header tall. Without the
+   second rule `flex: 1` keeps its full share of the rail and leaves a large
+   empty box under the closed head. */
 .rail > .side {
   flex: 1;
   min-height: 0;
   border-left: 0;
+}
+
+.rail > .side[data-open="false"] {
+  flex: none;
+}
+
+/* Points down when open, right when shut, the same as every other drawer. */
+.side[data-open="false"] .chev {
+  transform: rotate(-90deg);
+}
+
+.side[data-open="false"] .drawer-head {
+  border-bottom: 1px solid var(--line);
 }
 
 /* The pane grid follows how many providers are switched on. It was hard-wired to
@@ -615,7 +631,10 @@ textarea.field {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 10px;
+  /* Wraps rather than overflowing: a complexity line can be long, and pushing
+     the buttons off the end of the row was how it used to handle that. */
+  flex-wrap: wrap;
+  gap: 2px 8px;
   padding: 5px 10px;
   border-top: 1px solid var(--line);
   background: var(--bg-raised);
@@ -1641,9 +1660,14 @@ textarea.field {
 }
 
 .drawer-head {
-  cursor: default;
+  /* The row is a button — `role="button"` in both drawers — so it says so. */
+  cursor: pointer;
   user-select: none;
   border-bottom: 0;
+  /* Slightly under the 11px .side-head inherits, so the taller glyph lands the
+     row near the 38px it was rather than growing it. */
+  padding-top: 8px;
+  padding-bottom: 8px;
 }
 
 .sessions[data-open="true"] .drawer-head {
@@ -1655,20 +1679,32 @@ textarea.field {
 }
 
 /* The one control that says whether a drawer is open or shut, so it has to be
-   readable at a glance. At 10px in --text-faint the triangle was a smudge --
-   large enough to be a hit target only because the whole header is one. A fixed
-   square box keeps the glyph centred through the rotation instead of letting
-   its own bearings shift it a pixel sideways. */
+   readable at a glance. Half again as big as the 16px/14px it started at --
+   tripling it turned the header into a band, and this was never about hit area
+   anyway, since the whole row is the target. It was about seeing which way it
+   points without looking for it. A fixed square box keeps the glyph centred
+   through the rotation instead of letting its own bearings shift it sideways. */
 .drawer-head .chev {
   display: grid;
   place-items: center;
   flex: none;
-  width: 16px;
-  height: 16px;
-  font-size: 14px;
+  width: 24px;
+  height: 24px;
+  font-size: 21px;
   line-height: 1;
   color: var(--text-dim);
   transition: transform 0.15s ease, color 0.15s ease;
+}
+
+/* At this size the glyph is doing real work, so it gets real contrast rather
+   than the dimmed treatment that suited a small mark. */
+.drawer-head:hover .chev,
+.drawer-head:focus-visible .chev {
+  color: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer-head .chev { transition: none; }
 }
 
 .drawer-head:hover .chev {
@@ -2786,3 +2822,386 @@ body[data-dragging="row"] * {
   height: 100vh;
   background: var(--bg);
 }
+
+
+/* The router catalogue: potentially a couple of hundred ids, so it scrolls in
+   its own box rather than pushing the rest of Settings off screen. Each row is
+   clickable, so it has to look clickable and has to keep the id readable at a
+   glance -- the id is what you came for; the badges are commentary. */
+.catalogue {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2, var(--panel));
+}
+
+.catalogue-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+
+.catalogue-row:last-child {
+  border-bottom: 0;
+}
+
+.catalogue-row:hover {
+  background: var(--hover, rgba(127, 127, 127, 0.12));
+}
+
+.catalogue-id {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+
+/* The run history, under the session list. A row is a button because it does
+   something -- it replaces what the panes are showing -- and the thing you
+   scan for is what was asked, so that gets the weight and the meta goes quiet. */
+.history {
+  border-top: 1px solid var(--line);
+  padding: 8px 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 42vh;
+  overflow-y: auto;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 2px 2px 6px;
+}
+
+.history-count { font-size: 11px; color: var(--text-faint); }
+
+.history-empty {
+  font-size: 12px;
+  color: var(--text-faint);
+  margin: 2px 2px 0;
+  line-height: 1.5;
+}
+
+.history-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  text-align: left;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.history-row:hover:not(:disabled) { background: var(--hover, rgba(127, 127, 127, .1)); }
+.history-row:disabled { opacity: .45; cursor: default; }
+.history-row:focus-visible { outline: 2px solid var(--accent, currentColor); outline-offset: 1px; }
+
+/* The run the panes are showing right now. */
+.history-row[data-current="true"] {
+  border-color: var(--accent, currentColor);
+  background: var(--hover, rgba(127, 127, 127, .1));
+}
+
+.history-asked {
+  font-size: 12.5px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.history-meta { font-size: 11px; color: var(--text-faint); }
+
+
+/* Shown above the panes while they hold a saved run. Warm rather than red:
+   nothing is wrong, but nothing on screen is live either. */
+.history-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 12px 8px;
+  padding: 7px 12px;
+  border: 1px solid var(--warn, #b0790f);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--warn, #b0790f) 12%, transparent);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+
+/* A queued job with no worker behind it. Warm, not red: nothing has failed --
+   nothing has started, which is a different thing and needs a different tone. */
+.job-stalled {
+  margin: 0 0 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--warn, #b0790f);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--warn, #b0790f) 10%, transparent);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.job-stalled p { margin: 0; font-size: 12.5px; line-height: 1.45; }
+.job-stalled .hint { color: var(--text-dim); }
+.job-stalled .mono { font-size: 12px; }
+
+
+/* ------------------------------------------------------------- solution card
+
+   The read-out on the answer. Three facets side by side on a wide pane and
+   stacked on a narrow one, because they are peers -- nobody reads "efficiency"
+   before "is it correct", and nesting them would imply an order that is not
+   there. */
+.solution-card {
+  /* A direct flex child of `.rail`, which is a column. Without these three the
+     card takes its full content height and refuses to give any of it back:
+     flex items default to `min-height: auto`, so a tall card cannot shrink, and
+     it squeezes the consensus panel below it to nothing and spills over the
+     rail. It is allowed roughly half the rail and scrolls inside that. */
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 52%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 12px 14px 14px;
+  margin: 0 0 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Collapsed, the card is just its header: no cap, nothing to scroll, and no
+   sticky offset to leave a gap where the body used to be. */
+.solution-card[data-open="false"] {
+  max-height: none;
+  overflow: visible;
+  gap: 0;
+  padding-bottom: 0;
+}
+
+/* The header stays put while the body scrolls under it -- the status badge is
+   the thing you look back at, and losing it off the top defeats the card. */
+.solution-head {
+  position: sticky;
+  top: -12px;
+  z-index: 1;
+  margin: -12px -14px 0;
+  /* Its own padding: `.side-head` is sized for a full-width column head, and
+     this one sits inside a card that already has padding. */
+  padding: 8px 14px;
+  background: var(--panel);
+  border-bottom: 0;
+}
+
+/* A rule under the head while it is open, the same as the sessions drawer, so
+   the header reads as a header rather than as the first line of the body. */
+.solution-card[data-open="true"] .solution-head {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 2px;
+}
+
+.solution-head h2 { margin: 0; font-size: 12px; font-weight: 650; }
+.solution-empty { margin: 0; line-height: 1.5; }
+
+.solution-card[data-open="false"] .solution-head {
+  position: static;
+  margin-bottom: -12px;
+}
+
+/* Points down when open, right when shut -- the direction it will move, the
+   same as every other drawer in the app. */
+.solution-card[data-open="false"] .chev {
+  transform: rotate(-90deg);
+}
+
+.solution-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.solution-card > .solution-head { cursor: pointer; }
+.solution-head h3 { margin: 0; font-size: 13px; font-weight: 650; }
+.solution-why { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text-dim); }
+
+/* Measured numbers get the mono treatment; the absence of them gets prose, so
+   the two can never be mistaken for each other at a glance. */
+.solution-measured {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  align-items: baseline;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--hover, rgba(127, 127, 127, .08));
+  font-size: 12px;
+}
+
+.solution-measured[data-measured="true"] span {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.solution-measured b {
+  font-family: var(--font-sans, inherit);
+  font-weight: 600;
+  font-size: 10.5px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-right: 6px;
+}
+
+.solution-runtime-label { color: var(--text-faint); }
+
+/* One under the other, never side by side.
+   Three columns in a rail this narrow gave each facet about a third of an
+   already-narrow space, so "Current / Suggested" wrapped onto four lines and the
+   three cards read as one block of crushed text. They are a short list -- read
+   top to bottom -- and a list is what they should look like. */
+.solution-facets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.facet {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 9px 11px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.facet h4 {
+  margin: 0;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* With the full width of the card there is room to put the label and its value
+   on one line, which is how you compare "Current" against "Suggested" -- the
+   whole point of the pairing. */
+.facet dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 4px 12px;
+  font-size: 12.5px;
+  align-items: baseline;
+}
+
+.facet dt { color: var(--text-faint); font-size: 11px; align-self: baseline; white-space: nowrap; }
+.facet dd { margin: 0; overflow-wrap: anywhere; }
+
+/* When the reviewer had nothing to improve, the suggestion is the current
+   answer. Marking it quiet stops it reading as a change being proposed. */
+.facet dd[data-same="true"] { color: var(--good, #2f855a); }
+.facet dd[data-grade="excellent"] { color: var(--good, #2f855a); }
+.facet dd[data-grade="poor"] { color: var(--bad, #c53030); }
+.facet dd[data-grade="fair"] { color: var(--warn, #b0790f); }
+
+.facet p { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-dim); }
+.facet p b { color: var(--text); font-weight: 600; }
+
+.solution-ports { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.solution-ports .segmented { flex: none; }
+
+/* The code viewer, and the reason the card scrolled instead of the code.
+   `.codeblock pre` only sets `overflow-x`, so a forty-line solution simply grew
+   to forty lines tall: there was nothing to scroll *in*, so the wheel moved the
+   card, then the page. Bounding the height is what turns it into a viewer --
+   and `overflow: auto` rather than `overflow-x` gives it the vertical axis it
+   was missing. */
+.solution-ports .codeblock {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.solution-ports .codeblock pre {
+  max-width: 100%;
+  max-height: 320px;
+  overflow: auto;
+  /* Reaching the end of the code should stop, not hand the scroll to the card
+     and then to the page behind it. */
+  overscroll-behavior: contain;
+}
+
+
+/* The separator between facts under a pane. Part of the text, not a gap, so a
+   copied row still reads as separate facts. */
+.pane-foot-sep {
+  color: var(--text-faint);
+  opacity: .55;
+  margin-right: 8px;
+}
+
+
+/* Who agreed with whom, in sentences. The mark carries the verdict so the row
+   reads at a glance; the words carry the nuance the mark cannot. */
+.pairings {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.pairings li {
+  display: grid;
+  grid-template-columns: 16px auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.pair-mark {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--bad, #c53030);
+  text-align: center;
+}
+
+.pairings li[data-agree="true"] .pair-mark { color: var(--good, #2f855a); }
+.pair-who { white-space: nowrap; }
+.pair-who b { font-weight: 600; }
+.pair-said { color: var(--text-dim); }
+
+/* The numbers are still there for tuning the threshold, just not first. */
+.pair-detail { margin-top: 12px; }
+
+.pair-detail > summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.pair-detail > summary:hover { color: var(--text); }

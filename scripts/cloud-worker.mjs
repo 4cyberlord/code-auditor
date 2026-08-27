@@ -4,7 +4,7 @@
  *
  * This process owns queued background jobs. It deliberately does not read local
  * Keychain secrets or screenshots: jobs arrive through Supabase rows and Storage,
- * while provider, GitHub/Codespaces and APNs secrets come from server-side env.
+ * while provider, GitHub Actions, E2B and APNs secrets come from server-side env.
  *
  * v1 runs a compact Council: independent solver calls, benchmark generation and
  * execution, reviewer passes, judge passes and one synthesis pass. Revision
@@ -40,13 +40,34 @@ const SLOW_JOB_MS = Number(process.env.CODE_AUDITOR_SLOW_JOB_MS || 180_000);
 
 initObservability({ service: "cloud-worker", workerId: WORKER_ID });
 
-const [{ systemPrompt, userPrompt }, { parseFinal }, council, { resolveAnswerLanguage }] =
-  await Promise.all([
-    import("../src/lib/prompts.ts"),
-    import("../src/lib/parse.ts"),
-    import("../src/lib/council.ts"),
-    import("../src/lib/answerLanguage.ts"),
-  ]);
+const [
+  { systemPrompt, userPrompt, imageManifest, solutionPolicy },
+  { parseFinal },
+  council,
+  { resolveAnswerLanguage },
+  { titleFor, isPlaceholder },
+  extraction,
+  { knowledgePackFor },
+] = await Promise.all([
+  import("../src/lib/prompts.ts"),
+  import("../src/lib/parse.ts"),
+  import("../src/lib/council.ts"),
+  import("../src/lib/answerLanguage.ts"),
+  import("../src/lib/title.ts"),
+  import("../src/lib/extraction.ts"),
+  import("../src/lib/knowledge.ts"),
+]);
+
+const {
+  EXTRACTION_SYSTEM,
+  EMPTY_EXTRACTION,
+  extractionUserPrompt,
+  parseExtraction,
+  compareExtractions,
+  singleReading,
+  readingMarkdown,
+  renderForReasoning,
+} = extraction;
 
 const {
   COUNCIL_DEFAULT_MODELS,
@@ -58,8 +79,20 @@ const {
   executionDigest,
   judgeSystemPrompt,
   judgeUserPrompt,
+  endpointForCouncilModel,
+  enforceWinnerGate,
+  harnessIsSuspect,
   letterFor,
+  looksLikeCodingProblem,
   normalizeCodeLanguage,
+  partitionByVision,
+  answerStanding,
+  gateFor,
+  reachableSeats,
+  reasoningFields,
+  reasoningForModel,
+  rejectedImages,
+  rejectedReasoning,
   parseTestSuites,
   parseReviewSet,
   reviewSystemPrompt,
@@ -76,6 +109,48 @@ const LOCAL_RUN_TIMEOUT_MS = 20_000;
 const REMOTE_RUN_TIMEOUT_MS = 120_000;
 const TOKENROUTER_MIN_DELAY_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS || 13_000);
 const TOKENROUTER_JITTER_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_JITTER_MS || 1_500);
+const TOKENROUTER_REQUEST_TIMEOUT_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_REQUEST_TIMEOUT_MS || 75_000);
+/**
+ * How many times a *timeout* is worth repeating. Deliberately not the same
+ * budget as a 429.
+ *
+ * A rate limit is the gateway saying "not yet", and waiting is the correct
+ * answer. A request that produced nothing at all in the whole timeout window is
+ * a route that is not answering, and asking it twice more mostly buys two more
+ * timeouts. On the lc4 run that arithmetic cost 99 seconds on a single review
+ * from a model that had already timed out as a solver minutes earlier.
+ */
+/**
+ * Routes that answered "I have no reasoning mode", remembered for the process.
+ *
+ * Learned rather than tabulated. A hardcoded list of which models think would be
+ * wrong within a month, and wrong in the expensive direction: either paying for
+ * a retry on every call to a model that never supported it, or never asking a
+ * model that does.
+ */
+const noReasoning = new Set();
+
+function thinkingBudget(effort) {
+  return effort === "off"
+    ? Math.max(5_000, TOKENROUTER_REQUEST_TIMEOUT_MS)
+    : Math.max(5_000, TOKENROUTER_REASONING_TIMEOUT_MS);
+}
+
+/**
+ * A thinking model needs longer than a talking one.
+ *
+ * Asking for high effort and then cutting the request off at the timeout that
+ * suited a chat reply is how a good model gets benched for being thorough. The
+ * plain timeout still applies to everything else.
+ */
+const TOKENROUTER_REASONING_TIMEOUT_MS = Number(
+  process.env.CODE_AUDITOR_TOKENROUTER_REASONING_TIMEOUT_MS || 240_000
+);
+
+const TOKENROUTER_TIMEOUT_ATTEMPTS = Math.max(
+  1,
+  Number(process.env.CODE_AUDITOR_TOKENROUTER_TIMEOUT_ATTEMPTS || 2)
+);
 let tokenRouterNextAt = 0;
 let tokenRouterQueue = Promise.resolve();
 
@@ -186,8 +261,11 @@ function chatModels(settings) {
   const configured = Array.isArray(settings?.councilModels)
     ? settings.councilModels
     : COUNCIL_DEFAULT_MODELS;
-  return configured
-    .filter((model) => model?.id && model.endpoint !== "responses")
+  return reachableSeats(configured, (m) => m?.id, settings?.availableModels).reachable
+    // The Responses filter that used to live here dated from a worker that only
+    // spoke chat-completions. It now speaks both, so dropping a seat the user
+    // deliberately configured would be silently discarding their roster.
+    .filter((model) => model?.id)
     .slice(0, Number(process.env.CODE_AUDITOR_WORKER_SOLVERS || 4));
 }
 
@@ -195,9 +273,8 @@ function chatJudges(settings) {
   const configured = Array.isArray(settings?.councilJudges)
     ? settings.councilJudges
     : COUNCIL_DEFAULT_JUDGES;
-  return configured
+  return reachableSeats(configured, (j) => j?.model, settings?.availableModels).reachable
     .filter((judge) => judge?.model)
-    .filter((judge) => !COUNCIL_DEFAULT_MODELS.find((model) => model.id === judge.model && model.endpoint === "responses"))
     .slice(0, Number(process.env.CODE_AUDITOR_WORKER_JUDGES || 3));
 }
 
@@ -229,7 +306,7 @@ async function tokenRouterTurn() {
   await run;
 }
 
-async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxTokens = 4096 }) {
+async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off" }) {
   const content = [{ type: "text", text: user }];
   for (const image of images) {
     content.push({ type: "image_url", image_url: { url: image.dataUrl } });
@@ -237,24 +314,48 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
 
   let temperature = 0.2;
   let last = "";
+  let timeouts = 0;
+  let think = noReasoning.has(model) ? "off" : reasoning;
   for (let attempt = 0; attempt < 3; attempt++) {
     await tokenRouterTurn();
-    const resp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${TOKENROUTER_API_KEY}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content },
-        ],
-        max_tokens: maxTokens,
-        temperature,
-      }),
-    });
+    const controller = new AbortController();
+    const budget = thinkingBudget(think);
+    const timeout = setTimeout(() => controller.abort(), budget);
+    let resp;
+    try {
+      resp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          authorization: `Bearer ${TOKENROUTER_API_KEY}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content },
+          ],
+          max_tokens: maxTokens,
+          temperature,
+          ...reasoningFields(think, "chat"),
+        }),
+      });
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        timeouts += 1;
+        last = `request timed out after ${budget}ms (attempt ${timeouts})`;
+        if (timeouts < TOKENROUTER_TIMEOUT_ATTEMPTS) continue;
+        // Tell the caller it was time, not content, that failed — the circuit
+        // breaker upstream uses this to bench the route for the rest of the job.
+        const timedOut = new Error(`${model}: ${last}`);
+        timedOut.timedOut = true;
+        throw timedOut;
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
     const text = await resp.text();
     last = `${resp.status} ${resp.statusText}: ${text}`;
     if (resp.ok) {
@@ -279,6 +380,19 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
       break;
     }
 
+    // The route has no reasoning mode. That is a fact about the route, not a
+    // failure of the seat: drop the fields, remember it, and ask again.
+    if (think !== "off" && rejectedReasoning(text)) {
+      noReasoning.add(model);
+      think = "off";
+      // Not a failed attempt: nothing was wrong with the request except a field
+      // this route does not have. Spending a retry slot on it would leave a
+      // model that both refuses reasoning and hits a 429 with fewer chances
+      // than one that never refused.
+      attempt -= 1;
+      continue;
+    }
+
     if (/invalid temperature:\s*only\s*1\s*is\s*allowed/i.test(text) && temperature !== 1) {
       temperature = 1;
       continue;
@@ -289,6 +403,115 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
     await sleep(waitMs);
   }
   throw new Error(`${model}: ${last}`);
+}
+
+async function tokenRouterResponses({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off" }) {
+  const content = [{ type: "input_text", text: user }];
+  for (const image of images) {
+    content.push({ type: "input_image", image_url: image.dataUrl });
+  }
+
+  let last = "";
+  let timeouts = 0;
+  let think = noReasoning.has(model) ? "off" : reasoning;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await tokenRouterTurn();
+    const controller = new AbortController();
+    const budget = thinkingBudget(think);
+    const timeout = setTimeout(() => controller.abort(), budget);
+    let resp;
+    try {
+      resp = await fetch(`${baseUrl.replace(/\/$/, "")}/responses`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          authorization: `Bearer ${TOKENROUTER_API_KEY}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          instructions: system,
+          input: [{ type: "message", role: "user", content }],
+          max_output_tokens: maxTokens,
+          temperature: 0.2,
+          stream: false,
+          ...reasoningFields(think, "responses"),
+        }),
+      });
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        timeouts += 1;
+        last = `request timed out after ${budget}ms (attempt ${timeouts})`;
+        if (timeouts < TOKENROUTER_TIMEOUT_ATTEMPTS) continue;
+        const timedOut = new Error(`${model}: ${last}`);
+        timedOut.timedOut = true;
+        throw timedOut;
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    const text = await resp.text();
+    last = `${resp.status} ${resp.statusText}: ${text}`;
+    if (resp.ok) {
+      const json = JSON.parse(text);
+      const answer = responseText(json);
+      if (answer.trim()) return answer;
+      last = `${model}: empty model response`;
+      if (attempt < 2) {
+        await sleep(2000 * (attempt + 1));
+        continue;
+      }
+      break;
+    }
+
+    if (think !== "off" && rejectedReasoning(text)) {
+      noReasoning.add(model);
+      think = "off";
+      attempt -= 1;
+      continue;
+    }
+
+    const waitMs = retryDelayMs(resp.status, text, attempt);
+    if (!waitMs || attempt === 2) break;
+    await sleep(waitMs);
+  }
+  throw new Error(`${model}: ${last}`);
+}
+
+function responseText(json) {
+  let out = "";
+  for (const item of json?.output || []) {
+    if (item?.type !== "message" || !Array.isArray(item.content)) continue;
+    for (const part of item.content) {
+      if ((part?.type === "output_text" || part?.type === "text") && typeof part.text === "string") {
+        out += part.text;
+      }
+    }
+  }
+  if (!out && typeof json?.output_text === "string") out = json.output_text;
+  return out;
+}
+
+/**
+ * One call, either wire.
+ *
+ * The endpoint comes from `endpointForCouncilModel`, the same function the
+ * desktop uses, so a seat the user marked as Responses in Settings is dialled
+ * that way here too. The worker previously consulted a hardcoded list of its
+ * own and ignored the roster entirely, which meant the `endpoint` field on a
+ * configured model did nothing on the cloud path.
+ */
+async function tokenRouterGenerate({ settings, ...args }) {
+  const endpoint = endpointForCouncilModel(settings?.councilModels, args.model);
+  // Decided here rather than at six call sites, so no phase can quietly forget
+  // to ask a model to think.
+  const reasoning = reasoningForModel(settings, args.model);
+  const withThinking = { ...args, reasoning };
+  return endpoint === "responses"
+    ? tokenRouterResponses(withThinking)
+    : tokenRouterChat(withThinking);
 }
 
 function winnerFromSynthesis(text) {
@@ -339,6 +562,9 @@ function isCommonJs(code) {
   return /require\(|module\.exports|exports\.|__dirname|__filename/.test(stripped);
 }
 
+const JAVA_COMMAND =
+  "sed -E '/^public[[:space:]]+class[[:space:]]+Main\\b/!s/^public[[:space:]]+(class|interface|enum|record)[[:space:]]+/\\1 /' Main.java > _M.java && mv _M.java Main.java && javac Main.java && java Main";
+
 function runtimeFor(language, code) {
   // Same normaliser the suites and the candidates go through, so a fence
   // labelled ```c++17 lands on the C++ row instead of falling off the table.
@@ -354,7 +580,17 @@ function runtimeFor(language, code) {
   if (lang === "php") return { file: "main.php", command: "php main.php", runtime: "php" };
   if (lang === "c") return { file: "main.c", command: "cc -std=c17 -O1 main.c -o prog -lm && ./prog", runtime: "cc" };
   if (["cpp", "c++", "cc", "cxx"].includes(lang)) return { file: "main.cpp", command: "c++ -std=c++20 -O1 main.cpp -o prog && ./prog", runtime: "c++" };
-  if (lang === "java") return { file: "Main.java", command: "java Main.java", runtime: "java" };
+  if (lang === "java") {
+    // `java Main.java` is single-file source mode: it runs the FIRST class in
+    // the file, so a harness with the candidate's `Solution` spliced above its
+    // own `Main` dies with "can't find main(String[]) method in class: Solution"
+    // having never executed a line. That is exactly what killed Candidate A.
+    // Compiling first and naming the entry class makes the order irrelevant.
+    // The sed drops `public` from every top-level type except Main, because a
+    // second public class in one file is a compile error and `public class
+    // Solution` is the habit every LeetCode answer is written with.
+    return { file: "Main.java", command: JAVA_COMMAND, runtime: "javac + java" };
+  }
   if (["go", "golang"].includes(lang)) return { file: "main.go", command: "go run main.go", runtime: "go" };
   if (["rust", "rs"].includes(lang)) return { file: "main.rs", command: "rustc -O main.rs -o prog 2>&1 && ./prog", runtime: "rustc" };
   return null;
@@ -415,7 +651,7 @@ function shellSingle(s) {
   return `'${String(s).replaceAll("'", `'"'"'`)}'`;
 }
 
-function remoteScript(language, code) {
+function remoteScript(language, code, providerLabel = "remote") {
   const encoded = Buffer.from(code, "utf8").toString("base64");
   return `set -u
 tmp="$(mktemp -d "\${TMPDIR:-/tmp}/code-auditor-bench.XXXXXX")" || exit 98
@@ -428,8 +664,8 @@ CA_CODE
 base64 -d code.b64 > code.txt
 lang=${shellSingle(language)}
 lang="$(printf '%s' "$lang" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')"
-# Fourth and last copy of the language table (E2B and Codespaces share this
-# script). Same standard-stripping as the local table and the Actions workflow,
+# Fourth and last copy of the language table. Same standard-stripping as the
+# local table and the Actions workflow,
 # so a c++17 fence compiles here too instead of exiting 97 unrun.
 case "$lang" in
   c++*|cpp*|cxx*) lang=cpp ;;
@@ -438,18 +674,18 @@ case "$lang" in
   node[0-9]*|es[0-9][0-9][0-9][0-9]) lang=javascript ;;
 esac
 case "$lang" in
-  python|python3|py|py3) file=main.py; cp code.txt "$file"; command='python3 main.py'; runtime='codespace python3' ;;
-  javascript|js|node|nodejs|mjs) file=main.mjs; cp code.txt "$file"; command='node main.mjs'; runtime='codespace node esm' ;;
-  cjs) file=main.cjs; cp code.txt "$file"; command='node main.cjs'; runtime='codespace node commonjs' ;;
-  typescript|ts) file=main.ts; cp code.txt "$file"; command='node --experimental-strip-types main.ts'; runtime='codespace node type stripping' ;;
-  bash|sh|shell) file=main.sh; cp code.txt "$file"; command='bash main.sh'; runtime='codespace bash' ;;
-  ruby|rb) file=main.rb; cp code.txt "$file"; command='ruby main.rb'; runtime='codespace ruby' ;;
-  php) file=main.php; cp code.txt "$file"; command='php main.php'; runtime='codespace php' ;;
-  c) file=main.c; cp code.txt "$file"; command='cc -std=c17 -O2 main.c -o prog -lm && ./prog'; runtime='codespace cc -O2' ;;
-  cpp|c++|cc|cxx) file=main.cpp; cp code.txt "$file"; command='c++ -std=c++20 -O2 main.cpp -o prog && ./prog'; runtime='codespace c++ -O2' ;;
-  java) file=Main.java; cp code.txt "$file"; command='java Main.java'; runtime='codespace java' ;;
-  go|golang) file=main.go; cp code.txt "$file"; command='go run main.go'; runtime='codespace go' ;;
-  rust|rs) file=main.rs; cp code.txt "$file"; command='rustc -O main.rs -o prog 2>&1 && ./prog'; runtime='codespace rustc -O' ;;
+  python|python3|py|py3) file=main.py; cp code.txt "$file"; command='python3 main.py'; runtime='${providerLabel} python3' ;;
+  javascript|js|node|nodejs|mjs) file=main.mjs; cp code.txt "$file"; command='node main.mjs'; runtime='${providerLabel} node esm' ;;
+  cjs) file=main.cjs; cp code.txt "$file"; command='node main.cjs'; runtime='${providerLabel} node commonjs' ;;
+  typescript|ts) file=main.ts; cp code.txt "$file"; command='node --experimental-strip-types main.ts'; runtime='${providerLabel} node type stripping' ;;
+  bash|sh|shell) file=main.sh; cp code.txt "$file"; command='bash main.sh'; runtime='${providerLabel} bash' ;;
+  ruby|rb) file=main.rb; cp code.txt "$file"; command='ruby main.rb'; runtime='${providerLabel} ruby' ;;
+  php) file=main.php; cp code.txt "$file"; command='php main.php'; runtime='${providerLabel} php' ;;
+  c) file=main.c; cp code.txt "$file"; command='cc -std=c17 -O2 main.c -o prog -lm && ./prog'; runtime='${providerLabel} cc -O2' ;;
+  cpp|c++|cc|cxx) file=main.cpp; cp code.txt "$file"; command='c++ -std=c++20 -O2 main.cpp -o prog && ./prog'; runtime='${providerLabel} c++ -O2' ;;
+  java) file=Main.java; cp code.txt "$file"; command="${JAVA_COMMAND}"; runtime='${providerLabel} javac + java' ;;
+  go|golang) file=main.go; cp code.txt "$file"; command='go run main.go'; runtime='${providerLabel} go' ;;
+  rust|rs) file=main.rs; cp code.txt "$file"; command='rustc -O main.rs -o prog 2>&1 && ./prog'; runtime='${providerLabel} rustc -O' ;;
   *) echo "Unsupported remote benchmark language: $lang" >&2; exit 97 ;;
 esac
 status=0
@@ -501,84 +737,40 @@ function parseRemoteOutput(raw) {
     stdout: between("CA_STDOUT_BEGIN\n", "\nCA_STDOUT_END"),
     stderr,
     exitCode: exit ? Number(exit[1]) : null,
-    runtime: runtime?.[1]?.trim() || "codespace",
+    runtime: runtime?.[1]?.trim() || "remote",
     remoteElapsedMs: metrics.elapsed_s ? Math.round(Number(metrics.elapsed_s) * 1000) : metrics.elapsed_ms ? Number(metrics.elapsed_ms) : null,
     peakMemoryKb: metrics.maxrss_kb ? Number(metrics.maxrss_kb) : null,
   };
 }
 
 /**
- * Which machine benchmarks a passing candidate.
+ * Optional second-pass benchmark evidence after E2B/local generated tests.
+ * E2B is the default execution gate; Actions is heavier, reproducible evidence
+ * for passing candidates only.
+ */
+/**
+ * Where the *extra* remote measurement comes from, on top of the run that gates.
  *
- * Actions is the default because latency is the whole point: a dispatched
- * workflow is running within seconds on a warm pool, where a cold Codespace
- * takes minutes to wake — and the council is *waiting* on this number, so
- * minutes is the difference between evidence and a timeout.
+ * This used to default to Actions whenever a repo was configured, so a candidate
+ * was executed twice for one answer: once in the E2B sandbox to decide whether
+ * it passes, and again on a GitHub runner to time it. E2B already reports
+ * elapsed time and peak resident set — it runs the same metrics script — so the
+ * second run bought a slightly different number at the cost of a dispatch, a
+ * poll and an artifact download per candidate.
  *
- * Codespaces stays available for the case it is genuinely better at: a long
- * interactive session where the machine is already warm and you want the same
- * environment the repo develops in.
- *
- * The `codespacesBenchmark` branch is migration, not preference. Settings saved
- * before this setting existed carry that boolean, and honouring it means
- * turning Codespaces on once does not silently become Actions on the next
- * launch.
+ * The default is now "off": whatever ran the code is what measured it. Choosing
+ * "actions" is an explicit decision to have GitHub do the measuring, for when a
+ * neutral machine matters more than the minutes.
  */
 export function resolveBenchmarkBackend(settings = {}, env = process.env) {
   const explicit = String(settings.benchmarkBackend || "").trim().toLowerCase();
-  if (explicit === "actions" || explicit === "codespaces" || explicit === "off") {
-    if (explicit === "actions" && !repoFor(env)) return "off";
-    return explicit;
-  }
-  if (settings.codespacesBenchmark) return "codespaces";
-  return repoFor(env) ? "actions" : "off";
+  if (explicit === "actions") return repoFor(env) ? "actions" : "off";
+  return "off";
 }
 
 /** The repo Actions dispatches against. */
 export function repoFor(env = process.env) {
   return String(env.GITHUB_REPOSITORY || env.CODE_AUDITOR_GITHUB_REPOSITORY || "").trim();
-}
-
-async function runRemoteCode(codespace, language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
-  const started = Date.now();
-  let timedOut = false;
-  const child = spawn("gh", ["codespace", "ssh", "-c", codespace, "--", "bash", "-s"], {
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk;
-  });
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk;
-  });
-  child.stdin.end(remoteScript(language, code));
-  const timer = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGKILL");
-  }, Math.max(1000, Math.min(timeoutMs, REMOTE_RUN_TIMEOUT_MS)));
-  const exitCode = await new Promise((resolve, reject) => {
-    child.on("error", reject);
-    child.on("close", (code) => resolve(code));
-  }).finally(() => clearTimeout(timer));
-  const parsed = parseRemoteOutput(stdout);
-  const out = clampOutput(parsed.stdout);
-  const err = clampOutput([parsed.stderr, stderr].filter((s) => s?.trim()).join("\n"));
-  const effectiveExit = parsed.exitCode ?? exitCode;
-  return {
-    ok: effectiveExit === 0 && !timedOut,
-    runtime: parsed.runtime,
-    exitCode: effectiveExit,
-    stdout: out.text,
-    stderr: err.text,
-    durationMs: Date.now() - started,
-    remoteElapsedMs: parsed.remoteElapsedMs,
-    peakMemoryKb: parsed.peakMemoryKb,
-    timedOut,
-    truncated: out.truncated || err.truncated,
-    codespace,
-  };
 }
 
 async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
@@ -600,7 +792,7 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
   try {
     let result;
     try {
-      result = await sandbox.commands.run(`bash -lc ${shellSingle(remoteScript(language, code))}`, {
+      result = await sandbox.commands.run(`bash -lc ${shellSingle(remoteScript(language, code, "e2b"))}`, {
         timeoutMs,
       });
     } catch (err) {
@@ -656,7 +848,7 @@ async function runVerification(settings, suite, program) {
   return runLocalCode(suite.language, program, LOCAL_RUN_TIMEOUT_MS);
 }
 
-async function benchmarkCandidates(job, settings, baseUrl, models, judges, question, candidates) {
+async function benchmarkCandidates(job, settings, baseUrl, models, judges, question, candidates, knowledge = "", bench) {
   const codeCandidates = candidates.filter((c) => c.final?.kind === "code" && c.final.code?.trim());
   if (codeCandidates.length < 2) {
     await addEvent(
@@ -671,10 +863,19 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   await patchJob(job.id, { progress_phase: "speccing" });
   await addEvent(job.id, "info", "speccing", "Generating language-specific benchmark harnesses.");
   const languages = Array.from(new Set(codeCandidates.map((c) => candidateLanguage(c.final)).filter(Boolean)));
-  const specModel = settings.synthesisModel || judges[0]?.model || models[0]?.id;
+  // A benched route would spend the whole timeout again on the one call the
+  // benchmark phase cannot proceed without.
+  const specModel = [settings.synthesisModel, judges[0]?.model, ...models.map((m) => m.id)].find(
+    (candidate) => candidate && !bench.has(candidate)
+  );
+  if (!specModel) {
+    await addEvent(job.id, "warn", "spec_failed", "Every model is benched, so no benchmark harness could be generated.");
+    return { suites: [], runs: {} };
+  }
   let suites = [];
   try {
-    const specText = await tokenRouterChat({
+    const specText = await tokenRouterGenerate({
+      settings,
       baseUrl,
       model: specModel,
       system: testSpecSystemPrompt(),
@@ -682,13 +883,14 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
         question,
         docket: candidateDocket(candidates),
         languages,
-        knowledge: settings.knowledgeDigest || "",
+        knowledge: knowledge || settings.knowledgeDigest || "",
       }),
       maxTokens: Number(settings.maxTokens || 4096),
     });
     suites = parseTestSuites(specText);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    await bench.note(specModel, err, "speccing");
     await addEvent(job.id, "warn", "spec_failed", `Benchmark spec generation failed: ${message}`);
     return { suites: [], runs: {} };
   }
@@ -747,7 +949,7 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
           });
           remote = {
             ok: gha.ok,
-            codespace: "github-actions",
+            runner: "github-actions",
             runtime: gha.runtime,
             durationMs: gha.durationMs,
             remoteElapsedMs: gha.remoteElapsedMs ?? null,
@@ -758,7 +960,7 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
         } catch (err) {
           remote = {
             ok: false,
-            codespace: "github-actions",
+            runner: "github-actions",
             runtime: "github-actions",
             durationMs: 0,
             remoteElapsedMs: null,
@@ -768,46 +970,18 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
         }
       }
 
-      const codespace =
-        backend === "codespaces"
-          ? String(settings.codespacesName || process.env.CODE_AUDITOR_CODESPACE_NAME || "").trim()
-          : "";
-      if (codespace && worthBenchmarking) {
-        try {
-          const rb = await runRemoteCode(codespace, suite.language, program, Number(settings.codespacesTimeoutMs || 30_000));
-          const remoteCases = countCases(rb.stdout);
-          remote = {
-            ok: rb.ok && remoteCases.failed === 0 && remoteCases.passed > 0,
-            codespace: rb.codespace,
-            runtime: rb.runtime,
-            durationMs: rb.durationMs,
-            remoteElapsedMs: rb.remoteElapsedMs,
-            peakMemoryKb: rb.peakMemoryKb,
-            note: rb.timedOut
-              ? "timed out"
-              : rb.exitCode !== 0
-                ? `exit ${rb.exitCode}`
-                : remoteCases.passed > 0
-                  ? `${remoteCases.passed} remote case(s) passed`
-                  : "no PASS lines",
-          };
-        } catch (err) {
-          remote = {
-            ok: false,
-            codespace,
-            runtime: "codespace",
-            durationMs: 0,
-            remoteElapsedMs: null,
-            peakMemoryKb: null,
-            note: err instanceof Error ? err.message : String(err),
-          };
-        }
-      }
       // A bare "exit 1" says a candidate failed but not whether the code was
       // wrong or the generated harness was — and that is exactly the line the
       // "objective failure outranks consensus" rule is drawn on. Keep the first
       // few lines of what the compiler or runtime actually said.
       const diagnostic = String(local.stderr || "").trim().split("\n").slice(0, 6).join("\n");
+      // A program that never started did not fail its tests — the harness did.
+      // Naming it distinctly keeps a build problem out of the evidence the
+      // judges weigh, where it would read as "this candidate is wrong".
+      const brokenHarness =
+        /could not find or load main class|error: cannot find symbol|no such file or directory|command not found|compilation failed|error: expected/i.test(
+          diagnostic
+        );
       runs[candidate.letter] = {
         letter: candidate.letter,
         ran: true,
@@ -815,8 +989,20 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
         passed: localCases.passed,
         failed: localCases.failed,
         durationMs: local.durationMs,
-        note: local.timedOut ? "timed out" : local.exitCode !== 0 ? `exit ${local.exitCode}` : "",
+        note: local.timedOut
+          ? "timed out"
+          : brokenHarness
+            ? "the generated harness did not build or start"
+            : local.exitCode !== 0
+              ? `exit ${local.exitCode}`
+              : "",
         runtime: local.runtime,
+        // Whatever ran it measured it. These come back from the same metrics
+        // script the remote runners use, and dropping them was the reason a
+        // second run on Actions looked necessary at all.
+        remoteElapsedMs: local.remoteElapsedMs ?? null,
+        peakMemoryKb: local.peakMemoryKb ?? null,
+        provider: local.provider || executionProvider(settings),
         stderr: diagnostic,
         remote,
       };
@@ -829,6 +1015,266 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   }
 
   return { suites, runs };
+}
+
+/**
+ * A route that ran out of time once does not get asked again this job.
+ *
+ * The Council asks the same models over and over — read, solve, spec, review,
+ * judge, synthesise. Nothing remembered that a model had already failed to
+ * answer, so a dead route was re-asked at every stage and charged the full
+ * timeout each time. On the lc4 run `moonshotai/kimi-k2.7-code` timed out as a
+ * solver and was then asked to review, where it timed out again: 99 seconds
+ * spent on a question whose answer was already known.
+ *
+ * Only timeouts bench a model. A refusal, a bad status, a malformed reply are
+ * all answers — the route is alive and might do better on a different prompt.
+ * Silence is the one failure that repeats.
+ */
+function createBench(job) {
+  const out = new Map();
+  const blind = new Map();
+  return {
+    has: (model) => out.has(model),
+    /** Proven, this run, to refuse a picture rather than the prompt. */
+    isBlind: (model) => blind.has(model),
+    /**
+     * A route that rejected the image itself.
+     *
+     * Vision is a property of the route and can only be proven by showing it
+     * something. Nothing was writing that proof down — only timeouts benched a
+     * model — so a route that refuses pictures was handed the same one on every
+     * job forever. It keeps its seat, because it can still read and judge text;
+     * it just stops being shown images.
+     */
+    async noteBlind(model, message, phase) {
+      if (!rejectedImages(message || "") || blind.has(model)) return blind.has(model);
+      blind.set(model, phase);
+      await addEvent(
+        job.id,
+        "warn",
+        "model_blind",
+        `${model} refused the image during ${phase}; it is not shown pictures again this run. Mark it "text only" in the roster to skip it permanently.`,
+        { model, phase }
+      ).catch(() => {});
+      return true;
+    },
+    keep: (list, pick = (x) => x) => list.filter((item) => !out.has(pick(item))),
+    async note(model, err, phase) {
+      if (!err?.timedOut || out.has(model)) return out.has(model);
+      out.set(model, phase);
+      await addEvent(
+        job.id,
+        "warn",
+        "model_benched",
+        `${model} ran out of time during ${phase}; it is skipped for the rest of this job.`,
+        { model, phase }
+      ).catch(() => {});
+      return true;
+    },
+    async announce(phase, skipped) {
+      if (!skipped.length) return;
+      await addEvent(job.id, "info", "phase_skipped", `Skipping ${skipped.join(", ")} for ${phase} — already benched.`, {
+        models: skipped,
+        phase,
+      }).catch(() => {});
+    },
+    list: () => [...out.entries()].map(([model, phase]) => ({ model, phase })),
+  };
+}
+
+/**
+ * Turns the job's pictures into a document, before anybody tries to solve them.
+ *
+ * The desktop app has always done this. The cloud worker never did: it handed
+ * four models a raw PNG and the sentence "Solve the attached problem", because
+ * `solve_jobs` carries no note and no extraction column, so there was nothing
+ * else to hand them. Two consequences followed from that one gap. A model whose
+ * route does not carry images could not take part at all. And there was no text
+ * to search the knowledge pack with, so the knowledge pack was never searched --
+ * `knowledgeDigest` had exactly one consumer and nothing ever set it.
+ *
+ * Reading first fixes both. The picture becomes words; the words select the
+ * knowledge; the knowledge and the words go to every model, seeing or blind.
+ *
+ * Two readers when there are two, because a single transcription that misreads a
+ * character reaches the whole panel as fact and nothing contradicts it. When
+ * only one answers the reading still proceeds, but it says so -- `singleReading`
+ * writes the doubt into the document rather than leaving it implied.
+ */
+async function readScreenshots({ job, settings, baseUrl, models, images, imageRefs, bench }) {
+  const manifest = imageManifest(imageRefs);
+  const readers = bench.keep(models, (m) => m.id).slice(0, Math.max(1, Number(process.env.CODE_AUDITOR_WORKER_READERS || 2)));
+  if (!readers.length) {
+    await addEvent(job.id, "warn", "reading_none", "No model was available to read the screenshot.");
+    return { extraction: null, context: "", markdown: "", readers: [], agreement: null };
+  }
+
+  await patchJob(job.id, { progress_phase: "reading" });
+  await addEvent(job.id, "info", "reading", `Transcribing ${images.length} screenshot(s) with ${readers.length} reader(s).`);
+
+  const done = [];
+  await Promise.all(
+    readers.map(async (spec) => {
+      try {
+        const text = await tokenRouterGenerate({
+          settings,
+          baseUrl,
+          model: spec.id,
+          system: EXTRACTION_SYSTEM,
+          user: extractionUserPrompt("", manifest),
+          images,
+          maxTokens: Number(settings.maxTokens || 4096),
+        });
+        const parsed = parseExtraction(text);
+        if (!parsed) {
+          await addEvent(job.id, "warn", "reading_unparsed", `${spec.id} answered but the reading did not parse.`, { model: spec.id });
+          return;
+        }
+        done.push({ model: spec.id, extraction: parsed });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        await bench.note(spec.id, err, "reading");
+        await bench.noteBlind(spec.id, message, "reading");
+        await addEvent(job.id, "warn", "reading_failed", `${spec.id} could not read the screenshot: ${message}`, { model: spec.id });
+      }
+    })
+  );
+
+  if (!done.length) {
+    // Not fatal. The images still go to the solvers, so a vision-capable model
+    // can work; what is lost is the knowledge pack and the blind models.
+    await addEvent(job.id, "warn", "reading_none", "No model produced a usable reading; solving from the images alone.");
+    return { extraction: EMPTY_EXTRACTION, context: "", markdown: "", readers: [], agreement: null };
+  }
+
+  const agreement =
+    done.length > 1
+      ? compareExtractions(done[0].extraction, done[1].extraction)
+      : singleReading(done[0].extraction, `only ${done[0].model} answered`);
+
+  const readerNames = done.map((d) => d.model);
+  if (done.length > 1 && !agreement.agree) {
+    await addEvent(job.id, "warn", "reading_conflict", `The readers disagree: ${agreement.summary}`, {
+      readers: readerNames,
+      conflicts: agreement.conflicts,
+    });
+  }
+
+  const merged = agreement.merged;
+  const markdown = readingMarkdown(merged, {
+    readers: readerNames,
+    agreement: done.length > 1 ? agreement : null,
+    manifest,
+    at: new Date().toISOString(),
+  });
+
+  await addEvent(job.id, "info", "reading_done", `Read by ${readerNames.join(", ")} — confidence ${merged.confidence}.`, {
+    readers: readerNames,
+    agree: agreement.agree,
+    language: merged.language,
+    confidence: merged.confidence,
+    ambiguities: merged.ambiguities,
+    markdownBytes: Buffer.byteLength(markdown, "utf8"),
+  });
+
+  return { extraction: merged, context: renderForReasoning(merged), markdown, readers: readerNames, agreement };
+}
+
+/**
+ * The slice of the knowledge library this particular question needs.
+ *
+ * `knowledgePackFor` retrieves against text, which is why this cannot run before
+ * the reading. A caller may override it outright via `settings.knowledgeDigest`;
+ * otherwise the query is what the readers actually saw -- the summary of what is
+ * being asked, anything they noted, and the transcribed code.
+ */
+async function selectKnowledge(job, settings, { candidates = [], reading = null } = {}) {
+  const override = String(settings.knowledgeDigest || "").trim();
+  if (override) {
+    await addEvent(job.id, "info", "knowledge_selected", "Using the knowledge digest supplied with the job.", {
+      source: "settings",
+      bytes: Buffer.byteLength(override, "utf8"),
+    });
+    return override;
+  }
+
+  // The panel's own answers are the query. They are the first text in the
+  // pipeline written by something that understood the question — better
+  // retrieval material than a transcription of the pixels, and available
+  // without spending a call to produce it. A transcript, when one exists
+  // because nothing could see, is folded in as well.
+  const fromCandidates = candidates
+    .map((c) => [c.final?.answer, c.final?.complexity, c.final?.code].filter((part) => part?.trim()).join("\n"))
+    .filter(Boolean)
+    .join("\n\n");
+  const e = reading?.extraction;
+  const fromReading = e
+    ? [e.problemSummary, (e.observations || []).join("\n"), e.code].filter((part) => part?.trim()).join("\n\n")
+    : "";
+  const query = [fromCandidates, fromReading].filter(Boolean).join("\n\n");
+  if (!query.trim()) {
+    await addEvent(job.id, "warn", "knowledge_skipped", "Nothing produced text to search the knowledge library with.");
+    return "";
+  }
+
+  const limit = Math.max(1, Number(settings.knowledgeLimit || 5));
+  const pack = knowledgePackFor(query, limit);
+  await addEvent(
+    job.id,
+    pack.trim() ? "info" : "warn",
+    "knowledge_selected",
+    pack.trim() ? `Selected ${limit} knowledge record(s) for this question.` : "The knowledge library returned nothing for this question.",
+    { source: "library", limit, bytes: Buffer.byteLength(pack, "utf8"), queryBytes: Buffer.byteLength(query, "utf8") }
+  );
+  return pack;
+}
+
+/**
+ * Name the session after the question, once the question is known.
+ *
+ * A cloud job arrives before anybody has read the picture, so the session is
+ * created under whatever placeholder the caller had — "Batch — lc4", "Cloud
+ * smoke 2026-08-27T02:07:42.817Z". Those are scaffolding. By the time the panel
+ * has answered, the run can name itself after what it actually worked on, which
+ * is the only version of the name that helps you find it again a week later.
+ *
+ * A title a person typed is never touched: `isPlaceholder` is the whole guard,
+ * and renaming someone's session out from under them is how an app stops being
+ * trusted with their data.
+ */
+async function nameSessionFromWork(job, reading, candidates) {
+  if (!job.session_id) return;
+  try {
+    const suggested = titleFor({
+      extraction: reading?.extraction ?? null,
+      answers: candidates
+        .map((c) => c.final)
+        .filter(Boolean)
+        .map((f) => ({ answer: f.answer, language: f.language, code: f.code })),
+    });
+    if (!suggested) return;
+
+    const [session] = (await rest(`sessions?id=eq.${job.session_id}&select=title`)) ?? [];
+    if (!session || !isPlaceholder(String(session.title || ""))) return;
+
+    await rest(`sessions?id=eq.${job.session_id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title: suggested }),
+    });
+    await addEvent(job.id, "info", "session_named", `Named this session "${suggested}".`, {
+      title: suggested,
+      from: reading?.extraction ? "reading" : "answers",
+    });
+  } catch (err) {
+    // A name is a convenience. Losing one must never cost a completed run.
+    await addEvent(
+      job.id,
+      "warn",
+      "session_name_failed",
+      `Could not name the session: ${err instanceof Error ? err.message : String(err)}`
+    ).catch(() => {});
+  }
 }
 
 async function saveCouncilReport(job, report) {
@@ -989,8 +1435,40 @@ export async function runCouncilJob(job) {
   const baseUrl = gatewayBaseUrl(settings);
   const models = chatModels(settings);
   const judges = chatJudges(settings);
+
+  // A seat the key has no access to is not worth a request to discover. The
+  // router's catalogue already answered that for every model at once, so the
+  // seat is dropped here — but never silently, because a roster that quietly
+  // shrinks is how a four-solver Council becomes a two-solver Council without
+  // anyone noticing.
+  const missing = [
+    ...reachableSeats(
+      Array.isArray(settings.councilModels) ? settings.councilModels : COUNCIL_DEFAULT_MODELS,
+      (m) => m?.id,
+      settings.availableModels
+    ).unreachable.map((m) => m.id),
+    ...reachableSeats(
+      Array.isArray(settings.councilJudges) ? settings.councilJudges : COUNCIL_DEFAULT_JUDGES,
+      (j) => j?.model,
+      settings.availableModels
+    ).unreachable.map((j) => j.model),
+  ];
+  if (missing.length) {
+    await addEvent(
+      job.id,
+      "warn",
+      "seats_unreachable",
+      `This key cannot reach ${missing.join(", ")}, so those seats are not used.`,
+      { models: missing, catalogueSize: settings.availableModels?.length ?? 0 }
+    );
+  }
   if (models.length < 2) {
-    throw new Error("Cloud Council needs at least two chat-compatible TokenRouter models.");
+    throw new Error(
+      missing.length
+        ? `Cloud Council needs at least two reachable models, and this key cannot reach ${missing.join(", ")}. ` +
+          "Refresh the model list in Settings, or put reachable ids in the roster."
+        : "Cloud Council needs at least two chat-compatible TokenRouter models."
+    );
   }
 
   if (!process.env.CODE_AUDITOR_GITHUB_TOKEN && !process.env.GITHUB_TOKEN && !process.env.GH_TOKEN) {
@@ -1016,29 +1494,135 @@ export async function runCouncilJob(job) {
   const images = await downloadJobImages(job.id);
   if (!images.length) throw new Error("The job has no downloadable screenshots.");
 
-  await patchJob(job.id, { progress_phase: "solving" });
-  await addEvent(job.id, "info", "solving", `Asking ${models.length} independent Council solver models.`);
+  // Real references, in the order the images are attached, so the manifest can
+  // say whether these are separate problems or one screen cut into pieces.
+  // Passing `{}` per image, as this did, produced a manifest that described
+  // nothing.
+  const imageRefs = images.map((img) => ({ group: String(img.fileName || ""), }));
 
-  const question = userPrompt("", true, "", images.map(() => ({})), "");
+  const bench = createBench(job);
+
+  // The picture goes to the models that can be shown a picture. The rest sit the
+  // round out rather than being handed a transcription to guess from: a
+  // transcription is a lossy copy of the evidence, and an answer derived from
+  // one is worth less than no answer from that seat at all. Vision belongs to
+  // the route, not the model, so a measured probe outranks every table.
+  const available = bench.keep(models, (m) => m.id);
+  const partitioned = partitionByVision(available, (m) => m.id, settings.probes, settings.councilModels);
+  const seeing = partitioned.seeing.filter((m) => !bench.isBlind(m.id));
+  const resting = [...partitioned.resting, ...partitioned.seeing.filter((m) => bench.isBlind(m.id))];
+  if (resting.length) {
+    await addEvent(
+      job.id,
+      "info",
+      "models_resting",
+      `${resting.map((m) => m.id).join(", ")} cannot be shown an image on this route, so they sit this question out.`,
+      { models: resting.map((m) => m.id) }
+    );
+  }
+
+  // Transcription is off by default and exists for exactly one case: nobody on
+  // the bench can see. Then a reading is the difference between an answer and
+  // no answer, and the cost stops being a matter of taste.
+  const mustTranscribe = seeing.length === 0;
+  const wantsTranscript = settings.transcribeScreenshots === true || mustTranscribe;
+
+  // Readers are drawn from the whole reachable roster, not from the four solver
+  // seats. This used to hand the picture to `available` — which, when the
+  // fallback fires, is by definition the models that cannot be shown one. The
+  // single case the fallback exists for was the single case it could not work
+  // in, and it spent two calls and half a minute of pacing proving it.
+  const roster = Array.isArray(settings.councilModels) && settings.councilModels.length
+    ? settings.councilModels
+    : COUNCIL_DEFAULT_MODELS;
+  const readerPool = partitionByVision(
+    bench.keep(reachableSeats(roster, (m) => m?.id, settings.availableModels).reachable, (m) => m.id),
+    (m) => m.id,
+    settings.probes,
+    settings.councilModels
+  ).seeing.filter((m) => !bench.isBlind(m.id));
+
+  if (mustTranscribe) {
+    if (!readerPool.length) {
+      // Nothing anywhere can be shown this picture. Saying so is the useful
+      // answer; spending eight model calls to arrive at an empty reading and
+      // four guesses made from it is not.
+      throw new Error(
+        "No model this key can reach is able to read a screenshot. Add a vision-capable seat to the roster, " +
+          "or run the image check in Settings if one of these can in fact see."
+      );
+    }
+    await addEvent(
+      job.id,
+      "warn",
+      "no_seeing_models",
+      `No solver seat can be shown this screenshot, so ${readerPool.map((m) => m.id).join(", ")} transcribe it instead.`,
+      { readers: readerPool.map((m) => m.id) }
+    );
+  }
+
+  const reading = wantsTranscript
+    ? await readScreenshots({ job, settings, baseUrl, models: readerPool, images, imageRefs, bench })
+    : { extraction: null, context: "", markdown: "", readers: [], agreement: null };
+
+  // Who actually solves: the seeing models, or — only when none can see — the
+  // whole bench working from the transcription.
+  const solving = seeing.length ? seeing : available;
+  const solveImages = seeing.length ? images : [];
+
+  await patchJob(job.id, { progress_phase: "solving" });
+
+  // Everything the desktop path sends, which until now none of was sent: the
+  // reading of the picture, the knowledge selected for this question, a real
+  // manifest, and the house preference for what to write it in.
+  const policy = solutionPolicy(
+    Array.isArray(settings.solutionLanguages) && settings.solutionLanguages.length
+      ? settings.solutionLanguages
+      : undefined,
+    Number(settings.memoryTargetKb || 20 * 1024)
+  );
+  // No knowledge argument here on purpose. `knowledgePackFor` retrieves against
+  // text, and before anybody has answered there is no text — only a picture.
+  // The library arrives the moment the panel produces words, which is also the
+  // moment the system can tell this is a coding problem at all.
+  const question = userPrompt("", solveImages.length > 0, reading.context, imageRefs, "", policy);
+
   // Same rule as the desktop run: the answer comes back in the language the
-  // question was in, unless the setting names one.
+  // question was posed in, unless the setting names one. The reading is where
+  // that language finally comes from — `job.extraction` was never a column, so
+  // this had silently resolved to "unknown" on every cloud run ever made.
   const answerLanguage = resolveAnswerLanguage(
     String(settings.outputLanguage || ""),
-    String(job.extraction?.language || job.language || "")
+    String(reading.extraction?.language || "")
   );
+  await addEvent(job.id, "info", "answer_language", `Answering in ${answerLanguage.display || "the question's own language"}.`, {
+    id: answerLanguage.id,
+    source: answerLanguage.source,
+  });
   const solverSystem = systemPrompt(settings.mode || "auto", answerLanguage);
   const candidates = [];
 
+  await bench.announce("solving", models.filter((m) => bench.has(m.id)).map((m) => m.id));
+  await addEvent(
+    job.id,
+    "info",
+    "solving",
+    seeing.length
+      ? `Asking ${solving.length} model(s) that can read the screenshot to solve it directly.`
+      : `Asking ${solving.length} model(s) to solve from the transcription.`,
+    { models: solving.map((m) => m.id), fromImage: seeing.length > 0 }
+  );
   await Promise.all(
-    models.map(async (spec, index) => {
+    solving.map(async (spec, index) => {
       const letter = letterFor(index);
       try {
-        const text = await tokenRouterChat({
+        const text = await tokenRouterGenerate({
+          settings,
           baseUrl,
           model: spec.id,
           system: solverSystem,
           user: question,
-          images,
+          images: solveImages,
           maxTokens: Number(settings.maxTokens || 4096),
         });
         const final = parseFinal(text);
@@ -1051,6 +1635,8 @@ export async function runCouncilJob(job) {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         candidates[index] = { letter, model: spec.id, final: null, text: "", error: message };
+        await bench.note(spec.id, err, "solving");
+        await bench.noteBlind(spec.id, message, "solving");
         await addEvent(job.id, "warn", "solver_failed", `${spec.id} failed: ${message}`, {
           model: spec.id,
           letter,
@@ -1088,27 +1674,82 @@ export async function runCouncilJob(job) {
   }
 
   const field = candidates.filter(Boolean);
-  const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field);
+
+  // What kind of question was it? Asked of the answers, not of the picture: a
+  // panel that came back with code has settled that more reliably than any
+  // classifier run over the pixels beforehand could have.
+  // Named here rather than at the end: the answers are in hand, and a run that
+  // fails later should still have left a session you can recognise.
+  await nameSessionFromWork(job, reading, field);
+
+  const isCoding = looksLikeCodingProblem(field);
+  await addEvent(
+    job.id,
+    "info",
+    "problem_kind",
+    isCoding
+      ? "The panel answered with code, so this is treated as a coding problem: the knowledge library and the performance targets apply."
+      : "No candidate produced code, so this is not treated as a coding problem.",
+    { coding: isCoding, kinds: field.map((c) => c.final?.kind || null) }
+  );
+
+  // The library only comes out for the problems it was written for. It is a
+  // benchmarking and optimisation collection — cp-algorithms, getrusage, perf
+  // counters, criterion — and feeding it to a multiple-choice question would be
+  // noise charged four times over.
+  const knowledge = isCoding ? await selectKnowledge(job, settings, { candidates: field, reading }) : "";
+
+  const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field, knowledge, bench);
   const docket = candidateDocket(field);
+  // An execution backend that is down makes every candidate "untested", which
+  // reads exactly like every candidate being useless. It is not the same thing
+  // and the record should not imply it is.
+  const attempted = Object.values(benchmark.runs).filter((r) => r?.note && !r.ran);
+  const infraFailures = attempted.filter((r) =>
+    /sandbox|e2b|timed out|econn|network|unauthor|api key|rate limit/i.test(String(r.note))
+  );
+  if (benchmark.suites.length && infraFailures.length && infraFailures.length === attempted.length) {
+    await addEvent(
+      job.id,
+      "error",
+      "benchmark_backend_down",
+      `No candidate could be executed at all — the execution backend looks unavailable: ${infraFailures[0].note}`,
+      { provider: executionProvider(settings), notes: infraFailures.map((r) => r.note) }
+    );
+  }
+
+  const suspectHarness = harnessIsSuspect(benchmark.runs);
+  if (suspectHarness) {
+    await addEvent(job.id, "warn", "harness_suspect", suspectHarness, { runs: benchmark.runs });
+  }
   const execution = benchmark.suites.length
-    ? executionDigest(field, benchmark.runs)
+    ? // The doubt travels with the evidence rather than beside it, so reviews,
+      // judges and the synthesis all read it in the same breath as the scores
+      // they would otherwise take at face value.
+      [executionDigest(field, benchmark.runs), suspectHarness && `NOTE ON THE HARNESS: ${suspectHarness}`]
+        .filter(Boolean)
+        .join("\n\n")
     : "No benchmark evidence is available for this cloud Council run.";
   if (!benchmark.suites.length) {
     await addEvent(job.id, "warn", "benchmark_pending", execution);
   }
 
   await patchJob(job.id, { progress_phase: "reviewing" });
-  await addEvent(job.id, "info", "reviewing", `Collecting ${models.length} Council review passes.`);
+
   const reviewSets = [];
 
+  const reviewing = bench.keep(models, (m) => m.id);
+  await bench.announce("reviewing", models.filter((m) => bench.has(m.id)).map((m) => m.id));
+  await addEvent(job.id, "info", "reviewing", `Collecting ${reviewing.length} Council review passes.`);
   await Promise.all(
-    models.map(async (spec) => {
+    reviewing.map(async (spec) => {
       try {
-        const text = await tokenRouterChat({
+        const text = await tokenRouterGenerate({
+          settings,
           baseUrl,
           model: spec.id,
           system: reviewSystemPrompt(),
-          user: reviewUserPrompt({ question, docket, execution }),
+          user: reviewUserPrompt({ question, docket, execution, knowledge }),
           maxTokens: Number(settings.maxTokens || 4096),
         });
         const parsed = parseReviewSet(text, spec.id);
@@ -1120,6 +1761,7 @@ export async function runCouncilJob(job) {
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        await bench.note(spec.id, err, "reviewing");
         await addEvent(job.id, "warn", "review_failed", `${spec.id} review failed: ${message}`, {
           model: spec.id,
         });
@@ -1128,13 +1770,17 @@ export async function runCouncilJob(job) {
   );
 
   await patchJob(job.id, { progress_phase: "judging" });
-  await addEvent(job.id, "info", "judging", `Collecting ${judges.length} judge reports.`);
+
   const judgeReports = [];
 
+  const judging = bench.keep(judges, (j) => j.model);
+  await bench.announce("judging", judges.filter((j) => bench.has(j.model)).map((j) => j.model));
+  await addEvent(job.id, "info", "judging", `Collecting ${judging.length} judge reports.`);
   await Promise.all(
-    judges.map(async (judge) => {
+    judging.map(async (judge) => {
       try {
-        const text = await tokenRouterChat({
+        const text = await tokenRouterGenerate({
+          settings,
           baseUrl,
           model: judge.model,
           system: judgeSystemPrompt(judge.emphasis || "correctness"),
@@ -1143,6 +1789,7 @@ export async function runCouncilJob(job) {
             docket,
             reviews: reviewDigest(reviewSets),
             execution,
+            knowledge,
           }),
           maxTokens: Number(settings.maxTokens || 4096),
         });
@@ -1154,6 +1801,7 @@ export async function runCouncilJob(job) {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         judgeReports.push({ model: judge.model, emphasis: judge.emphasis || "correctness", text: "", error: message });
+        await bench.note(judge.model, err, "judging");
         await addEvent(job.id, "warn", "judge_failed", `${judge.model} judge failed: ${message}`, {
           model: judge.model,
           emphasis: judge.emphasis || "correctness",
@@ -1165,10 +1813,14 @@ export async function runCouncilJob(job) {
   await patchJob(job.id, { progress_phase: "synthesizing" });
   await addEvent(job.id, "info", "synthesizing", "Synthesizing the cloud Council result.");
 
-  const synthesisModel = models[0].id;
+  const synthesisModel =
+    [settings.synthesisModel, ...judges.map((j) => j.model), ...models.map((m) => m.id)].find(
+      (id) => id && !bench.has(id)
+    ) || models[0].id;
   let synthesis;
   try {
-    synthesis = await tokenRouterChat({
+    synthesis = await tokenRouterGenerate({
+      settings,
       baseUrl,
       model: synthesisModel,
       system: synthesisSystemPrompt(),
@@ -1178,6 +1830,7 @@ export async function runCouncilJob(job) {
         reviews: reviewDigest(reviewSets) || "(no reviews were collected)",
         execution,
         judges: judgeDigest(judgeReports) || "(no judges were collected)",
+        knowledge,
       }),
       maxTokens: Number(settings.maxTokens || 4096),
     });
@@ -1219,6 +1872,31 @@ export async function runCouncilJob(job) {
     throw err;
   }
 
+  // The gate, applied to the synthesis in code rather than asked for in a
+  // prompt. On the first real run the synthesis named a candidate whose program
+  // never started, described the failure as an environmental timeout, and built
+  // the final answer on it. It never argued with the rule — it re-described the
+  // evidence until the rule appeared not to apply. A model cannot re-describe
+  // its way past this.
+  const claimed = winnerFromSynthesis(synthesis);
+  const ruling = enforceWinnerGate(claimed, benchmark.runs);
+
+  // And the question the gate does not ask: is the text a person is about to
+  // paste into an editor backed by anything that ran?
+  const standing = answerStanding(ruling.winner, benchmark.runs);
+  if (standing.standing === "unverified") {
+    await addEvent(job.id, "warn", "answer_unverified", standing.reason, {
+      claimedWinner: claimed,
+      gates: Object.fromEntries(Object.values(benchmark.runs).map((r) => [r.letter, gateFor(r)])),
+    });
+  }
+  if (ruling.overruledReason) {
+    await addEvent(job.id, "warn", "gate_overrule", ruling.overruledReason, {
+      claimedWinner: claimed,
+      run: benchmark.runs[claimed] || null,
+    });
+  }
+
   const report = {
     candidates: field,
     suites: benchmark.suites,
@@ -1226,8 +1904,32 @@ export async function runCouncilJob(job) {
     revisedRuns: {},
     reviews: reviewSets,
     judges: judgeReports,
-    synthesis,
-    winner: winnerFromSynthesis(synthesis),
+    // Stamped at the top, not appended at the bottom. A warning below a code
+    // block is a warning nobody reads before copying the code block.
+    synthesis: [
+      standing.standing === "unverified"
+        ? `> **UNVERIFIED ANSWER.** ${standing.reason}\n`
+        : standing.standing === "unexecuted"
+          ? `> **NOT EXECUTED.** ${standing.reason}\n`
+          : "",
+      synthesis,
+      ruling.overruledReason ? `\n\n---\n\n**GATE OVERRULE.** ${ruling.overruledReason}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    standing: standing.standing,
+    standingReason: standing.reason,
+    synthesisClaimedWinner: claimed,
+    gateOverruleReason: ruling.overruledReason,
+    harnessSuspect: suspectHarness,
+    reading: {
+      readers: reading.readers,
+      agree: reading.agreement?.agree ?? null,
+      confidence: reading.extraction?.confidence ?? 0,
+      markdown: reading.markdown,
+    },
+    knowledgeBytes: Buffer.byteLength(knowledge || "", "utf8"),
+    winner: ruling.winner,
   };
   const markdown = await saveCouncilReport(job, report);
 

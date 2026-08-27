@@ -101,11 +101,30 @@ function humanise(symbol: string): string {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+/** The first sentence of a paragraph, without the trailing punctuation. */
+function firstSentence(text: string): string {
+  const trimmed = (text ?? "").trim();
+  if (!trimmed) return "";
+  const stop = /[.!?](\s|$)/.exec(trimmed);
+  const sentence = stop ? trimmed.slice(0, stop.index) : trimmed;
+  return sentence.split(/\r?\n/)[0]?.trim() ?? "";
+}
+
 export interface TitleSource {
   /** What the reading decided the problem was. The best source by far. */
   extraction?: Partial<Extraction> | null;
   /** Anything the person typed. Trusted above a model's summary. */
   note?: string;
+  /**
+   * What the panel answered, when nothing read the picture.
+   *
+   * The cloud path stopped transcribing by default — the models that can see
+   * solve straight from the image — which removed the `problemSummary` this used
+   * to name a run after. The answers are the next best thing and arrive for
+   * free: a run called "Binary search on the partition of the smaller array" is
+   * a run you can find again, and "Batch — lc4" is not.
+   */
+  answers?: { answer?: string; language?: string; code?: string }[];
 }
 
 /**
@@ -117,7 +136,7 @@ export interface TitleSource {
  * outcome — it means there is genuinely nothing to name this after yet, and the
  * caller should keep whatever placeholder it has rather than inventing one.
  */
-export function titleFor({ extraction, note }: TitleSource): string {
+export function titleFor({ extraction, note, answers }: TitleSource): string {
   const typed = tidy(note ?? "");
   if (typed.length >= 8) return typed;
 
@@ -125,6 +144,14 @@ export function titleFor({ extraction, note }: TitleSource): string {
 
   const summarised = tidy(e.problemSummary ?? "");
   if (summarised.length >= 8) return summarised;
+
+  // Nothing read the screenshot, so name it after what the panel concluded.
+  // First sentence only: an answer is a paragraph and a title is a label.
+  for (const candidate of answers ?? []) {
+    const first = firstSentence(candidate.answer ?? "");
+    const named = tidy(first);
+    if (named.length >= 8) return shorten(named);
+  }
 
   // An error on screen is what the session is about, even with no summary.
   const firstError = e.errors?.[0]?.message ?? "";
@@ -168,5 +195,16 @@ export function placeholderTitle(when: string): string {
  */
 export function isPlaceholder(title: string): boolean {
   const t = title.trim();
-  return !t || t === "New session" || /^Session — /.test(t) || t === "Untitled session";
+  return (
+    !t ||
+    t === "New session" ||
+    t === "Untitled session" ||
+    /^Session — /.test(t) ||
+    // Names the batch runner and the smoke test invent before anyone knows what
+    // the question is. They are scaffolding, not decisions, and leaving them in
+    // place is how a history list fills up with "Batch — lc4".
+    /^Batch — /.test(t) ||
+    /^Cloud smoke\b/.test(t) ||
+    /^Council batch\b/.test(t)
+  );
 }

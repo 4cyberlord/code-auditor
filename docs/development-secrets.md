@@ -167,7 +167,5 @@ npm run smoke:live -- --no-solve
 npm run smoke:live -- --no-telegram
 ```
 
-The smoke solve uses GitHub Actions for remote benchmark evidence when the
-worker reaches runnable code candidates. Codespaces is no longer the recommended
-background benchmark backend because cold wake-up time is too slow for this app's
-solve loop.
+The smoke solve uses GitHub Actions for optional remote benchmark evidence when
+the worker reaches runnable code candidates.

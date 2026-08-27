@@ -1,7 +1,6 @@
 mod auth;
 mod capture;
 mod background_helper;
-mod codespaces;
 mod db;
 mod exec;
 mod keychain;
@@ -193,8 +192,6 @@ pub fn run() {
             db::db_migrate,
             db::settings_load,
             db::settings_save,
-            codespaces::codespaces_status,
-            codespaces::codespace_benchmark,
             sessions::session_list,
             sessions::session_create,
             sessions::session_update,
@@ -206,6 +203,8 @@ pub fn run() {
             sessions::screenshot_reorder,
             sessions::screenshots_purge,
             sessions::run_save,
+            sessions::run_list,
+            sessions::run_get,
             sessions::solve_job_create,
             sessions::solve_job_list,
             sessions::solve_job_event_list,

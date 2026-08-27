@@ -139,19 +139,19 @@ export default function DatabaseCard() {
         <span className="vendor">Supabase Postgres</span>
         {!saved ? (
           <span className="badge" data-tone="warn">
-            not set up
+            Not set up
           </span>
         ) : busy ? (
           <span className="badge" data-tone="live">
-            testing
+            Testing
           </span>
         ) : health ? (
           <span className="badge" data-tone="good">
-            connected
+            Connected
           </span>
         ) : error ? (
           <span className="badge" data-tone="bad">
-            not reachable
+            Not reachable
           </span>
         ) : (
           <span className="badge" data-tone="warn">

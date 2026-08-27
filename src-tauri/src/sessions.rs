@@ -617,6 +617,202 @@ pub async fn run_save(
 
 // ------------------------------------------------------------- solve jobs
 
+// ------------------------------------------------------------------- history
+
+/// One past run, as the sidebar lists it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSummary {
+    pub id: String,
+    pub session_id: String,
+    pub mode: String,
+    pub asked: String,
+    pub started_at: String,
+    pub finished_at: String,
+    pub answered: i64,
+    pub verdict: Option<String>,
+    pub reliability: Option<String>,
+}
+
+/// What one model said, read back out of the run it said it in.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredResponse {
+    pub id: String,
+    pub provider: String,
+    pub model: String,
+    pub attempt_id: String,
+    pub status: String,
+    pub body: String,
+    pub final_kind: Option<String>,
+    pub final_language: Option<String>,
+    pub final_answer: Option<String>,
+    pub final_code: Option<String>,
+    pub final_claims: Vec<String>,
+    pub complexity: Option<String>,
+    pub confidence: Option<f32>,
+    pub well_formed: bool,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub elapsed_ms: Option<i64>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredVerdict {
+    pub verdict: String,
+    pub headline: Option<String>,
+    pub detail: Option<String>,
+    pub reliability: Option<String>,
+    pub outliers: Vec<String>,
+    pub representative: Option<String>,
+    pub judge_provider: Option<String>,
+    pub judge_text: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunDetail {
+    pub run: RunSummary,
+    pub responses: Vec<StoredResponse>,
+    pub verdict: Option<StoredVerdict>,
+}
+
+/// Every run this session has finished, newest first.
+///
+/// `run_save` has been writing these since the first version of the app. Nothing
+/// ever read them back, so a finished run was visible for exactly as long as the
+/// panes held it and then existed only in the database. This is the missing half.
+#[tauri::command]
+pub async fn run_list(
+    db: tauri::State<'_, Db>,
+    session_id: String,
+) -> Result<Vec<RunSummary>, String> {
+    crate::auth::require()?;
+    let sid = parse_id(&session_id, "session")?;
+    let p = pool(&db).await?;
+    let rows = sqlx::query(
+        "select r.id, r.session_id, r.mode, r.asked, r.started_at, r.finished_at,
+                (select count(*) from agent_responses a where a.run_id = r.id) as answered,
+                v.verdict, v.reliability
+           from runs r
+           left join verdicts v on v.run_id = r.id
+          where r.session_id = $1
+          order by r.started_at desc",
+    )
+    .bind(sid)
+    .fetch_all(&p)
+    .await
+    .map_err(|e| format!("Could not list runs: {e}"))?;
+
+    Ok(rows
+        .iter()
+        .map(|r| RunSummary {
+            id: r.get::<Uuid, _>("id").to_string(),
+            session_id: r.get::<Uuid, _>("session_id").to_string(),
+            mode: r.get("mode"),
+            asked: r.get("asked"),
+            started_at: ts(r, "started_at"),
+            finished_at: ts_opt(r, "finished_at"),
+            answered: r.try_get("answered").unwrap_or(0),
+            verdict: r.try_get("verdict").ok().flatten(),
+            reliability: r.try_get("reliability").ok().flatten(),
+        })
+        .collect())
+}
+
+/// One run in full: every model's answer as it was stored, plus the verdict.
+#[tauri::command]
+pub async fn run_get(db: tauri::State<'_, Db>, run_id: String) -> Result<RunDetail, String> {
+    crate::auth::require()?;
+    let rid = parse_id(&run_id, "run")?;
+    let p = pool(&db).await?;
+
+    let row = sqlx::query(
+        "select r.id, r.session_id, r.mode, r.asked, r.started_at, r.finished_at,
+                (select count(*) from agent_responses a where a.run_id = r.id) as answered,
+                v.verdict, v.reliability
+           from runs r
+           left join verdicts v on v.run_id = r.id
+          where r.id = $1",
+    )
+    .bind(rid)
+    .fetch_optional(&p)
+    .await
+    .map_err(|e| format!("Could not read the run: {e}"))?
+    .ok_or_else(|| "That run no longer exists.".to_string())?;
+
+    let run = RunSummary {
+        id: row.get::<Uuid, _>("id").to_string(),
+        session_id: row.get::<Uuid, _>("session_id").to_string(),
+        mode: row.get("mode"),
+        asked: row.get("asked"),
+        started_at: ts(&row, "started_at"),
+        finished_at: ts_opt(&row, "finished_at"),
+        answered: row.try_get("answered").unwrap_or(0),
+        verdict: row.try_get("verdict").ok().flatten(),
+        reliability: row.try_get("reliability").ok().flatten(),
+    };
+
+    let answers = sqlx::query(
+        "select id, provider, model, attempt_id, status, body, final_kind, final_language,
+                final_answer, final_code, final_claims, complexity, confidence, well_formed,
+                input_tokens, output_tokens, elapsed_ms, error
+           from agent_responses where run_id = $1 order by created_at",
+    )
+    .bind(rid)
+    .fetch_all(&p)
+    .await
+    .map_err(|e| format!("Could not read the run's answers: {e}"))?;
+
+    let responses = answers
+        .iter()
+        .map(|r| StoredResponse {
+            id: r.get::<Uuid, _>("id").to_string(),
+            provider: r.get("provider"),
+            model: r.get("model"),
+            attempt_id: r.get("attempt_id"),
+            status: r.get("status"),
+            body: r.get("body"),
+            final_kind: r.try_get("final_kind").ok().flatten(),
+            final_language: r.try_get("final_language").ok().flatten(),
+            final_answer: r.try_get("final_answer").ok().flatten(),
+            final_code: r.try_get("final_code").ok().flatten(),
+            final_claims: r.try_get("final_claims").unwrap_or_default(),
+            complexity: r.try_get("complexity").ok().flatten(),
+            confidence: r.try_get("confidence").ok().flatten(),
+            well_formed: r.try_get("well_formed").unwrap_or(false),
+            input_tokens: r.try_get("input_tokens").ok().flatten(),
+            output_tokens: r.try_get("output_tokens").ok().flatten(),
+            elapsed_ms: r.try_get("elapsed_ms").ok().flatten(),
+            error: r.try_get("error").ok().flatten(),
+        })
+        .collect();
+
+    let verdict = sqlx::query(
+        "select verdict, headline, detail, reliability, outliers, representative,
+                judge_provider, judge_text
+           from verdicts where run_id = $1",
+    )
+    .bind(rid)
+    .fetch_optional(&p)
+    .await
+    .map_err(|e| format!("Could not read the verdict: {e}"))?
+    .map(|v| StoredVerdict {
+        verdict: v.get("verdict"),
+        headline: v.try_get("headline").ok().flatten(),
+        detail: v.try_get("detail").ok().flatten(),
+        reliability: v.try_get("reliability").ok().flatten(),
+        outliers: v.try_get("outliers").unwrap_or_default(),
+        representative: v.try_get("representative").ok().flatten(),
+        judge_provider: v.try_get("judge_provider").ok().flatten(),
+        judge_text: v.try_get("judge_text").ok().flatten(),
+    });
+
+    Ok(RunDetail { run, responses, verdict })
+}
+
 #[tauri::command]
 pub async fn solve_job_create(
     db: tauri::State<'_, Db>,
@@ -797,8 +993,12 @@ pub async fn solve_job_image_list(
     let jid = parse_id(&job_id, "solve job")?;
     let p = pool(&db).await?;
     let rows = sqlx::query(
+        // The column is `captured_at` — when the screenshot was taken, which for
+        // an image is the fact worth keeping. `created_at` is the name the
+        // serialized shape has always used, so it is aliased rather than
+        // renamed: the row is what was wrong here, not the API.
         "select id, job_id, session_id, position, storage_bucket, storage_path,
-                file_name, bytes, mime, width, height, created_at
+                file_name, bytes, mime, width, height, captured_at as created_at
            from solve_job_images where job_id = $1 order by position",
     )
     .bind(jid)

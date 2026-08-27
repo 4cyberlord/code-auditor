@@ -10,6 +10,7 @@
  */
 
 import type { AgentFinal } from "./parse.ts";
+import { normalizeCodeLanguage } from "./council.ts";
 
 export type Verdict = "unanimous" | "majority" | "split" | "none" | "insufficient";
 
@@ -173,11 +174,27 @@ function maskIdentifiers(tokens: string[]): string[] {
   );
 }
 
-function codeSim(a: string, b: string): number {
+function codeSim(a: string, b: string, langA = "", langB = ""): number {
   const hasA = a.trim().length > 0;
   const hasB = b.trim().length > 0;
   if (!hasA && !hasB) return -1; // axis not applicable to this pair
   if (!hasA || !hasB) return 0; // one produced code, the other didn't: real disagreement
+
+  // Two languages cannot be compared lexically, and pretending otherwise is how
+  // four agents that all wrote the same two-pointer scan got reported as "every
+  // agent produced a materially different answer". `for i in range(n):` and
+  // `for (int i = 0; i < n; ++i)` share almost no structure, and this axis
+  // carries 0.7 of the weight — so identical thinking in different languages
+  // scored as total disagreement.
+  //
+  // The honest answer is that the axis does not apply, exactly as it does not
+  // apply when only one of them wrote code at all. Dropping it hands the
+  // decision to the answer and the claims, which *are* comparable across
+  // languages and are where the agreement actually lives.
+  const la = normalizeCodeLanguage(langA);
+  const lb = normalizeCodeLanguage(langB);
+  if (la && lb && la !== lb) return -1;
+
   if (normalizeCode(a) === normalizeCode(b)) return 1;
 
   const ta = codeTokens(a);
@@ -207,7 +224,7 @@ function claimsSim(a: string[], b: string[]): number {
 function pairScore(x: ConsensusInput, y: ConsensusInput): PairScore {
   const answer = textSim(x.final.answer, y.final.answer);
   const claims = claimsSim(x.final.claims, y.final.claims);
-  const code = codeSim(x.final.code, y.final.code);
+  const code = codeSim(x.final.code, y.final.code, x.final.language, y.final.language);
   const bothCoded = code >= 0;
 
   const parts: [number, number][] = [[answer, bothCoded ? 0.1 : 0.45]];

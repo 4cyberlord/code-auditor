@@ -239,5 +239,89 @@ console.log("\n6. same algorithm, nothing phrased alike (the realistic case)");
   check("paraphrase does not break agreement", r.verdict === "unanimous", `groups=${JSON.stringify(r.groups)}`);
 }
 
+
+// ---------------------------------------------- the same idea, three languages
+
+// Four agents all wrote the two-pointer scan for Trapping Rain Water, in
+// different languages. Before the language check the code axis — 0.7 of the
+// weight — compared `for i in range(n):` against `for (int i = 0; i < n; ++i)`
+// and found nothing, so the panel reported "every agent produced a materially
+// different answer" about four agents that entirely agreed.
+{
+  const shared = {
+    kind: "code" as const,
+    answer:
+      "Two pointers with running left and right maxima; process whichever end is lower and add the running max minus the current bar.",
+    complexity: "O(n) time, O(1) space",
+    confidence: 0.99,
+    claims: [
+      "Each index is visited at most once, so the scan is linear.",
+      "Water above a bar is bounded by the smaller of the two running maxima.",
+    ],
+    raw: "",
+    wellFormed: true,
+  };
+
+  const python = {
+    id: "a",
+    name: "Kimi",
+    final: {
+      ...shared,
+      language: "python",
+      code: "def trap(h):\n    l, r = 0, len(h) - 1\n    lm = rm = out = 0\n    while l < r:\n        if h[l] <= h[r]:\n            lm = max(lm, h[l])\n            out += lm - h[l]\n            l += 1\n        else:\n            rm = max(rm, h[r])\n            out += rm - h[r]\n            r -= 1\n    return out",
+    },
+  };
+
+  const cpp = {
+    id: "b",
+    name: "Claude",
+    final: {
+      ...shared,
+      language: "c++17",
+      code: "int trap(vector<int>& h) {\n  int l = 0, r = (int)h.size() - 1, lm = 0, rm = 0, out = 0;\n  while (l < r) {\n    if (h[l] <= h[r]) { lm = max(lm, h[l]); out += lm - h[l]; ++l; }\n    else { rm = max(rm, h[r]); out += rm - h[r]; --r; }\n  }\n  return out;\n}",
+    },
+  };
+
+  const rust = {
+    id: "c",
+    name: "Gemini",
+    final: {
+      ...shared,
+      language: "rust",
+      code: "fn trap(h: Vec<i32>) -> i32 {\n    let (mut l, mut r) = (0usize, h.len() - 1);\n    let (mut lm, mut rm, mut out) = (0, 0, 0);\n    while l < r {\n        if h[l] <= h[r] { lm = lm.max(h[l]); out += lm - h[l]; l += 1; }\n        else { rm = rm.max(h[r]); out += rm - h[r]; r -= 1; }\n    }\n    out\n}",
+    },
+  };
+
+  const mixed = computeConsensus([python, cpp, rust] as never, 0.55);
+  check(
+    "the same algorithm in three languages is one group",
+    mixed.groups.length === 1,
+    `${mixed.groups.length} camps: ${JSON.stringify(mixed.groups)}`
+  );
+  check("nobody is called an outlier for their language", mixed.outliers.length === 0, mixed.outliers.join(", "));
+  check("and it does not read as total disagreement", mixed.verdict !== "none", mixed.verdict);
+
+  // The guard must not paper over real disagreement that happens to cross
+  // languages: a different algorithm is still a different algorithm.
+  const bruteForce = {
+    id: "d",
+    name: "GPT",
+    final: {
+      ...shared,
+      language: "python",
+      answer: "For every bar, scan left and right for the tallest bar on each side and add the shortfall.",
+      complexity: "O(n^2) time, O(1) space",
+      claims: ["Each bar rescans the whole array, so the scan is quadratic."],
+      code: "def trap(h):\n    out = 0\n    for i in range(len(h)):\n        lm = max(h[:i + 1])\n        rm = max(h[i:])\n        out += min(lm, rm) - h[i]\n    return out",
+    },
+  };
+  const split = computeConsensus([cpp, rust, bruteForce] as never, 0.55);
+  check(
+    "a genuinely different approach still separates",
+    split.groups.length > 1,
+    `${split.groups.length} camps: ${JSON.stringify(split.groups)}`
+  );
+}
+
 console.log(failures ? `\n${failures} FAILURE(S)\n` : "\nall checks passed\n");
 process.exit(failures ? 1 : 0);

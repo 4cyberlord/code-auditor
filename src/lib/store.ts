@@ -17,7 +17,21 @@ import {
 } from "./models.ts";
 import { parseFinal, type AgentFinal } from "./parse.ts";
 import { computeConsensus, type ConsensusResult } from "./consensus.ts";
-import { systemPrompt, userPrompt, judgePromptWithKnowledge, imageManifest, type Mode } from "./prompts.ts";
+import {
+  parseReview,
+  reviewSystemPromptFor,
+  reviewUserPromptFor,
+  type PortLanguage,
+  type SolutionReview,
+} from "./review.ts";
+import {
+  systemPrompt,
+  userPrompt,
+  judgePromptWithKnowledge,
+  imageManifest,
+  solutionPolicy,
+  type Mode,
+} from "./prompts.ts";
 import {
   EXTRACTION_SYSTEM,
   extractionUserPrompt,
@@ -52,8 +66,10 @@ import {
   councilFollowupUserPrompt,
   candidateDocket,
   candidateLanguage,
+  endpointForCouncilModel,
+  enforceWinnerGate,
+  harnessIsSuspect,
   executionDigest,
-  gateFor,
   countCases,
   judgeSystemPrompt,
   judgeUserPrompt,
@@ -80,6 +96,13 @@ import {
   type ReviewSet,
   type TestSuite,
 } from "./council.ts";
+
+/**
+ * The drawers in the right-hand rail. "none" is a real choice — every drawer
+ * shut, all the height to the panes.
+ */
+export const RAIL_PANELS = ["solution", "consensus", "jobs", "sessions", "none"] as const;
+export type RailPanel = (typeof RAIL_PANELS)[number];
 
 export type AgentStatus = "idle" | "queued" | "streaming" | "done" | "error" | "cancelled";
 
@@ -383,7 +406,16 @@ interface Settings {
    * the window permanently to a list that is consulted occasionally. As a drawer
    * under the verdict it costs one row when shut.
    */
-  sessionsOpen: boolean;
+  /**
+   * Which drawer in the right-hand rail is open. One at a time, by construction.
+   *
+   * Four independent booleans could all be true, and were: the rail then held
+   * four expanded panels competing for one column, each squeezed to a strip.
+   * A single value makes "only one is open" a property of the data rather than
+   * a rule some future toggle can forget to apply.
+   */
+  railPanel: RailPanel;
+  /** Whether the Solution read-out is expanded. Remembered between runs. */
   /**
    * Whether a capture pulls the window in front of whatever you were doing.
    *
@@ -457,16 +489,59 @@ interface Settings {
   executionProvider: "e2b" | "local";
   /** Wall-clock ceiling for one E2B command, after sandbox creation. */
   e2bTimeoutMs: number;
+  /** Optional second-pass benchmark evidence after the fast E2B/local gate. */
+  benchmarkBackend: "actions" | "off";
   /**
-   * Which machine benchmarks a passing council candidate.
+   * Every model id the router last said this key can reach.
    *
-   * Actions by default, because latency is the point: a dispatched workflow is
-   * running within seconds on a warm pool, where a cold Codespace takes minutes
-   * to wake and the council is waiting on this evidence. Codespaces stays for
-   * the case it is better at: a warm machine in the same environment the repo
-   * develops in.
+   * One listing call answers what used to take one probe request per model, and
+   * answers it for the whole catalogue rather than only the seats already
+   * filled. It is persisted so the Council can consult it without a round trip,
+   * and refreshed whenever Settings is opened. Empty means "never asked" — not
+   * "nothing available" — so an empty list never disqualifies anything.
    */
-  benchmarkBackend: "actions" | "codespaces" | "off";
+  availableModels: string[];
+  /**
+   * A running worker's tick endpoint, if there is one.
+   *
+   * The desktop app does not process cloud jobs — the worker is a separate Node
+   * process holding its own gateway and database credentials. What the app can
+   * do is ask it to take a job now instead of waiting out its poll interval, and
+   * tell you when nothing is listening at all. Blank means no worker, which the
+   * Background jobs panel reports rather than hides.
+   */
+  workerTickUrl: string;
+  workerTickSecret: string;
+  /**
+   * How hard every model is asked to think before answering. "high" by default.
+   *
+   * A Council seat is not chatting — it is answering something four other models
+   * and a bench of judges will pick apart, against a harness that runs its code.
+   * A fast wrong answer is the expensive one: it still costs a review pass, a
+   * judge pass and a benchmark run before anybody finds out it was wrong.
+   * Routes with no reasoning mode are detected on first refusal and stop being
+   * asked, so this costs nothing where it cannot be used.
+   */
+  reasoningEffort: "off" | "low" | "medium" | "high";
+  /**
+   * Which language to reach for when the question does not fix one, in order of
+   * preference. A default, never an override: a screenshot showing a Python stub
+   * still gets a Python answer, because that is the language it was asked in.
+   */
+  solutionLanguages: string[];
+  /** The peak resident set a solution is asked to design toward, in KB. */
+  memoryTargetKb: number;
+  /**
+   * Transcribe a screenshot into text before solving it.
+   *
+   * Off by default. The models that can be shown the picture solve from the
+   * picture; the ones whose route cannot carry an image sit the round out. A
+   * transcription is a lossy copy of the evidence, and spending two model calls
+   * to make one — so that a model which cannot see can guess from it — buys less
+   * than it costs. It turns itself back on for the one case where the
+   * alternative is no answer at all: nothing on the bench can see.
+   */
+  transcribeScreenshots: boolean;
   /** `owner/repo` the benchmark workflow is dispatched to. */
   githubRepository: string;
   /** The workflow file, if it has been renamed. */
@@ -475,12 +550,6 @@ interface Settings {
   githubRef: string;
   /** Wall-clock ceiling for one remote benchmark, dispatch and queue included. */
   benchmarkTimeoutMs: number;
-  /** Whether passing council candidates also get benchmarked in GitHub Codespaces. */
-  codespacesBenchmark: boolean;
-  /** The `gh codespace list` name to run remote benchmarks in. */
-  codespacesName: string;
-  /** Wall-clock timeout for the remote benchmark command. */
-  codespacesTimeoutMs: number;
   /**
    * What each model did when it was last actually asked something.
    *
@@ -515,8 +584,6 @@ interface State {
   gatewayKey: boolean;
   /** Whether a Supabase Storage key is saved. Where screenshots actually live. */
   storageKey: boolean;
-  codespacesStatus: bridge.CodespacesStatus | null;
-  codespacesLoading: boolean;
   /** Transient notifications. */
   toasts: Toast[];
   /**
@@ -543,6 +610,21 @@ interface State {
   sessionsStatus: "active" | "archived";
   /** The session captures attach to. Null when no database is configured. */
   currentSessionId: string | null;
+
+  /** Past runs in this session, newest first. Empty until asked for. */
+  history: db.RunSummary[];
+  historyLoading: boolean;
+  historyError: string | null;
+  /**
+   * The run the panes are currently showing, when it is not the live one.
+   *
+   * History is a *view*, not a destination: the live run is kept aside and put
+   * back on exit, so opening an old answer never costs you the one on screen.
+   */
+  viewingRunId: string | null;
+  loadHistory: () => Promise<void>;
+  openRun: (runId: string) => Promise<void>;
+  exitHistory: () => void;
   sessionsError: string | null;
   sessionsLoading: boolean;
   /** Guards against writing the same run to history twice. */
@@ -560,6 +642,13 @@ interface State {
   setNote: (note: string) => void;
   patchSettings: (patch: Partial<Settings>) => void;
   setSettingsOpen: (open: boolean) => void;
+  /**
+   * Open one drawer, closing whichever was open.
+   *
+   * Clicking the drawer that is already open shuts it, so the header stays a
+   * toggle rather than becoming a one-way switch you cannot undo.
+   */
+  toggleRailPanel: (panel: RailPanel) => void;
   setShortcutError: (message: string | null) => void;
 
   loadSessions: (status?: "active" | "archived") => Promise<void>;
@@ -638,14 +727,27 @@ interface State {
   failAgent: (e: bridge.ErrorEvent) => void;
 
   runJudge: () => Promise<void>;
+
+  /**
+   * The read-out on the solution the panel settled on: is it right, what is it
+   * doing, could it be faster, is it written well — and the same algorithm in
+   * C++, Rust and Python to compare.
+   */
+  review: {
+    status: "idle" | "running" | "done" | "error";
+    data: SolutionReview | null;
+    error: string | null;
+    /** Which port tab is showing. Sticky, so switching runs keeps your choice. */
+    language: PortLanguage;
+  };
+  runReview: () => Promise<void>;
+  setReviewLanguage: (lang: PortLanguage) => void;
   maybeAutoJudge: () => void;
   consensus: () => ConsensusResult;
   /** Fires the council once the panel has answered. No-op when disabled. */
   maybeStartCouncil: () => void;
   /** Continue the completed council discussion with one or more council models. */
   sendCouncilMessage: (message: string, models: string[]) => Promise<void>;
-  refreshCodespaces: () => Promise<void>;
-
   /**
    * Push a notification onto the tray. `ok` toasts self-dismiss; errors stay
    * until the user reads them.
@@ -663,7 +765,7 @@ interface State {
 
 const STORAGE_KEY = "code-auditor.settings.v1";
 const DB_SETTINGS_KEY = "app.v1";
-const RESPONSES_MODELS = new Set(["openai/gpt-5.3-codex", "openai/gpt-5.6-sol"]);
+
 
 /**
  * Images per run.
@@ -704,12 +806,15 @@ const defaultSettings = (): Settings => ({
   // five a minute the second one costs a pane. Claude reads screenshots most
   // reliably of the four, so when only one model can read, it is the one.
   extractors: ["anthropic"],
-  sessionsOpen: true,
+  railPanel: "consensus",
   raiseOnCapture: false,
   maxImages: MAX_IMAGES,
   useGateway: true,
   gatewayBaseUrl: GATEWAY.defaultBaseUrl,
-  councilEnabled: false,
+  // On by default. The panel alone answers "did four models agree", which is a
+  // weaker question than "does this run" — and runtime and memory only exist at
+  // all when something executed the code.
+  councilEnabled: true,
   councilModels: COUNCIL_DEFAULT_MODELS,
   councilJudges: COUNCIL_DEFAULT_JUDGES,
   synthesisModel: "openai/gpt-5.6-sol",
@@ -717,14 +822,20 @@ const defaultSettings = (): Settings => ({
   outputLanguage: "",
   executionProvider: "e2b",
   e2bTimeoutMs: 120_000,
-  benchmarkBackend: "actions",
+  // Off: the sandbox that runs a candidate already measures it. Switching this
+  // to "actions" is an explicit choice to have GitHub do the measuring instead.
+  benchmarkBackend: "off",
+  availableModels: [],
+  workerTickUrl: "",
+  workerTickSecret: "",
+  reasoningEffort: "high",
+  solutionLanguages: ["C++", "Python"],
+  memoryTargetKb: 20 * 1024,
+  transcribeScreenshots: false,
   githubRepository: "",
   githubWorkflow: "cloud-benchmark.yml",
   githubRef: "main",
   benchmarkTimeoutMs: 300_000,
-  codespacesBenchmark: false,
-  codespacesName: "",
-  codespacesTimeoutMs: 30000,
   probes: {},
 });
 
@@ -825,7 +936,9 @@ function normalizeSettings(s: Settings): Settings {
     gatewayPerMinute: Math.round(clampTo(s.gatewayPerMinute, 1, 600, base.gatewayPerMinute)),
     // A zone this machine's Intl cannot use would throw inside every render.
     timeZone: isUsableZone(s.timeZone) ? s.timeZone : base.timeZone,
-    sessionsOpen: typeof s.sessionsOpen === "boolean" ? s.sessionsOpen : base.sessionsOpen,
+    railPanel: RAIL_PANELS.includes(s.railPanel as RailPanel)
+      ? (s.railPanel as RailPanel)
+      : base.railPanel,
     raiseOnCapture:
       typeof s.raiseOnCapture === "boolean" ? s.raiseOnCapture : base.raiseOnCapture,
     maxImages: Math.round(clampTo(s.maxImages, 1, MAX_IMAGES, base.maxImages)),
@@ -847,18 +960,6 @@ function normalizeSettings(s: Settings): Settings {
     maxTokens: Math.round(
       clampTo(s.maxTokens, MAX_TOKENS_RANGE.min, MAX_TOKENS_RANGE.max, base.maxTokens)
     ),
-    codespacesBenchmark:
-      typeof s.codespacesBenchmark === "boolean"
-        ? s.codespacesBenchmark
-        : base.codespacesBenchmark,
-    codespacesName:
-      typeof s.codespacesName === "string" ? s.codespacesName.trim() : base.codespacesName,
-    codespacesTimeoutMs: Math.round(
-      clampTo(s.codespacesTimeoutMs, 5000, 120000, base.codespacesTimeoutMs)
-    ),
-    // A settings file saved before this existed carries no backend but may
-    // carry `codespacesBenchmark: true`. Honouring that is the difference
-    // between a migration and a silent preference change.
     // Free text on purpose: the runner supports languages this app has never
     // been told about, and refusing an unrecognised one would be the app
     // deciding what counts as a language.
@@ -870,13 +971,32 @@ function normalizeSettings(s: Settings): Settings {
       ? s.executionProvider
       : base.executionProvider,
     e2bTimeoutMs: Math.round(clampTo(s.e2bTimeoutMs, 30_000, 300_000, base.e2bTimeoutMs)),
-    benchmarkBackend: (["actions", "codespaces", "off"] as const).includes(
+    availableModels: Array.isArray(s.availableModels)
+      ? (s.availableModels as string[]).filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim())
+      : base.availableModels,
+    workerTickUrl: typeof s.workerTickUrl === "string" ? s.workerTickUrl.trim() : base.workerTickUrl,
+    workerTickSecret:
+      typeof s.workerTickSecret === "string" ? s.workerTickSecret : base.workerTickSecret,
+    reasoningEffort: (["off", "low", "medium", "high"] as const).includes(
+      s.reasoningEffort as "high"
+    )
+      ? (s.reasoningEffort as Settings["reasoningEffort"])
+      : base.reasoningEffort,
+    solutionLanguages:
+      Array.isArray(s.solutionLanguages) && s.solutionLanguages.some((x) => typeof x === "string" && x.trim())
+        ? (s.solutionLanguages as string[]).filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim())
+        : base.solutionLanguages,
+    memoryTargetKb:
+      typeof s.memoryTargetKb === "number" && Number.isFinite(s.memoryTargetKb) && s.memoryTargetKb > 0
+        ? Math.round(s.memoryTargetKb)
+        : base.memoryTargetKb,
+    transcribeScreenshots:
+      typeof s.transcribeScreenshots === "boolean" ? s.transcribeScreenshots : base.transcribeScreenshots,
+    benchmarkBackend: (["actions", "off"] as const).includes(
       s.benchmarkBackend as "actions"
     )
       ? s.benchmarkBackend
-      : s.codespacesBenchmark
-        ? "codespaces"
-        : base.benchmarkBackend,
+      : base.benchmarkBackend,
     githubRepository:
       typeof s.githubRepository === "string" ? s.githubRepository.trim() : base.githubRepository,
     githubWorkflow:
@@ -927,7 +1047,6 @@ function normalizeSettings(s: Settings): Settings {
 const COUNCIL_MODEL_BLOCKLIST: readonly string[] = [
   "deepseek/",
   "qwen/",
-  "z-ai/",
 ];
 
 const isBlocklisted = (modelId: string): boolean =>
@@ -1131,7 +1250,7 @@ export function routeFor(
 
 function endpointForModel(s: Settings, model: string): "chat" | "responses" {
   const id = model.trim();
-  return s.councilModels.find((m) => m.id === id)?.endpoint ?? (RESPONSES_MODELS.has(id) ? "responses" : "chat");
+  return endpointForCouncilModel(s.councilModels, id);
 }
 
 /**
@@ -1189,6 +1308,32 @@ async function fetchStored(path: string, mime: string): Promise<{ dataUrl: strin
   }
 }
 
+/** The live run, kept aside while history is being read. Never rendered. */
+let liveSnapshot: { agents: AgentSlot[]; note: string } | null = null;
+
+/**
+ * How long to wait for a pane that has not started before judging without it.
+ *
+ * Sized against the gateway's pacing rather than guessed: seats start roughly
+ * one request apart, so the last of four can be a good few seconds behind the
+ * first. Waiting costs nothing when nothing is pending.
+ */
+const LATE_STARTER_GRACE_MS = Number(process.env.NEXT_PUBLIC_LATE_STARTER_GRACE_MS) || 8000;
+
+/**
+ * How many times to come back before deciding without the late pane.
+ *
+ * Bounded on purpose. A pane can sit in "queued" and never leave it — a route
+ * that never starts, a seat whose model was removed — and an unbounded wait for
+ * one of those means the run is never judged, never reviewed and, worst of all,
+ * never written to history. The original code carried a comment warning that
+ * returning early from this function silently loses the run; waiting forever is
+ * the same mistake wearing a timer.
+ */
+const LATE_STARTER_TRIES = 3;
+let lateStarterCheck: ReturnType<typeof setTimeout> | null = null;
+let lateStarterWaits = 0;
+
 export const useStore = create<State>((set, get) => ({
   agents: buildAgents(defaultSettings()),
   images: [],
@@ -1200,11 +1345,10 @@ export const useStore = create<State>((set, get) => ({
   keys: Object.fromEntries(PROVIDER_ORDER.map((p) => [p, false])) as Record<ProviderId, boolean>,
   gatewayKey: false,
   storageKey: false,
-  codespacesStatus: null,
-  codespacesLoading: false,
   uploads: {},
   toasts: [],
   probing: false,
+  review: { status: "idle", data: null, error: null, language: "cpp" },
   probeError: null,
   judge: { status: "idle", provider: "anthropic", text: "", error: null },
   council: IDLE_COUNCIL,
@@ -1213,6 +1357,10 @@ export const useStore = create<State>((set, get) => ({
   sessions: [],
   sessionsStatus: "active",
   currentSessionId: null,
+  history: [],
+  historyLoading: false,
+  historyError: null,
+  viewingRunId: null,
   sessionsError: null,
   sessionsLoading: false,
   runPersisted: false,
@@ -1336,6 +1484,9 @@ export const useStore = create<State>((set, get) => ({
   setNote: (note) => set({ note }),
 
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+
+  toggleRailPanel: (panel) =>
+    get().patchSettings({ railPanel: get().settings.railPanel === panel ? "none" : panel }),
   setShortcutError: (shortcutError) => set({ shortcutError }),
 
   loadSessions: async (status) => {
@@ -2021,13 +2172,27 @@ export const useStore = create<State>((set, get) => ({
     );
     let knowledge = knowledgePackFor(note, 5);
 
+    // A new run leaves history: the panes are about to be overwritten anyway,
+    // and keeping a snapshot of an old run to "return" to would put stale
+    // answers back on screen after a fresh one finished.
+    liveSnapshot = null;
+    // A fresh run gets a fresh patience budget, or a second run inherits an
+    // exhausted one and never waits for its own late seat.
+    lateStarterWaits = 0;
+    if (lateStarterCheck) {
+      clearTimeout(lateStarterCheck);
+      lateStarterCheck = null;
+    }
+
     set((s) => ({
       runId,
       running: true,
       runPersisted: false,
+      viewingRunId: null,
       extraction: IDLE_EXTRACTION,
       council: IDLE_COUNCIL,
       judge: { status: "idle", provider: s.settings.judgeProvider, text: "", error: null },
+      review: { status: "idle", data: null, error: null, language: s.review.language },
       agents: s.agents.map((a) => {
         const route = routes.get(a.provider);
         const spec = agentSpec(a.provider);
@@ -2166,6 +2331,13 @@ export const useStore = create<State>((set, get) => ({
     // The run id is deliberately reused so Stop still sweeps the whole run by
     // prefix; the attempt id is what separates this launch from the last one.
     const attemptId = newAttemptId();
+    // Re-running one pane is a fresh wait for that pane, so it does not inherit
+    // a patience budget the previous run already spent.
+    lateStarterWaits = 0;
+    if (lateStarterCheck) {
+      clearTimeout(lateStarterCheck);
+      lateStarterCheck = null;
+    }
     set((s) => ({
       runId: id,
       running: true,
@@ -2324,6 +2496,35 @@ export const useStore = create<State>((set, get) => ({
   maybeAutoJudge: () => {
     const s = get();
     if (s.running) return;
+
+    /**
+     * A pane that has not started yet is not a pane that failed.
+     *
+     * The gateway paces requests, so with four seats the last one can begin
+     * seconds after the first — and a run was being judged the moment the
+     * *finished* panes settled, while a slow starter was still sitting in
+     * "queued". The verdict then described three answers and called the fourth
+     * an outlier for not existing yet.
+     *
+     * So: if anything is still waiting to begin, come back shortly rather than
+     * deciding without it. The re-check is cheap and only fires while a pane is
+     * genuinely pending.
+     */
+    const pending = s.agents.filter((a) => a.enabled && a.status === "queued");
+    if (pending.length && lateStarterWaits < LATE_STARTER_TRIES) {
+      if (!lateStarterCheck) {
+        lateStarterWaits += 1;
+        lateStarterCheck = setTimeout(() => {
+          lateStarterCheck = null;
+          get().maybeAutoJudge();
+        }, LATE_STARTER_GRACE_MS);
+      }
+      return;
+    }
+    if (lateStarterCheck) {
+      clearTimeout(lateStarterCheck);
+      lateStarterCheck = null;
+    }
     if (s.judge.status === "running" || s.judge.status === "done") return;
 
     // Decided as one answer rather than a ladder of early returns, because every
@@ -2348,6 +2549,9 @@ export const useStore = create<State>((set, get) => ({
 
     // When the judge runs, persistence waits for it so its reasoning is part of
     // the same record.
+    // The read-out is what a person actually reads, so it runs whether or not
+    // the judge does — it is a different question from "did they agree".
+    void get().runReview();
     if (willJudge) void get().runJudge();
     else void get().persistRun();
   },
@@ -2359,6 +2563,96 @@ export const useStore = create<State>((set, get) => ({
    * so the judge's reasoning is part of the same record instead of needing a
    * second write. Guarded by `runPersisted` because several paths reach here.
    */
+  /** The runs this session has finished. */
+  loadHistory: async () => {
+    const sessionId = get().currentSessionId;
+    if (!sessionId) {
+      set({ history: [], historyError: null });
+      return;
+    }
+    set({ historyLoading: true, historyError: null });
+    try {
+      set({ history: await db.listRuns(sessionId), historyLoading: false });
+    } catch (err) {
+      set({ historyLoading: false, historyError: cleanError(String(err)) });
+    }
+  },
+
+  /**
+   * Put a past run back on the panes.
+   *
+   * Each stored answer goes to the pane that produced it, matched by provider
+   * and falling back to the model id — a roster can be edited between the run
+   * and the reading of it, and an answer with nowhere to sit would otherwise
+   * vanish silently. Panes with nothing stored are blanked rather than left
+   * holding the live run's text, which would read as part of the history.
+   */
+  openRun: async (runId) => {
+    const s = get();
+    if (s.running) return;
+
+    // Keep the live run aside the first time, so leaving history restores it.
+    const live = (s.viewingRunId ? liveSnapshot : null) ?? { agents: s.agents, note: s.note };
+    if (!s.viewingRunId) liveSnapshot = { agents: s.agents, note: s.note };
+
+    set({ historyError: null });
+    try {
+      const detail = await db.getRun(runId);
+      const byProvider = new Map(detail.responses.map((r) => [r.provider, r]));
+      const byModel = new Map(detail.responses.map((r) => [r.model, r]));
+
+      const agents = s.agents.map((slot) => {
+        const stored = byProvider.get(slot.provider) ?? byModel.get(slot.model);
+        if (!stored) {
+          return { ...slot, status: "idle" as AgentStatus, text: "", error: null, final: null, attemptId: null };
+        }
+        return {
+          ...slot,
+          model: stored.model,
+          status: (stored.status === "done" ? "done" : stored.status === "cancelled" ? "cancelled" : "error") as AgentStatus,
+          text: stored.body,
+          error: stored.error,
+          inputTokens: stored.inputTokens,
+          outputTokens: stored.outputTokens,
+          elapsedMs: stored.elapsedMs,
+          startedAt: null,
+          final: parseFinal(stored.body),
+          attemptId: stored.attemptId,
+        };
+      });
+
+      set({
+        agents,
+        note: detail.run.asked,
+        viewingRunId: runId,
+        judge: detail.verdict?.judgeText
+          ? {
+              status: "done" as const,
+              provider: (detail.verdict.judgeProvider || "") as ProviderId,
+              text: detail.verdict.judgeText,
+              error: null,
+            }
+          : { status: "idle" as const, provider: s.settings.judgeProvider, text: "", error: null },
+      });
+    } catch (err) {
+      // Nothing was replaced, so there is nothing to put back.
+      if (!s.viewingRunId) liveSnapshot = null;
+      set({ agents: live.agents, note: live.note, historyError: cleanError(String(err)) });
+    }
+  },
+
+  /** Back to the run that was on screen before history was opened. */
+  exitHistory: () => {
+    const kept = liveSnapshot;
+    liveSnapshot = null;
+    set({
+      viewingRunId: null,
+      historyError: null,
+      ...(kept ? { agents: kept.agents, note: kept.note } : {}),
+      judge: { status: "idle", provider: get().settings.judgeProvider, text: "", error: null },
+    });
+  },
+
   persistRun: async () => {
     const s = get();
     if (s.runPersisted || s.running) return;
@@ -2556,27 +2850,72 @@ export const useStore = create<State>((set, get) => ({
     }));
   },
 
-  refreshCodespaces: async () => {
-    set({ codespacesLoading: true });
+  setReviewLanguage: (language) => set((s) => ({ review: { ...s.review, language } })),
+
+  /**
+   * Reviews whichever answer the panel settled on.
+   *
+   * The representative of the largest agreeing group, because that is the
+   * answer a reader is actually looking at; falling back to the first agent
+   * that produced code at all. One model call — the ports come back in the same
+   * reply, so asking for three languages costs nothing beyond the tokens.
+   */
+  runReview: async () => {
+    const s = get();
+    if (s.review.status === "running") return;
+
+    const consensus = s.consensus();
+    const answered = s.agents.filter((a) => a.enabled && a.final?.code?.trim());
+    const pick =
+      answered.find((a) => a.id === consensus.representative) ??
+      answered.find((a) => a.final?.wellFormed) ??
+      answered[0];
+
+    if (!pick?.final) {
+      set((st) => ({
+        review: { ...st.review, status: "error", data: null, error: "No agent produced code to review." },
+      }));
+      return;
+    }
+
+    const route = routeFor(s.settings.judgeProvider, s.settings, s.keys, s.gatewayKey);
+    if (!route) {
+      set((st) => ({
+        review: { ...st.review, status: "error", data: null, error: "No route for the reviewer model." },
+      }));
+      return;
+    }
+
+    set((st) => ({ review: { ...st.review, status: "running", error: null } }));
     try {
-      const status = await bridge.codespacesStatus();
-      set({ codespacesStatus: status, codespacesLoading: false });
-      if (!status.error && status.codespaces.length && !get().settings.codespacesName) {
-        const firstReady =
-          status.codespaces.find((c) => c.state.toLowerCase() === "available") ??
-          status.codespaces[0];
-        get().patchSettings({ codespacesName: firstReady.name });
-      }
-    } catch (err) {
-      set({
-        codespacesStatus: {
-          ghAvailable: false,
-          authenticated: false,
-          codespaces: [],
-          error: cleanError(String(err)),
-        },
-        codespacesLoading: false,
+      const text = await bridge.runOnce({
+        runId: `review-${Date.now().toString(36)}`,
+        agentId: "judge",
+        attemptId: newAttemptId(),
+        provider: route.provider,
+        model: route.model,
+        systemPrompt: reviewSystemPromptFor(),
+        userText: reviewUserPromptFor({
+          question: `${s.note}\n\n${s.extraction.context}`.trim(),
+          language: pick.final.language,
+          code: pick.final.code,
+          answer: pick.final.answer,
+        }),
+        images: [],
+        maxTokens: s.settings.maxTokens,
+        temperature: 0,
+        baseUrl: route.baseUrl,
+        endpoint: endpointForModel(s.settings, route.model),
       });
+
+      const data = parseReview(text);
+      set((st) => ({
+        review: data
+          ? { ...st.review, status: "done", data, error: null }
+          : { ...st.review, status: "error", data: null, error: "The reviewer did not answer in the expected form." },
+      }));
+    } catch (err) {
+      set((st) => ({ review: { ...st.review, status: "error", data: null, error: cleanError(String(err)) } }));
     }
   },
 
@@ -2799,46 +3138,6 @@ async function executeField(
     try {
       const r = await bridge.runCode({ language: suite.language, code: program, timeoutMs: 20000 });
       const { passed, failed } = countCases(r.stdout);
-      let remote: CandidateRun["remote"] | undefined;
-      const remoteEnabled = get().settings.codespacesBenchmark;
-      const codespace = get().settings.codespacesName.trim();
-      if (remoteEnabled && codespace && r.ok && failed === 0 && passed > 0) {
-        try {
-          const rb = await bridge.codespaceBenchmark({
-            codespace,
-            language: suite.language,
-            code: program,
-            timeoutMs: get().settings.codespacesTimeoutMs,
-          });
-          const remoteCases = countCases(rb.stdout);
-          remote = {
-            ok: rb.ok && remoteCases.failed === 0 && remoteCases.passed > 0,
-            codespace: rb.codespace,
-            runtime: rb.runtime,
-            durationMs: rb.durationMs,
-            remoteElapsedMs: rb.remoteElapsedMs,
-            peakMemoryKb: rb.peakMemoryKb,
-            note:
-              rb.timedOut
-                ? "timed out"
-                : rb.exitCode !== 0
-                  ? `exit ${rb.exitCode}`
-                  : remoteCases.passed > 0
-                    ? `${remoteCases.passed} remote case(s) passed`
-                    : "no PASS lines",
-          };
-        } catch (err) {
-          remote = {
-            ok: false,
-            codespace,
-            runtime: "codespace",
-            durationMs: 0,
-            remoteElapsedMs: null,
-            peakMemoryKb: null,
-            note: cleanError(String(err)),
-          };
-        }
-      }
       setRun({
         letter: c.letter,
         ran: true,
@@ -2848,7 +3147,6 @@ async function executeField(
         durationMs: r.durationMs,
         note: r.timedOut ? "timed out" : r.exitCode !== 0 ? `exit ${r.exitCode}` : "",
         runtime: r.runtime,
-        remote,
       });
     } catch (err) {
       setRun({ letter: c.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: cleanError(String(err)), runtime: "" });
@@ -2922,7 +3220,17 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
             model: entry.id,
             endpoint: endpointForModel(settings, entry.id),
             systemPrompt: sys,
-            userText: userPrompt(s0.note, allImages.length > 0, extractionCtx, s0.images, knowledge),
+            userText: userPrompt(
+              s0.note,
+              allImages.length > 0,
+              extractionCtx,
+              s0.images,
+              knowledge,
+              solutionPolicy(
+                settings.solutionLanguages?.length ? settings.solutionLanguages : undefined,
+                settings.memoryTargetKb || 20 * 1024
+              )
+            ),
             images: allImages,
             maxTokens: settings.maxTokens,
             temperature: 0,
@@ -3143,11 +3451,15 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   const docketBoth =
     candidateDocket(fieldNow) +
     (fieldNow.some((c) => c.revised) ? "\n\n=== REVISED ===\n\n" + candidateDocket(fieldNow, { revised: true }) : "");
+  const suspectHarness = harnessIsSuspect(get().council.runs);
   const execBoth = [
     executionDigest(fieldNow, get().council.runs),
     fieldNow.some((c) => c.revised)
       ? "=== REVISED RUNS ===\n" + executionDigest(fieldNow, get().council.revisedRuns, { revised: true })
       : "",
+    // Independent solutions do not usually fail in the same place. When they do,
+    // the judges should hear that before they read the scores, not after.
+    suspectHarness ? `NOTE ON THE HARNESS: ${suspectHarness}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -3233,14 +3545,24 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   }
 
   // The winner is read out of the synthesis, but only when the gate allows it.
-  // A synthesizer that names a rejected candidate loses the vote to the
-  // harness — the reports line up on the record either way.
+  // `enforceWinnerGate` is the same function the cloud worker calls, so the two
+  // paths cannot drift apart on the one rule the whole design exists to protect.
+  // It is stricter than the check that used to live here in one way that
+  // matters: "untested" is rejected too, not only "fail". A candidate nobody
+  // could execute is unverified, and unverified is not correct — while a run
+  // where *nothing* executed, an MCQ or a maths answer, still passes through,
+  // because a gate with no evidence behind it must not veto anything.
   const winMatch = synthesis.match(/^\s*WINNER\s*:\s*([A-Z])/im);
-  let winner = winMatch ? winMatch[1].toUpperCase() : "";
-  if (winner) {
-    const c = fieldNow.find((x) => x.letter === winner);
-    const g = c?.revised ? gateFor(get().council.revisedRuns[winner]) : gateFor(get().council.runs[winner]);
-    if (g === "fail") winner = "";
+  const claimedWinner = winMatch ? winMatch[1].toUpperCase() : "";
+  const gateRuns: Record<string, CandidateRun> = {};
+  for (const c of fieldNow) {
+    const run = c.revised ? get().council.revisedRuns[c.letter] : get().council.runs[c.letter];
+    if (run) gateRuns[c.letter] = run;
+  }
+  const ruling = enforceWinnerGate(claimedWinner, gateRuns);
+  const winner = ruling.winner;
+  if (ruling.overruledReason) {
+    synthesis = `${synthesis}\n\n---\n\n**GATE OVERRULE.** ${ruling.overruledReason}`;
   }
 
   set((st) => ({

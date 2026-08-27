@@ -17,7 +17,7 @@ import { HOME_ZONE, detectZone, isUsableZone, zoneLabel } from "@/lib/when";
 import * as bridge from "@/lib/bridge";
 import AccountCard from "./AccountCard";
 import DatabaseCard from "./DatabaseCard";
-import { classifyProbeResult, isPermanentlyUnreachable } from "@/lib/probeFit";
+import { classifyProbeResult } from "@/lib/probeFit";
 
 /**
  * One probe truth badge.
@@ -48,14 +48,14 @@ function ProbeBadge({
     return (
       <span className="badge" data-tone="warn" title={rep.detail ?? rep.summary}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          different endpoint
+          Different endpoint
           <button
             className="btn tiny ghost"
             style={{ padding: "0 6px", height: "auto", lineHeight: 1.2, fontSize: 10 }}
             onClick={() => void setEndpointFor(modelId, "responses")}
             title="Probe again over the Responses API"
           >
-            use responses
+            Use Responses
           </button>
         </span>
       </span>
@@ -125,14 +125,14 @@ function StorageCard() {
       <div className="top">
         <span className="dot" style={{ background: STORAGE.accent }} />
         <span className="name">{STORAGE.label}</span>
-        <span className="vendor">where screenshots live</span>
+        <span className="vendor">Where screenshots live</span>
         {saved ? (
           <span className="badge" data-tone="good">
-            uploading
+            Uploading
           </span>
         ) : (
           <span className="badge" data-tone="warn">
-            no key
+            No key
           </span>
         )}
         <span className="spacer" />
@@ -276,6 +276,8 @@ function GatewayCard() {
   const testModels = useStore((st) => st.testModels);
 
   const [available, setAvailable] = useState<string[] | null>(null);
+  const [catalogueFilter, setCatalogueFilter] = useState("");
+  const [copied, setCopied] = useState<string | null>(null);
   const [listing, setListing] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
 
@@ -307,6 +309,13 @@ function GatewayCard() {
     return [...ids].filter(Boolean);
   }, [routerModels, judgeProvider, extractors, councilEnabled, councilModels, councilJudges, synthesisModel]);
 
+  /** The catalogue as shown: every id the key can reach, narrowed by the filter. */
+  const catalogue = useMemo(() => {
+    const all = available ?? [];
+    const q = catalogueFilter.trim().toLowerCase();
+    return q ? all.filter((m) => m.toLowerCase().includes(q)) : all;
+  }, [available, catalogueFilter]);
+
   /** Which seats a model holds, for the role tag beside its row. */
   const rolesFor = (m: string): string[] => {
     const roles: string[] = [];
@@ -330,66 +339,43 @@ function GatewayCard() {
     return roles;
   };
 
-  const pruneUnreachableSeats = useStore((st) => st.pruneUnreachableSeats);
-  const [pruneNote, setPruneNote] = useState<string | null>(null);
-
-  // Which roster seats the last probe proved dead. Derived rather than stored,
-  // so it disappears the moment a re-probe finds them again.
-  const unreachable = useMemo(() => {
-    const dead = new Set<string>();
-    for (const [model, p] of Object.entries(probes)) {
-      if (p.ok) continue;
-      if (isPermanentlyUnreachable(classifyProbeResult(model, false, p.error).reason)) {
-        dead.add(model);
-      }
-    }
-    const onRoster = new Set<string>([
-      ...councilModels.map((m) => m.id),
-      ...councilJudges.map((j) => j.model),
-      synthesisModel.trim(),
-    ]);
-    return [...dead].filter((m) => onRoster.has(m)).sort();
-  }, [probes, councilModels, councilJudges, synthesisModel]);
-
+  // How far the image check has got, and how many seats came back able to read
+  // one. Derived, so it clears itself the moment the seats change.
   const tested = modelsInUse.filter((m) => probes[m]).length;
   const working = modelsInUse.filter((m) => probes[m]?.ok).length;
-
-  // The pane rows are editable settings; the council roster is configured in
-  // its own tab. Anything on the roster that is not already a pane/judge/reader
-  // row appears read-only below them, with its probe badge, so the card shows
-  // every model this key will actually be asked for.
-  const paneIds = modelsInUse.filter((m) =>
-    PROVIDER_ORDER.some((p) => (routerModels[p] || PROVIDERS[p].defaultRouterModel) === m)
-  );
-  const extraIds: string[] = EXTRA_AGENTS.map((e) => e.model);
-  const councilOnlyModels = councilEnabled
-    ? modelsInUse.filter(
-        (m) => !paneIds.includes(m) && !extraIds.includes(m) &&
-          m !== (routerModels[judgeProvider] || PROVIDERS[judgeProvider].defaultRouterModel) &&
-          !extractors.some((x) => (routerModels[x] || PROVIDERS[x].defaultRouterModel) === m)
-      )
-    : [];
 
   const refreshModels = useCallback(async () => {
     setListing(true);
     setListError(null);
     try {
-      setAvailable(await bridge.listGatewayModels(baseUrl));
+      const ids = await bridge.listGatewayModels(baseUrl);
+      setAvailable(ids);
+      // Kept in settings, not just in this component's state: the Council reads
+      // it before a run to skip seats this key cannot reach, and Settings is not
+      // open when a run starts.
+      patch({ availableModels: ids });
     } catch (err) {
       setAvailable(null);
       setListError(String(err).replace(/^Error:\s*/, ""));
     } finally {
       setListing(false);
     }
-  }, [baseUrl]);
+  }, [baseUrl, patch]);
 
-  // The catalogue is asked for on a button press, not on Settings open: reading
-  // it goes through the gateway's request budget, and a pane's tokens matter
-  // more than pre-warming a datalist. A fresh key starts with the built-in
-  // suggestions until you press Refresh.
+  // This waited for a button press, on the reasoning that the listing call
+  // spends one of the key's five requests a minute and a pane's tokens matter
+  // more than pre-warming a dropdown. That held while the catalogue was only
+  // autocomplete. Now that it is the answer to "what can this key reach",
+  // making someone press a button to find out reads as the app not knowing —
+  // so it asks once per opening, and the button stays as a refresh.
   useEffect(() => {
-    if (!active) setAvailable(null);
-  }, [active]);
+    if (!active) {
+      setAvailable(null);
+      setCatalogueFilter("");
+      return;
+    }
+    if (available === null && !listing && !listError) void refreshModels();
+  }, [active, available, listing, listError, refreshModels]);
 
   const save = async () => {
     if (!draft.trim()) return;
@@ -433,7 +419,7 @@ function GatewayCard() {
         <span className="vendor">one key, every model</span>
         {active ? (
           <span className="badge" data-tone="good">
-            routing all panes
+            Routing all panes
           </span>
         ) : saved ? (
           <span className="badge" data-tone="warn">
@@ -441,7 +427,7 @@ function GatewayCard() {
           </span>
         ) : (
           <span className="badge" data-tone="warn">
-            not set up
+            Not set up
           </span>
         )}
         <span className="spacer" />
@@ -498,13 +484,13 @@ function GatewayCard() {
             className="section-label"
             style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}
           >
-            <span>Model ids on the router</span>
+            <span>Everything this key can reach</span>
             <span className="spacer" />
               {available ? (
                 <span className="chip">{available.length} on this key</span>
               ) : (
                 <span className="chip" title="The catalogue is fetched on demand, through the rate budget, so a pane's tokens are never spent pre-warming a dropdown.">
-                  asking on demand
+                  Asking on demand
                 </span>
               )}
             <button
@@ -514,56 +500,28 @@ function GatewayCard() {
             >
               {listing ? "Asking…" : "Refresh list"}
             </button>
-            {/* Listing tells you what the key is entitled to. This tells you what
-                answers. They are not the same question, and the gap between them
-                is where every confusing 403 in this project has lived. */}
-            <button
-              className="btn tiny"
-              onClick={() => void testModels(modelsInUse, false)}
-              disabled={probing}
-              title="One cheap text call per model, through the rate governor"
-            >
-              {probing ? `Testing… ${tested}/${modelsInUse.length}` : "Test these models"}
-            </button>
-            {/* Only offered once the probe has actually found dead seats. A
-                destructive button that is always available is one you press by
-                accident; one that appears with a count on it is a finding. */}
-            {unreachable.length > 0 && (
-              <button
-                className="btn tiny ghost"
-                onClick={() => {
-                  const removed = pruneUnreachableSeats();
-                  setPruneNote(
-                    removed.length
-                      ? `Removed ${removed.length}: ${removed.join(", ")}`
-                      : "Nothing to remove."
-                  );
-                }}
-                disabled={probing}
-                title={`These answered "no access" or "no such model": ${unreachable.join(", ")}. Rate limits and timeouts are never removed.`}
-              >
-                Remove {unreachable.length} unreachable
-              </button>
-            )}
+
+            {/* The liveness probe that used to sit here — one text request per
+                model, to learn whether the key could reach it — is gone. The
+                catalogue answers that for every model at once, in one request.
+                This is the question a listing genuinely cannot answer: a model
+                can be listed, answer text perfectly, and still have its
+                connection dropped the moment a picture is attached. It decides
+                which seats get shown a screenshot, so it is worth its requests
+                — and only the seats actually in use are asked. */}
             <button
               className="btn tiny ghost"
               onClick={() => void testModels(modelsInUse, true)}
               disabled={probing}
-              title="Text plus one image probe per model: twice the requests, at the governor's pace"
+              title="Sends one image to each seat in use, at the governor's pace. Listing cannot tell you this."
             >
-              {probing ? `${tested}/${modelsInUse.length}` : "+ vision"}
+              {probing ? `${tested}/${modelsInUse.length}` : "Check which can read images"}
             </button>
           </div>
 
           {probeError && (
             <p className="hint" style={{ margin: "0 0 6px", color: "var(--bad)" }}>
               {probeError}
-            </p>
-          )}
-
-          {pruneNote && (
-            <p className="hint" style={{ margin: "0 0 6px", color: "var(--text)" }}>
-              {pruneNote}
             </p>
           )}
 
@@ -576,7 +534,7 @@ function GatewayCard() {
                   <b>Hover a failed badge to see the exact error TokenRouter returned</b>{" "}
                   — that string is the whole diagnosis: <span className="mono">model_not_found</span>{" "}
                   means the id or entitlement, <span className="mono">429</span> means the
-                  key&rsquo;s budget, <span className="mono">timeout</span> means the model sat
+                  key&rsquo;s budget, <span className="mono">Timeout</span> means the model sat
                   there, and a provider&rsquo;s own message is its reason.
                 </>
               )}
@@ -599,108 +557,75 @@ function GatewayCard() {
               Could not read the model list: {listError}
             </p>
           )}
-          {PROVIDER_ORDER.map((p) => {
-            const id = routerModels[p] || PROVIDERS[p].defaultRouterModel;
-            const probe = probes[id];
-            const roles = [
-              p === judgeProvider ? "judge" : null,
-              extractors.includes(p) ? "reader" : null,
-            ].filter(Boolean);
-            return (
-            <div className="row" key={p}>
-              <label htmlFor={`rm-${p}`}>
-                {PROVIDERS[p].label}
-                {/* A model can be a pane, the judge and a reader at once. When it
-                    fails, knowing which of those just broke is the difference
-                    between one fix and three. */}
-                {roles.length > 0 && (
-                  <span className="role-tag"> + {roles.join(" + ")}</span>
-                )}
-              </label>
-              <input
-                id={`rm-${p}`}
-                className="field mono"
-                list={`rm-list-${p}`}
-                // Flagged when the router has given us a list and this is not on
-                // it: the difference between a typo and a model you have not
-                // enabled yet.
-                data-unknown={!!available && !available.includes(routerModels[p])}
-                value={routerModels[p]}
-                spellCheck={false}
-                placeholder={PROVIDERS[p].defaultRouterModel}
-                onChange={(e) => patch({ routerModels: { ...routerModels, [p]: e.target.value } })}
-              />
-              {probe && <ProbeBadge probe={probe} modelId={routerModels[p] || PROVIDERS[p].defaultRouterModel} />}
-              {/* Vision is asked separately because it has a separate answer. A
-                  model can answer text through this gateway and still have its
-                  connection dropped the moment a picture is attached. */}
-              {probe?.vision != null && (
-                <span
-                  className="badge"
-                  data-tone={probe.vision ? "good" : "warn"}
-                  title={probe.visionNote ?? ""}
-                >
-                  {probe.vision ? "sees images" : "text only"}
-                </span>
-              )}
-              {/* The live list once we have one; the built-in guesses only until
-                  then. Suggesting a model the key cannot reach is worse than
-                  suggesting nothing, because it looks like a working choice. */}
-              <datalist id={`rm-list-${p}`}>
-                {Array.from(
-                  new Set(
-                    available ?? [
-                      ...PROVIDERS[p].knownRouterModels,
-                      ...FREE_ROUTER_MODELS.map((m) => m.id),
-                      // The council roster belongs in the suggestions too: a model
-                      // sitting in a judge's seat should be offerable as a pane
-                      // without having to retype its id.
-                      ...councilModels.map((x) => x.id),
-                      ...councilJudges.map((j) => j.model),
-                    ]
-                  )
-                ).map((m) => (
-                  <option key={m} value={m} />
-                ))}
-              </datalist>
-            </div>
-            );
-          })}
 
-          {/* Council-only roster entries: not panes, so no editable field —
-              the roster lives in the Council tab — but their seats land here
-              with the same truth badges, so this card shows every model the
-              key will actually be asked for. */}
-          {councilOnlyModels.length > 0 && (
-            <div className="section-label" style={{ margin: "10px 0 2px" }}>
-              Council roster
-            </div>
-          )}
-          {councilOnlyModels.map((m) => {
-            const probe = probes[m];
-            const roles = rolesFor(m);
-            return (
-              <div className="row" key={m}>
-                <label>
-                  {m.split("/").pop()}
-                  {roles.length > 0 && <span className="role-tag"> + {roles.join(" + ")}</span>}
-                </label>
-                <span className="field mono" style={{ opacity: 0.7 }}>
-                  {m}
-                </span>
-                {probe && <ProbeBadge probe={probe} modelId={m} />}
-                {probe?.vision != null && (
-                  <span
-                    className="badge"
-                    data-tone={probe.vision ? "good" : "warn"}
-                    title={probe.visionNote ?? ""}
-                  >
-                    {probe.vision ? "sees images" : "text only"}
-                  </span>
+          {/* Everything the key can reach, not only the seats it is filling.
+              The catalogue used to exist only inside each field's autocomplete,
+              which meant the one question people actually open this card to ask
+              — "what am I allowed to use?" — could only be answered by typing
+              into a box and hoping the dropdown appeared. It is a list; it
+              should look like one. */}
+          <div className="section-label" style={{ margin: "14px 0 2px", display: "flex", gap: 8, alignItems: "center" }}>
+            <span className="spacer" />
+            {available && (
+              <span className="chip">
+                {catalogueFilter.trim()
+                  ? `${catalogue.length} of ${available.length}`
+                  : `${available.length} models`}
+              </span>
+            )}
+          </div>
+
+          {listing && !available && <p className="hint" style={{ margin: "0 0 6px" }}>Asking the router…</p>}
+
+          {available && available.length > 0 && (
+            <>
+              <input
+                className="field mono"
+                style={{ width: "100%", marginBottom: 6 }}
+                placeholder="Filter — try 'claude', 'kimi', 'gpt'"
+                value={catalogueFilter}
+                spellCheck={false}
+                onChange={(e) => setCatalogueFilter(e.target.value)}
+              />
+              <div className="catalogue" role="list">
+                {catalogue.map((m) => {
+                  const roles = rolesFor(m);
+                  const probe = probes[m];
+                  return (
+                    <div
+                      className="catalogue-row"
+                      role="listitem"
+                      key={m}
+                      // Click to copy: the id is the thing you need in your hand
+                      // to paste into a seat, and selecting monospace text out of
+                      // a scrolling list by hand is a small misery.
+                      onClick={() => {
+                        void navigator.clipboard?.writeText(m);
+                        setCopied(m);
+                        window.setTimeout(() => setCopied((c) => (c === m ? null : c)), 1200);
+                      }}
+                      title="Click to copy this id"
+                    >
+                      <span className="mono catalogue-id">{m}</span>
+                      {copied === m && <span className="badge" data-tone="good">Copied</span>}
+                      {roles.length > 0 && <span className="role-tag">{roles.join(" + ")}</span>}
+                      {probe && <ProbeBadge probe={probe} modelId={m} />}
+                      {probe?.vision != null && (
+                        <span className="badge" data-tone={probe.vision ? "good" : "warn"} title={probe.visionNote ?? ""}>
+                          {probe.vision ? "sees images" : "text only"}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+                {catalogue.length === 0 && (
+                  <p className="hint" style={{ margin: 6 }}>
+                    Nothing matches “{catalogueFilter}”.
+                  </p>
                 )}
               </div>
-            );
-          })}
+            </>
+          )}
 
           {/* The free panes have fixed ids, so they get a result line rather
               than an editable field. */}
@@ -816,11 +741,11 @@ function ProviderCard({ id }: { id: ProviderId }) {
           </span>
         ) : saved ? (
           <span className="badge" data-tone="good">
-            direct
+            Direct
           </span>
         ) : (
           <span className="badge" data-tone="bad">
-            no route
+            No route
           </span>
         )}
         <span className="spacer" />
@@ -1054,9 +979,6 @@ function CouncilCard() {
   const probing = useStore((st) => st.probing);
   const probeError = useStore((st) => st.probeError);
   const testModels = useStore((st) => st.testModels);
-  const codespacesStatus = useStore((st) => st.codespacesStatus);
-  const codespacesLoading = useStore((st) => st.codespacesLoading);
-  const refreshCodespaces = useStore((st) => st.refreshCodespaces);
 
   const [solversDraft, setSolversDraft] = useState<string | null>(null);
   const [judgesDraft, setJudgesDraft] = useState<string | null>(null);
@@ -1248,9 +1170,7 @@ function CouncilCard() {
               key={String(v)}
               data-on={settings.benchmarkBackend === v}
               style={{ flex: 1 }}
-              onClick={() => {
-                patch({ benchmarkBackend: v, codespacesBenchmark: false });
-              }}
+              onClick={() => patch({ benchmarkBackend: v })}
             >
               {v === "actions" ? "GitHub Actions" : "Off"}
             </button>
@@ -1319,57 +1239,6 @@ function CouncilCard() {
             pass/fail, time and memory evidence to the Council report. Production workers
             should use a server-side GitHub App or Actions-write token; the desktop app
             should not depend on a local <span className="mono">gh</span> login.
-          </p>
-        </>
-      )}
-
-      {settings.benchmarkBackend === "codespaces" && (
-        <>
-          <div className="row">
-            <label htmlFor="codespaces-name">Codespace</label>
-            <input
-              id="codespaces-name"
-              className="field mono"
-              type="text"
-              spellCheck={false}
-              value={settings.codespacesName}
-              onChange={(e) => patch({ codespacesName: e.target.value })}
-              list="codespaces-list"
-              placeholder="friendly-or-generated-codespace-name"
-              style={{ flex: 1 }}
-            />
-            <button className="btn tiny" onClick={() => void refreshCodespaces()} disabled={codespacesLoading}>
-              {codespacesLoading ? "Checking..." : "Refresh"}
-            </button>
-          </div>
-          <datalist id="codespaces-list">
-            {(codespacesStatus?.codespaces ?? []).map((c) => (
-              <option key={c.name} value={c.name}>
-                {[c.displayName, c.repository, c.machineName, c.state].filter(Boolean).join(" - ")}
-              </option>
-            ))}
-          </datalist>
-          <div className="row">
-            <label htmlFor="codespaces-timeout">Remote timeout</label>
-            <input
-              id="codespaces-timeout"
-              className="field"
-              type="number"
-              min={5}
-              max={120}
-              step={5}
-              value={Math.round(settings.codespacesTimeoutMs / 1000)}
-              onChange={(e) => patch({ codespacesTimeoutMs: Number(e.target.value) * 1000 })}
-              style={{ flex: 1 }}
-            />
-            <span className="vendor">seconds</span>
-          </div>
-          <p className="hint">
-            Runs passing council candidates through <span className="mono">gh codespace ssh</span>,
-            using the same generated harness. GitHub CLI auth stays outside this app. The result is
-            repeatable remote evidence, not a promise that LeetCode will display the same rounded
-            runtime.
-            {codespacesStatus?.error ? ` ${codespacesStatus.error}` : ""}
           </p>
         </>
       )}
@@ -1512,7 +1381,7 @@ function CouncilCard() {
           })}
           <p className="hint">
             The built-in list is what the router said your key can reach. Anything
-            marked <b>not on key</b> needs enabling at TokenRouter (or the id fixing here)
+            marked <b>Not on key</b> needs enabling at TokenRouter (or the id fixing here)
             before that seat can answer.
           </p>
         </>
@@ -1565,7 +1434,9 @@ function CaptureCard() {
       setHelper(next);
       setHelperNote(
         install
-          ? "Installed. macOS can start the helper at login with normal visibility and permissions."
+          ? next.loaded
+            ? "Installed and running. macOS will start it again at login."
+            : next.problem || "The agent was written but launchd has not loaded it."
           : "Removed. Helper-owned background capture will stop after the helper exits."
       );
     } catch (err) {
@@ -1589,6 +1460,23 @@ function CaptureCard() {
           and security software.
         </p>
         <div className="row">
+          <label>State</label>
+          {/* "Installed" used to mean a file existed. It now means launchd has
+              accepted the agent, which is the only version of the word worth
+              showing someone. */}
+          <span
+            className="badge"
+            data-tone={helper?.loaded ? "good" : helper?.installed ? "warn" : undefined}
+          >
+            {helper?.loaded ? "running" : helper?.installed ? "written, not loaded" : "not installed"}
+          </span>
+        </div>
+        {helper?.problem && (
+          <p className="hint" style={{ margin: "0 0 6px", color: "var(--bad)" }}>
+            {helper.problem}
+          </p>
+        )}
+        <div className="row">
           <label>LaunchAgent</label>
           <span className="mono small">{helper?.plistPath || "desktop shell required"}</span>
         </div>
@@ -1603,10 +1491,10 @@ function CaptureCard() {
         <div className="actions">
           <button
             className="btn"
-            disabled={helperBusy || helper?.installed === true}
+            disabled={helperBusy || helper?.loaded === true}
             onClick={() => void setInstalled(true)}
           >
-            Install
+            {helper?.installed && !helper?.loaded ? "Reinstall" : "Install"}
           </button>
           <button
             className="btn ghost"
@@ -1670,7 +1558,7 @@ function CaptureCard() {
         <div className="top">
           <span className="name">Shortcuts</span>
           <span className="spacer" />
-          <span className="vendor">system-wide</span>
+          <span className="vendor">System-wide</span>
         </div>
         {SHORTCUTS.map((s) => (
           <div className="row" key={s.env}>

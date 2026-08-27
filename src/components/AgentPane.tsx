@@ -52,6 +52,28 @@ export default function AgentPane({ agent }: { agent: AgentSlot }) {
   const visible = stripFinal(agent.text);
   const final = agent.final;
 
+  /**
+   * The one-line summary under a pane.
+   *
+   * Models asked not to state an unmeasured runtime often comply by writing
+   * "Runtime: not measured. Memory: not measured." into their complexity line.
+   * That is correct of them and useless here — the Solution card already says
+   * whether anything ran — so it is stripped rather than repeated four times.
+   */
+  const footFacts = (() => {
+    const out: string[] = [];
+    if (agent.elapsedMs != null) out.push(`${(agent.elapsedMs / 1000).toFixed(1)}s`);
+    if (agent.outputTokens != null) out.push(`${agent.inputTokens ?? "?"} in / ${agent.outputTokens} out`);
+    if (final?.confidence != null) out.push(`Confidence ${(final.confidence * 100).toFixed(0)}%`);
+    const complexity = (final?.complexity ?? "")
+      .replace(/\b(runtime|memory)\s*:\s*not measured\.?/gi, "")
+      .replace(/\s{2,}/g, " ")
+      .replace(/^[\s.;,]+|[\s.;,]+$/g, "")
+      .trim();
+    if (complexity) out.push(complexity);
+    return out;
+  })();
+
   return (
     <section className="pane" data-disabled={!agent.enabled}>
       <div className="pane-head">
@@ -79,7 +101,7 @@ export default function AgentPane({ agent }: { agent: AgentSlot }) {
         )}
         {(agent.status === "error" || agent.status === "cancelled" || agent.status === "done") && (
           <button className="btn tiny ghost" onClick={() => retry(agent.id)}>
-            rerun
+            Re-run
           </button>
         )}
       </div>
@@ -145,7 +167,7 @@ export default function AgentPane({ agent }: { agent: AgentSlot }) {
                   {final.kind !== "unknown" && <span className="badge">{final.kind}</span>}
                   {!final.wellFormed && (
                     <span className="badge" data-tone="warn" title="No FINAL block was returned; this was reconstructed from the reply.">
-                      inferred
+                      Inferred
                     </span>
                   )}
                 </div>
@@ -165,14 +187,16 @@ export default function AgentPane({ agent }: { agent: AgentSlot }) {
       </div>
 
       <div className="pane-foot">
-        {agent.elapsedMs != null && <span>{(agent.elapsedMs / 1000).toFixed(1)}s</span>}
-        {agent.outputTokens != null && (
-          <span>
-            {agent.inputTokens ?? "?"} in / {agent.outputTokens} out
+        {/* Built as one list with real separators rather than bare siblings
+            relying on flex `gap`. The gap only exists on screen: copy the row
+            and it came out as "30.9s19260 in / 1295 outconf 99%O(n) time",
+            which is what you paste into a bug report. */}
+        {footFacts.map((fact, i) => (
+          <span key={fact}>
+            {i > 0 && <span className="pane-foot-sep" aria-hidden="true">·</span>}
+            {fact}
           </span>
-        )}
-        {final?.confidence != null && <span>conf {(final.confidence * 100).toFixed(0)}%</span>}
-        {final?.complexity && <span>{final.complexity}</span>}
+        ))}
         <span className="spacer" />
         {!pinned && streaming && (
           <button
@@ -183,7 +207,7 @@ export default function AgentPane({ agent }: { agent: AgentSlot }) {
               if (el) el.scrollTop = el.scrollHeight;
             }}
           >
-            follow
+            Follow
           </button>
         )}
       </div>

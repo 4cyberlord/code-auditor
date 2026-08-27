@@ -189,7 +189,7 @@ function CodeBlock({ lang, text, open }: { lang: string; text: string; open: boo
       <header>
         <span>{lang || "code"}{open ? " · writing" : ""}</span>
         <button className="btn tiny ghost" onClick={copy}>
-          {copied ? "copied" : "copy"}
+          {copied ? "Copied" : "Copy"}
         </button>
       </header>
       <pre>

@@ -131,6 +131,32 @@ const ZONE = process.env.CODE_AUDITOR_TIMEZONE || "America/Chicago";
 const stamp = (d = new Date()) =>
   new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "medium", timeZone: ZONE }).format(d);
 
+/**
+ * Everything the gateway key can reach, so the worker can skip seats it cannot.
+ *
+ * The desktop fills this in when Settings is opened; a batch run never opens
+ * Settings, so without this the catalogue arrives empty and the seat filter is
+ * inert on the one path actually used for testing. Failing soft is deliberate —
+ * an empty list disqualifies nothing, which is the same as not having asked.
+ */
+async function gatewayCatalogue() {
+  const key = process.env.TOKENROUTER_API_KEY?.trim();
+  if (!key) return [];
+  const base = (process.env.CODE_AUDITOR_GATEWAY_BASE_URL || "https://api.tokenrouter.com/v1").replace(/\/$/, "");
+  try {
+    const res = await fetch(`${base}/models`, { headers: { authorization: `Bearer ${key}` } });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const body = await res.json();
+    const rows = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
+    const ids = [...new Set(rows.map((r) => (typeof r === "string" ? r : r?.id)).filter(Boolean))].sort();
+    console.log(dim(`catalogue: ${ids.length} model(s) on this key`));
+    return ids;
+  } catch (err) {
+    console.log(dim(`catalogue: could not read the model list (${err instanceof Error ? err.message : err})`));
+    return [];
+  }
+}
+
 /** Uploads one problem image the way a capture is uploaded. */
 async function uploadImage(sessionId, file) {
   const bytes = readFileSync(file);
@@ -182,6 +208,7 @@ async function runOne(file, index, total) {
         outputLanguage: process.env.CODE_AUDITOR_BATCH_LANGUAGE || "",
         benchmarkBackend: process.env.CODE_AUDITOR_BATCH_BACKEND || "actions",
         githubRepository: process.env.GITHUB_REPOSITORY || "",
+        availableModels: CATALOGUE,
       },
     }),
   });
@@ -218,7 +245,12 @@ async function runOne(file, index, total) {
   const [job] = await rest(
     `solve_jobs?id=eq.${jobId}&select=id,status,progress_phase,error,result_summary,started_at,finished_at`
   );
-  const [report] = (await rest(`council_reports?job_id=eq.${jobId}&select=winner,markdown`)) ?? [];
+  // The whole report, not just the prose. `report` carries each candidate's
+  // code and language, the generated harnesses, and every run's stderr — the
+  // evidence you need when the synthesis explains a failure wrongly, which it
+  // can, because a model wrote it.
+  const [report] =
+    (await rest(`council_reports?job_id=eq.${jobId}&select=winner,markdown,report`)) ?? [];
   const events =
     (await rest(`solve_job_events?job_id=eq.${jobId}&select=*&order=created_at`)) ?? [];
 
@@ -260,6 +292,8 @@ for (const f of files) {
 
 console.log(`${b("Council batch")} — ${files.length} problem(s), one at a time`);
 console.log(dim(`project ${SUPABASE_URL}`));
+
+const CATALOGUE = await gatewayCatalogue();
 
 try {
   await preflight();

@@ -93,5 +93,47 @@ console.log("\n8. long input is cut on a word boundary");
   check("does not end mid-word", /[a-z)\]]$/i.test(t), t);
 }
 
+console.log("\n7. naming a run when nothing read the picture");
+{
+  // The cloud path stopped transcribing by default, so `problemSummary` is gone
+  // and the answers are all there is to name a run after.
+  const fromAnswer = titleFor({
+    answers: [
+      { answer: "Binary search on the partition of the smaller array. Then take the median.", language: "cpp" },
+    ],
+  });
+  check("names it after what the panel concluded", /Binary search on the partition/.test(fromAnswer), fromAnswer);
+  check("one sentence, not the paragraph", !/Then take the median/.test(fromAnswer), fromAnswer);
+
+  // Order of authority is unchanged: a reading still beats an answer.
+  const both = titleFor({
+    extraction: { problemSummary: "Find the median of two sorted arrays" },
+    answers: [{ answer: "Binary search on the partition of the smaller array." }],
+  });
+  check("a reading still wins", /median of two sorted arrays/i.test(both), both);
+
+  // And a typed note still beats everything.
+  const typed = titleFor({
+    note: "why is my merge step wrong",
+    extraction: { problemSummary: "Find the median of two sorted arrays" },
+    answers: [{ answer: "Binary search on the partition." }],
+  });
+  check("what the person typed wins over both", /merge step/.test(typed), typed);
+
+  // Nothing to go on is still a legitimate empty answer.
+  check("no sources, no invented name", titleFor({ answers: [{ answer: "ok" }] }) === "");
+  check("empty answers are skipped", titleFor({ answers: [{ answer: "" }, { answer: "" }] }) === "");
+}
+
+console.log("\n8. scaffolding names are replaceable, typed ones are not");
+{
+  check("the batch runner's name", isPlaceholder("Batch — lc4"));
+  check("the smoke test's name", isPlaceholder("Cloud smoke 2026-08-27T02:07:42.817Z"));
+  check("the ordinary placeholder", isPlaceholder("Session — a moment ago"));
+  check("nothing at all", isPlaceholder("   "));
+  check("a name someone typed is never replaced", !isPlaceholder("Median of two sorted arrays"));
+  check("nor one that merely mentions a batch", !isPlaceholder("Batching strategy for the queue"));
+}
+
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall title checks passed\n");
 process.exit(fail ? 1 : 0);

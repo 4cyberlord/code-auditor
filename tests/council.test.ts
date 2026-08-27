@@ -183,8 +183,8 @@ console.log("\n8. language normalisation and the report");
 
 console.log("\n9. defaults hold the shape the design specifies");
 {
-  check("eight default solvers", COUNCIL_DEFAULT_MODELS.length === 8, String(COUNCIL_DEFAULT_MODELS.length));
-  check("seven default judges", COUNCIL_DEFAULT_JUDGES.length === 7, String(COUNCIL_DEFAULT_JUDGES.length));
+  check("four default solvers", COUNCIL_DEFAULT_MODELS.length === 4, String(COUNCIL_DEFAULT_MODELS.length));
+  check("two default judges", COUNCIL_DEFAULT_JUDGES.length === 2, String(COUNCIL_DEFAULT_JUDGES.length));
   check(
     "every judge has an emphasis",
     COUNCIL_DEFAULT_JUDGES.every((j) => j.emphasis.length > 0)
@@ -194,9 +194,14 @@ console.log("\n9. defaults hold the shape the design specifies");
     COUNCIL_DEFAULT_MODELS.every((m) => m.id.includes("/"))
   );
   check(
-    "codex is benched by default; 5.6-sol is on the responses wire",
-    !COUNCIL_DEFAULT_MODELS.some((m) => m.id === "openai/gpt-5.3-codex") &&
-      COUNCIL_DEFAULT_MODELS.find((m) => m.id === "openai/gpt-5.6-sol")?.endpoint === "responses"
+    "the requested solver roster is installed",
+    COUNCIL_DEFAULT_MODELS.map((m) => m.id).join(",") ===
+      "moonshotai/kimi-k3,z-ai/glm-5.3,x-ai/grok-4.6,google/gemini-3.7-flash"
+  );
+  check(
+    "the requested judge roster is installed",
+    COUNCIL_DEFAULT_JUDGES.map((j) => `${j.model}/${j.emphasis}`).join(",") ===
+      "openai/gpt-5.6-sol/performance,anthropic/claude-opus-5/security"
   );
 }
 

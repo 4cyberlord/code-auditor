@@ -245,6 +245,71 @@ export async function saveRun(args: {
 
 // ------------------------------------------------------------- solve jobs
 
+// ------------------------------------------------------------------ history
+
+/** One past run, as the sidebar lists it. */
+export interface RunSummary {
+  id: string;
+  sessionId: string;
+  mode: string;
+  /** The note as it stood when the run was launched, not as the session reads now. */
+  asked: string;
+  startedAt: string;
+  finishedAt: string;
+  answered: number;
+  verdict: string | null;
+  reliability: string | null;
+}
+
+/** What one model said, read back out of the run it said it in. */
+export interface StoredResponse {
+  id: string;
+  provider: string;
+  model: string;
+  attemptId: string;
+  status: string;
+  body: string;
+  finalKind: string | null;
+  finalLanguage: string | null;
+  finalAnswer: string | null;
+  finalCode: string | null;
+  finalClaims: string[];
+  complexity: string | null;
+  confidence: number | null;
+  wellFormed: boolean;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  elapsedMs: number | null;
+  error: string | null;
+}
+
+export interface StoredVerdict {
+  verdict: string;
+  headline: string | null;
+  detail: string | null;
+  reliability: string | null;
+  outliers: string[];
+  representative: string | null;
+  judgeProvider: string | null;
+  judgeText: string | null;
+}
+
+export interface RunDetail {
+  run: RunSummary;
+  responses: StoredResponse[];
+  verdict: StoredVerdict | null;
+}
+
+/** Every finished run in this session, newest first. */
+export async function listRuns(sessionId: string): Promise<RunSummary[]> {
+  return invoke<RunSummary[]>("run_list", { sessionId });
+}
+
+/** One run in full — every model's answer as it was stored. */
+export async function getRun(runId: string): Promise<RunDetail> {
+  return invoke<RunDetail>("run_get", { runId });
+}
+
 export async function createSolveJob(job: {
   sessionId: string;
   settingsSnapshot: Record<string, unknown>;

@@ -61,8 +61,7 @@ Local machine requirements after packaging should be small:
 
 The solve path should not depend on local Node, Rust, Python, compilers, GitHub
 CLI, or model-provider CLIs once the release app and remote worker are deployed.
-Generated code execution, benchmarks and optional Codespaces mirrors belong in
-the worker environment.
+Generated code execution and benchmarks belong in the worker environment.
 
 ## Bundling Strategy
 
@@ -124,8 +123,8 @@ on the server.
   passes, then skip code benchmarks unless candidates include runnable code.
 - **Small runnable coding problem:** use local worker execution in the remote
   worker container or E2B for fast isolation.
-- **Evidence-heavy coding problem:** mirror passing candidates to Codespaces or
-  dispatch GitHub Actions for slower reproducible validation.
+- **Evidence-heavy coding problem:** dispatch GitHub Actions for slower
+  reproducible validation after the E2B gate passes.
 - **Scheduling/retries:** prefer QStash when the worker endpoint needs retry,
   delay or delivery history. cron-job.org remains fine for a simple external
   clock.

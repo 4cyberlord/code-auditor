@@ -5,6 +5,11 @@ description = "Multi-agent code & research auditor"
 authors = ["Charles"]
 edition = "2021"
 rust-version = "1.77"
+# Two binaries live in this crate — the app and the background sync helper — so a
+# bare `cargo run` has no way to choose, and `tauri dev` issues exactly that.
+# Naming the app as the default is what makes `npm run app:dev` work; the helper
+# is still reachable with `cargo run --bin cloud-sync-helper`.
+default-run = "code-auditor"
 
 [lib]
 name = "code_auditor_lib"

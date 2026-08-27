@@ -10,7 +10,7 @@ import path from "node:path";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(path.join(HERE, "..", "scripts", "cloud-worker.mjs"), "utf8");
 const start = src.indexOf("export function resolveBenchmarkBackend");
-const end = src.indexOf("async function runRemoteCode(");
+const end = src.indexOf("async function runE2BCode(");
 const mod = src.slice(start, end).replace(/export function/g, "function");
 const { resolveBenchmarkBackend } = await import(
   "data:text/javascript," + encodeURIComponent(mod + "\nexport { resolveBenchmarkBackend };")
@@ -26,8 +26,13 @@ const check = (name, got, want) => {
 const REPO = { GITHUB_REPOSITORY: "cyberlord/code-auditor" };
 
 console.log("\n1. Actions is the default");
-check("a configured repo benchmarks on Actions", resolveBenchmarkBackend({}, REPO), "actions");
-check("the alternate env var works too", resolveBenchmarkBackend({}, { CODE_AUDITOR_GITHUB_REPOSITORY: "a/b" }), "actions");
+// Having a repo configured is not a request to use it. Actions used to switch
+// itself on whenever GITHUB_REPOSITORY existed, which ran every passing
+// candidate a second time purely to time it -- while the sandbox that had just
+// run it was already reporting elapsed time and peak memory from the same
+// metrics script. Whatever ran the code measures it, unless you say otherwise.
+check("a configured repo is not a request to use it", resolveBenchmarkBackend({}, REPO), "off");
+check("nor is the alternate env var", resolveBenchmarkBackend({}, { CODE_AUDITOR_GITHUB_REPOSITORY: "a/b" }), "off");
 
 console.log("\n2. nothing to dispatch to means off, not a broken run");
 // Claiming "actions" with no repo would dispatch nowhere and report a failure
@@ -36,22 +41,21 @@ check("no repo anywhere", resolveBenchmarkBackend({}, {}), "off");
 check("explicitly asking for Actions without a repo", resolveBenchmarkBackend({ benchmarkBackend: "actions" }, {}), "off");
 
 console.log("\n3. an explicit choice is obeyed");
-check("codespaces", resolveBenchmarkBackend({ benchmarkBackend: "codespaces" }, REPO), "codespaces");
 check("off", resolveBenchmarkBackend({ benchmarkBackend: "off" }, REPO), "off");
 check("actions", resolveBenchmarkBackend({ benchmarkBackend: "actions" }, REPO), "actions");
-check("case and spacing are forgiven", resolveBenchmarkBackend({ benchmarkBackend: " Codespaces " }, REPO), "codespaces");
+check("case and spacing are forgiven", resolveBenchmarkBackend({ benchmarkBackend: " Actions " }, REPO), "actions");
 
-console.log("\n4. settings saved before this existed keep working");
-// Turning Codespaces on once must not silently become Actions on next launch.
-check("legacy flag honoured", resolveBenchmarkBackend({ codespacesBenchmark: true }, REPO), "codespaces");
-check("legacy flag off falls to the default", resolveBenchmarkBackend({ codespacesBenchmark: false }, REPO), "actions");
-// An explicit choice outranks the legacy flag.
-check("explicit beats legacy", resolveBenchmarkBackend({ benchmarkBackend: "actions", codespacesBenchmark: true }, REPO), "actions");
+console.log("\n4. old Codespaces settings are retired");
+check("a retired backend name does not smuggle Actions back in", resolveBenchmarkBackend({ benchmarkBackend: "codespaces" }, REPO), "off");
+check("legacy codespaces flag is ignored", resolveBenchmarkBackend({ codespacesBenchmark: true }, REPO), "off");
 
 console.log("\n5. junk falls back rather than throwing");
-check("nonsense backend", resolveBenchmarkBackend({ benchmarkBackend: "banana" }, REPO), "actions");
-check("empty string", resolveBenchmarkBackend({ benchmarkBackend: "" }, REPO), "actions");
-check("undefined settings", resolveBenchmarkBackend(undefined, REPO), "actions");
+// Junk must never be read as consent to spend runner minutes.
+check("nonsense backend", resolveBenchmarkBackend({ benchmarkBackend: "banana" }, REPO), "off");
+check("empty string", resolveBenchmarkBackend({ benchmarkBackend: "" }, REPO), "off");
+check("undefined settings", resolveBenchmarkBackend(undefined, REPO), "off");
+// And asking for it plainly still works.
+check("asking for Actions is honoured", resolveBenchmarkBackend({ benchmarkBackend: "actions" }, REPO), "actions");
 
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall backend checks passed\n");
 process.exit(fail ? 1 : 0);

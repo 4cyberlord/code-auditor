@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import AgentPane from "@/components/AgentPane";
 import BackgroundJobsPanel from "@/components/BackgroundJobsPanel";
 import ConsensusPanel from "@/components/ConsensusPanel";
+import SolutionCard from "@/components/SolutionCard";
 import CouncilPanel from "@/components/CouncilPanel";
 import InputBar from "@/components/InputBar";
 import ReadingPanel from "@/components/ReadingPanel";
@@ -64,11 +65,18 @@ function Workbench() {
   const hydrate = useStore((s) => s.hydrate);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const running = useStore((s) => s.running);
-  const sessionsOpen = useStore((s) => s.settings.sessionsOpen);
+  const sessionsOpen = useStore((s) => s.settings.railPanel === "sessions");
 
   // Only enabled providers get a pane. With five to choose from, rendering the
   // switched-off ones as placeholders would spend half the screen on nothing --
   // and the toggles live in Settings, which is where you would look anyway.
+  const viewingRunId = useStore((s) => s.viewingRunId);
+  const exitHistory = useStore((s) => s.exitHistory);
+  const viewingAsked = useStore((s) => {
+    const row = s.history.find((r) => r.id === s.viewingRunId);
+    return row?.asked.trim().split("\n")[0] ?? "";
+  });
+
   const panes = agents.filter((a) => a.enabled);
 
   useAgentEvents();
@@ -117,6 +125,22 @@ function Workbench() {
         </button>
       </div>
 
+      {/* The panes are showing a past run. Said plainly, because every control
+          around them still looks live and a stale answer read as a fresh one
+          is the whole failure mode of a history view. */}
+      {viewingRunId && (
+        <div className="history-banner">
+          <span>
+            Showing a saved run{viewingAsked ? ` — “${viewingAsked}”` : ""}. These are the answers as they
+            were recorded.
+          </span>
+          <span className="spacer" />
+          <button className="btn tiny" onClick={() => exitHistory()}>
+            Back to live
+          </button>
+        </div>
+      )}
+
       <ReadingPanel />
 
       <div className="body">
@@ -146,6 +170,7 @@ function Workbench() {
             you go and look at, not something you watch. */}
         <div className="rail" data-sessions={sessionsOpen}>
           <CouncilPanel />
+          <SolutionCard />
           <ConsensusPanel />
           <BackgroundJobsPanel />
           {sessionsOpen && (

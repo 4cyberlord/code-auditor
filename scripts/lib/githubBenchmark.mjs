@@ -1,11 +1,9 @@
 /**
  * Benchmarking on GitHub Actions.
  *
- * The council needs a machine that is not this laptop to time a candidate, and
- * it needs it *now*. A Codespace is the wrong tool for that: a cold one takes
- * minutes to wake, which is fine for a development session and useless when a
- * run is waiting on the number. An Actions workflow_dispatch starts in seconds
- * on a warm pool, runs the same script, and costs nothing on a public repo.
+ * E2B owns the fast generated-code gate. This file is the slower reproducible
+ * evidence layer for candidates that already passed, using workflow_dispatch
+ * and the same benchmark result format.
  *
  * The half that was missing is this file. `scripts/github-actions-dispatch.mjs`
  * could start a run and watch it finish, but never read the result back, so the

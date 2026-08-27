@@ -235,7 +235,7 @@ export default function CouncilPanel() {
                     <div className="who">
                       Candidate {c.letter}
                       <span className="badge">{c.model.split("/").pop()}</span>
-                      {c.letter === council.winner && <span className="badge" data-tone="good">winner</span>}
+                      {c.letter === council.winner && <span className="badge" data-tone="good">Winner</span>}
                     </div>
                     <div className="txt">{f?.answer || c.error || "(no answer line returned)"}</div>
                   </div>

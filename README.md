@@ -168,6 +168,17 @@ deliberating is still evidence.
 The roster lives in Settings as two free-text lists, one gateway model id per line. Any
 model the key can reach works; nothing is recompiled when you change it.
 
+The default recommended Council is intentionally lean:
+
+| Seat | Model | TokenRouter ID |
+|---|---|---|
+| Solver | Kimi K3 | `moonshotai/kimi-k3` |
+| Solver | GLM-5.3 | `z-ai/glm-5.3` |
+| Solver | Grok 4.6 | `x-ai/grok-4.6` |
+| Solver | Gemini 3.7 Flash | `google/gemini-3.7-flash` |
+| Judge | GPT-5.6 Sol | `openai/gpt-5.6-sol` |
+| Judge | Claude Opus 5 | `anthropic/claude-opus-5` |
+
 ### E2B program tests and GitHub Actions evidence
 
 Generated candidate programs now run in E2B by default when the worker has
@@ -184,10 +195,8 @@ npm run e2b:template
 ```
 
 GitHub Actions remains available as optional extra remote evidence after a
-candidate passes its generated tests. Codespaces can still be kept as a
-legacy/manual backend, but it is no longer the recommended background solver
-path because a cold Codespace can take too long to wake up while the Council is
-waiting for benchmark evidence.
+candidate passes its generated tests. The application no longer uses Codespaces
+for this path; cold wake-up time is too slow for the solver loop.
 
 In the app, open Settings › Council, set **Program tests** to **E2B sandbox**.
 If you also want the extra Actions evidence, set **Remote benchmark** to

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { forgetLocalFile, signedUrl, uploadScreenshot } from "@/lib/bridge";
+import { forgetLocalFile, pokeWorker, signedUrl, uploadScreenshot } from "@/lib/bridge";
 import { CLOUD_SOLVER_MAX_IMAGES, sanitizedSettingsSnapshot } from "@/lib/cloudJobs";
 import {
   createSolveJob,
@@ -37,7 +37,11 @@ function excerpt(text: string, max = 220): string {
 }
 
 export default function BackgroundJobsPanel() {
-  const [open, setOpen] = useState(true);
+  // Part of the rail accordion rather than local state, so opening it closes
+  // whatever else was open — and so the choice survives a reload.
+  const open = useStore((s) => s.settings.railPanel === "jobs");
+  const toggleRail = useStore((s) => s.toggleRailPanel);
+  const setOpen = () => toggleRail("jobs");
   const [jobs, setJobs] = useState<SolveJob[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [events, setEvents] = useState<SolveJobEvent[]>([]);
@@ -53,11 +57,51 @@ export default function BackgroundJobsPanel() {
   const ensureSession = useStore((s) => s.ensureSession);
   const zone = useStore((s) => s.settings.timeZone);
   const selectSession = useStore((s) => s.selectSession);
+  const workerTickUrl = useStore((s) => s.settings.workerTickUrl);
+  const workerTickSecret = useStore((s) => s.settings.workerTickSecret);
+  const [poking, setPoking] = useState(false);
+  const [pokeNote, setPokeNote] = useState<string | null>(null);
 
   const selectedJob = useMemo(
     () => jobs.find((job) => job.id === selected) ?? jobs[0] ?? null,
     [jobs, selected]
   );
+
+  /**
+   * A job nobody has picked up.
+   *
+   * Queuing a job and running one are separate processes: the app writes the row
+   * and a worker claims it. If no worker is running, the row simply waits — and
+   * the panel used to show it sitting at "queued" with nothing to say that
+   * nothing was coming for it. Two minutes is well past a 5-second poll, so a
+   * job still unclaimed after that is not slow, it is unattended.
+   */
+  const stalled = useMemo(() => {
+    const cutoff = Date.now() - 120_000;
+    return jobs.filter(
+      (job) => job.status === "queued" && !job.claimedAt && new Date(job.createdAt).getTime() < cutoff
+    );
+  }, [jobs]);
+
+  const poke = async () => {
+    setPoking(true);
+    setPokeNote(null);
+    try {
+      const result = await pokeWorker(workerTickUrl, workerTickSecret);
+      setPokeNote(
+        !result
+          ? "No worker address is set."
+          : result.worked
+            ? "The worker took a job."
+            : "The worker answered, but had nothing queued to take."
+      );
+      await refresh();
+    } catch (err) {
+      setPokeNote(String(err).replace(/^Error:\s*/, ""));
+    } finally {
+      setPoking(false);
+    }
+  };
 
   const refresh = async () => {
     setLoading(true);
@@ -190,11 +234,11 @@ export default function BackgroundJobsPanel() {
         role="button"
         tabIndex={0}
         aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpen()}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
-            setOpen((v) => !v);
+            setOpen();
           }
         }}
         title={open ? "Collapse" : "Show background jobs"}
@@ -237,6 +281,28 @@ export default function BackgroundJobsPanel() {
 
           {!error && !loading && jobs.length === 0 && (
             <div className="empty">No cloud jobs yet.</div>
+          )}
+
+          {/* The one thing this panel could not previously tell you. */}
+          {stalled.length > 0 && (
+            <div className="job-stalled">
+              <p>
+                {stalled.length === 1 ? "One job has" : `${stalled.length} jobs have`} been waiting
+                over two minutes with nothing to run {stalled.length === 1 ? "it" : "them"}. Cloud
+                jobs are processed by the worker, which runs separately from this app.
+              </p>
+              {workerTickUrl.trim() ? (
+                <button className="btn tiny" disabled={poking} onClick={() => void poke()}>
+                  {poking ? "Asking…" : "Ask the worker to take one"}
+                </button>
+              ) : (
+                <p className="hint">
+                  Start it with <span className="mono">npm run worker:watch</span>, or set a worker
+                  address in Settings to nudge one from here.
+                </p>
+              )}
+              {pokeNote && <p className="hint">{pokeNote}</p>}
+            </div>
           )}
 
           {jobs.length > 0 && (
