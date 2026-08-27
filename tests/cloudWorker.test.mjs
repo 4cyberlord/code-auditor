@@ -1,6 +1,8 @@
 process.env.SUPABASE_URL = "https://project.supabase.co";
 process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role";
 process.env.TOKENROUTER_API_KEY = "tokenrouter";
+process.env.CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS = "0";
+process.env.CODE_AUDITOR_TOKENROUTER_JITTER_MS = "0";
 process.env.CODE_AUDITOR_WORKER_SOLVERS = "2";
 process.env.CODE_AUDITOR_WORKER_JUDGES = "1";
 

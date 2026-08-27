@@ -108,6 +108,7 @@ Create a fine-grained token or GitHub App token with Actions write permission fo
 your repository:
 
 ```bash
+CODE_AUDITOR_GITHUB_TOKEN=
 GH_TOKEN=
 GITHUB_REPOSITORY=owner/repo
 CODE_AUDITOR_GITHUB_WORKFLOW=cloud-benchmark.yml
@@ -115,9 +116,10 @@ CODE_AUDITOR_GITHUB_REF=main
 ```
 
 The workflow must exist on the default branch before dispatch works.
-During local development, `gh auth login` with `repo` and `workflow` scopes also
-works; the dispatch script falls back to `gh auth token` when an env token cannot
-dispatch workflows.
+`CODE_AUDITOR_GITHUB_TOKEN` is the preferred worker variable. During local
+development, `gh auth login` with `repo` and `workflow` scopes also works; the
+dispatch script falls back to `gh auth token` when an env token cannot dispatch
+workflows.
 
 ## Local smoke test
 
@@ -140,3 +142,8 @@ Useful variants:
 npm run smoke:live -- --no-solve
 npm run smoke:live -- --no-telegram
 ```
+
+The smoke solve uses GitHub Actions for remote benchmark evidence when the
+worker reaches runnable code candidates. Codespaces is no longer the recommended
+background benchmark backend because cold wake-up time is too slow for this app's
+solve loop.

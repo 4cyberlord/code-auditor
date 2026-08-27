@@ -56,7 +56,17 @@ jobs:
 
           printf '%s' "$PROGRAM_B64" | base64 -d > code.txt
 
-          lang="$(printf '%s' "$LANGUAGE" | tr '[:upper:]' '[:lower:]')"
+          lang="$(printf '%s' "$LANGUAGE" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')"
+          # Models label a fence with the standard they wrote against, not the
+          # bare language: c++17, cpp20, c11, python3.11. The runner keys on the
+          # language, so strip the standard before matching or every one of them
+          # falls through to exit 97 having never been compiled.
+          case "$lang" in
+            c++*|cpp*|cxx*) lang=cpp ;;
+            c[0-9][0-9]) lang=c ;;
+            python3.*) lang=python3 ;;
+            node[0-9]*|es[0-9][0-9][0-9][0-9]) lang=javascript ;;
+          esac
           case "$lang" in
             python|python3|py|py3) file=main.py; cp code.txt "$file"; command='python3 main.py'; runtime='github-actions python3' ;;
             javascript|js|node|nodejs|mjs) file=main.mjs; cp code.txt "$file"; command='node main.mjs'; runtime='github-actions node esm' ;;

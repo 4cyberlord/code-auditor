@@ -168,26 +168,31 @@ deliberating is still evidence.
 The roster lives in Settings as two free-text lists, one gateway model id per line. Any
 model the key can reach works; nothing is recompiled when you change it.
 
-### Remote Codespaces benchmarks
+### Remote GitHub Actions benchmarks
 
-Remote benchmarking uses the GitHub CLI, not a GitHub token stored in this app.
+Remote benchmarking now defaults to GitHub Actions. Codespaces can still be
+kept as a legacy/manual backend, but it is no longer the recommended background
+solver path because a cold Codespace can take too long to wake up while the
+Council is waiting for benchmark evidence.
 
-```bash
-gh auth refresh -h github.com -s codespace
-gh codespace list
-gh codespace ssh -c <codespace-name> -- 'python3 --version && c++ --version | head -1'
-```
+In the app, open Settings › Council, set **Remote benchmark** to **GitHub
+Actions**, then fill:
 
-In the app, open Settings › Council, set **Remote benchmark** to **Codespaces**, press
-Refresh, and choose a Codespace name. The currently prepared benchmark Codespace is:
+| Field | Example |
+|---|---|
+| Repository | `4cyberlord/code-auditor` |
+| Workflow | `cloud-benchmark.yml` |
+| Ref | `main` |
+| Remote timeout | `300` seconds |
 
-```text
-turbo-cod-qr9p57v5x5ph6wpj
-```
+The worker dispatches `.github/workflows/cloud-benchmark.yml`, waits for the
+run, downloads its `benchmark-result.json` artifact and attaches the runner
+pass/fail, runtime and memory evidence to the Council report.
 
-It has Python, Node, C/C++, Java, Go, Ruby, PHP and Rust available. Rust installed through
-`rustup` is loaded by the remote benchmark script via `~/.cargo/env`, so `rustc` works
-over noninteractive `gh codespace ssh` calls.
+For production, do not bundle a local `gh` login. Give the deployed worker a
+server-side GitHub App installation token or fine-grained token with Actions
+write access to this repository. Local development can still use `gh auth
+login` as a fallback when no env token is present.
 
 ## Background cloud solver foundation
 
@@ -225,7 +230,7 @@ node scripts/cloud-worker.mjs --once
 It claims queued jobs, records progress and sends APNs notifications when the
 server has APNs credentials. It now runs a compact cloud Council through
 TokenRouter chat models: independent solver calls, benchmark harness generation,
-local worker verification, optional Codespaces benchmark mirrors, reviewer
+local worker verification, optional GitHub Actions benchmark evidence, reviewer
 passes, judge reports and a synthesis pass, then writes a `council_reports` row
 and marks the job completed. Revision rounds are still the next worker layer.
 See `docs/background-cloud-solver.md`.
@@ -268,6 +273,12 @@ Four digits is only defensible because of what sits around it:
 * **"Remember this Mac" stores a token, not the PIN.** Thirty-two random bytes in the
   Keychain; only their SHA-256 reaches `app_sessions`. Signing out revokes both ends, and
   changing the PIN revokes every remembered sign-in.
+
+The gate has no browser-preview exemption: `npm run dev` in a plain browser stops at the
+same screen, because "the lock is off in one of the two ways this app runs" is not a lock.
+For UI work on the login itself, `NEXT_PUBLIC_UNLOCK=1 npm run dev` moves the frontend gate
+and nothing else — the Rust guards below are unaffected, so an unlocked frontend still
+cannot reach a key, a capture or the database.
 
 The lock is enforced in Rust, not just in React. `auth::require()` guards two chokepoints —
 `db::pool()` and `keychain::read_api_key()` — which between them cover every database

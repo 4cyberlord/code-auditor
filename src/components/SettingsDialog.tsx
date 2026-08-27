@@ -1199,25 +1199,89 @@ function CouncilCard() {
       </div>
 
       <div className="row">
-        <label htmlFor="codespaces-benchmark">Remote benchmark</label>
+        <label htmlFor="benchmark-backend">Remote benchmark</label>
         <div className="segmented" style={{ flex: 1 }}>
-          {([false, true] as const).map((v) => (
+          {(["actions", "off"] as const).map((v) => (
             <button
               key={String(v)}
-              data-on={settings.codespacesBenchmark === v}
+              data-on={settings.benchmarkBackend === v}
               style={{ flex: 1 }}
               onClick={() => {
-                patch({ codespacesBenchmark: v });
-                if (v && !codespacesStatus && !codespacesLoading) void refreshCodespaces();
+                patch({ benchmarkBackend: v, codespacesBenchmark: false });
               }}
             >
-              {v ? "Codespaces" : "Local only"}
+              {v === "actions" ? "GitHub Actions" : "Off"}
             </button>
           ))}
         </div>
       </div>
 
-      {settings.codespacesBenchmark && (
+      {settings.benchmarkBackend === "actions" && (
+        <>
+          <div className="row">
+            <label htmlFor="github-repository">Repository</label>
+            <input
+              id="github-repository"
+              className="field mono"
+              type="text"
+              spellCheck={false}
+              value={settings.githubRepository}
+              onChange={(e) => patch({ githubRepository: e.target.value })}
+              placeholder="owner/repo"
+              style={{ flex: 1 }}
+            />
+          </div>
+          <div className="row">
+            <label htmlFor="github-workflow">Workflow</label>
+            <input
+              id="github-workflow"
+              className="field mono"
+              type="text"
+              spellCheck={false}
+              value={settings.githubWorkflow}
+              onChange={(e) => patch({ githubWorkflow: e.target.value })}
+              placeholder="cloud-benchmark.yml"
+              style={{ flex: 1 }}
+            />
+          </div>
+          <div className="row">
+            <label htmlFor="github-ref">Ref</label>
+            <input
+              id="github-ref"
+              className="field mono"
+              type="text"
+              spellCheck={false}
+              value={settings.githubRef}
+              onChange={(e) => patch({ githubRef: e.target.value })}
+              placeholder="main"
+              style={{ flex: 1 }}
+            />
+          </div>
+          <div className="row">
+            <label htmlFor="github-timeout">Remote timeout</label>
+            <input
+              id="github-timeout"
+              className="field"
+              type="number"
+              min={30}
+              max={900}
+              step={30}
+              value={Math.round(settings.benchmarkTimeoutMs / 1000)}
+              onChange={(e) => patch({ benchmarkTimeoutMs: Number(e.target.value) * 1000 })}
+              style={{ flex: 1 }}
+            />
+            <span className="vendor">seconds</span>
+          </div>
+          <p className="hint">
+            Runs passing council candidates on GitHub Actions and attaches the runner
+            pass/fail, time and memory evidence to the Council report. Production workers
+            should use a server-side GitHub App or Actions-write token; the desktop app
+            should not depend on a local <span className="mono">gh</span> login.
+          </p>
+        </>
+      )}
+
+      {settings.benchmarkBackend === "codespaces" && (
         <>
           <div className="row">
             <label htmlFor="codespaces-name">Codespace</label>

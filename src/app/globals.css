@@ -2613,6 +2613,26 @@ body[data-dragging="row"] * {
   color: var(--text-dim);
 }
 
+/* The app-wide `.field` is 30px, sized for the dense rows in Settings. Sitting
+   directly above four 56px PIN cells that reads as two different forms stacked
+   on each other, so inside this panel it takes the PIN's height, border weight
+   and corner radius. Nothing outside `.auth-field` is affected. */
+.auth-field .field {
+  height: 56px;
+  padding: 0 16px;
+  font-size: 15px;
+  border-width: 1.5px;
+  border-color: var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+/* The connection string is long enough that 15px would only ever show its
+   scheme. It keeps the height and gives up the type size. */
+.auth-field .field.mono {
+  font-size: 12.5px;
+}
+
 /* ---- the PIN: one input, four cells --------------------------------------
    The boxes are painted by `.pin-cells` underneath, and the real field lies on
    top with a transparent face. That keeps it a single focusable, pasteable,

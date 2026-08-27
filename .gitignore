@@ -19,3 +19,4 @@ AuthKey_*.p8
 login-preview.html
 __pycache__/
 *.pyc
+council-runs/

@@ -46,10 +46,18 @@ if (process.argv.includes("--help") || process.argv.length < 5) {
 
 function tokenCandidates() {
   const tokens = [];
+  tokens.push(
+    ...[
+      process.env.CODE_AUDITOR_GITHUB_TOKEN,
+      process.env.GH_TOKEN,
+      process.env.GITHUB_TOKEN,
+    ].filter(Boolean)
+  );
   try {
     const cleanEnv = { ...process.env };
     delete cleanEnv.GH_TOKEN;
     delete cleanEnv.GITHUB_TOKEN;
+    delete cleanEnv.CODE_AUDITOR_GITHUB_TOKEN;
     const cli = execFileSync("gh", ["auth", "token"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
@@ -59,7 +67,6 @@ function tokenCandidates() {
   } catch {
     // gh is optional; explicit env tokens are enough in CI.
   }
-  tokens.push(...[process.env.GH_TOKEN, process.env.GITHUB_TOKEN].filter(Boolean));
   return [...new Set(tokens)];
 }
 
@@ -67,7 +74,7 @@ const tokens = tokenCandidates();
 let activeToken = tokens[0] || "";
 
 if (!tokens.length || !repo) {
-  console.error("GH_TOKEN/GITHUB_TOKEN or a logged-in GitHub CLI, plus GITHUB_REPOSITORY, are required.");
+  console.error("CODE_AUDITOR_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN or a logged-in GitHub CLI, plus GITHUB_REPOSITORY, are required.");
   process.exit(2);
 }
 

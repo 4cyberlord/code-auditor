@@ -13,6 +13,7 @@
  */
 
 import { createSign } from "node:crypto";
+import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { readFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -39,11 +40,13 @@ const SLOW_JOB_MS = Number(process.env.CODE_AUDITOR_SLOW_JOB_MS || 180_000);
 
 initObservability({ service: "cloud-worker", workerId: WORKER_ID });
 
-const [{ systemPrompt, userPrompt }, { parseFinal }, council] = await Promise.all([
-  import("../src/lib/prompts.ts"),
-  import("../src/lib/parse.ts"),
-  import("../src/lib/council.ts"),
-]);
+const [{ systemPrompt, userPrompt }, { parseFinal }, council, { resolveAnswerLanguage }] =
+  await Promise.all([
+    import("../src/lib/prompts.ts"),
+    import("../src/lib/parse.ts"),
+    import("../src/lib/council.ts"),
+    import("../src/lib/answerLanguage.ts"),
+  ]);
 
 const {
   COUNCIL_DEFAULT_MODELS,
@@ -56,6 +59,7 @@ const {
   judgeSystemPrompt,
   judgeUserPrompt,
   letterFor,
+  normalizeCodeLanguage,
   parseTestSuites,
   parseReviewSet,
   reviewSystemPrompt,
@@ -70,6 +74,10 @@ const {
 const MAX_OUTPUT = 64 * 1024;
 const LOCAL_RUN_TIMEOUT_MS = 20_000;
 const REMOTE_RUN_TIMEOUT_MS = 120_000;
+const TOKENROUTER_MIN_DELAY_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS || 13_000);
+const TOKENROUTER_JITTER_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_JITTER_MS || 1_500);
+let tokenRouterNextAt = 0;
+let tokenRouterQueue = Promise.resolve();
 
 function mustEnv(name) {
   const v = process.env[name];
@@ -209,6 +217,18 @@ async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function tokenRouterTurn() {
+  const run = tokenRouterQueue.then(async () => {
+    const now = Date.now();
+    const waitMs = Math.max(0, tokenRouterNextAt - now);
+    if (waitMs > 0) await sleep(waitMs);
+    const jitter = TOKENROUTER_JITTER_MS > 0 ? Math.floor(Math.random() * TOKENROUTER_JITTER_MS) : 0;
+    tokenRouterNextAt = Date.now() + Math.max(0, TOKENROUTER_MIN_DELAY_MS) + jitter;
+  });
+  tokenRouterQueue = run.catch(() => {});
+  await run;
+}
+
 async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxTokens = 4096 }) {
   const content = [{ type: "text", text: user }];
   for (const image of images) {
@@ -218,6 +238,7 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
   let temperature = 0.2;
   let last = "";
   for (let attempt = 0; attempt < 3; attempt++) {
+    await tokenRouterTurn();
     const resp = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
@@ -239,8 +260,23 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
     if (resp.ok) {
       const json = JSON.parse(text);
       const answer = json?.choices?.[0]?.message?.content;
-      if (!answer?.trim()) throw new Error(`${model}: empty model response`);
-      return answer;
+      if (answer?.trim()) return answer;
+
+      // A 200 carrying no content is the router, not the model: it is listed as
+      // available, the request was accepted, and the backing route returned
+      // nothing. It clears on its own within minutes.
+      //
+      // This used to throw here, outside the retry loop, so a transient blank
+      // reply killed the seat outright — which is exactly what
+      // "moonshotai/kimi-k3: empty model response" was in Sentry, twice, for
+      // one run. Retrying costs one more request against a limit the pacing
+      // queue already respects.
+      last = `${model}: empty model response`;
+      if (attempt < 2) {
+        await sleep(2000 * (attempt + 1));
+        continue;
+      }
+      break;
     }
 
     if (/invalid temperature:\s*only\s*1\s*is\s*allowed/i.test(text) && temperature !== 1) {
@@ -274,6 +310,16 @@ function judgeDigest(judges) {
     .join("\n\n---\n\n");
 }
 
+function isProviderQuotaError(message) {
+  return /insufficient_user_quota|credit limit is insufficient|account quota is running low|please recharge/i.test(
+    String(message || "")
+  );
+}
+
+function isProviderRateLimit(message) {
+  return /429 Too Many Requests|request limit|rate limit/i.test(String(message || ""));
+}
+
 function clampOutput(raw) {
   if (raw.length <= MAX_OUTPUT) return { text: raw, truncated: false };
   const head = Math.floor((MAX_OUTPUT * 2) / 3);
@@ -294,7 +340,9 @@ function isCommonJs(code) {
 }
 
 function runtimeFor(language, code) {
-  const lang = String(language || "").trim().toLowerCase().replace(/^\./, "");
+  // Same normaliser the suites and the candidates go through, so a fence
+  // labelled ```c++17 lands on the C++ row instead of falling off the table.
+  const lang = normalizeCodeLanguage(language);
   if (["python", "python3", "py", "py3"].includes(lang)) return { file: "main.py", command: "python3 main.py", runtime: "python3" };
   if (["javascript", "js", "node", "nodejs", "mjs", "cjs"].includes(lang)) {
     if (isCommonJs(code)) return { file: "main.cjs", command: "node main.cjs", runtime: "node (commonjs)" };
@@ -379,7 +427,17 @@ ${encoded}
 CA_CODE
 base64 -d code.b64 > code.txt
 lang=${shellSingle(language)}
-case "$(printf '%s' "$lang" | tr '[:upper:]' '[:lower:]')" in
+lang="$(printf '%s' "$lang" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')"
+# Fourth and last copy of the language table (E2B and Codespaces share this
+# script). Same standard-stripping as the local table and the Actions workflow,
+# so a c++17 fence compiles here too instead of exiting 97 unrun.
+case "$lang" in
+  c++*|cpp*|cxx*) lang=cpp ;;
+  c[0-9][0-9]) lang=c ;;
+  python3.*) lang=python3 ;;
+  node[0-9]*|es[0-9][0-9][0-9][0-9]) lang=javascript ;;
+esac
+case "$lang" in
   python|python3|py|py3) file=main.py; cp code.txt "$file"; command='python3 main.py'; runtime='codespace python3' ;;
   javascript|js|node|nodejs|mjs) file=main.mjs; cp code.txt "$file"; command='node main.mjs'; runtime='codespace node esm' ;;
   cjs) file=main.cjs; cp code.txt "$file"; command='node main.cjs'; runtime='codespace node commonjs' ;;
@@ -447,6 +505,38 @@ function parseRemoteOutput(raw) {
     remoteElapsedMs: metrics.elapsed_s ? Math.round(Number(metrics.elapsed_s) * 1000) : metrics.elapsed_ms ? Number(metrics.elapsed_ms) : null,
     peakMemoryKb: metrics.maxrss_kb ? Number(metrics.maxrss_kb) : null,
   };
+}
+
+/**
+ * Which machine benchmarks a passing candidate.
+ *
+ * Actions is the default because latency is the whole point: a dispatched
+ * workflow is running within seconds on a warm pool, where a cold Codespace
+ * takes minutes to wake — and the council is *waiting* on this number, so
+ * minutes is the difference between evidence and a timeout.
+ *
+ * Codespaces stays available for the case it is genuinely better at: a long
+ * interactive session where the machine is already warm and you want the same
+ * environment the repo develops in.
+ *
+ * The `codespacesBenchmark` branch is migration, not preference. Settings saved
+ * before this setting existed carry that boolean, and honouring it means
+ * turning Codespaces on once does not silently become Actions on the next
+ * launch.
+ */
+export function resolveBenchmarkBackend(settings = {}, env = process.env) {
+  const explicit = String(settings.benchmarkBackend || "").trim().toLowerCase();
+  if (explicit === "actions" || explicit === "codespaces" || explicit === "off") {
+    if (explicit === "actions" && !repoFor(env)) return "off";
+    return explicit;
+  }
+  if (settings.codespacesBenchmark) return "codespaces";
+  return repoFor(env) ? "actions" : "off";
+}
+
+/** The repo Actions dispatches against. */
+export function repoFor(env = process.env) {
+  return String(env.GITHUB_REPOSITORY || env.CODE_AUDITOR_GITHUB_REPOSITORY || "").trim();
 }
 
 async function runRemoteCode(codespace, language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
@@ -616,10 +706,57 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
       const local = await runVerification(settings, suite, program);
       const localCases = countCases(local.stdout);
       let remote;
-      const codespace = settings.codespacesBenchmark
-        ? String(settings.codespacesName || process.env.CODE_AUDITOR_CODESPACE_NAME || "").trim()
-        : "";
-      if (codespace && local.ok && localCases.failed === 0 && localCases.passed > 0) {
+      const backend = resolveBenchmarkBackend(settings);
+      // Only a candidate that already passed locally is worth a remote machine.
+      // Benchmarking something that fails its own tests measures how fast it is
+      // wrong, and spends a runner minute to find that out.
+      const worthBenchmarking = local.ok && localCases.failed === 0 && localCases.passed > 0;
+
+      if (worthBenchmarking && backend === "actions") {
+        // Unique per candidate, not per job: the run is found again by its
+        // display title, and two candidates of one job in the same language
+        // would otherwise produce two runs nobody can tell apart.
+        const correlationId = `${job.id}-${candidate.letter}`;
+        try {
+          const gha = await runGithubBenchmark({
+            repo: repoFor(),
+            token: String(settings.githubToken || process.env.CODE_AUDITOR_GITHUB_TOKEN || ""),
+            workflow: String(settings.githubWorkflow || process.env.CODE_AUDITOR_GITHUB_WORKFLOW || "cloud-benchmark.yml"),
+            ref: String(settings.githubRef || process.env.CODE_AUDITOR_GITHUB_REF || "main"),
+            correlationId,
+            language: suite.language,
+            program,
+            timeoutMs: Number(settings.benchmarkTimeoutMs || 300_000),
+            log: (line) => console.log(`[bench ${candidate.letter}] ${line}`),
+          });
+          remote = {
+            ok: gha.ok,
+            codespace: "github-actions",
+            runtime: gha.runtime,
+            durationMs: gha.durationMs,
+            remoteElapsedMs: gha.remoteElapsedMs ?? null,
+            peakMemoryKb: gha.peakMemoryKb ?? null,
+            note: gha.note || (gha.ok ? "benchmarked on GitHub Actions" : "benchmark failed"),
+            url: gha.url ?? null,
+          };
+        } catch (err) {
+          remote = {
+            ok: false,
+            codespace: "github-actions",
+            runtime: "github-actions",
+            durationMs: 0,
+            remoteElapsedMs: null,
+            peakMemoryKb: null,
+            note: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+
+      const codespace =
+        backend === "codespaces"
+          ? String(settings.codespacesName || process.env.CODE_AUDITOR_CODESPACE_NAME || "").trim()
+          : "";
+      if (codespace && worthBenchmarking) {
         try {
           const rb = await runRemoteCode(codespace, suite.language, program, Number(settings.codespacesTimeoutMs || 30_000));
           const remoteCases = countCases(rb.stdout);
@@ -650,6 +787,11 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
           };
         }
       }
+      // A bare "exit 1" says a candidate failed but not whether the code was
+      // wrong or the generated harness was — and that is exactly the line the
+      // "objective failure outranks consensus" rule is drawn on. Keep the first
+      // few lines of what the compiler or runtime actually said.
+      const diagnostic = String(local.stderr || "").trim().split("\n").slice(0, 6).join("\n");
       runs[candidate.letter] = {
         letter: candidate.letter,
         ran: true,
@@ -659,9 +801,10 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
         durationMs: local.durationMs,
         note: local.timedOut ? "timed out" : local.exitCode !== 0 ? `exit ${local.exitCode}` : "",
         runtime: local.runtime,
+        stderr: diagnostic,
         remote,
       };
-      await addEvent(job.id, local.ok && localCases.failed === 0 ? "info" : "warn", "benchmark_done", `Candidate ${candidate.letter}: ${runs[candidate.letter].note || `${localCases.passed} case(s) passed`}.`, runs[candidate.letter]);
+      await addEvent(job.id, local.ok && localCases.failed === 0 ? "info" : "warn", "benchmark_done", `Candidate ${candidate.letter}: ${runs[candidate.letter].note || `${localCases.passed} case(s) passed`}.${diagnostic ? ` — ${diagnostic.split("\n")[0]}` : ""}`, runs[candidate.letter]);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: message, runtime: "" };
@@ -834,12 +977,12 @@ export async function runCouncilJob(job) {
     throw new Error("Cloud Council needs at least two chat-compatible TokenRouter models.");
   }
 
-  if (!process.env.GITHUB_TOKEN && !process.env.GH_TOKEN) {
+  if (!process.env.CODE_AUDITOR_GITHUB_TOKEN && !process.env.GITHUB_TOKEN && !process.env.GH_TOKEN) {
     await addEvent(
       job.id,
       "warn",
       "benchmark_setup",
-      "GitHub token is missing; Codespaces benchmark execution is not available yet."
+      "GitHub token is missing; GitHub Actions benchmark evidence will be skipped until the worker has an Actions-write token."
     );
   }
 
@@ -861,7 +1004,13 @@ export async function runCouncilJob(job) {
   await addEvent(job.id, "info", "solving", `Asking ${models.length} independent Council solver models.`);
 
   const question = userPrompt("", true, "", images.map(() => ({})), "");
-  const solverSystem = systemPrompt(settings.mode || "auto");
+  // Same rule as the desktop run: the answer comes back in the language the
+  // question was in, unless the setting names one.
+  const answerLanguage = resolveAnswerLanguage(
+    String(settings.outputLanguage || ""),
+    String(job.extraction?.language || job.language || "")
+  );
+  const solverSystem = systemPrompt(settings.mode || "auto", answerLanguage);
   const candidates = [];
 
   await Promise.all(
@@ -895,7 +1044,32 @@ export async function runCouncilJob(job) {
   );
 
   const answered = candidates.filter((candidate) => candidate?.text || candidate?.final);
-  if (answered.length < 1) throw new Error("No Council solver produced an answer.");
+  if (answered.length < 1) {
+    const errors = candidates.filter(Boolean).map((candidate) => candidate.error || "").filter(Boolean);
+    const quota = errors.find(isProviderQuotaError);
+    const rateLimit = errors.find(isProviderRateLimit);
+    if (quota || rateLimit) {
+      const reason = quota
+        ? "TokenRouter quota is exhausted; add credit or switch the worker to another reachable model/key."
+        : "TokenRouter rate limit blocked every solver; the worker should retry later.";
+      await addEvent(job.id, "warn", "needs_attention", reason);
+      await patchJob(job.id, {
+        status: "needs_attention",
+        progress_phase: "needs_attention",
+        error: reason,
+        finished_at: new Date().toISOString(),
+      });
+      await notifyOps({
+        level: "warn",
+        title: "Council job needs attention",
+        body: reason,
+        jobId: job.id,
+        phase: "needs_attention",
+      }).catch(() => {});
+      return;
+    }
+    throw new Error("No Council solver produced an answer.");
+  }
 
   const field = candidates.filter(Boolean);
   const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field);
@@ -976,19 +1150,58 @@ export async function runCouncilJob(job) {
   await addEvent(job.id, "info", "synthesizing", "Synthesizing the cloud Council result.");
 
   const synthesisModel = models[0].id;
-  const synthesis = await tokenRouterChat({
-    baseUrl,
-    model: synthesisModel,
-    system: synthesisSystemPrompt(),
-    user: synthesisUserPrompt({
-      question,
-      docket,
-      reviews: reviewDigest(reviewSets) || "(no reviews were collected)",
-      execution,
-      judges: judgeDigest(judgeReports) || "(no judges were collected)",
-    }),
-    maxTokens: Number(settings.maxTokens || 4096),
-  });
+  let synthesis;
+  try {
+    synthesis = await tokenRouterChat({
+      baseUrl,
+      model: synthesisModel,
+      system: synthesisSystemPrompt(),
+      user: synthesisUserPrompt({
+        question,
+        docket,
+        reviews: reviewDigest(reviewSets) || "(no reviews were collected)",
+        execution,
+        judges: judgeDigest(judgeReports) || "(no judges were collected)",
+      }),
+      maxTokens: Number(settings.maxTokens || 4096),
+    });
+  } catch (err) {
+    // Reviews and judges each survive their own failure; synthesis was a bare
+    // await, so one refused request at the last step threw away every solver
+    // answer and every benchmark measurement the run had already paid for.
+    // The job still fails — a Council result without a synthesis is not a
+    // result — but nothing is lost silently any more: what the run did produce
+    // goes into the log first, so a failed run can still be read afterwards.
+    const message = err instanceof Error ? err.message : String(err);
+    await addEvent(job.id, "error", "synthesis_failed", `Synthesis failed on ${synthesisModel}: ${message}`, {
+      model: synthesisModel,
+      // What the run got as far as, so the spend is auditable even in failure.
+      solvers: field.map((c) => ({
+        letter: c.letter,
+        model: c.model,
+        answered: Boolean(c.text || c.final),
+        kind: c.final?.kind || null,
+        language: c.final?.kind === "code" ? candidateLanguage(c.final) : null,
+        codeBytes: c.final?.code ? Buffer.byteLength(c.final.code, "utf8") : 0,
+        error: c.error || null,
+      })),
+      benchmark: Object.values(benchmark.runs).map((run) => ({
+        letter: run.letter,
+        ran: run.ran,
+        ok: run.ok,
+        passed: run.passed,
+        failed: run.failed,
+        durationMs: run.durationMs,
+        note: run.note,
+        stderr: run.stderr || "",
+      })),
+      reviewsCollected: reviewSets.length,
+      judgesCollected: judgeReports.filter((j) => j.text).length,
+      judgesFailed: judgeReports.filter((j) => j.error).map((j) => ({ model: j.model, error: j.error })),
+    }).catch(() => {});
+    captureWorkerException(err, { jobId: job.id, phase: "synthesis_failed", model: synthesisModel });
+    throw err;
+  }
 
   const report = {
     candidates: field,
@@ -1033,20 +1246,21 @@ export async function tick() {
     await runCouncilJob(job);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const needsAttention = isProviderQuotaError(message) || isProviderRateLimit(message);
     captureWorkerException(err, { jobId: job.id, phase: "failed" });
-    await addEvent(job.id, "error", "failed", message).catch(() => {});
+    await addEvent(job.id, needsAttention ? "warn" : "error", needsAttention ? "needs_attention" : "failed", message).catch(() => {});
     await patchJob(job.id, {
-      status: "failed",
-      progress_phase: "failed",
+      status: needsAttention ? "needs_attention" : "failed",
+      progress_phase: needsAttention ? "needs_attention" : "failed",
       error: message,
       finished_at: new Date().toISOString(),
     }).catch(() => {});
     await notifyOps({
-      level: "error",
-      title: "Council job failed",
+      level: needsAttention ? "warn" : "error",
+      title: needsAttention ? "Council job needs attention" : "Council job failed",
       body: message,
       jobId: job.id,
-      phase: "failed",
+      phase: needsAttention ? "needs_attention" : "failed",
     }).catch(() => {});
   } finally {
     const durationMs = Date.now() - started;

@@ -29,13 +29,11 @@ export interface AuthStatus {
 }
 
 /**
- * What the UI shows. `unavailable` is the browser-preview case: there is no Rust
- * to ask, so there is also nothing worth locking, and the app renders as normal
- * with the "browser preview" badge already in the title bar saying why nothing
- * works. Pretending to lock a build that cannot make a single model call would
- * only stop UI work.
+ * What the UI shows. Four states, and no way past them that is not a sign-in:
+ * `loading` before Rust has answered once, `connect` when there is no database
+ * to hold an account, `login` otherwise, and `in`.
  */
-export type AuthGate = "loading" | "unavailable" | "connect" | "login" | "in";
+export type AuthGate = "loading" | "connect" | "login" | "in";
 
 /**
  * Order matters here, and the reason is hydration rather than logic.
@@ -53,7 +51,19 @@ export type AuthGate = "loading" | "unavailable" | "connect" | "login" | "in";
  */
 export function gateFor(status: AuthStatus | null, ready: boolean): AuthGate {
   if (!ready || !status) return "loading";
-  if (!inTauri()) return "unavailable";
+  // Deliberately no browser-preview exemption. An earlier version let a build
+  // running outside the desktop shell straight through on the grounds that it
+  // could not make a model call anyway -- but "the lock is off in one of the two
+  // ways this app runs" is not a lock, and it is the version anyone would hit
+  // first with `npm run dev`. The one escape is explicit, build-time and named,
+  // so it cannot happen by accident:
+  //
+  //   NEXT_PUBLIC_UNLOCK=1 npm run dev
+  //
+  // and it moves nothing but the UI. `auth::require()` still guards the Rust
+  // side, so an unlocked frontend can still not reach a key, a capture or the
+  // database.
+  if (process.env.NEXT_PUBLIC_UNLOCK === "1") return "in";
   if (status.authenticated) return "in";
   // There is no sign-up state. Rust provisions the owner account the first time
   // it reaches a database with an empty `app_users`, so by the time the gate is

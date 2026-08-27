@@ -1,3 +1,5 @@
+import { answerLanguageRule, type AnswerLanguage } from "./answerLanguage.ts";
+
 /**
  * The agent contract.
  *
@@ -95,9 +97,12 @@ ${CODE_ROLE}
 Otherwise set KIND to "research" and:
 ${RESEARCH_ROLE}`.trim();
 
-export function systemPrompt(mode: Mode): string {
+export function systemPrompt(mode: Mode, language?: AnswerLanguage): string {
   const role = mode === "code" ? CODE_ROLE : mode === "research" ? RESEARCH_ROLE : AUTO_ROLE;
-  return `${SHARED_ROLE}\n\n${role}\n\n${CONTRACT}`;
+  // Placed after the role and before the contract, so it reads as part of what
+  // the job *is* rather than as a formatting note appended to the output spec.
+  const lang = language ? `\n\n${answerLanguageRule(language)}` : "";
+  return `${SHARED_ROLE}\n\n${role}${lang}\n\n${CONTRACT}`;
 }
 
 /**

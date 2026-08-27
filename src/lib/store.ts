@@ -40,6 +40,7 @@ import * as bridge from "./bridge.ts";
 import * as db from "./sessions.ts";
 import { detectZone, isUsableZone, formatWhen } from "./when.ts";
 import { titleFor, placeholderTitle, isPlaceholder } from "./title.ts";
+import { resolveAnswerLanguage } from "./answerLanguage.ts";
 import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from "./probeFit.ts";
 import { knowledgePackFor } from "./knowledge.ts";
 import {
@@ -435,6 +436,36 @@ interface Settings {
   synthesisModel: string;
   /** Whether the panel's answers are also candidates in the council it feeds. */
   councilIncludePanel: boolean;
+  /**
+   * The language solutions come back in.
+   *
+   * Empty means "whatever the question was written in", which is the default:
+   * someone who photographs a Python function wants Python back, and a correct
+   * C++ rewrite answers a question they did not ask. Set it to force one
+   * language regardless of the source.
+   *
+   * Separate from what the benchmark compiles. Timing a C++ build of the same
+   * algorithm is evidence about the algorithm; it is not the deliverable.
+   */
+  outputLanguage: string;
+  /**
+   * Which machine benchmarks a passing council candidate.
+   *
+   * Actions by default, because latency is the point: a dispatched workflow is
+   * running within seconds on a warm pool, where a cold Codespace takes minutes
+   * to wake and the council is waiting on this evidence. Codespaces stays for
+   * the case it is better at: a warm machine in the same environment the repo
+   * develops in.
+   */
+  benchmarkBackend: "actions" | "codespaces" | "off";
+  /** `owner/repo` the benchmark workflow is dispatched to. */
+  githubRepository: string;
+  /** The workflow file, if it has been renamed. */
+  githubWorkflow: string;
+  /** The ref the workflow runs from. */
+  githubRef: string;
+  /** Wall-clock ceiling for one remote benchmark, dispatch and queue included. */
+  benchmarkTimeoutMs: number;
   /** Whether passing council candidates also get benchmarked in GitHub Codespaces. */
   codespacesBenchmark: boolean;
   /** The `gh codespace list` name to run remote benchmarks in. */
@@ -674,6 +705,12 @@ const defaultSettings = (): Settings => ({
   councilJudges: COUNCIL_DEFAULT_JUDGES,
   synthesisModel: "openai/gpt-5.6-sol",
   councilIncludePanel: true,
+  outputLanguage: "",
+  benchmarkBackend: "actions",
+  githubRepository: "",
+  githubWorkflow: "cloud-benchmark.yml",
+  githubRef: "main",
+  benchmarkTimeoutMs: 300_000,
   codespacesBenchmark: false,
   codespacesName: "",
   codespacesTimeoutMs: 30000,
@@ -807,6 +844,35 @@ function normalizeSettings(s: Settings): Settings {
       typeof s.codespacesName === "string" ? s.codespacesName.trim() : base.codespacesName,
     codespacesTimeoutMs: Math.round(
       clampTo(s.codespacesTimeoutMs, 5000, 120000, base.codespacesTimeoutMs)
+    ),
+    // A settings file saved before this existed carries no backend but may
+    // carry `codespacesBenchmark: true`. Honouring that is the difference
+    // between a migration and a silent preference change.
+    // Free text on purpose: the runner supports languages this app has never
+    // been told about, and refusing an unrecognised one would be the app
+    // deciding what counts as a language.
+    outputLanguage:
+      typeof s.outputLanguage === "string" ? s.outputLanguage.trim() : base.outputLanguage,
+    benchmarkBackend: (["actions", "codespaces", "off"] as const).includes(
+      s.benchmarkBackend as "actions"
+    )
+      ? s.benchmarkBackend
+      : s.codespacesBenchmark
+        ? "codespaces"
+        : base.benchmarkBackend,
+    githubRepository:
+      typeof s.githubRepository === "string" ? s.githubRepository.trim() : base.githubRepository,
+    githubWorkflow:
+      typeof s.githubWorkflow === "string" && s.githubWorkflow.trim()
+        ? s.githubWorkflow.trim()
+        : base.githubWorkflow,
+    githubRef:
+      typeof s.githubRef === "string" && s.githubRef.trim() ? s.githubRef.trim() : base.githubRef,
+    // 30s is not enough for a cold runner to boot, install a toolchain and run;
+    // 15 minutes matches the workflow's own timeout, past which waiting longer
+    // only delays the report of a run that is already lost.
+    benchmarkTimeoutMs: Math.round(
+      clampTo(s.benchmarkTimeoutMs, 30_000, 900_000, base.benchmarkTimeoutMs)
     ),
     routerModels: migrateRouterModels(s.routerModels),
   };
@@ -1932,7 +1998,10 @@ export const useStore = create<State>((set, get) => ({
     const attempts = Object.fromEntries(
       ALL_AGENTS.map((p) => [p, newAttemptId()])
     ) as Record<AgentId, string>;
-    const sys = systemPrompt(settings.mode);
+    const sys = systemPrompt(
+      settings.mode,
+      resolveAnswerLanguage(settings.outputLanguage, get().extraction.agreement?.merged.language ?? "")
+    );
     let knowledge = knowledgePackFor(note, 5);
 
     set((s) => ({
@@ -2114,7 +2183,10 @@ export const useStore = create<State>((set, get) => ({
         attemptId,
         provider: route.provider,
         model: route.model,
-        systemPrompt: systemPrompt(settings.mode),
+        systemPrompt: systemPrompt(
+          settings.mode,
+          resolveAnswerLanguage(settings.outputLanguage, get().extraction.agreement?.merged.language ?? "")
+        ),
         userText: userPrompt(
           note,
           plan.sendImages && images.length > 0,
@@ -2815,7 +2887,10 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
 
   const extractionCtx = s0.extraction.context;
   const knowledge = knowledgePackFor(`${s0.note}\n\n${extractionCtx}`, 5);
-  const sys = systemPrompt(settings.mode);
+  const sys = systemPrompt(
+    settings.mode,
+    resolveAnswerLanguage(settings.outputLanguage, get().extraction.agreement?.merged.language ?? "")
+  );
   const allImages = s0.images.map((i) => ({ mime: i.mime, data: i.base64 }));
   await Promise.all(
     solveSlots.map((slot, i) =>

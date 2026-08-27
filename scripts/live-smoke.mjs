@@ -322,6 +322,11 @@ async function createSmokeJob() {
         mode: "auto",
         maxTokens: 1200,
         executionProvider: "local",
+        benchmarkBackend: "actions",
+        githubRepository: mustEnv("GITHUB_REPOSITORY") || mustEnv("CODE_AUDITOR_GITHUB_REPOSITORY"),
+        githubWorkflow: mustEnv("CODE_AUDITOR_GITHUB_WORKFLOW") || "cloud-benchmark.yml",
+        githubRef: mustEnv("CODE_AUDITOR_GITHUB_REF") || "main",
+        benchmarkTimeoutMs: Number(mustEnv("CODE_AUDITOR_GITHUB_TIMEOUT_MS") || 300_000),
       },
     }),
   });
@@ -370,6 +375,7 @@ async function solveSmokeJob() {
   process.env.CODE_AUDITOR_WORKER_JUDGES = "1";
   process.env.CODE_AUDITOR_NOTIFY_COMPLETED ||= "true";
   process.env.CODE_AUDITOR_EXECUTION_PROVIDER ||= "local";
+  process.env.CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS ||= "13000";
 
   const created = await timed("Queued smoke solve job", createSmokeJob);
   if (!created) return;

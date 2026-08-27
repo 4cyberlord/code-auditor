@@ -185,15 +185,73 @@ export function parseTestSuites(text: string): TestSuite[] {
   while ((m = re.exec(body))) {
     const harness = m[2].trim();
     if (harness.includes(SPLICE_MARKER)) {
-      suites.push({ language: m[1].toLowerCase(), harness });
+      suites.push({ language: normalizeCodeLanguage(m[1]), harness });
     }
   }
   return suites;
 }
 
+/**
+ * Every alias that means the same runtime, collapsed to one canonical name.
+ *
+ * There are three places a language string has to line up — the suite the spec
+ * model emits, the candidate's own fence label, and the runtime table that
+ * decides how to compile it. They only ever agreed by luck, because each one
+ * did its own ad-hoc lowercasing. This is the single vocabulary all three now
+ * speak.
+ */
+const LANGUAGE_ALIASES: Record<string, string> = {
+  js: "javascript",
+  node: "javascript",
+  nodejs: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
+  ts: "typescript",
+  py: "python",
+  py3: "python",
+  python3: "python",
+  rb: "ruby",
+  rs: "rust",
+  golang: "go",
+  sh: "bash",
+  shell: "bash",
+  zsh: "bash",
+  console: "bash",
+  "c++": "cpp",
+  cplusplus: "cpp",
+  cc: "cpp",
+  cxx: "cpp",
+};
+
+/**
+ * Canonical language name for a fence label or suite tag.
+ *
+ * Models label a fence with the standard they wrote against — ```c++17,
+ * ```c++20, ```c11, ```python3.11 — not with the bare language. The runtime
+ * table is keyed by language, so every one of those came back "Unsupported
+ * benchmark language" and the candidate was dropped without ever being run.
+ * That hit C++ hardest, which is the language the Council is meant to prefer.
+ * Strip the standard, then resolve the alias.
+ */
+export function normalizeCodeLanguage(raw: string): string {
+  let lang = String(raw || "").trim().toLowerCase().replace(/^\./, "");
+  if (!lang) return "";
+  lang = lang.replace(/[\s_-]+/g, "");
+  // ```c++17, ```cpp20, ```cxx2x  ->  cpp   (checked before bare C, so the
+  // "++" is never mistaken for a C standard suffix)
+  if (/^(?:c\+\+|cpp|cxx)(?:\d{2}|\dx|2x)?$/.test(lang)) return "cpp";
+  // ```c99, ```c11, ```c17, ```c23  ->  c
+  if (/^c(?:\d{2})?$/.test(lang) && lang !== "cc") return "c";
+  // ```python3.11, ```python3  ->  python
+  if (/^python3(?:\.\d+)*$/.test(lang)) return "python";
+  // ```node20, ```es2022  ->  javascript
+  if (/^node(?:js)?\d*$/.test(lang) || /^es\d{4}$/.test(lang)) return "javascript";
+  return LANGUAGE_ALIASES[lang] ?? lang;
+}
+
 /** Language of a candidate, normalised to the runner's vocabulary. */
 export function candidateLanguage(c: AgentFinal): string {
-  return (c.language || "").toLowerCase().replace(/^(js|node)$/, "javascript").replace(/^py$/, "python");
+  return normalizeCodeLanguage(c.language || "");
 }
 
 /** Splices a candidate's code into the harness. Null when marker is absent. */
