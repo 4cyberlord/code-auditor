@@ -6,8 +6,7 @@ import Image from "next/image";
 /**
  * StartupLoader: user-friendly, animated launch screen.
  *
- * Replaces the blank dark screen while the application checks credentials,
- * database connectivity, and workspace readiness.
+ * Guaranteed vertical and horizontal centering across desktop webviews and browsers.
  */
 export default function StartupLoader() {
   const [dots, setDots] = useState("");
@@ -35,9 +34,56 @@ export default function StartupLoader() {
   }, [hints.length]);
 
   return (
-    <div className="startup-screen" role="status" aria-live="polite">
+    <div
+      className="startup-screen"
+      role="status"
+      aria-live="polite"
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: "100vw",
+        height: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "var(--bg, #0b0d11)",
+        color: "var(--text, #e7ebf0)",
+        zIndex: 99999,
+        overflow: "hidden",
+      }}
+    >
+      {/* Window drag handle across the top */}
+      <div
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          height: 38,
+          zIndex: 10,
+        }}
+        data-tauri-drag-region
+      />
+
       <div className="startup-ambient-glow" aria-hidden="true" />
-      <div className="startup-card">
+
+      <div
+        className="startup-card"
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          textAlign: "center",
+          margin: "auto",
+          maxWidth: 440,
+          width: "90%",
+        }}
+      >
         <div className="startup-icon-wrapper">
           <Image
             src="/icon.png"
@@ -47,7 +93,6 @@ export default function StartupLoader() {
             className="startup-icon"
             priority
           />
-          <div className="startup-ring" aria-hidden="true" />
         </div>
 
         <h1 className="startup-title">Council Editor</h1>
