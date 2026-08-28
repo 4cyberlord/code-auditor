@@ -45,7 +45,7 @@ struct JobListView: View {
                     }
                 }
             }
-            .navigationTitle("Code Editor")
+            .navigationTitle("Council Editor")
             .toolbar {
                 Button("Refresh") {
                     Task { await model.refresh() }

@@ -65,7 +65,7 @@ Generated code execution and benchmarks belong in the worker environment.
 
 ## Bundling Strategy
 
-- The release `Code Editor.app` bundles the Tauri binary, static Next output and
+- The release `Council Editor.app` bundles the Tauri binary, static Next output and
   `cloud-sync-helper` sidecar.
 - End users should not install Node, npm, Cargo, Rust, Tauri CLI or frontend
   packages.

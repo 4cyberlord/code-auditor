@@ -9,7 +9,7 @@ Get these from Apple Developer:
 
 - Team ID: Account > Membership details.
 - Bundle ID: Certificates, Identifiers & Profiles > Identifiers. Use
-  `com.charles.codeeditor` for the iOS companion and enable Push Notifications.
+  `com.charles.councileditor` for the iOS companion and enable Push Notifications.
 - APNs auth key: Certificates, Identifiers & Profiles > Keys > add key > enable
   Apple Push Notifications service. Download the `.p8` once and copy its Key ID.
 
@@ -18,7 +18,7 @@ Development values:
 ```bash
 APNS_KEY_ID=
 APNS_TEAM_ID=
-APNS_BUNDLE_ID=com.charles.codeeditor
+APNS_BUNDLE_ID=com.charles.councileditor
 APNS_PRIVATE_KEY_PATH=./AuthKey_XXXXXX.p8
 APNS_ENV=sandbox
 ```

@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    code_auditor_lib::run()
+    council_editor_lib::run()
 }

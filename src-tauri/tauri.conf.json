@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Council Editor",
-  "mainBinaryName": "code-auditor",
+  "mainBinaryName": "council-editor",
   "version": "0.1.0",
-  "identifier": "com.charles.codeauditor",
+  "identifier": "com.charles.councileditor",
   "build": {
     "frontendDist": "../out",
     "devUrl": "http://localhost:3000",

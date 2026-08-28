@@ -89,7 +89,7 @@ export default function StartupLoader() {
       >
         <div className="startup-icon-wrapper">
           <Image
-            src="/icon.png"
+            src="/app-icon.png"
             alt="Council Editor"
             width={82}
             height={82}

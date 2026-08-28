@@ -34,8 +34,8 @@ solver workbench; it does not become a full IDE.
   passes and judge reports, write `council_reports`, mark jobs completed, record
   progress events, and send APNs notifications when APNs credentials are
   configured.
-- `scripts/com.charles.codeeditor.cloud-sync-helper.plist` is the LaunchAgent
-  template for the packaged helper sidecar inside `Code Editor.app`.
+- `scripts/com.charles.councileditor.cloud-sync-helper.plist` is the LaunchAgent
+  template for the packaged helper sidecar inside `Council Editor.app`.
 - `ios/CodeEditorCompanion` is the native iOS companion foundation. It registers
   APNs tokens through the worker server, reads Supabase cloud job history and
   opens job details from the same stored events/reports the desktop app reads.
@@ -62,7 +62,7 @@ export GH_TOKEN="..."
 # Optional native iOS / Apple Watch notifications through APNs
 export APNS_KEY_ID="..."
 export APNS_TEAM_ID="..."
-export APNS_BUNDLE_ID="com.charles.codeeditor"
+export APNS_BUNDLE_ID="com.charles.councileditor"
 export APNS_PRIVATE_KEY_PATH="./AuthKey_XXXXXX.p8"
 export APNS_ENV="sandbox" # or production
 
@@ -71,7 +71,7 @@ node scripts/cloud-worker.mjs --once
 
 ## Next Implementation Layer
 
-1. Rename the public product from **Code Editor** to **Council Editor** before
+1. The public product name is **Council Editor**.
    App Store/TestFlight packaging.
 2. Package/sign the helper binary inside the release `.app` instead of relying on
    a separately built `target/*/cloud-sync-helper` during development.

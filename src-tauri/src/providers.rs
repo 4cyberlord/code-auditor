@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 
-use crate::keychain;
+use crate::secrets;
 
 pub const EV_DELTA: &str = "agent://delta";
 pub const EV_DONE: &str = "agent://done";
@@ -249,7 +249,7 @@ async fn run_once_responses(req: &RunRequest) -> Result<String, String> {
         .filter(|b| !b.trim().is_empty())
         .unwrap_or_else(|| "https://api.tokenrouter.com/v1".into());
     let url = format!("{}/responses", base.trim_end_matches('/'));
-    let key = keychain::read_api_key(&req.provider)?;
+    let key = secrets::read_api_key(&req.provider)?;
     let body = build_responses_body(req);
     let client = http_client()?;
     let build = || {
@@ -431,7 +431,7 @@ async fn execute_responses(
         .filter(|b| !b.trim().is_empty())
         .unwrap_or_else(|| "https://api.tokenrouter.com/v1".into());
     let url = format!("{}/responses", base.trim_end_matches('/'));
-    let key = keychain::read_api_key(&req.provider)?;
+    let key = secrets::read_api_key(&req.provider)?;
     let body = build_responses_body(req);
 
     let client = http_client()?;
@@ -585,7 +585,7 @@ pub async fn probe_models(
 ) -> Result<Vec<ProbeResult>, String> {
     let want_vision = test_vision.unwrap_or(false);
     let endpoint_by_model = endpoint_by_model.unwrap_or_default();
-    let key = keychain::read_api_key("tokenrouter")?;
+    let key = secrets::read_api_key("tokenrouter")?;
     let base = base_url
         .filter(|b| !b.trim().is_empty())
         .unwrap_or_else(|| "https://api.tokenrouter.com/v1".into());
@@ -846,7 +846,7 @@ async fn probe_vision(
 /// and today.
 #[tauri::command]
 pub async fn list_gateway_models(base_url: Option<String>) -> Result<Vec<String>, String> {
-    let key = keychain::read_api_key("tokenrouter")?;
+    let key = secrets::read_api_key("tokenrouter")?;
     let base = base_url
         .filter(|b| !b.trim().is_empty())
         .unwrap_or_else(|| "https://api.tokenrouter.com/v1".into());
@@ -1170,7 +1170,7 @@ fn build_request(
     req: &RunRequest,
     stream: bool,
 ) -> Result<(String, Vec<(String, String)>, Value), String> {
-    let key = keychain::read_api_key(&req.provider)?;
+    let key = secrets::read_api_key(&req.provider)?;
     match req.provider.as_str() {
         "openai" | "moonshot" | "tokenrouter" => {
             let base = req.base_url.clone().unwrap_or_else(|| {

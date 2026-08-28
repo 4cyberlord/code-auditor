@@ -1,6 +1,6 @@
-# Code Editor Companion
+# Council Editor Companion
 
-Native iOS companion foundation for Code Editor.
+Native iOS companion foundation for Council Editor.
 
 The app registers for APNs, sends the device token to the worker server and
 reads cloud job history from Supabase. Apple Watch support comes through normal

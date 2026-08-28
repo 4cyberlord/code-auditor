@@ -15,7 +15,7 @@ something done because it looks done.
 |---|---|
 | Tauri + Next.js shell, tray, background operation | The window closes to the menu bar and the process survives, so the shortcuts keep working. Quit lives in the tray. |
 | Global shortcuts | `Control+Option+S` screen, `Control+Option+R` region, `Control+Option+A` audit. Registered in Rust so they survive webview reloads. Confirmed firing in `~/Library/Logs/CodeAuditor/trace.log`. |
-| Full-screen and region capture | Saved to `~/Pictures/Code Editor`, then loaded into the app. Whole chain confirmed: key, command, file on disk, thumbnail. |
+| Full-screen and region capture | Saved to `~/Pictures/Council Editor`, then loaded into the app. Whole chain confirmed: key, command, file on disk, thumbnail. |
 | Screenshot handling | Up to 10 per run, thumbnails, delete, full-size preview with arrow-key navigation. |
 | API keys | macOS Keychain. The webview can ask *whether* a key exists, never what it is. |
 | Multi-model fan-out | Six panes — GPT, Claude, Kimi, Gemini and two free models — streaming in parallel. Each vision pane reads the image itself. |
@@ -29,16 +29,16 @@ something done because it looks done.
 | Dedicated helper v1 | `cloud-sync-helper` owns start/capture/submit hotkeys, captures full-screen screenshots with macOS `screencapture`, stores pending batch state locally, uploads to Supabase Storage and queues Council jobs from Keychain credentials. |
 | Cloud Jobs history | The desktop rail can list queued/running/completed cloud jobs, queue the current workspace screenshots, show ordered screenshot thumbnails, recent events and final report summaries. |
 | Cloud worker v1 | `scripts/cloud-worker.mjs` claims queued jobs, downloads ordered screenshots, runs independent TokenRouter chat-model solvers, benchmark harness generation, local worker verification, optional Codespaces mirrors, reviewer passes, judge reports and synthesis, writes Council reports and marks jobs completed. |
-| Product rename | The release bundle, window title, login screen and tray labels now ship as **Code Editor**. Internal binary and keychain identifiers remain stable for migration safety. |
+| Product rename | The release bundle, window title, login screen and tray labels now ship as **Council Editor**. Internal binary and keychain identifiers remain stable for migration safety. |
 | Remote ops scaffolding | cron-job.org, QStash, E2B and GitHub Actions integration entrypoints are documented and scaffolded so scheduling and heavy validation can move off the laptop. |
 | Worker observability | The cloud worker has optional Sentry breadcrumbs/errors and Telegram operations alerts for failed, needs-attention and slow jobs, with screenshots/prompts/answers stripped from telemetry. |
-| Packaged release | `npm run app:build` now produces `Code Editor.app` and `Code Editor_0.1.0_aarch64.dmg`; the app bundle contains the `cloud-sync-helper` sidecar. |
+| Packaged release | `npm run app:build` now produces `Council Editor.app` and `Council Editor_0.1.0_aarch64.dmg`; the app bundle contains the `cloud-sync-helper` sidecar. |
 | Worker HTTP server | `npm run worker:serve` exposes `/api/worker-tick` for cron-job.org/QStash and `/api/register-device` for iOS APNs token registration without putting Supabase service-role credentials on the phone. |
 | iOS companion foundation | `ios/CodeEditorCompanion` contains a native SwiftUI app foundation for APNs registration, Apple Watch mirrored notifications and Supabase job/event/report viewing. |
 
 **Tracked TODO**
 
-- Rename the public product from **Code Editor** to **Council Editor** before
+- The public product name is **Council Editor**.
   App Store/TestFlight packaging, including desktop bundle display name, iOS
   companion display name, docs, screenshots, notifications and release assets.
 

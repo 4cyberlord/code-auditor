@@ -3,11 +3,12 @@ use std::path::PathBuf;
 
 // Namespaced under the bundle identifier, not a near-miss of it. This read
 // `com.charles.codeeditor.…` while the bundle id and the Keychain service are
-// both `com.charles.codeauditor` — the kind of drift that leaves an orphaned
+// both `com.charles.councileditor` — the kind of drift that leaves an orphaned
 // LaunchAgent running under a label nothing looks for after a rename.
-const LABEL: &str = "com.charles.codeauditor.cloud-sync-helper";
-/// The label the agent used to be installed under, so an upgrade can clean it up.
-const LEGACY_LABEL: &str = "com.charles.codeeditor.cloud-sync-helper";
+const LABEL: &str = "com.charles.councileditor.cloud-sync-helper";
+/// The labels used by older builds, so an upgrade can clean them up.
+const LEGACY_LABEL: &str = "com.charles.codeauditor.cloud-sync-helper";
+const LEGACY_LABEL_V0: &str = "com.charles.codeeditor.cloud-sync-helper";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,6 +41,12 @@ fn legacy_plist_path() -> Result<PathBuf, String> {
         .join(format!("{LEGACY_LABEL}.plist")))
 }
 
+fn legacy_plist_path_v0() -> Result<PathBuf, String> {
+    Ok(home()?
+        .join("Library/LaunchAgents")
+        .join(format!("{LEGACY_LABEL_V0}.plist")))
+}
+
 /// Does launchd actually know about this agent?
 ///
 /// `launchctl print` is the only honest answer. Writing the plist is not
@@ -61,7 +68,7 @@ fn app_path() -> Result<String, String> {
             return Ok(path.to_string());
         }
     }
-    Ok("/Applications/Code Editor.app".to_string())
+    Ok("/Applications/Council Editor.app".to_string())
 }
 
 fn helper_path() -> Result<String, String> {
@@ -184,6 +191,15 @@ pub async fn background_helper_install() -> Result<BackgroundHelperStatus, Strin
             let _ = std::fs::remove_file(&legacy);
         }
     }
+    if let Ok(legacy) = legacy_plist_path_v0() {
+        if legacy.exists() {
+            let _ = std::process::Command::new("launchctl")
+                .arg("bootout")
+                .arg(format!("{}/{LEGACY_LABEL_V0}", launchctl_domain()))
+                .output();
+            let _ = std::fs::remove_file(&legacy);
+        }
+    }
 
     std::fs::write(&path, plist(&helper, &logs.to_string_lossy()))
         .map_err(|e| format!("Could not write the LaunchAgent: {e}"))?;
@@ -229,6 +245,15 @@ pub async fn background_helper_uninstall() -> Result<BackgroundHelperStatus, Str
             let _ = std::process::Command::new("launchctl")
                 .arg("bootout")
                 .arg(format!("{}/{LEGACY_LABEL}", launchctl_domain()))
+                .output();
+            let _ = std::fs::remove_file(&legacy);
+        }
+    }
+    if let Ok(legacy) = legacy_plist_path_v0() {
+        if legacy.exists() {
+            let _ = std::process::Command::new("launchctl")
+                .arg("bootout")
+                .arg(format!("{}/{LEGACY_LABEL_V0}", launchctl_domain()))
                 .output();
             let _ = std::fs::remove_file(&legacy);
         }

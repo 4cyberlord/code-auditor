@@ -4,10 +4,10 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.charles.codeeditor.cloud-sync-helper</string>
+  <string>com.charles.councileditor.cloud-sync-helper</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Applications/Code Editor.app/Contents/MacOS/cloud-sync-helper</string>
+    <string>/Applications/Council Editor.app/Contents/MacOS/cloud-sync-helper</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

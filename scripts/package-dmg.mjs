@@ -8,7 +8,7 @@ const ROOT = process.cwd();
 const tauriConfig = JSON.parse(
   readFileSync(path.join(ROOT, "src-tauri", "tauri.conf.json"), "utf8")
 );
-const productName = tauriConfig.productName || "Code Editor";
+const productName = tauriConfig.productName || "Council Editor";
 const version = tauriConfig.version || "0.1.0";
 const arch = process.arch === "arm64" ? "aarch64" : process.arch;
 const bundleDir = path.join(ROOT, "src-tauri", "target", "release", "bundle");

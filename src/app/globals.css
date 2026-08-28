@@ -19,6 +19,25 @@
   --bad: #f85149;
   --code-bg: #0d1117;
 
+  /* The sign-in showcase panel. Its own set, because it is a deliberately
+     heavier surface than the app chrome -- but it is still a *set*, so it can
+     have a light counterpart instead of staying a dark slab beside a white
+     form. */
+  --brand-bg: #0a0c11;
+  --brand-ink: #f2f5f9;
+  --brand-ink-dim: rgba(226, 232, 240, 0.72);
+  --brand-ink-faint: rgba(226, 232, 240, 0.42);
+  --brand-line: rgba(255, 255, 255, 0.09);
+  --brand-tint: rgba(255, 255, 255, 0.055);
+  --brand-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+
+  /* A white knob reads on a dark track and disappears on a light one, so the
+     off state gets its own colour per theme. On, it always sits on --accent. */
+  --knob-off: #ffffff;
+  --knob-on: #ffffff;
+  /* "answered over the gateway" -- needs to carry on both grounds. */
+  --via: #f2994a;
+
   --radius: 10px;
   --radius-lg: 14px;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
@@ -58,6 +77,18 @@
   --warn: #9a6700;
   --bad: #cf222e;
   --code-bg: #f6f8fa;
+
+  --brand-bg: #101722;
+  --brand-ink: #f4f7fb;
+  --brand-ink-dim: rgba(226, 232, 240, 0.76);
+  --brand-ink-faint: rgba(226, 232, 240, 0.48);
+  --brand-line: rgba(255, 255, 255, 0.10);
+  --brand-tint: rgba(255, 255, 255, 0.07);
+  --brand-shadow: 0 18px 40px rgba(15, 23, 42, 0.28);
+
+  --knob-off: #8b95a3;
+  --knob-on: #ffffff;
+  --via: #b4632a;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.08);
 
   --t-comment: #8a94a6;
@@ -93,6 +124,18 @@
     --warn: #9a6700;
     --bad: #cf222e;
     --code-bg: #f6f8fa;
+
+  --brand-bg: #101722;
+  --brand-ink: #f4f7fb;
+  --brand-ink-dim: rgba(226, 232, 240, 0.76);
+  --brand-ink-faint: rgba(226, 232, 240, 0.48);
+  --brand-line: rgba(255, 255, 255, 0.10);
+  --brand-tint: rgba(255, 255, 255, 0.07);
+  --brand-shadow: 0 18px 40px rgba(15, 23, 42, 0.28);
+
+  --knob-off: #8b95a3;
+  --knob-on: #ffffff;
+  --via: #b4632a;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.08);
 
     --t-comment: #8a94a6;
@@ -1400,10 +1443,11 @@ textarea.field {
   width: 13px;
   height: 13px;
   border-radius: 50%;
-  background: #fff;
-  transition: transform 0.15s ease;
+  background: var(--knob-off);
+  transition: transform 0.15s ease, background 0.15s ease;
 }
 .switch[data-on="true"]::after {
+  background: var(--knob-on);
   transform: translateX(15px);
 }
 
@@ -2078,7 +2122,7 @@ textarea.field {
    vendor. Small on purpose: it is a caveat on the comparison, not a headline. */
 .pane-model .via {
   margin-right: 4px;
-  color: #f2994a;
+  color: var(--via);
   font-family: var(--font-ui);
 }
 
@@ -2466,8 +2510,8 @@ body[data-dragging="row"] * {
   gap: 26px;
   padding: 56px 52px;
   overflow: hidden;
-  background: #0a0c11;
-  border-right: 1px solid rgba(255, 255, 255, 0.07);
+  background: var(--brand-bg);
+  border-right: 1px solid var(--brand-line);
 }
 
 /* Four washes, one per quadrant colour, sitting roughly where that tile sits in
@@ -2481,7 +2525,7 @@ body[data-dragging="row"] * {
     linear-gradient(225deg, color-mix(in srgb, var(--q-b) 24%, transparent), transparent 40%),
     linear-gradient(315deg, color-mix(in srgb, var(--q-c) 24%, transparent), transparent 42%),
     linear-gradient(45deg, color-mix(in srgb, var(--q-d) 20%, transparent), transparent 42%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 58%);
+    linear-gradient(180deg, var(--brand-tint), transparent 58%);
   filter: blur(18px);
   opacity: 0.72;
   animation: auth-drift 26s ease-in-out infinite alternate;
@@ -2533,9 +2577,9 @@ body[data-dragging="row"] * {
   padding: 10px;
   margin-bottom: 22px;
   border-radius: 22px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+  background: var(--brand-tint);
+  border: 1px solid var(--brand-line);
+  box-shadow: var(--brand-shadow);
   backdrop-filter: blur(8px);
 }
 
@@ -2551,14 +2595,14 @@ body[data-dragging="row"] * {
   font-size: 30px;
   font-weight: 680;
   letter-spacing: 0;
-  color: #f2f5f9;
+  color: var(--brand-ink);
 }
 
 .auth-tagline {
   margin: 0 0 26px;
   font-size: 14px;
   line-height: 1.6;
-  color: rgba(226, 232, 240, 0.72);
+  color: var(--brand-ink-dim);
   max-width: 30ch;
 }
 
@@ -2574,10 +2618,10 @@ body[data-dragging="row"] * {
   align-items: center;
   min-height: 26px;
   padding: 0 9px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--brand-line);
   border-radius: var(--radius);
-  background: rgba(255, 255, 255, 0.055);
-  color: rgba(226, 232, 240, 0.68);
+  background: var(--brand-tint);
+  color: var(--brand-ink-dim);
   font-size: 11px;
   font-weight: 600;
 }
@@ -2596,7 +2640,7 @@ body[data-dragging="row"] * {
   padding-left: 22px;
   font-size: 12.5px;
   line-height: 1.5;
-  color: rgba(226, 232, 240, 0.6);
+  color: var(--brand-ink-dim);
 }
 
 /* One dot per quadrant, in the icon's own order. Four claims, four colours, one
@@ -2629,7 +2673,7 @@ body[data-dragging="row"] * {
   max-width: 44ch;
   font-size: 11px;
   line-height: 1.6;
-  color: rgba(226, 232, 240, 0.38);
+  color: var(--brand-ink-faint);
 }
 
 /* ------------------------------------------------------------- right: form */
@@ -2663,23 +2707,6 @@ body[data-dragging="row"] * {
   font-size: 12.5px;
   line-height: 1.55;
   color: var(--text-dim);
-}
-
-.auth-test {
-  margin: -6px 0 4px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: fit-content;
-  max-width: 100%;
-  padding: 7px 9px;
-  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--accent) 8%, var(--bg-sunken));
-  color: var(--text-muted);
-  font-size: 11.5px;
-  line-height: 1.4;
-  overflow-wrap: anywhere;
 }
 
 .auth-field {
@@ -3487,3 +3514,83 @@ body[data-dragging="row"] * {
 }
 
 .pair-detail > summary:hover { color: var(--text); }
+
+
+/* ---------------------------------------------------------------- boot
+
+   The first second. This is server-rendered markup sitting above everything,
+   so it paints before React exists -- which is the only way to fill the gap
+   where the window is open and nothing has mounted. It used to be a dark
+   rectangle with nothing in it, which reads as a hang rather than a start.
+
+   Built entirely from tokens, so it arrives in the right theme: the inline
+   script in the document head stamps `data-theme` before this paints. */
+#boot {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--text);
+  opacity: 1;
+  transition: opacity 0.32s ease;
+}
+
+#boot[data-done="true"] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.boot-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+/* The four tiles of the app icon, one per pane -- the same four colours the
+   panes use, so the first thing on screen is already the app's own language
+   rather than a generic spinner. They pulse in sequence: the panes answer one
+   after another, and the mark says so before anything has. */
+.boot-mark {
+  display: grid;
+  grid-template-columns: repeat(2, 15px);
+  grid-template-rows: repeat(2, 15px);
+  gap: 5px;
+}
+
+.boot-mark span {
+  border-radius: 4px;
+  animation: boot-pulse 1.4s ease-in-out infinite;
+}
+
+.boot-mark span:nth-child(1) { background: var(--q-a); animation-delay: 0s; }
+.boot-mark span:nth-child(2) { background: var(--q-b); animation-delay: 0.14s; }
+.boot-mark span:nth-child(3) { background: var(--q-c); animation-delay: 0.42s; }
+.boot-mark span:nth-child(4) { background: var(--q-d); animation-delay: 0.28s; }
+
+@keyframes boot-pulse {
+  0%, 100% { opacity: 0.28; transform: scale(0.86); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+.boot-name {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.boot-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+/* A pulsing grid is decoration. Anyone who asked for less motion gets the
+   words, which were the useful part. */
+@media (prefers-reduced-motion: reduce) {
+  #boot { transition: none; }
+  .boot-mark span { animation: none; opacity: 0.9; transform: none; }
+}

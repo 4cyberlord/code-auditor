@@ -1,4 +1,4 @@
-# Code Editor
+# Council Editor
 
 Four frontier models read the same screenshot, solve it independently in four panes,
 and submit their answers to a solution box that tells you whether they agree.
@@ -84,7 +84,7 @@ what makes a working hotkey look like a dead key.
 
 Grant it under System Settings › Privacy & Security › Screen & System Audio Recording.
 Under `app:dev` there may be nothing there to grant: `tauri dev` runs the bare binary at
-`src-tauri/target/debug/code-auditor`, which has no bundle identifier for TCC to attach a
+`src-tauri/target/debug/council-editor`, which has no bundle identifier for TCC to attach a
 grant to, so the prompt often never appears and any approval lands on the terminal that
 launched it instead. Run `npm run app:build` and launch the bundled app if the shortcut
 refuses to capture. The global shortcuts also only exist while the app is running — from
@@ -326,7 +326,7 @@ while you are signed out — the string is only editable while signed in, so cle
 Mac's record of the account instead and set it up against the new database:
 
 ```sh
-security delete-generic-password -s com.charles.codeauditor -a auth-owner
+security delete-generic-password -s com.charles.councileditor -a auth-owner
 ```
 
 That leaves the account in Postgres untouched; you will just be asked to sign in again.
@@ -335,7 +335,7 @@ That leaves the account in Postgres untouched; you will just be asked to sign in
 
 ## Keys and privacy
 
-API keys go into the macOS Keychain under `com.charles.codeauditor`. The Rust side reads
+API keys go into the macOS Keychain under `com.charles.councileditor`. The Rust side reads
 them when it builds a request; the JavaScript can only ask *whether* a key exists, never
 what it is. Every network call happens in Rust, which also sidesteps browser CORS —
 Anthropic in particular refuses direct calls from a webview without an explicit opt-in.
