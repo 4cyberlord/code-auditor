@@ -448,3 +448,528 @@ create index if not exists app_sessions_user_idx
 drop trigger if exists app_users_touch on app_users;
 create trigger app_users_touch before update on app_users
   for each row execute function touch_updated_at();
+
+-- ---------------------------------------------------------------- app config
+--
+-- Everything that used to sit in `.development.env`, so the machine running this
+-- app is not also the place its configuration lives. One row per variable.
+--
+-- Not the `settings` table, deliberately. `settings_load` is a Tauri command,
+-- which means the webview can read any key in it -- fine for a pane layout,
+-- catastrophic for a TokenRouter key. This table has no command that returns a
+-- secret value, and that is the whole reason it is separate.
+create table if not exists app_config (
+  key        text        primary key,
+  value      text        not null default '',
+  -- Whether the value may ever leave the machine's Rust side. Secrets are
+  -- listed to the UI by name only; the value goes to outbound requests and
+  -- nowhere else.
+  secret     boolean     not null default false,
+  updated_at timestamptz not null default now()
+);
+
+-- No policies, and that is the point.
+--
+-- Supabase grants the `anon` and `authenticated` roles access to tables in
+-- `public`, and the anon key ships inside the app -- so a table holding a
+-- GitHub token with RLS off is a table that anyone who opens the bundle can
+-- read. Enabling row level security and writing no policy at all leaves exactly
+-- one way in: `service_role`, which bypasses RLS and now lives in the Edge
+-- Function rather than on a laptop.
+alter table app_config enable row level security;
+
+drop trigger if exists app_config_touch on app_config;
+create trigger app_config_touch before update on app_config
+  for each row execute function touch_updated_at();
+
+-- ------------------------------------------------------------------ tenancy
+--
+-- Phase 01 of the multi-tenant migration: give every row an owner.
+--
+-- Sixteen tables, and until now only `app_sessions` knew who anything belonged
+-- to. That is correct for an app built for one person on one Mac, and it is a
+-- cross-account leak the moment a second account exists.
+--
+-- Deliberately in two halves. This file adds the column and backfills it, both
+-- of which are safe to run on every launch and safe to run twice. Making the
+-- column `not null` lives in `supabase/tenancy-constrain.sql`, run by hand once
+-- the audit is clean -- because `ensure_schema` replays this file at startup, so
+-- a constraint that fails against one unbackfilled row would stop the app from
+-- starting rather than merely failing to migrate.
+--
+-- `settings` and `app_config` are not here on purpose. Both are key/value tables
+-- whose primary key is the key itself, so per-user rows need a composite key
+-- rather than an extra column. That is phase 03, where the platform-versus-user
+-- resolution is designed properly.
+
+-- Step 1: the column, nullable. Nothing reads it yet, so nothing can break.
+alter table if exists sessions             add column if not exists owner_id uuid;
+alter table if exists screenshots          add column if not exists owner_id uuid;
+alter table if exists runs                 add column if not exists owner_id uuid;
+alter table if exists solve_jobs           add column if not exists owner_id uuid;
+alter table if exists solve_job_images     add column if not exists owner_id uuid;
+alter table if exists solve_job_events     add column if not exists owner_id uuid;
+alter table if exists council_reports      add column if not exists owner_id uuid;
+alter table if exists notification_devices add column if not exists owner_id uuid;
+
+-- Step 2: backfill.
+--
+-- With one account this is exact rather than a guess: every existing row belongs
+-- to the only person who could have made it. Roots take the first account;
+-- children inherit through the foreign key they already carry, so the chain
+-- stays true even if a session was created before the account was renamed.
+--
+-- Each statement is `where owner_id is null`, so the second launch does nothing.
+
+update sessions set owner_id = (select id from app_users order by created_at limit 1)
+ where owner_id is null;
+
+update notification_devices set owner_id = (select id from app_users order by created_at limit 1)
+ where owner_id is null;
+
+update screenshots c set owner_id = p.owner_id
+  from sessions p where p.id = c.session_id and c.owner_id is null;
+
+update runs c set owner_id = p.owner_id
+  from sessions p where p.id = c.session_id and c.owner_id is null;
+
+update solve_jobs c set owner_id = p.owner_id
+  from sessions p where p.id = c.session_id and c.owner_id is null;
+
+update solve_job_images c set owner_id = p.owner_id
+  from solve_jobs p where p.id = c.job_id and c.owner_id is null;
+
+update solve_job_events c set owner_id = p.owner_id
+  from solve_jobs p where p.id = c.job_id and c.owner_id is null;
+
+update council_reports c set owner_id = p.owner_id
+  from solve_jobs p where p.id = c.job_id and c.owner_id is null;
+
+-- The indexes every scoped query will need. Created now rather than with the
+-- constraint, so the first tenant-scoped read is fast on day one.
+create index if not exists sessions_owner_idx
+  on sessions (owner_id, updated_at desc);
+create index if not exists screenshots_owner_idx
+  on screenshots (owner_id);
+create index if not exists runs_owner_idx
+  on runs (owner_id, started_at desc);
+create index if not exists solve_jobs_owner_idx
+  on solve_jobs (owner_id, created_at desc);
+create index if not exists solve_job_images_owner_idx
+  on solve_job_images (owner_id);
+create index if not exists solve_job_events_owner_idx
+  on solve_job_events (owner_id);
+create index if not exists council_reports_owner_idx
+  on council_reports (owner_id);
+create index if not exists notification_devices_owner_idx
+  on notification_devices (owner_id);
+
+-- Ownership is inherited, not passed around.
+--
+-- Four different things write these tables: the Rust app, the cloud worker, the
+-- batch runner, and one day an iOS client. Asking every one of them to remember
+-- an `owner_id` is asking for the one that forgets — and a child row with the
+-- wrong owner is worse than one with none, because it is invisible rather than
+-- caught by the audit.
+--
+-- So the database fills it in from the parent. A writer that supplies an owner
+-- keeps it; a writer that does not gets the right one anyway. `addEvent` in the
+-- worker holds only a job id and needs no change at all.
+
+create or replace function inherit_owner_from_session() returns trigger as $$
+begin
+  if new.owner_id is null then
+    select owner_id into new.owner_id from sessions where id = new.session_id;
+  end if;
+  return new;
+end;
+$$ language plpgsql;
+
+create or replace function inherit_owner_from_job() returns trigger as $$
+begin
+  if new.owner_id is null then
+    select owner_id into new.owner_id from solve_jobs where id = new.job_id;
+  end if;
+  return new;
+end;
+$$ language plpgsql;
+
+drop trigger if exists screenshots_owner on screenshots;
+create trigger screenshots_owner before insert on screenshots
+  for each row execute function inherit_owner_from_session();
+
+drop trigger if exists runs_owner on runs;
+create trigger runs_owner before insert on runs
+  for each row execute function inherit_owner_from_session();
+
+drop trigger if exists solve_jobs_owner on solve_jobs;
+create trigger solve_jobs_owner before insert on solve_jobs
+  for each row execute function inherit_owner_from_session();
+
+drop trigger if exists solve_job_images_owner on solve_job_images;
+create trigger solve_job_images_owner before insert on solve_job_images
+  for each row execute function inherit_owner_from_job();
+
+drop trigger if exists solve_job_events_owner on solve_job_events;
+create trigger solve_job_events_owner before insert on solve_job_events
+  for each row execute function inherit_owner_from_job();
+
+drop trigger if exists council_reports_owner on council_reports;
+create trigger council_reports_owner before insert on council_reports
+  for each row execute function inherit_owner_from_job();
+
+-- ------------------------------------------------------- per-user settings
+--
+-- Phase 03. `app_config` and `settings` were left out of phase 01 because their
+-- primary key *is* the key: one row named `tokenrouter`, one named `paneLayout`.
+-- With two accounts that is not a scoping bug, it is a collision — the second
+-- person to save a TokenRouter key overwrites the first, both then see a key
+-- present and working, and it bills to whoever's it actually is. Nothing in the
+-- app would report a problem.
+--
+-- So the key becomes (owner_id, key).
+--
+-- Platform rows use an all-zeroes owner rather than null. Null would need the
+-- primary key to be an expression over `coalesce`, and then every upsert has to
+-- name that same expression in its `on conflict` — a sharp edge on every write
+-- forever, to save one sentinel constant.
+--
+-- Existing rows go to the owner, not to the platform tier. These are Charles's
+-- own keys: defaulting them to "shared with every future account" is the wrong
+-- direction to be wrong in. Promoting one to platform is a deliberate act.
+
+alter table if exists app_config add column if not exists owner_id uuid;
+alter table if exists settings   add column if not exists owner_id uuid;
+
+update app_config set owner_id = (select id from app_users order by created_at limit 1)
+ where owner_id is null;
+update settings   set owner_id = (select id from app_users order by created_at limit 1)
+ where owner_id is null;
+
+-- A database with no account yet (a fresh install seeding itself) has nobody to
+-- own these, so they start as platform rows and the first sign-in inherits them.
+update app_config set owner_id = '00000000-0000-0000-0000-000000000000' where owner_id is null;
+update settings   set owner_id = '00000000-0000-0000-0000-000000000000' where owner_id is null;
+
+alter table app_config alter column owner_id set not null;
+alter table settings   alter column owner_id set not null;
+
+-- Idempotent by name: `migrations.sql` is replayed on every launch, and
+-- `add primary key` is not `if not exists`.
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'app_config_owner_key_pk') then
+    alter table app_config drop constraint if exists app_config_pkey;
+    alter table app_config add constraint app_config_owner_key_pk primary key (owner_id, key);
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'settings_owner_key_pk') then
+    alter table settings drop constraint if exists settings_pkey;
+    alter table settings add constraint settings_owner_key_pk primary key (owner_id, key);
+  end if;
+end $$;
+
+-- The server API endpoint is app configuration, not somebody's preference: it is
+-- the same for every account, so it belongs in the platform tier rather than
+-- being copied into each person's rows by the backfill above.
+update settings set owner_id = '00000000-0000-0000-0000-000000000000'
+ where key = 'serverApi'
+   and owner_id <> '00000000-0000-0000-0000-000000000000'
+   and not exists (
+     select 1 from settings p
+      where p.key = 'serverApi'
+        and p.owner_id = '00000000-0000-0000-0000-000000000000'
+   );
+
+-- --------------------------------------------------------- server-side auth
+--
+-- Phase 04. The username and PIN stay exactly as the way in; what changes is
+-- *where* they are checked.
+--
+-- Today the desktop reads a pepper from the Mac's Keychain, hashes the PIN with
+-- Argon2id locally, and compares. That means: a Keychain entry that cannot be
+-- removed, a signature prompt on every rebuild, and an app that fails closed
+-- when macOS declines. It also means the attempt counter is enforced by the
+-- client that is doing the guessing.
+--
+-- So verification moves into the database, called by the Edge Function, with the
+-- pepper supplied as a function secret. bcrypt via pgcrypto rather than Argon2id
+-- because it is already installed in every Supabase project — no WASM
+-- dependency in the Deno runtime, and nothing new to keep working.
+--
+-- `security definer` so the function may read `pin_hash` while nothing else can.
+
+create extension if not exists pgcrypto;
+
+create or replace function auth_verify_pin(p_username text, p_pin text, p_pepper text)
+returns table (user_id uuid, matched_username text, outcome text)
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+declare
+  u record;
+  attempts integer;
+begin
+  select id, username, pin_hash, failed_attempts, locked_until
+    into u
+    from app_users
+   where lower(username) = lower(trim(p_username));
+
+  -- Deliberately the same shape as a wrong PIN to the caller above: telling an
+  -- unauthenticated client that a username exists is telling it what to guess.
+  if not found then
+    return query select null::uuid, null::text, 'no';
+    return;
+  end if;
+
+  if u.locked_until is not null and u.locked_until > now() then
+    return query select u.id, u.username, 'locked';
+    return;
+  end if;
+
+  -- An Argon2id hash from the old local scheme. Not a failure and not a wrong
+  -- PIN: this account simply predates server-side checking and needs its PIN
+  -- set once more.
+  if left(u.pin_hash, 2) <> '$2' then
+    return query select u.id, u.username, 'needs_reset';
+    return;
+  end if;
+
+  if crypt(p_pin || p_pepper, u.pin_hash) = u.pin_hash then
+    update app_users
+       set failed_attempts = 0, locked_until = null, last_login_at = now()
+     where id = u.id;
+    return query select u.id, u.username, 'ok';
+    return;
+  end if;
+
+  -- Four free tries, then widening windows. Enforced here, so it holds however
+  -- the caller behaves.
+  attempts := u.failed_attempts + 1;
+  update app_users
+     set failed_attempts = attempts,
+         locked_until = case
+           when attempts <= 4 then null
+           when attempts = 5 then now() + interval '1 minute'
+           when attempts = 6 then now() + interval '5 minutes'
+           when attempts = 7 then now() + interval '15 minutes'
+           when attempts = 8 then now() + interval '1 hour'
+           else now() + interval '24 hours'
+         end
+   where id = u.id;
+
+  return query select u.id, u.username, 'no';
+end;
+$$;
+
+create or replace function auth_set_pin(p_user_id uuid, p_pin text, p_pepper text)
+returns void
+language plpgsql
+security definer
+set search_path = public, extensions
+as $$
+begin
+  if p_pin !~ '^[0-9]{4}$' then
+    raise exception 'The PIN has to be exactly 4 digits.';
+  end if;
+  update app_users
+     set pin_hash = crypt(p_pin || p_pepper, gen_salt('bf', 12)),
+         failed_attempts = 0,
+         locked_until = null,
+         updated_at = now()
+   where id = p_user_id;
+end;
+$$;
+
+-- Only the service role, which is to say only the Edge Function. `security
+-- definer` would otherwise let any role that can reach PostgREST call these.
+revoke all on function auth_verify_pin(text, text, text) from public, anon, authenticated;
+revoke all on function auth_set_pin(uuid, text, text) from public, anon, authenticated;
+
+-- ------------------------------------------------------------ saving a run
+--
+-- One run is three tables: `runs`, every row of `agent_responses`, and at most
+-- one `verdicts`. The desktop wrote them inside a single transaction, and that
+-- mattered — a network failure halfway through would otherwise leave a run
+-- holding some of its answers and no verdict, which reads as a finished run that
+-- quietly lost data rather than as a failure anyone would notice.
+--
+-- PostgREST has no transactions, so moving this to the Edge Function as three
+-- inserts would have made the failure worse than the thing it replaced. A
+-- function is one statement to the caller and one transaction to Postgres, so
+-- the guarantee survives the move.
+--
+-- `security definer` with an explicit owner check: the caller supplies the owner
+-- from its verified token, and a session belonging to anyone else is refused
+-- rather than written to.
+
+create or replace function run_save(
+  p_owner              uuid,
+  p_session            uuid,
+  p_mode               text,
+  p_asked              text,
+  p_context_mode       text,
+  p_extracted_context  text,
+  p_extraction_agreed  boolean,
+  p_responses          jsonb,
+  p_verdict            jsonb
+) returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_run uuid;
+  r jsonb;
+begin
+  if not exists (select 1 from sessions where id = p_session and owner_id = p_owner) then
+    raise exception 'no such session' using errcode = 'P0002';
+  end if;
+
+  insert into runs (session_id, owner_id, mode, asked, context_mode,
+                    extracted_context, extraction_agreed, finished_at)
+  values (p_session, p_owner, p_mode, p_asked, p_context_mode,
+          p_extracted_context, p_extraction_agreed, now())
+  returning id into v_run;
+
+  for r in select * from jsonb_array_elements(coalesce(p_responses, '[]'::jsonb))
+  loop
+    insert into agent_responses
+      (run_id, provider, model, attempt_id, status, body, final_kind,
+       final_language, final_answer, final_code, final_claims, complexity,
+       confidence, well_formed, input_tokens, output_tokens, elapsed_ms, error)
+    values (
+      v_run,
+      r->>'provider',
+      r->>'model',
+      r->>'attemptId',
+      r->>'status',
+      coalesce(r->>'body', ''),
+      r->>'finalKind',
+      r->>'finalLanguage',
+      r->>'finalAnswer',
+      r->>'finalCode',
+      -- `text[]` from a JSON array, and empty rather than null: the column is
+      -- `not null default '{}'` and the Rust struct reads it as a plain Vec.
+      coalesce(
+        (select array_agg(value::text) from jsonb_array_elements_text(r->'finalClaims')),
+        '{}'::text[]
+      ),
+      r->>'complexity',
+      (r->>'confidence')::real,
+      coalesce((r->>'wellFormed')::boolean, false),
+      (r->>'inputTokens')::bigint,
+      (r->>'outputTokens')::bigint,
+      (r->>'elapsedMs')::bigint,
+      r->>'error'
+    );
+  end loop;
+
+  if p_verdict is not null and p_verdict <> 'null'::jsonb then
+    insert into verdicts
+      (run_id, verdict, headline, detail, reliability, camps, outliers,
+       representative, judge_provider, judge_text)
+    values (
+      v_run,
+      p_verdict->>'verdict',
+      p_verdict->>'headline',
+      p_verdict->>'detail',
+      p_verdict->>'reliability',
+      coalesce(p_verdict->'camps', '[]'::jsonb),
+      coalesce(
+        (select array_agg(value::text) from jsonb_array_elements_text(p_verdict->'outliers')),
+        '{}'::text[]
+      ),
+      p_verdict->>'representative',
+      p_verdict->>'judgeProvider',
+      p_verdict->>'judgeText'
+    );
+  end if;
+
+  return v_run;
+end;
+$$;
+
+revoke all on function run_save(uuid, uuid, text, text, text, text, boolean, jsonb, jsonb)
+  from public, anon, authenticated;
+
+-- --------------------------------------------------- queueing a solve job
+--
+-- Same reasoning as `run_save`: a job is a `solve_jobs` row, one
+-- `solve_job_images` row per screenshot, and the first `solve_job_events` line.
+-- A job written without its images is a job the worker will claim and fail on,
+-- so the three belong in one transaction.
+
+create or replace function solve_job_create(
+  p_owner    uuid,
+  p_session  uuid,
+  p_settings jsonb,
+  p_images   jsonb
+) returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_job uuid;
+  img jsonb;
+  pos integer := 0;
+begin
+  if not exists (select 1 from sessions where id = p_session and owner_id = p_owner) then
+    raise exception 'no such session' using errcode = 'P0002';
+  end if;
+
+  insert into solve_jobs (session_id, owner_id, mode, status, progress_phase, settings_snapshot)
+  values (p_session, p_owner, 'council', 'queued', 'queued', coalesce(p_settings, '{}'::jsonb))
+  returning id into v_job;
+
+  for img in select * from jsonb_array_elements(coalesce(p_images, '[]'::jsonb))
+  loop
+    insert into solve_job_images
+      (job_id, session_id, owner_id, position, storage_bucket, storage_path,
+       file_name, bytes, mime, width, height)
+    values (
+      v_job, p_session, p_owner, pos,
+      img->>'storageBucket', img->>'storagePath', img->>'fileName',
+      (img->>'bytes')::integer, img->>'mime',
+      (img->>'width')::integer, (img->>'height')::integer
+    );
+    pos := pos + 1;
+  end loop;
+
+  insert into solve_job_events (job_id, owner_id, level, phase, message, payload)
+  values (v_job, p_owner, 'info', 'queued', 'Background Council job queued.',
+          jsonb_build_object('imageCount', jsonb_array_length(coalesce(p_images, '[]'::jsonb))));
+
+  return v_job;
+end;
+$$;
+
+revoke all on function solve_job_create(uuid, uuid, jsonb, jsonb) from public, anon, authenticated;
+
+-- ------------------------------------------------------ reordering screenshots
+--
+-- One statement instead of a loop of updates inside a transaction. `position`
+-- has no unique constraint, but a partial write would still leave a session
+-- whose screenshots are in an order nobody chose.
+
+create or replace function screenshots_reorder(
+  p_owner   uuid,
+  p_session uuid,
+  p_ids     uuid[]
+) returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update screenshots s
+     set position = o.ord - 1
+    from unnest(p_ids) with ordinality as o(id, ord)
+   where s.id = o.id
+     and s.session_id = p_session
+     and s.owner_id = p_owner;
+end;
+$$;
+
+revoke all on function screenshots_reorder(uuid, uuid, uuid[]) from public, anon, authenticated;

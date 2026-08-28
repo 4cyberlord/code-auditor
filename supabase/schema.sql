@@ -17,6 +17,9 @@ create extension if not exists "pgcrypto";
 
 create table if not exists sessions (
   id           uuid primary key default gen_random_uuid(),
+  -- Who this belongs to. Nullable here and made mandatory by
+  -- tenancy-constrain.sql, once the backfill is verified.
+  owner_id     uuid,
   title        text        not null default 'Untitled session',
   -- Free text the user adds to describe the problem (section 7, "Add notes").
   note         text        not null default '',
@@ -36,6 +39,9 @@ create index if not exists sessions_status_updated_idx
 
 create table if not exists screenshots (
   id           uuid primary key default gen_random_uuid(),
+  -- Who this belongs to. Nullable here and made mandatory by
+  -- tenancy-constrain.sql, once the backfill is verified.
+  owner_id     uuid,
   session_id   uuid        not null references sessions (id) on delete cascade,
   -- Explicit ordering column so screenshots can be reordered without rewriting
   -- ids; section 7 asks for reorder, and capture order is not always the order
@@ -74,6 +80,9 @@ create index if not exists screenshots_pending_upload_idx
 
 create table if not exists runs (
   id           uuid primary key default gen_random_uuid(),
+  -- Who this belongs to. Nullable here and made mandatory by
+  -- tenancy-constrain.sql, once the backfill is verified.
+  owner_id     uuid,
   session_id   uuid        not null references sessions (id) on delete cascade,
   -- auto | code | research
   mode         text        not null default 'auto',
@@ -147,6 +156,9 @@ create index if not exists verdicts_run_idx on verdicts (run_id);
 
 create table if not exists solve_jobs (
   id                uuid primary key default gen_random_uuid(),
+  -- Who this belongs to. Nullable here and made mandatory by
+  -- tenancy-constrain.sql, once the backfill is verified.
+  owner_id     uuid,
   session_id        uuid        not null references sessions (id) on delete cascade,
   -- council is the only v1 cloud mode. Keeping it as a column lets later builds
   -- add cheaper panel-only jobs without changing the queue shape.
@@ -174,6 +186,9 @@ create index if not exists solve_jobs_session_idx
 
 create table if not exists solve_job_images (
   id             uuid primary key default gen_random_uuid(),
+  -- Who this belongs to. Nullable here and made mandatory by
+  -- tenancy-constrain.sql, once the backfill is verified.
+  owner_id     uuid,
   job_id         uuid        not null references solve_jobs (id) on delete cascade,
   session_id     uuid        not null references sessions (id) on delete cascade,
   position       integer     not null,
@@ -193,6 +208,9 @@ create index if not exists solve_job_images_job_idx
 
 create table if not exists solve_job_events (
   id         uuid primary key default gen_random_uuid(),
+  -- Who this belongs to. Nullable here and made mandatory by
+  -- tenancy-constrain.sql, once the backfill is verified.
+  owner_id     uuid,
   job_id     uuid        not null references solve_jobs (id) on delete cascade,
   level      text        not null default 'info'
                check (level in ('info', 'warn', 'error')),
@@ -207,6 +225,9 @@ create index if not exists solve_job_events_job_idx
 
 create table if not exists council_reports (
   id         uuid primary key default gen_random_uuid(),
+  -- Who this belongs to. Nullable here and made mandatory by
+  -- tenancy-constrain.sql, once the backfill is verified.
+  owner_id     uuid,
   job_id     uuid        not null unique references solve_jobs (id) on delete cascade,
   session_id uuid        not null references sessions (id) on delete cascade,
   winner     text,
@@ -221,6 +242,9 @@ create index if not exists council_reports_session_idx
 
 create table if not exists notification_devices (
   id           uuid primary key default gen_random_uuid(),
+  -- Who this belongs to. Nullable here and made mandatory by
+  -- tenancy-constrain.sql, once the backfill is verified.
+  owner_id     uuid,
   platform     text        not null check (platform in ('ios')),
   device_token text        not null unique,
   label        text        not null default '',
@@ -232,9 +256,14 @@ create table if not exists notification_devices (
 -- ---------------------------------------------------------------- settings
 
 create table if not exists settings (
-  key        text primary key,
+  key        text        not null,
+  -- Whose value this is. All-zeroes means a platform row: yours,
+  -- readable by every account, written only on purpose.
+  owner_id   uuid        not null
+               default '00000000-0000-0000-0000-000000000000',
   value      jsonb       not null,
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  primary key (owner_id, key)
 );
 
 -- ---------------------------------------------------------- intelligence/RAG
@@ -343,4 +372,42 @@ create trigger intelligence_records_touch before update on intelligence_records
 
 drop trigger if exists app_users_touch on app_users;
 create trigger app_users_touch before update on app_users
+  for each row execute function touch_updated_at();
+
+-- ---------------------------------------------------------------- app config
+--
+-- Everything that used to sit in `.development.env`, so the machine running this
+-- app is not also the place its configuration lives. One row per variable.
+--
+-- Not the `settings` table, deliberately. `settings_load` is a Tauri command,
+-- which means the webview can read any key in it -- fine for a pane layout,
+-- catastrophic for a TokenRouter key. This table has no command that returns a
+-- secret value, and that is the whole reason it is separate.
+create table if not exists app_config (
+  key        text        not null,
+  -- Whose value this is. All-zeroes means a platform row: yours,
+  -- readable by every account, written only on purpose.
+  owner_id   uuid        not null
+               default '00000000-0000-0000-0000-000000000000',
+  value      text        not null default '',
+  -- Whether the value may ever leave the machine's Rust side. Secrets are
+  -- listed to the UI by name only; the value goes to outbound requests and
+  -- nowhere else.
+  secret     boolean     not null default false,
+  updated_at timestamptz not null default now(),
+  primary key (owner_id, key)
+);
+
+-- No policies, and that is the point.
+--
+-- Supabase grants the `anon` and `authenticated` roles access to tables in
+-- `public`, and the anon key ships inside the app -- so a table holding a
+-- GitHub token with RLS off is a table that anyone who opens the bundle can
+-- read. Enabling row level security and writing no policy at all leaves exactly
+-- one way in: `service_role`, which bypasses RLS and now lives in the Edge
+-- Function rather than on a laptop.
+alter table app_config enable row level security;
+
+drop trigger if exists app_config_touch on app_config;
+create trigger app_config_touch before update on app_config
   for each row execute function touch_updated_at();
