@@ -1,12 +1,16 @@
 mod auth;
 mod capture;
 mod background_helper;
+mod config;
 mod db;
+pub mod deployment;
 mod exec;
-mod keychain;
+mod helper_auth;
+mod secrets;
 mod platform_base;
 mod providers;
 mod runner;
+mod server_api;
 mod sessions;
 mod storage;
 mod vision;
@@ -61,7 +65,7 @@ fn accel(var: &str, default: &str) -> String {
 /// rebuild -- but not one that spams a terminal-launched run by default.
 pub fn trace(msg: &str) {
     if std::env::var_os("CODE_AUDITOR_TRACE").is_some() {
-        eprintln!("[code-auditor] {msg}");
+        eprintln!("[council-editor] {msg}");
     }
     // Also to a file, because stderr depends on how the app was launched: double
     // clicked from Finder it goes nowhere, so the one time you need the trace --
@@ -164,9 +168,9 @@ pub fn run() {
             auth::auth_login,
             auth::auth_logout,
             auth::auth_change_pin,
-            keychain::set_api_key,
-            keychain::delete_api_key,
-            keychain::has_api_key,
+            secrets::set_api_key,
+            secrets::delete_api_key,
+            secrets::has_api_key,
             providers::run_agent,
             providers::run_once,
             providers::cancel_run,
@@ -185,13 +189,14 @@ pub fn run() {
             background_helper::background_helper_status,
             background_helper::background_helper_install,
             background_helper::background_helper_uninstall,
-            db::db_save_url,
-            db::db_clear_url,
-            db::db_has_url,
-            db::db_test,
-            db::db_migrate,
+            helper_auth::helper_authorize,
+            helper_auth::helper_auth_status,
+            helper_auth::helper_deauthorize,
             db::settings_load,
             db::settings_save,
+            config::config_list,
+            config::config_set,
+            config::config_delete,
             sessions::session_list,
             sessions::session_create,
             sessions::session_update,
@@ -293,7 +298,7 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while building Code Editor");
+        .expect("error while building Council Editor");
 
     app.run(|app, event| {
         // Clicking the dock icon while every window is hidden should bring the
