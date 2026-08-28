@@ -139,54 +139,32 @@ export async function cancelRun(runId: string): Promise<void> {
   await invoke("cancel_run", { runId });
 }
 
-export interface DbHealth {
-  connected: boolean;
-  /** Host and database only — never the user or password. */
-  target: string;
-  serverVersion: string;
-  tablesFound: string[];
-  tablesMissing: string[];
-  sessionCount: number;
-  /** Set when the connection works but the schema needs attention. */
-  advice: string | null;
+export interface HelperAuth {
+  authorised: boolean;
+  /** ISO timestamp, or null when the helper has never been authorised. */
+  expiresAt: string | null;
 }
 
 /**
- * The connection string carries the database password, so it is handled exactly
- * like an API key: written to the Keychain by Rust, never read back into here.
+ * Authorise the background capture helper, or renew it.
+ *
+ * The token itself never comes back across this bridge — Rust writes it straight
+ * into the Keychain. All the UI needs is whether it worked and when it runs out.
  */
-export async function dbSaveUrl(url: string): Promise<void> {
+export async function helperAuthorize(): Promise<HelperAuth> {
   if (!inTauri()) throw new Error(NOT_TAURI);
-  await invoke("db_save_url", { url });
+  return invoke<HelperAuth>("helper_authorize");
 }
 
-export async function dbClearUrl(): Promise<void> {
+/** Asks the server, not the Keychain: a stored token may already be revoked. */
+export async function helperAuthStatus(): Promise<HelperAuth> {
+  if (!inTauri()) return { authorised: false, expiresAt: null };
+  return invoke<HelperAuth>("helper_auth_status");
+}
+
+export async function helperDeauthorize(): Promise<void> {
   if (!inTauri()) return;
-  await invoke("db_clear_url");
-}
-
-export async function dbHasUrl(): Promise<boolean> {
-  if (!inTauri()) return false;
-  try {
-    return await invoke<boolean>("db_has_url");
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Connects and reports what is there. Connecting also creates any missing tables,
- * so this doubles as "set the database up".
- */
-export async function dbTest(): Promise<DbHealth> {
-  if (!inTauri()) throw new Error(NOT_TAURI);
-  return invoke<DbHealth>("db_test");
-}
-
-/** Re-applies the schema, for when a table has been dropped by hand. */
-export async function dbMigrate(): Promise<DbHealth> {
-  if (!inTauri()) throw new Error(NOT_TAURI);
-  return invoke<DbHealth>("db_migrate");
+  await invoke("helper_deauthorize");
 }
 
 export async function settingsLoad<T>(key: string): Promise<T | null> {

@@ -6,6 +6,7 @@ import BackgroundJobsPanel from "@/components/BackgroundJobsPanel";
 import ConsensusPanel from "@/components/ConsensusPanel";
 import SolutionCard from "@/components/SolutionCard";
 import CouncilPanel from "@/components/CouncilPanel";
+import BootScreen from "@/components/BootScreen";
 import HistoryPanel from "@/components/HistoryPanel";
 import InputBar from "@/components/InputBar";
 import ReadingPanel from "@/components/ReadingPanel";
@@ -55,7 +56,7 @@ export default function Page() {
   }, [gate, ready, status]);
 
   if (gate === "loading") return <StartupLoader />;
-  if (gate === "connect" || gate === "login") {
+  if (gate === "login") {
     return <LoginScreen gate={gate} status={status} onChanged={apply} />;
   }
   return <Workbench />;
@@ -190,6 +191,8 @@ function Workbench() {
           <SessionSidebar />
         </div>
       </div>
+
+      <BootScreen />
 
       <InputBar />
 

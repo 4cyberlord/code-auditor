@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { dbSaveUrl, dbTest } from "@/lib/bridge";
 import {
   PIN_LENGTH,
   authLogin,
@@ -41,13 +40,10 @@ export default function LoginScreen({
   status: AuthStatus | null;
   onChanged: (next: AuthStatus) => void;
 }) {
-  const [url, setUrl] = useState("");
   const [username, setUsername] = useState(status?.username ?? "");
   const [pin, setPin] = useState("");
-  const [remember, setRemember] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
 
   // Ticks only while a lockout is open, so an idle login screen is not holding a
   // timer open for the life of the app.
@@ -62,9 +58,8 @@ export default function LoginScreen({
   const locked = left > 0;
 
   const pinField = useRef<HTMLInputElement>(null);
-  const urlField = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    (gate === "connect" ? urlField : pinField).current?.focus();
+    pinField.current?.focus();
   }, [gate]);
 
   // Rust knows the owner's name; the field should show it rather than making
@@ -73,40 +68,33 @@ export default function LoginScreen({
     if (status?.username && !username) setUsername(status.username);
   }, [status?.username, username]);
 
-  const connect = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    setNote(null);
-    try {
-      await dbSaveUrl(url);
-      const health = await dbTest();
-      if (health.tablesMissing.length) {
-        setError(health.advice ?? `Connected, but ${health.tablesMissing.join(", ")} are missing.`);
-        return;
-      }
-      setNote(`Connected to ${health.target}.`);
-      // Re-asked rather than patched locally: connecting is also what creates the
-      // tables and provisions the owner, and only Rust knows the name it used.
-      onChanged(await authStatus());
-    } catch (err) {
-      setError(reason(err));
-    } finally {
-      setBusy(false);
-    }
-  }, [url, onChanged]);
-
-  const signIn = useCallback(async () => {
+  /**
+   * `candidate` exists because of a bug worth remembering.
+   *
+   * `onPin` submits the instant the fourth digit lands, but the `signIn` it can
+   * see was built during the previous render — when `pin` still held three
+   * digits. So a perfectly correct PIN failed its own length check and reported
+   * "The PIN is 4 digits", every time, before any attempt was made. Reading the
+   * digits from the caller rather than from state is what makes the check see
+   * what the person actually typed.
+   */
+  const signIn = useCallback(async (candidate?: string) => {
+    const entered = candidate ?? pin;
     setError(null);
     // Shape is checked here so an obviously-wrong PIN never costs one of the five
     // tries. Rust checks it again; this only saves the attempt.
-    if (pin.length !== PIN_LENGTH) {
+    if (entered.length !== PIN_LENGTH) {
       setError(`The PIN is ${PIN_LENGTH} digits.`);
       return;
     }
 
     setBusy(true);
     try {
-      onChanged(await authLogin(username.trim(), pin, remember));
+      // Nothing is remembered: the session token lives in memory for the life
+      // of the process, so quitting signs you out. The old "keep me signed in"
+      // checkbox stored a thirty-day token on this Mac, which is exactly the
+      // thing that made a copy of the laptop a copy of the account.
+      onChanged(await authLogin(username.trim(), entered, false));
     } catch (err) {
       setError(reason(err));
       setPin("");
@@ -118,7 +106,7 @@ export default function LoginScreen({
     } finally {
       setBusy(false);
     }
-  }, [username, pin, remember, onChanged]);
+  }, [username, pin, onChanged]);
 
   // Four digits is the whole credential, so asking for a button press afterwards
   // is a keystroke that carries no information.
@@ -126,7 +114,8 @@ export default function LoginScreen({
     const next = sanitizePin(raw);
     setPin(next);
     if (next.length === PIN_LENGTH && !busy && !locked) {
-      queueMicrotask(() => void signIn());
+      // Hand the digits over rather than waiting for state to catch up.
+      queueMicrotask(() => void signIn(next));
     }
   };
 
@@ -134,9 +123,7 @@ export default function LoginScreen({
     ? { tone: "bad", text: `Too many wrong PINs. Try again in ${humanSeconds(left)}.` }
     : error
       ? { tone: "bad", text: error }
-      : note
-        ? { tone: "good", text: note }
-        : status?.problem
+      : status?.problem
           ? { tone: "warn", text: status.problem }
           : gate === "login" &&
               status?.attemptsRemaining != null &&
@@ -195,90 +182,51 @@ export default function LoginScreen({
           onSubmit={(e) => {
             e.preventDefault();
             if (busy || locked) return;
-            void (gate === "connect" ? connect() : signIn());
+            void signIn();
           }}
         >
-          {gate === "connect" ? (
-            <>
-              <h2>Connect your database</h2>
-              <p className="auth-sub">
-                Your account lives in your own Postgres, so this comes first. The string is kept
-                in the macOS Keychain and never reaches the app.
-              </p>
+          <h2>Unlock workbench</h2>
+          <p className="auth-sub">Enter your username and PIN.</p>
 
-              <label className="auth-field">
-                <span>Connection string</span>
-                <input
-                  ref={urlField}
-                  className="field mono"
-                  type="password"
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="postgresql://postgres.<ref>:PASSWORD@aws-0-<region>.pooler.supabase.com:5432/postgres"
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                />
-              </label>
-            </>
-          ) : (
-            <>
-              <h2>Unlock workbench</h2>
-              <p className="auth-sub">Enter the owner PIN for this Mac.</p>
-              <p className="auth-test">
-                Testing login: <span className="mono">nimo</span> / <span className="mono">3313</span>
-              </p>
+          <label className="auth-field">
+            <span>Username</span>
+            <input
+              className="field"
+              autoComplete="username"
+              spellCheck={false}
+              autoCapitalize="off"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              disabled={locked}
+            />
+          </label>
 
-              <label className="auth-field">
-                <span>Username</span>
-                <input
-                  className="field"
-                  autoComplete="username"
-                  spellCheck={false}
-                  autoCapitalize="off"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  disabled={locked}
-                />
-              </label>
-
-              <label className="auth-field">
-                <span>PIN</span>
-                {/* One input, four cells. The boxes are painted underneath and the
-                    real field sits on top with a transparent face, so there is
-                    exactly one thing to focus and paste into -- four separate
-                    inputs look the same and behave badly for both. */}
-                <span className="pin" data-locked={locked}>
-                  <input
-                    ref={pinField}
-                    className="pin-input"
-                    type="password"
-                    inputMode="numeric"
-                    autoComplete="current-password"
-                    maxLength={PIN_LENGTH}
-                    value={pin}
-                    onChange={(e) => onPin(e.target.value)}
-                    disabled={locked}
-                    aria-label="PIN"
-                  />
-                  <span className="pin-cells" aria-hidden="true">
-                    {Array.from({ length: PIN_LENGTH }, (_, i) => (
-                      <i key={i} data-on={i < pin.length} data-next={i === pin.length && !locked} />
-                    ))}
-                  </span>
-                </span>
-              </label>
-
-              <label className="auth-remember">
-                <input
-                  type="checkbox"
-                  checked={remember}
-                  onChange={(e) => setRemember(e.target.checked)}
-                  disabled={locked}
-                />
-                <span>Keep me signed in on this Mac for 30 days</span>
-              </label>
-            </>
-          )}
+          <label className="auth-field">
+            <span>PIN</span>
+            {/* One input, four cells. The boxes are painted underneath and the
+                real field sits on top with a transparent face, so there is
+                exactly one thing to focus and paste into -- four separate
+                inputs look the same and behave badly for both. */}
+            <span className="pin" data-locked={locked}>
+              <input
+                ref={pinField}
+                className="pin-input"
+                type="password"
+                inputMode="numeric"
+                autoComplete="current-password"
+                maxLength={PIN_LENGTH}
+                value={pin}
+                onChange={(e) => onPin(e.target.value)}
+                disabled={locked}
+                aria-label="PIN"
+              />
+              <span className="pin-cells" aria-hidden="true">
+                {Array.from({ length: PIN_LENGTH }, (_, i) => (
+                  <i key={i} data-on={i < pin.length} data-next={i === pin.length && !locked} />
+                ))}
+              </span>
+            </span>
+          </label>
 
           {message && (
             <p className="auth-msg" data-tone={message.tone}>
@@ -287,16 +235,13 @@ export default function LoginScreen({
           )}
 
           <button className="btn primary auth-go" type="submit" disabled={busy || locked}>
-            {busy ? "Working…" : gate === "connect" ? "Connect" : "Unlock"}
+            {busy ? "Working…" : "Unlock"}
           </button>
 
-          {gate === "login" && (
-            <p className="auth-hint">
-              Forgotten the PIN? It cannot be recovered. Run{" "}
-              <span className="mono">delete from app_users;</span> in the Supabase SQL editor and
-              the next launch provisions a fresh one.
-            </p>
-          )}
+          <p className="auth-hint">
+            Forgotten the PIN? It cannot be recovered from this Mac — nothing about the account
+            is stored here. Ask whoever administers the workspace to set a new one.
+          </p>
         </form>
       </main>
     </div>

@@ -16,7 +16,7 @@ import { MAX_IMAGES, MAX_TOKENS_RANGE, useStore } from "@/lib/store";
 import { HOME_ZONE, detectZone, isUsableZone, zoneLabel } from "@/lib/when";
 import * as bridge from "@/lib/bridge";
 import AccountCard from "./AccountCard";
-import DatabaseCard from "./DatabaseCard";
+import HelperCard from "./HelperCard";
 import { classifyProbeResult } from "@/lib/probeFit";
 
 /**
@@ -903,7 +903,7 @@ function ReadingCard() {
         ))}
       </div>
 
-      <p className="hint" style={{ marginTop: 0 }}>
+      <p className="hint" style={{ marginTop: 0, marginBottom: 8 }}>
         {mode.blurb}
       </p>
 
@@ -1650,20 +1650,6 @@ export default function SettingsDialog() {
     setRateDraft(null);
   };
 
-  // Land on whatever is unfinished. Someone opening Settings with no database
-  // configured is almost certainly looking for the database, and it was the tab
-  // they would have had to go hunting for.
-  useEffect(() => {
-    if (!open) return;
-    let live = true;
-    void bridge.dbHasUrl().then((has) => {
-      if (live && !has) setTab("sessions");
-    });
-    return () => {
-      live = false;
-    };
-  }, [open]);
-
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -1717,7 +1703,7 @@ export default function SettingsDialog() {
               {/* The account lives in the database, so it belongs on the tab
                   where the database does rather than in a tab of its own. */}
               <AccountCard />
-              <DatabaseCard />
+              <HelperCard />
               <StorageCard />
               <TimeZoneCard />
             </>

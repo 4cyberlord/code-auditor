@@ -33,7 +33,7 @@ export interface AuthStatus {
  * `loading` before Rust has answered once, `connect` when there is no database
  * to hold an account, `login` otherwise, and `in`.
  */
-export type AuthGate = "loading" | "connect" | "login" | "in";
+export type AuthGate = "loading" | "login" | "in";
 
 /**
  * Order matters here, and the reason is hydration rather than logic.
@@ -68,7 +68,9 @@ export function gateFor(status: AuthStatus | null, ready: boolean): AuthGate {
   // There is no sign-up state. Rust provisions the owner account the first time
   // it reaches a database with an empty `app_users`, so by the time the gate is
   // asked, the only two answers are "point me at a database" and "PIN, please".
-  return status.dbConfigured ? "login" : "connect";
+  // No "connect" any more: the backend is compiled into the app, so there is
+  // nothing to configure and nowhere for that screen to lead.
+  return "login";
 }
 
 const OFFLINE: AuthStatus = {
