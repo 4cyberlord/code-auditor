@@ -1,5 +1,5 @@
 [package]
-name = "code-auditor"
+name = "council-editor"
 version = "0.1.0"
 description = "Multi-agent code & research auditor"
 authors = ["Charles"]
@@ -9,14 +9,14 @@ rust-version = "1.77"
 # bare `cargo run` has no way to choose, and `tauri dev` issues exactly that.
 # Naming the app as the default is what makes `npm run app:dev` work; the helper
 # is still reachable with `cargo run --bin cloud-sync-helper`.
-default-run = "code-auditor"
+default-run = "council-editor"
 
 [lib]
-name = "code_auditor_lib"
+name = "council_editor_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "code-auditor"
+name = "council-editor"
 path = "src/main.rs"
 
 [[bin]]
@@ -37,21 +37,13 @@ tokio-util = "0.7"
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 thiserror = "2"
-# Runtime-checked queries only (no `query!` macros), so the app builds without
-# database credentials present in the environment.
-sqlx = { version = "0.8", default-features = false, features = [
-  "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json",
-] }
+# sqlx, argon2, hmac and sha2 were all dropped when the app stopped talking to
+# Postgres directly. Queries live in the Edge Function and in plpgsql now, and
+# the PIN is hashed and verified server-side — so the client links neither a
+# database driver nor a password hasher, and builds a good deal faster for it.
 uuid = { version = "1", features = ["v4", "serde"] }
 global-hotkey = "0.8"
 tao = "0.37"
-
-# Login. Argon2id for the PIN itself; HMAC-SHA256 to pepper it with a Keychain
-# secret first, so a stolen database dump is not an offline attack on four
-# digits. See src/auth.rs for why the pepper carries most of the weight here.
-argon2 = "0.5"
-hmac = "0.12"
-sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 
 # No mobile implementation exists, so keep it off the mobile targets entirely.

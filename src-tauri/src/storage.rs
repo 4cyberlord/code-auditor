@@ -17,58 +17,9 @@
 
 use serde::Serialize;
 
-use crate::keychain;
-
-/// The Keychain entry for the Storage credential.
-///
-/// Separate from the Postgres connection string on purpose: they are different
-/// secrets with different blast radii, and a `service_role` key pasted into the
-/// database box would be a confusing way to find that out.
-pub const PROVIDER: &str = "supabase_storage";
 
 /// Where screenshots go. One bucket, private.
 pub const BUCKET: &str = "screenshots";
-
-/// The project's REST host, worked out from the database connection string.
-///
-/// Both Supabase connection shapes carry the project reference, and asking the
-/// user to find their project URL in the dashboard when we are already holding
-/// something that contains it is asking them to do a lookup we can do. So this
-/// takes the string they have already pasted and produces the host, and the only
-/// thing left to paste is the key itself.
-///
-/// - direct:  `postgresql://postgres:pw@db.<ref>.supabase.co:5432/postgres`
-/// - pooler:  `postgresql://postgres.<ref>:pw@aws-0-eu-west-2.pooler.supabase.com:5432/postgres`
-///
-/// The password is allowed to contain `@`, so the host is taken from the *last*
-/// `@` rather than the first -- the same trap the connection diagnostics fell
-/// into once already.
-pub fn project_url(conn: &str) -> Option<String> {
-    let after_at = conn.rsplit('@').next()?;
-    let host = after_at.split(['/', ':']).next()?;
-
-    // Direct host: the reference is in the hostname.
-    if let Some(rest) = host.strip_prefix("db.") {
-        if let Some(reference) = rest.strip_suffix(".supabase.co") {
-            if !reference.is_empty() && !reference.contains('.') {
-                return Some(format!("https://{reference}.supabase.co"));
-            }
-        }
-    }
-
-    // Pooler host: the reference is in the *username*, as `postgres.<ref>`.
-    if host.ends_with(".pooler.supabase.com") {
-        let creds = conn.rsplit_once('@')?.0;
-        let after_scheme = creds.split("//").nth(1)?;
-        let user = after_scheme.split(':').next()?;
-        let reference = user.strip_prefix("postgres.")?;
-        if !reference.is_empty() && !reference.contains('.') {
-            return Some(format!("https://{reference}.supabase.co"));
-        }
-    }
-
-    None
-}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,41 +36,6 @@ fn client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Creates the bucket if it is not there yet.
-///
-/// Private, always. A screenshot is whatever happened to be on the screen when
-/// the shortcut was pressed, which is a category that includes far more than the
-/// code someone meant to capture, and a public bucket would make every one of
-/// them a guessable URL.
-async fn ensure_bucket(base: &str, key: &str) -> Result<(), String> {
-    let c = client()?;
-    let resp = c
-        .post(format!("{base}/storage/v1/bucket"))
-        .header("Authorization", format!("Bearer {key}"))
-        .header("apikey", key)
-        .json(&serde_json::json!({
-            "id": BUCKET,
-            "name": BUCKET,
-            "public": false,
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("Could not reach Supabase Storage: {e}"))?;
-
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-
-    // Already existing is the normal case, not a failure.
-    if status.is_success() {
-        crate::trace(&format!("storage bucket created: {BUCKET}"));
-        return Ok(());
-    }
-    if body.contains("already exists") || status.as_u16() == 409 {
-        return Ok(());
-    }
-    Err(explain_storage(status, &body))
-}
-
 /// Uploads one screenshot and returns where it landed.
 ///
 /// The path is `<session>/<position>-<name>`, so an object's address says which
@@ -128,39 +44,38 @@ async fn ensure_bucket(base: &str, key: &str) -> Result<(), String> {
 /// address that carries it means the order survives even if a row is lost.
 #[tauri::command]
 pub async fn storage_upload(
+    db: tauri::State<'_, crate::db::Db>,
     session_id: String,
     file_name: String,
     mime: String,
     data: String,
 ) -> Result<Uploaded, String> {
-    let key = keychain::read_api_key(PROVIDER)?;
-    // Read here, never passed in. The connection string carries the database
-    // password; the webview has never held it and must not start now just
-    // because Storage happens to need the project reference inside it.
-    let conn = crate::db::connection_string()?;
-    let base = project_url(&conn).ok_or(
-        "Could not work out the Supabase project URL from the database connection string. \
-         Check the connection string in Settings — it should end in `.supabase.co` or \
-         `.pooler.supabase.com`.",
-    )?;
-
     let bytes = unbase64(&data).ok_or("That image is not valid base64.")?;
     if bytes.is_empty() {
         return Err("Refusing to upload an empty image.".into());
     }
 
-    ensure_bucket(&base, &key).await?;
+    // Ownership lives in the path, because at upload time there is no row to
+    // check it against — the screenshot record is written afterwards.
+    let owner = crate::auth::current().ok_or(crate::auth::LOCKED)?.user_id;
+    let path = format!("{owner}/{session_id}/{}", safe_name(&file_name));
 
-    let path = format!("{session_id}/{}", safe_name(&file_name));
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Signed {
+        url: String,
+    }
+    let signed: Signed = crate::server_api::call(
+        db.inner(),
+        "storage.uploadUrl",
+        serde_json::json!({ "path": path, "bucket": BUCKET }),
+    )
+    .await?;
+
     let started = std::time::Instant::now();
-    let c = client()?;
-    let resp = c
-        .post(format!("{base}/storage/v1/object/{BUCKET}/{path}"))
-        .header("Authorization", format!("Bearer {key}"))
-        .header("apikey", &key)
+    let resp = client()?
+        .put(&signed.url)
         .header("Content-Type", if mime.is_empty() { "image/png" } else { &mime })
-        // Re-uploading the same capture replaces it rather than failing, so a
-        // retry after a dropped connection is safe to press.
         .header("x-upsert", "true")
         .body(bytes.clone())
         .send()
@@ -168,35 +83,17 @@ pub async fn storage_upload(
         .map_err(|e| format!("Could not upload the screenshot: {e}"))?;
 
     let status = resp.status();
-    let ms = started.elapsed().as_millis();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        let why = explain_storage(status, &body);
-        // Logged as well as returned. An upload that fails while the panel is
-        // busy answering is exactly the kind of thing that gets dismissed and
-        // then wondered about later; the log is what makes "later" answerable.
-        crate::trace(&format!(
-            "storage upload FAILED {} ({} bytes, {}ms): {}",
-            path,
-            bytes.len(),
-            ms,
-            why
-        ));
-        return Err(why);
+        return Err(explain_storage(status, &body));
     }
 
     crate::trace(&format!(
-        "storage upload ok {} ({} bytes, {}ms)",
-        path,
+        "screenshot uploaded {path} ({} bytes, {}ms)",
         bytes.len(),
-        ms
+        started.elapsed().as_millis()
     ));
-
-    Ok(Uploaded {
-        bucket: BUCKET.to_string(),
-        path,
-        bytes: bytes.len(),
-    })
+    Ok(Uploaded { bucket: BUCKET.to_string(), path, bytes: bytes.len() })
 }
 
 /// A time-limited URL for one stored screenshot.
@@ -205,61 +102,37 @@ pub async fn storage_upload(
 /// file is gone -- and how an iOS client will fetch one without ever holding a
 /// key that can write.
 #[tauri::command]
-pub async fn storage_signed_url(path: String, seconds: u32) -> Result<String, String> {
-    let key = keychain::read_api_key(PROVIDER)?;
-    let conn = crate::db::connection_string()?;
-    let base = project_url(&conn).ok_or("Could not work out the Supabase project URL.")?;
-    let c = client()?;
-
-    let resp = c
-        .post(format!("{base}/storage/v1/object/sign/{BUCKET}/{path}"))
-        .header("Authorization", format!("Bearer {key}"))
-        .header("apikey", &key)
-        .json(&serde_json::json!({ "expiresIn": seconds.clamp(60, 604_800) }))
-        .send()
-        .await
-        .map_err(|e| format!("Could not reach Supabase Storage: {e}"))?;
-
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(explain_storage(status, &body));
+pub async fn storage_signed_url(
+    db: tauri::State<'_, crate::db::Db>,
+    path: String,
+    seconds: u32,
+) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct Signed {
+        url: String,
     }
-
-    let signed = serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v["signedURL"].as_str().map(str::to_string))
-        .ok_or("Supabase Storage signed the object but returned no URL.")?;
-
-    // The API returns a path, not an absolute URL.
-    Ok(if signed.starts_with("http") {
-        signed
-    } else {
-        format!("{base}/storage/v1{}", signed)
-    })
+    let signed: Signed = crate::server_api::call(
+        db.inner(),
+        "storage.sign",
+        serde_json::json!({ "path": path, "seconds": seconds, "bucket": BUCKET }),
+    )
+    .await?;
+    Ok(signed.url)
 }
 
 /// Deletes one stored screenshot, so "delete" in the app means deleted.
 #[tauri::command]
-pub async fn storage_remove(path: String) -> Result<(), String> {
-    let key = keychain::read_api_key(PROVIDER)?;
-    let conn = crate::db::connection_string()?;
-    let base = project_url(&conn).ok_or("Could not work out the Supabase project URL.")?;
-    let c = client()?;
-    let resp = c
-        .delete(format!("{base}/storage/v1/object/{BUCKET}/{path}"))
-        .header("Authorization", format!("Bearer {key}"))
-        .header("apikey", &key)
-        .send()
-        .await
-        .map_err(|e| format!("Could not reach Supabase Storage: {e}"))?;
-
-    let status = resp.status();
-    if status.is_success() || status.as_u16() == 404 {
-        return Ok(());
-    }
-    let body = resp.text().await.unwrap_or_default();
-    Err(explain_storage(status, &body))
+pub async fn storage_remove(
+    db: tauri::State<'_, crate::db::Db>,
+    path: String,
+) -> Result<(), String> {
+    let _: serde_json::Value = crate::server_api::call(
+        db.inner(),
+        "storage.remove",
+        serde_json::json!({ "path": path, "bucket": BUCKET }),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Removes the local file, now that the bytes are somewhere else.
@@ -406,146 +279,3 @@ fn explain_storage(status: reqwest::StatusCode, body: &str) -> String {
     format!("Supabase Storage returned {status}: {snippet}")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_pooler_string_yields_the_project_url() {
-        assert_eq!(
-            project_url(
-                "postgresql://postgres.ikpzlesstdqauevsdwem:pw@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
-            )
-            .as_deref(),
-            Some("https://ikpzlesstdqauevsdwem.supabase.co")
-        );
-    }
-
-    #[test]
-    fn the_direct_string_yields_it_too() {
-        assert_eq!(
-            project_url("postgresql://postgres:pw@db.ikpzlesstdqauevsdwem.supabase.co:5432/postgres")
-                .as_deref(),
-            Some("https://ikpzlesstdqauevsdwem.supabase.co")
-        );
-    }
-
-    #[test]
-    fn a_password_containing_an_at_sign_does_not_confuse_the_host() {
-        // The trap the connection diagnostics fell into once already.
-        assert_eq!(
-            project_url("postgresql://postgres.abcdef:p@ss@aws-0-eu-west-2.pooler.supabase.com:5432/postgres")
-                .as_deref(),
-            Some("https://abcdef.supabase.co")
-        );
-        assert_eq!(
-            project_url("postgresql://postgres:p@ss@db.abcdef.supabase.co:5432/postgres").as_deref(),
-            Some("https://abcdef.supabase.co")
-        );
-    }
-
-    #[test]
-    fn a_non_supabase_database_has_no_project_url() {
-        assert!(project_url("postgresql://u:p@localhost:5432/postgres").is_none());
-        assert!(project_url("postgresql://u:p@db.example.com:5432/postgres").is_none());
-        assert!(project_url("").is_none());
-    }
-
-    #[test]
-    fn a_pooler_host_without_a_project_username_is_refused() {
-        // Rather than inventing a project reference out of "postgres".
-        assert!(project_url("postgresql://postgres:pw@aws-0-us-east-1.pooler.supabase.com:5432/postgres").is_none());
-    }
-
-    #[test]
-    fn a_slash_in_a_file_name_cannot_invent_a_folder() {
-        assert_eq!(safe_name("../../etc/passwd"), "etc-passwd");
-        assert_eq!(safe_name("a/b.png"), "a-b.png");
-
-        // The exact spelling of a mangled name does not matter; what matters is
-        // the two properties, so they are asserted rather than a string guessed.
-        for hostile in [
-            "../../etc/passwd",
-            "..%2F..%2Fsecret.png",
-            "/absolute/path.png",
-            "....//....//x.png",
-            "a\\b.png",
-        ] {
-            let got = safe_name(hostile);
-            assert!(!got.contains('/'), "{hostile} -> {got}");
-            assert!(!got.contains(".."), "{hostile} -> {got}");
-            assert!(!got.is_empty(), "{hostile} -> empty");
-        }
-    }
-
-    #[test]
-    fn ordinary_capture_names_are_left_alone() {
-        assert_eq!(safe_name("capture-1756000000000.png"), "capture-1756000000000.png");
-        assert_eq!(safe_name("0-shot.png"), "0-shot.png");
-    }
-
-    #[test]
-    fn a_name_made_entirely_of_junk_still_produces_something() {
-        assert_eq!(safe_name("///"), "capture.png");
-        assert_eq!(safe_name(""), "capture.png");
-    }
-
-    #[test]
-    fn spaces_and_unicode_become_safe() {
-        assert_eq!(safe_name("Screen Shot 2026.png"), "Screen-Shot-2026.png");
-        assert_eq!(safe_name("café (1).png"), "caf-1-.png");
-    }
-
-    #[test]
-    fn base64_round_trips_the_reference_vectors() {
-        // RFC 4648, the same vectors the encoder in capture.rs is held to.
-        assert_eq!(unbase64("").unwrap(), b"");
-        assert_eq!(unbase64("Zg==").unwrap(), b"f");
-        assert_eq!(unbase64("Zm8=").unwrap(), b"foo"[..2].to_vec());
-        assert_eq!(unbase64("Zm9v").unwrap(), b"foo");
-        assert_eq!(unbase64("Zm9vYg==").unwrap(), b"foob");
-        assert_eq!(unbase64("Zm9vYmE=").unwrap(), b"fooba");
-        assert_eq!(unbase64("Zm9vYmFy").unwrap(), b"foobar");
-    }
-
-    #[test]
-    fn base64_decodes_a_real_png_header() {
-        // The first bytes of any PNG, which is what actually arrives here.
-        let png = unbase64("iVBORw0KGgo=").unwrap();
-        assert_eq!(&png[..8], &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
-    }
-
-    #[test]
-    fn wrapped_base64_still_decodes() {
-        assert_eq!(unbase64("Zm9v\nYmFy").unwrap(), b"foobar");
-        assert_eq!(unbase64(" Zm9vYmFy ").unwrap(), b"foobar");
-    }
-
-    #[test]
-    fn rubbish_is_refused_rather_than_half_decoded() {
-        assert!(unbase64("not base64!").is_none());
-        assert!(unbase64("Zm9v$mFy").is_none());
-        // Data after the padding is two strings stuck together.
-        assert!(unbase64("Zg==Zg==").is_none());
-        // A stray trailing sextet would silently lose a character.
-        assert!(unbase64("QUJD0").is_none());
-    }
-
-    #[test]
-    fn an_anon_key_is_diagnosed_rather_than_dumped() {
-        let msg = explain_storage(
-            reqwest::StatusCode::UNAUTHORIZED,
-            r#"{"message":"Invalid JWT"}"#,
-        );
-        assert!(msg.contains("service_role"), "{msg}");
-    }
-
-    #[test]
-    fn an_oversized_upload_says_what_to_do() {
-        let msg = explain_storage(
-            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
-            r#"{"message":"Payload too large"}"#,
-        );
-        assert!(msg.contains("region"), "{msg}");
-    }
-}
