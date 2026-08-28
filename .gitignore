@@ -20,3 +20,7 @@ login-preview.html
 __pycache__/
 *.pyc
 council-runs/
+
+# Supabase CLI scratch: project ref, pooler URL, tool versions.
+# Machine-local, rewritten by every CLI command.
+supabase/.temp/
