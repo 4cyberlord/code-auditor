@@ -1,3 +1,6 @@
+// Hermetic: config now comes from the database, and this test must not inherit
+// whatever is in a developer's .development.env.
+process.env.CODE_AUDITOR_CONFIG = "off";
 process.env.SUPABASE_URL = "https://project.supabase.co";
 process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role";
 process.env.TOKENROUTER_API_KEY = "tokenrouter";

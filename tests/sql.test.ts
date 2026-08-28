@@ -67,7 +67,7 @@ for (const m of schemaSql.matchAll(
 }
 
 console.log("\n1. the schema parses");
-check("fifteen tables found", tables.size === 15, [...tables.keys()].join(", "));
+check("sixteen tables found", tables.size === 16, [...tables.keys()].join(", "));
 for (const t of [
   "sessions",
   "screenshots",
@@ -103,126 +103,38 @@ const rust = readdirSync(RUST_DIR)
 
 check("rust sources found", rust.length > 0, String(rust.length));
 
-/** Reads a balanced `(...)` starting at `open`, respecting Rust string literals. */
-function balanced(src: string, open: number): { body: string; end: number } {
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = open; i < src.length; i++) {
-    const c = src[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === "\\") esc = true;
-      else if (c === '"') inStr = false;
-      continue;
+// ------------------------------------------- 2: the SQL that still exists
+
+console.log("\n2. the SQL functions name only columns the schema has");
+//
+// Sections 2-4 used to scan Rust for `sqlx::query` calls: placeholders against
+// binds, `row.get("col")` against the schema, insert columns against values.
+// There is no SQL in Rust any more — it moved into `supabase/migrations.sql` as
+// plpgsql functions and into the Edge Function — so those checks were asserting
+// facts about an empty set, which is worse than not checking: a green tick for
+// work nobody is doing.
+//
+// What replaces them is the same idea aimed at where the SQL actually went.
+{
+  const fnBodies = [...schemaSql.matchAll(/create or replace function\s+(\w+)[\s\S]*?\n\$\$;/gi)];
+  check("the migration file defines functions", fnBodies.length > 0, `${fnBodies.length}`);
+
+  const known = new Set([...tables.values()].flatMap((cols) => [...cols]));
+  for (const fn of fnBodies) {
+    const name = fn[1];
+    // Columns named in `insert into <table> (a, b, c)` inside each function.
+    for (const ins of fn[0].matchAll(/insert into\s+(\w+)\s*\n?\s*\(([^)]*)\)/gi)) {
+      const table = ins[1];
+      const cols = ins[2].split(",").map((c) => c.trim()).filter(Boolean);
+      const schemaCols = tables.get(table);
+      if (!schemaCols) {
+        check(`${name}: ${table} is a table`, false, "unknown table");
+        continue;
+      }
+      const unknown = cols.filter((c) => !schemaCols.has(c));
+      check(`${name}: every column it writes into ${table} exists`, unknown.length === 0, unknown.join(","));
     }
-    if (c === '"') inStr = true;
-    else if (c === "(") depth++;
-    else if (c === ")") {
-      depth--;
-      if (depth === 0) return { body: src.slice(open + 1, i), end: i };
-    }
-  }
-  return { body: src.slice(open + 1), end: src.length };
-}
-
-const lineOf = (src: string, i: number) => src.slice(0, i).split("\n").length;
-
-// ------------------------------------------------ 2: binds vs placeholders
-
-console.log("\n2. every bind has a placeholder and vice versa");
-let queries = 0;
-let skipped = 0;
-
-for (const { file, src } of rust) {
-  for (const m of src.matchAll(/sqlx::query(?:_as)?\s*\(/g)) {
-    const open = m.index! + m[0].length - 1;
-    const { body, end } = balanced(src, open);
-    const line = lineOf(src, m.index!);
-
-    // `sqlx::query(sql)` where sql is a variable: the SQL is not here to read.
-    // Counted and reported rather than silently passed, so the number of
-    // unchecked call sites cannot creep up unnoticed.
-    if (!body.trim().startsWith('"') && !body.trim().startsWith("r#")) {
-      skipped++;
-      continue;
-    }
-    queries++;
-
-    const after = src.slice(end);
-    const stop = /\.\s*(execute|fetch_one|fetch_all|fetch_optional)\b/.exec(after);
-    const chain = after.slice(0, stop ? stop.index : 1200);
-    const binds = [...chain.matchAll(/\.\s*bind\s*\(/g)].length;
-
-    const nums = [...body.matchAll(/\$(\d+)/g)].map((x) => Number(x[1]));
-    const distinct = [...new Set(nums)].sort((a, b) => a - b);
-    const need = distinct.length ? Math.max(...distinct) : 0;
-
-    check(`${file}:${line} ${need} placeholder(s) / ${binds} bind(s)`, binds === need);
-    check(
-      `${file}:${line} placeholders numbered 1..${need}`,
-      distinct.length === need && distinct.every((n, i) => n === i + 1),
-      distinct.join(",")
-    );
-  }
-}
-console.log(`  (${queries} literal queries checked, ${skipped} built from a variable)`);
-check("most queries are literal and therefore checkable", queries > skipped);
-
-// ------------------------------------------------------ 3: column names
-
-console.log("\n3. every column named in Rust exists in the schema");
-const knownColumns = new Set<string>();
-for (const cols of tables.values()) for (const c of cols) knownColumns.add(c);
-// Values computed by a query rather than stored in a table.
-for (const c of ["count", "server_version", "table_name", "n"]) knownColumns.add(c);
-
-for (const { file, src } of rust) {
-  for (const m of src.matchAll(/\.get(?:::<[^>]+>)?\s*\(\s*"([a-z_][a-z0-9_]*)"\s*\)/g)) {
-    check(`${file}:${lineOf(src, m.index!)} row.get("${m[1]}")`, knownColumns.has(m[1]));
-  }
-}
-
-// ---------------------------------------------------- 4: insert arity
-
-console.log("\n4. inserts name as many columns as they give values");
-for (const { file, src } of rust) {
-  for (const m of src.matchAll(/insert into\s+(\w+)\s*\(/gi)) {
-    const line = lineOf(src, m.index!);
-    const colOpen = m.index! + m[0].length - 1;
-    const { body: colBody, end: colEnd } = balanced(src, colOpen);
-    const rest = src.slice(colEnd);
-    const vm = /\bvalues\s*\(/i.exec(rest);
-    if (!vm) continue;
-    const { body: valBody } = balanced(rest, vm.index + vm[0].length - 1);
-
-    const cols = colBody
-      .split(",")
-      .map((c) => c.trim().replace(/\s+/g, " "))
-      .filter(Boolean);
-
-    // Split on top-level commas only: `coalesce((select ...), 0)` is one value.
-    const vals: string[] = [];
-    let depth = 0;
-    let cur = "";
-    for (const c of valBody) {
-      if (c === "(") depth++;
-      if (c === ")") depth--;
-      if (c === "," && depth === 0) {
-        vals.push(cur);
-        cur = "";
-      } else cur += c;
-    }
-    if (cur.trim()) vals.push(cur);
-
-    check(
-      `${file}:${line} insert into ${m[1]}: ${cols.length} columns / ${vals.length} values`,
-      cols.length === vals.length
-    );
-
-    const known = tables.get(m[1]);
-    const unknown = known ? cols.filter((c) => !known.has(c)) : [];
-    check(`${file}:${line} all ${m[1]} columns exist`, unknown.length === 0, unknown.join(","));
+    void known;
   }
 }
 
