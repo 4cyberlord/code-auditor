@@ -24,6 +24,10 @@
  * turn concurrency into a wall of 429s that says nothing about the models.
  */
 
+// Configuration lives in the database now. This import has a top-level await,
+// so app_config is merged into process.env before anything below reads it.
+import "./lib/config.mjs";
+
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";

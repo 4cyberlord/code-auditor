@@ -12,6 +12,10 @@
  * layer is added.
  */
 
+// Configuration lives in the database now. This import has a top-level await,
+// so app_config is merged into process.env before anything below reads it.
+import "./lib/config.mjs";
+
 import { createSign } from "node:crypto";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { readFileSync } from "node:fs";
@@ -30,12 +34,66 @@ import {
 
 const SUPABASE_URL = mustEnv("SUPABASE_URL");
 const SUPABASE_SERVICE_ROLE_KEY = mustEnv("SUPABASE_SERVICE_ROLE_KEY");
-const TOKENROUTER_API_KEY = process.env.TOKENROUTER_API_KEY || "";
+/**
+ * The keys for whichever job is in hand.
+ *
+ * Provider keys belong to people now, not to the worker. `TOKENROUTER_API_KEY`
+ * used to be a module constant read once at import — correct while one person
+ * owned everything, and wrong the moment two accounts have their own, because
+ * every job would then be solved with whoever's key happened to load first and
+ * billed to them.
+ *
+ * The worker takes one job at a time, so a per-job scope is enough: load the
+ * owner's keys when the job is claimed, drop them when it finishes. Anything not
+ * set for that person falls through to the platform tier, and then to the
+ * worker's own environment for settings that are genuinely worker-wide.
+ */
+let jobSecrets = null;
+
+/** Platform rows are owned by the nil UUID. */
+const PLATFORM_OWNER = "00000000-0000-0000-0000-000000000000";
+
+/**
+ * No falling back to the worker's own environment once a job has an owner.
+ *
+ * The obvious `jobSecrets?.get(name) ?? process.env[name]` reintroduces exactly
+ * the bug this is meant to fix: a second account with no TokenRouter key saved
+ * would silently be solved with whatever key the worker was started with — and
+ * billed to that person. A job whose owner has not supplied a key must fail and
+ * say so, not quietly spend someone else's money.
+ *
+ * When `jobSecrets` is null there is no owner to charge — an older job from
+ * before phase 01, or the batch runner — and the worker's environment is the
+ * only answer available.
+ */
+function secret(name) {
+  if (jobSecrets) return String(jobSecrets.get(name) ?? "").trim();
+  return String(process.env[name] ?? "").trim();
+}
+
+async function loadOwnerSecrets(ownerId) {
+  if (!ownerId) {
+    jobSecrets = null;
+    return null;
+  }
+  jobSecrets = new Map();
+  // Ordered so the platform tier arrives first and the person's own row
+  // overwrites it — the nil UUID sorts before any real one.
+  const rows =
+    (await rest(
+      `app_config?select=key,value,owner_id&secret=eq.true` +
+        `&or=(owner_id.eq.${ownerId},owner_id.eq.${PLATFORM_OWNER})&order=owner_id.asc`
+    )) ?? [];
+  for (const row of rows) {
+    if (row.value) jobSecrets.set(row.key, row.value);
+  }
+  return jobSecrets;
+}
 const WORKER_ID = process.env.CODE_AUDITOR_WORKER_ID || `worker-${process.pid}`;
 const POLL_MS = Number(process.env.CODE_AUDITOR_WORKER_POLL_MS || 5000);
 const ONCE = process.argv.includes("--once");
 const STORAGE_BUCKET = "screenshots";
-const APP_DISPLAY_NAME = "Code Editor";
+const APP_DISPLAY_NAME = "Council Editor";
 const SLOW_JOB_MS = Number(process.env.CODE_AUDITOR_SLOW_JOB_MS || 180_000);
 
 initObservability({ service: "cloud-worker", workerId: WORKER_ID });
@@ -327,7 +385,7 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
         method: "POST",
         signal: controller.signal,
         headers: {
-          authorization: `Bearer ${TOKENROUTER_API_KEY}`,
+          authorization: `Bearer ${secret("TOKENROUTER_API_KEY")}`,
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -425,7 +483,7 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
         method: "POST",
         signal: controller.signal,
         headers: {
-          authorization: `Bearer ${TOKENROUTER_API_KEY}`,
+          authorization: `Bearer ${secret("TOKENROUTER_API_KEY")}`,
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -599,7 +657,7 @@ function runtimeFor(language, code) {
 async function runLocalCode(language, code, timeoutMs = LOCAL_RUN_TIMEOUT_MS) {
   const runtime = runtimeFor(language, code);
   if (!runtime) throw new Error(`Unsupported benchmark language: ${language || "unknown"}`);
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "code-auditor-worker-"));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "council-editor-worker-"));
   const started = Date.now();
   let timedOut = false;
   try {
@@ -654,7 +712,7 @@ function shellSingle(s) {
 function remoteScript(language, code, providerLabel = "remote") {
   const encoded = Buffer.from(code, "utf8").toString("base64");
   return `set -u
-tmp="$(mktemp -d "\${TMPDIR:-/tmp}/code-auditor-bench.XXXXXX")" || exit 98
+tmp="$(mktemp -d "\${TMPDIR:-/tmp}/council-editor-bench.XXXXXX")" || exit 98
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT
 cd "$tmp" || exit 98
@@ -827,7 +885,7 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
 }
 
 function executionProvider(settings) {
-  const fallback = process.env.E2B_API_KEY ? "e2b" : "local";
+  const fallback = secret("E2B_API_KEY") ? "e2b" : "local";
   return String(
     settings.executionProvider ||
       process.env.CODE_AUDITOR_EXECUTION_PROVIDER ||
@@ -840,8 +898,8 @@ function executionProvider(settings) {
 async function runVerification(settings, suite, program) {
   const provider = executionProvider(settings);
   if (provider === "e2b") {
-    if (!process.env.E2B_API_KEY) {
-      throw new Error("E2B_API_KEY is missing, so E2B benchmark execution cannot run.");
+    if (!secret("E2B_API_KEY")) {
+      throw new Error("No E2B key is saved for the account that owns this job.");
     }
     return runE2BCode(suite.language, program, Number(settings.e2bTimeoutMs || REMOTE_RUN_TIMEOUT_MS));
   }
@@ -938,7 +996,7 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
         try {
           const gha = await runGithubBenchmark({
             repo: repoFor(),
-            token: String(settings.githubToken || process.env.CODE_AUDITOR_GITHUB_TOKEN || ""),
+            token: String(settings.githubToken || secret("CODE_AUDITOR_GITHUB_TOKEN") || secret("GITHUB_TOKEN") || ""),
             workflow: String(settings.githubWorkflow || process.env.CODE_AUDITOR_GITHUB_WORKFLOW || "cloud-benchmark.yml"),
             ref: String(settings.githubRef || process.env.CODE_AUDITOR_GITHUB_REF || "main"),
             correlationId,
@@ -1407,24 +1465,27 @@ export async function runCouncilJob(job) {
   await addEvent(job.id, "info", "claimed", "Cloud worker claimed the job.");
   await notify(job.id, APP_DISPLAY_NAME, "Council job started.");
 
-  if (!TOKENROUTER_API_KEY) {
+  // Whose job is this, and therefore whose keys pay for it.
+  await loadOwnerSecrets(job.owner_id);
+
+  if (!secret("TOKENROUTER_API_KEY")) {
     await addEvent(
       job.id,
       "error",
       "needs_attention",
-      "TOKENROUTER_API_KEY is missing from the worker environment."
+      "No TokenRouter key is saved for the account that owns this job."
     );
     await patchJob(job.id, {
       status: "needs_attention",
       progress_phase: "needs_attention",
-      error: "TOKENROUTER_API_KEY is missing from the worker environment.",
+      error: "No TokenRouter key is saved for the account that owns this job.",
       finished_at: new Date().toISOString(),
     });
     await notify(job.id, APP_DISPLAY_NAME, "Council job needs TokenRouter configuration.");
     await notifyOps({
       level: "warn",
       title: "Council job needs attention",
-      body: "TOKENROUTER_API_KEY is missing from the worker environment.",
+      body: "No TokenRouter key is saved for the account that owns this job.",
       jobId: job.id,
       phase: "needs_attention",
     }).catch(() => {});
@@ -1471,7 +1532,7 @@ export async function runCouncilJob(job) {
     );
   }
 
-  if (!process.env.CODE_AUDITOR_GITHUB_TOKEN && !process.env.GITHUB_TOKEN && !process.env.GH_TOKEN) {
+  if (!secret("CODE_AUDITOR_GITHUB_TOKEN") && !secret("GITHUB_TOKEN") && !secret("GH_TOKEN")) {
     await addEvent(
       job.id,
       "warn",
@@ -1480,7 +1541,7 @@ export async function runCouncilJob(job) {
     );
   }
 
-  if (executionProvider(settings) === "e2b" && !process.env.E2B_API_KEY) {
+  if (executionProvider(settings) === "e2b" && !secret("E2B_API_KEY")) {
     await addEvent(
       job.id,
       "warn",

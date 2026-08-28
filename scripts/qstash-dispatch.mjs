@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// Configuration lives in the database now. This import has a top-level await,
+// so app_config is merged into process.env before anything below reads it.
+import "./lib/config.mjs";
+
 import { Client } from "@upstash/qstash";
 
 function usage() {

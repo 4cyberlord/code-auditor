@@ -15,6 +15,10 @@
  * the class had no main method, this is where you find that out.
  */
 
+// Configuration lives in the database now. This import has a top-level await,
+// so app_config is merged into process.env before anything below reads it.
+import "./lib/config.mjs";
+
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 

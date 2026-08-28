@@ -23,6 +23,10 @@
  * produces is a bug rather than a mystery.
  */
 
+// Configuration lives in the database now. This import has a top-level await,
+// so app_config is merged into process.env before anything below reads it.
+import "./lib/config.mjs";
+
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -31,7 +35,7 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 // Must match keychain.rs, or this tests a key the app will never read.
-const KEYCHAIN_SERVICE = "com.charles.codeauditor";
+const KEYCHAIN_SERVICE = "com.charles.councileditor";
 const KEYCHAIN_ACCOUNT = "googlevision";
 
 const EXPECTED = [

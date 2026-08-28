@@ -14,9 +14,13 @@
  * Nothing is written, nothing is deleted, and no secret is printed.
  */
 
+// Configuration lives in the database now. This import has a top-level await,
+// so app_config is merged into process.env before anything below reads it.
+import "./lib/config.mjs";
+
 import { execFileSync } from "node:child_process";
 
-const SERVICE = "com.charles.codeauditor";
+const SERVICE = "com.charles.councileditor";
 const BUCKET = "screenshots";
 
 const g = (s) => `\x1b[32m${s}\x1b[0m`;

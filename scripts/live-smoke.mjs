@@ -12,6 +12,10 @@
  * Secrets are never printed.
  */
 
+// Configuration lives in the database now. This import has a top-level await,
+// so app_config is merged into process.env before anything below reads it.
+import "./lib/config.mjs";
+
 import { createHash, createSign, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
@@ -21,7 +25,7 @@ import { pathToFileURL } from "node:url";
 const ROOT = process.cwd();
 const ENV_PATH = path.join(ROOT, ".development.env");
 const BUCKET = "screenshots";
-const APP = "Code Editor";
+const APP = "Council Editor";
 const args = new Set(process.argv.slice(2));
 const SHOULD_SOLVE = !args.has("--no-solve");
 const SHOULD_NOTIFY_TELEGRAM = !args.has("--no-telegram");

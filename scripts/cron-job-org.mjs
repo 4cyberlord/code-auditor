@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// Configuration lives in the database now. Imports are evaluated before this
+// module's body, so app_config is in process.env by the time `apiKey` is read.
+import "./lib/config.mjs";
+
 const API = "https://api.cron-job.org";
 const apiKey = process.env.CRON_JOB_ORG_API_KEY;
 
@@ -10,7 +14,7 @@ function usage() {
 
 Environment:
   CODE_AUDITOR_WORKER_TICK_URL   HTTPS endpoint cron-job.org should call
-  CODE_AUDITOR_CRON_TITLE        Default: Code Editor cloud worker tick
+  CODE_AUDITOR_CRON_TITLE        Default: Council Editor cloud worker tick
   CODE_AUDITOR_CRON_MINUTES      Default: 5
   CODE_AUDITOR_CRON_TIMEZONE     Default: UTC
   CODE_AUDITOR_WORKER_TICK_SECRET Optional bearer token sent to your worker endpoint`);
@@ -54,14 +58,14 @@ function workerJob() {
   }
   const headers = {
     "content-type": "application/json",
-    "x-code-auditor-source": "cron-job.org",
+    "x-council-editor-source": "cron-job.org",
   };
   const secret = process.env.CODE_AUDITOR_WORKER_TICK_SECRET || process.env.CODE_AUDITOR_CRON_SECRET;
   if (secret) {
     headers.authorization = `Bearer ${secret}`;
   }
   return {
-    title: process.env.CODE_AUDITOR_CRON_TITLE || "Code Editor cloud worker tick",
+    title: process.env.CODE_AUDITOR_CRON_TITLE || "Council Editor cloud worker tick",
     enabled: true,
     saveResponses: true,
     url,

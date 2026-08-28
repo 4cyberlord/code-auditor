@@ -18,10 +18,14 @@
  * apart.
  */
 
+// Configuration lives in the database now. This import has a top-level await,
+// so app_config is merged into process.env before anything below reads it.
+import "./lib/config.mjs";
+
 import { execFileSync } from "node:child_process";
 import { randomUUID, createHash } from "node:crypto";
 
-const SERVICE = "com.charles.codeauditor";
+const SERVICE = "com.charles.councileditor";
 const STORAGE_ACCOUNT = "supabase_storage";
 const DB_ACCOUNT = "supabase-url";
 const BUCKET = "screenshots";
