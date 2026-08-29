@@ -17,7 +17,7 @@
  * paste into a bug report is a config tool you will stop using.
  */
 
-import { BOOTSTRAP, looksSecret, readEnvFile } from "./lib/config.mjs";
+import { BOOTSTRAP, looksSecret, PROCESS_LOCAL, readEnvFile } from "./lib/config.mjs";
 
 const argv = new Set(process.argv.slice(2));
 const DRY = argv.has("--dry-run");
@@ -101,7 +101,7 @@ const skipped = [];
 const refused = [];
 const rows = [];
 for (const [key, value] of file) {
-  if (BOOTSTRAP.has(key)) {
+  if (BOOTSTRAP.has(key) || PROCESS_LOCAL.has(key)) {
     skipped.push(key);
     continue;
   }
@@ -114,7 +114,13 @@ for (const [key, value] of file) {
 
 console.log(`\n${rows.length} variable(s) to store, ${skipped.length} kept local\n`);
 for (const key of skipped) {
-  console.log(dim(`  app    ${key}  (opens the database — set in Settings, read from the Keychain)`));
+  console.log(
+    dim(
+      PROCESS_LOCAL.has(key)
+        ? `  local  ${key}  (belongs to the process that starts, not to configuration)`
+        : `  app    ${key}  (opens the database — set in Settings, read from the Keychain)`
+    )
+  );
 }
 console.log();
 for (const r of rows) console.log(`  ${r.secret ? "🔒" : "  "} ${r.key}`);

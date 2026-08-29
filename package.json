@@ -40,7 +40,8 @@
     "check": "npm run typecheck && npm run lint && npm test && npm run check:rust",
     "tauri": "tauri",
     "app:dev": "tauri dev",
-    "app:build": "tauri build --bundles app && node scripts/package-dmg.mjs"
+    "app:build": "tauri build --bundles app && node scripts/package-dmg.mjs",
+    "app:build:signed": "node scripts/build-signed.mjs"
   },
   "dependencies": {
     "@e2b/code-interpreter": "^2.7.2",

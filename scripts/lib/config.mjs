@@ -84,6 +84,17 @@ export function projectUrl(conn) {
   return null;
 }
 
+/**
+ * Variables that describe how a process is being run, not how it is configured.
+ *
+ * These must never be injected. `NODE_ENV=development` sitting in an env file is
+ * correct for `npm run dev` and wrong for `next build` — and a production build
+ * that thinks it is a development build does not fail loudly, it emits
+ * Pages-Router error pages into an App-Router project and dies on `/500`. The
+ * process that starts a build owns these; configuration does not get a say.
+ */
+export const PROCESS_LOCAL = new Set(["NODE_ENV", "PORT", "PWD", "HOME", "PATH", "SHELL", "TMPDIR"]);
+
 /** The four that cannot be stored in the database they open. */
 export const BOOTSTRAP = new Set([
   "DATABASE_URL",
@@ -129,6 +140,7 @@ export function readEnvFile(dir = process.cwd()) {
 /** Fill `process.env` from a file, without overriding what is already set. */
 function applyFile() {
   for (const [k, v] of readEnvFile()) {
+    if (PROCESS_LOCAL.has(k)) continue;
     if (!process.env[k]) process.env[k] = v;
   }
 }
@@ -246,7 +258,7 @@ export async function loadConfig({ quiet = true } = {}) {
 
   let filled = 0;
   for (const row of rows ?? []) {
-    if (BOOTSTRAP.has(row.key)) continue;
+    if (BOOTSTRAP.has(row.key) || PROCESS_LOCAL.has(row.key)) continue;
     if (process.env[row.key]) continue;
     process.env[row.key] = row.value ?? "";
     filled++;
