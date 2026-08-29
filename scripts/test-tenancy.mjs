@@ -79,6 +79,13 @@ let targetSessionId = null;
 async function cleanup() {
   try {
     if (targetSessionId) await db(`sessions?id=eq.${targetSessionId}`, { method: "DELETE" });
+    // The probe creates a session of its own in section 3. Delete it explicitly
+    // rather than relying on the account delete to cascade: until
+    // tenancy-constrain.sql has run there is no foreign key to cascade along, so
+    // the session outlives its owner — and an orphan is exactly what stops that
+    // constraint from being added. The test that proves ownership works should
+    // not be the thing leaving rows with no owner.
+    if (probeUserId) await db(`sessions?owner_id=eq.${probeUserId}`, { method: "DELETE" });
     if (probeUserId) await db(`app_users?id=eq.${probeUserId}`, { method: "DELETE" });
   } catch (err) {
     console.error(r(`\nCleanup failed: ${err.message}`));

@@ -69,7 +69,14 @@ async function count(table, query = "") {
 console.log(`\nTenancy audit · ${URL_.replace(/^https:\/\//, "")}\n`);
 
 let unowned = 0;
+let orphaned = 0;
 let missingColumn = 0;
+
+// The accounts that exist, to compare owner_id against.
+const accountRows = await fetch(`${URL_}/rest/v1/app_users?select=id`, { headers });
+const accounts = new Set(
+  accountRows.ok ? (await accountRows.json()).map((r2) => r2.id) : []
+);
 
 for (const table of TABLES) {
   const all = await count(table);
@@ -79,6 +86,10 @@ for (const table of TABLES) {
     continue;
   }
 
+  // Two ways a row can be unowned, and this script only checked one of them.
+  // A null owner is the obvious case; an owner_id pointing at an account that
+  // no longer exists is the one that actually blocked the constraint, because
+  // "every row has an owner" was true and the foreign key still refused.
   const nulls = await count(table, "&owner_id=is.null");
   if (nulls.error) {
     // A 400 here means the column is not there yet — the migration has not run.
@@ -87,11 +98,25 @@ for (const table of TABLES) {
     continue;
   }
 
-  const ok = nulls.total === 0;
+  // Postgrest cannot express "not in another table", so the owners are compared
+  // here: every distinct owner_id on the table, against the accounts that exist.
+  const owners = await fetch(
+    `${URL_}/rest/v1/${table}?select=owner_id&owner_id=not.is.null`,
+    { headers }
+  );
+  const seen = owners.ok
+    ? new Set((await owners.json()).map((r2) => r2.owner_id).filter(Boolean))
+    : new Set();
+  const dangling = [...seen].filter((id) => !accounts.has(id));
+
+  const ok = nulls.total === 0 && dangling.length === 0;
   unowned += nulls.total;
+  orphaned += dangling.length;
   const shape = ok
     ? g(`all ${all.total} owned`)
-    : r(`${nulls.total} of ${all.total} unowned`);
+    : nulls.total
+      ? r(`${nulls.total} of ${all.total} unowned`)
+      : r(`${dangling.length} owner(s) that no longer exist`);
   console.log(`  ${ok ? g("ok") : r("!!")} ${table.padEnd(24)} ${shape}`);
 }
 
@@ -102,6 +127,15 @@ if (missingColumn) {
   console.log(
     y("The migration has not run yet.") +
       "\nLaunch the app once — it applies migrations.sql on connect — then run this again.\n"
+  );
+  process.exit(1);
+}
+
+if (orphaned) {
+  console.log(
+    r(`${orphaned} owner id(s) point at accounts that no longer exist.`) +
+      "\nThat is what makes tenancy-constrain.sql fail: the rows have an owner,\n" +
+      "the owner is not there. Run supabase/tenancy-orphans.sql first.\n"
   );
   process.exit(1);
 }
