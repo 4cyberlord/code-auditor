@@ -1,10 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   EXTRA_AGENTS,
   FREE_ROUTER_MODELS,
+  CODING_BRIDGE,
   GATEWAY,
   PROVIDERS,
   PROVIDER_ORDER,
@@ -15,6 +17,14 @@ import {
 import { MAX_IMAGES, MAX_TOKENS_RANGE, useStore } from "@/lib/store";
 import { HOME_ZONE, detectZone, isUsableZone, zoneLabel } from "@/lib/when";
 import * as bridge from "@/lib/bridge";
+import {
+  CODING_QWEN_MAX_TOKENS,
+  inspectCodingBridge,
+  loadCodingBridgeConfig,
+  saveCodingBridgeConfig,
+  type CodingBridgeConfig,
+  type CodingBridgeHealth,
+} from "@/lib/codingIntelligence";
 import AccountCard from "./AccountCard";
 import HelperCard from "./HelperCard";
 import { classifyProbeResult } from "@/lib/probeFit";
@@ -180,6 +190,252 @@ function StorageCard() {
 
       {note && (
         <p className="hint" style={{ color: "var(--text)" }}>
+          {note}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function CodingBridgeCard() {
+  const [config, setConfig] = useState<CodingBridgeConfig>(() => loadCodingBridgeConfig());
+  const [draftKey, setDraftKey] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [health, setHealth] = useState<CodingBridgeHealth | null>(null);
+
+  useEffect(() => {
+    void bridge.hasApiKey(CODING_BRIDGE.id).then(setSaved);
+  }, []);
+
+  const patchConfig = (patch: Partial<CodingBridgeConfig>) => {
+    const next = { ...config, ...patch };
+    setConfig(next);
+    window.setTimeout(() => saveCodingBridgeConfig(next), 0);
+  };
+
+  const saveKey = async () => {
+    if (!draftKey.trim()) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      await bridge.setApiKey(CODING_BRIDGE.id, draftKey.trim());
+      setDraftKey("");
+      setSaved(true);
+      setNote("Saved. The Coding workspace will use this bridge key when it calls the local agent.");
+    } catch (err) {
+      setNote(String(err).replace(/^Error:\s*/, ""));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeKey = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      await bridge.deleteApiKey(CODING_BRIDGE.id);
+      setSaved(false);
+      setNote("Removed. The Coding workspace will use Bearer local unless you save a key again.");
+    } catch (err) {
+      setNote(String(err).replace(/^Error:\s*/, ""));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const check = async () => {
+    setChecking(true);
+    setNote(null);
+    try {
+      const inspected = await inspectCodingBridge(config, draftKey);
+      setHealth(inspected.health);
+      setConfig(inspected.config);
+      saveCodingBridgeConfig(inspected.config);
+      setNote("Connected. Model and bridge limits were refreshed from the local bridge.");
+    } catch (err) {
+      setHealth(null);
+      setNote(`Bridge check failed: ${String(err).replace(/^Error:\s*/, "")}`);
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const chooseProjectRoot = async () => {
+    setNote(null);
+    try {
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: "Choose Coding Project Root",
+      });
+      if (typeof picked === "string" && picked.trim()) {
+        patchConfig({ projectRoot: picked });
+      }
+    } catch (err) {
+      setNote(`Could not open folder picker: ${String(err).replace(/^Error:\s*/, "")}`);
+    }
+  };
+
+  return (
+    <div className="provider-card" data-accent="coding-bridge">
+      <div className="top">
+        <span className="dot" style={{ background: CODING_BRIDGE.accent }} />
+        <span className="name">{CODING_BRIDGE.label}</span>
+        <span className="vendor">local coding agent bridge</span>
+        <span className="badge" data-tone={health?.ok ? "good" : saved ? "good" : "warn"}>
+          {health?.ok ? "connected" : saved ? "key saved" : "local default"}
+        </span>
+        <span className="spacer" />
+        <button className="btn tiny" onClick={() => void check()} disabled={busy || checking}>
+          {checking ? "Checking..." : "Check bridge"}
+        </button>
+      </div>
+
+      <div className="row">
+        <label htmlFor="coding-bridge-url">Chat URL</label>
+        <input
+          id="coding-bridge-url"
+          className="field mono"
+          value={config.url}
+          spellCheck={false}
+          onChange={(e) => patchConfig({ url: e.target.value })}
+        />
+      </div>
+
+      <div className="row">
+        <label htmlFor="coding-bridge-model">Model</label>
+        <input
+          id="coding-bridge-model"
+          className="field mono"
+          value={config.model}
+          spellCheck={false}
+          onChange={(e) => patchConfig({ model: e.target.value })}
+        />
+      </div>
+
+      <div className="row">
+        <label htmlFor="coding-project-root">Project root</label>
+        <div className="with-btn">
+          <input
+            id="coding-project-root"
+            className="field mono"
+            value={config.projectRoot}
+            spellCheck={false}
+            placeholder="/path/to/the/project/this-agent-can-edit"
+            onChange={(e) => patchConfig({ projectRoot: e.target.value })}
+          />
+          <button className="btn tiny" onClick={() => void chooseProjectRoot()} disabled={busy || checking}>
+            Choose
+          </button>
+        </div>
+      </div>
+
+      <div className="row">
+        <label htmlFor="coding-bridge-key">API key</label>
+        <div className="with-btn">
+          <input
+            id="coding-bridge-key"
+            className="field mono"
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={saved ? "••••••••  saved" : CODING_BRIDGE.keyHint}
+            value={draftKey}
+            onChange={(e) => setDraftKey(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void saveKey();
+            }}
+          />
+          <button className="btn tiny" onClick={() => void saveKey()} disabled={busy || !draftKey.trim()}>
+            Save
+          </button>
+          {saved && (
+            <button className="btn tiny ghost" onClick={() => void removeKey()} disabled={busy}>
+              Remove
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="row">
+        <label htmlFor="coding-bridge-tokens">Max tokens</label>
+        <div className="settings-two-fields">
+          <input
+            id="coding-bridge-tokens"
+            className="field mono"
+            type="number"
+            min={256}
+            max={65536}
+            value={config.maxTokens}
+            onChange={(e) => patchConfig({ maxTokens: Number(e.target.value) || CODING_QWEN_MAX_TOKENS })}
+          />
+          <input
+            aria-label="Coding bridge temperature"
+            className="field mono"
+            type="number"
+            min={0}
+            max={2}
+            step={0.1}
+            value={config.temperature}
+            onChange={(e) => patchConfig({ temperature: Number(e.target.value) || 0 })}
+          />
+        </div>
+      </div>
+
+      {health && (
+        <div className="settings-report">
+          <div>
+            <span>Bridge</span>
+            <strong>{health.bridge ?? "connected"}</strong>
+          </div>
+          <div>
+            <span>Upstream</span>
+            <strong>{health.upstream ?? "unknown"}</strong>
+          </div>
+          <div>
+            <span>Mechanisms</span>
+            <strong>
+              {[
+                health.manual_tool_translation ? "manual tool translation" : null,
+                health.mutation_completion_enforced ? "mutation enforced" : null,
+                health.verification_after_mutation ? "verification enforced" : null,
+              ]
+                .filter(Boolean)
+                .join(", ") || "standard chat completion"}
+            </strong>
+          </div>
+          <div>
+            <span>Allowed tools</span>
+            <strong>{health.allowed_tools?.join(", ") || "not reported until bridge restart"}</strong>
+          </div>
+        </div>
+      )}
+
+      <div className="settings-report">
+        <div>
+          <span>Bridge</span>
+          <strong>{config.url}</strong>
+        </div>
+        <div>
+          <span>Role</span>
+          <strong>Reasoning only. The app owns repository changes.</strong>
+        </div>
+        <div>
+          <span>Settings</span>
+          <strong>Bridge URL, model, key, and limits are configured here.</strong>
+        </div>
+      </div>
+
+      <p className="hint">
+        Defaults target a local OpenAI-compatible bridge. The key is only needed when
+        that bridge starts with <span className="mono">BRIDGE_API_KEY</span>.
+      </p>
+
+      {note && (
+        <p className="hint" style={{ color: note.includes("failed") ? "var(--bad)" : "var(--text)" }}>
           {note}
         </p>
       )}
@@ -1683,6 +1939,7 @@ export default function SettingsDialog() {
         <div className="content">
           {tab === "models" && (
             <>
+              <CodingBridgeCard />
               <GatewayCard />
               {PROVIDER_ORDER.map((p) => (
                 <ProviderCard key={p} id={p} />

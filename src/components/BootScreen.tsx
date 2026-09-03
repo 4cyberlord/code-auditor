@@ -14,7 +14,7 @@ import { useStore } from "@/lib/store";
  * a flash of defaults being corrected.
  *
  * It fades rather than cutting, because a hard swap at this size reads as a
- * flicker — and it is skipped entirely for anyone who asked for less motion.
+ * flicker.
  */
 export default function BootScreen() {
   const ready = useStore((s) => s.hydrated);
@@ -29,7 +29,6 @@ export default function BootScreen() {
     // see the empty shell through it.
     const raf = requestAnimationFrame(() => {
       el.setAttribute("data-done", "true");
-      window.setTimeout(() => el.remove(), 400);
     });
     return () => cancelAnimationFrame(raf);
   }, [ready]);

@@ -1,6 +1,7 @@
 mod auth;
 mod capture;
 mod background_helper;
+mod coding_tools;
 mod config;
 mod db;
 pub mod deployment;
@@ -114,7 +115,9 @@ pub fn run() {
     let screen_accel = accel("CODE_AUDITOR_SCREEN_KEY", ACCEL_CAPTURE_SCREEN);
     let solve_accel = accel("CODE_AUDITOR_SOLVE_KEY", ACCEL_SOLVE);
 
-    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init());
 
     // Global shortcuts are desktop-only; there is no mobile implementation.
     //
@@ -173,6 +176,11 @@ pub fn run() {
             secrets::has_api_key,
             providers::run_agent,
             providers::run_once,
+            providers::run_local_qwen,
+            providers::run_local_qwen_step,
+            providers::cancel_local_qwen,
+            providers::inspect_local_qwen,
+            coding_tools::coding_tool_execute,
             providers::cancel_run,
             providers::list_gateway_models,
             providers::probe_models,

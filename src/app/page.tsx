@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import AgentPane from "@/components/AgentPane";
 import BackgroundJobsPanel from "@/components/BackgroundJobsPanel";
 import ConsensusPanel from "@/components/ConsensusPanel";
 import SolutionCard from "@/components/SolutionCard";
 import CouncilPanel from "@/components/CouncilPanel";
+import CodingWorkspace from "@/components/CodingWorkspace";
 import BootScreen from "@/components/BootScreen";
 import HistoryPanel from "@/components/HistoryPanel";
 import InputBar from "@/components/InputBar";
@@ -16,6 +17,7 @@ import StartupLoader from "@/components/StartupLoader";
 import Splitter from "@/components/Splitter";
 import { useAgentEvents } from "@/lib/useAgentEvents";
 import { useGlobalShortcuts } from "@/lib/shortcuts";
+import { useWindowChrome } from "@/lib/windowChrome";
 import { useStore } from "@/lib/store";
 import Toasts from "@/components/Toasts";
 import LoginScreen from "@/components/LoginScreen";
@@ -63,6 +65,7 @@ export default function Page() {
 }
 
 function Workbench() {
+  const [workspace, setWorkspace] = useState<"council" | "coding">("council");
   const agents = useStore((s) => s.agents);
   const hydrated = useStore((s) => s.hydrated);
   const hydrate = useStore((s) => s.hydrate);
@@ -85,6 +88,7 @@ function Workbench() {
 
   useAgentEvents();
   useGlobalShortcuts();
+  useWindowChrome();
 
   useEffect(() => {
     devLog("workbench", "hydrate started");
@@ -119,6 +123,14 @@ function Workbench() {
           </span>
         </span>
         <span className="spacer" data-tauri-drag-region />
+        <div className="segmented" aria-label="Workspace">
+          <button data-on={workspace === "council"} onClick={() => setWorkspace("council")}>
+            Council
+          </button>
+          <button data-on={workspace === "coding"} onClick={() => setWorkspace("coding")}>
+            Coding
+          </button>
+        </div>
         {hydrated && !inTauri() && (
           <span className="badge" data-tone="warn" title="Model calls only work inside the desktop shell.">
             browser preview
@@ -147,54 +159,58 @@ function Workbench() {
 
       <ReadingPanel />
 
-      <div className="body">
-        {/* The count drives the pane layout in CSS; hard-wiring 2x2 broke the
-            moment a fifth provider joined. */}
-        <div className="grid" data-count={panes.length}>
-          {panes.map((a) => (
-            <AgentPane key={a.id} agent={a} />
-          ))}
-        </div>
+      {workspace === "coding" ? (
+        <CodingWorkspace />
+      ) : (
+        <div className="body">
+          {/* The count drives the pane layout in CSS; hard-wiring 2x2 broke the
+              moment a fifth provider joined. */}
+          <div className="grid" data-count={panes.length}>
+            {panes.map((a) => (
+              <AgentPane key={a.id} agent={a} />
+            ))}
+          </div>
 
-        {/* Dragging this makes the panes wider or the verdict wider. It writes
-            a CSS variable rather than moving anything, so the grid stays the
-            single source of truth about the layout. */}
-        <Splitter
-          axis="col"
-          variable="--rail-w"
-          min={260}
-          max={720}
-          reset={344}
-          storageKey="code-auditor.layout.rail"
-          invert
-        />
+          {/* Dragging this makes the panes wider or the verdict wider. It writes
+              a CSS variable rather than moving anything, so the grid stays the
+              single source of truth about the layout. */}
+          <Splitter
+            axis="col"
+            variable="--rail-w"
+            min={260}
+            max={720}
+            reset={344}
+            storageKey="code-auditor.layout.rail"
+            invert
+          />
 
-        {/* The verdict, and the drawers in one column. */}
-        <div className="rail" data-sessions={sessionsOpen} data-history={historyOpen}>
-          <CouncilPanel />
-          <SolutionCard />
-          <div className="solution-divider" aria-hidden="true" />
-          <ConsensusPanel />
-          <BackgroundJobsPanel />
-          <HistoryPanel />
-          {sessionsOpen && (
-            <Splitter
-              axis="row"
-              variable="--sessions-h"
-              min={120}
-              max={620}
-              reset={280}
-              storageKey="code-auditor.layout.sessions"
-              invert
-            />
-          )}
-          <SessionSidebar />
+          {/* The verdict, and the drawers in one column. */}
+          <div className="rail" data-sessions={sessionsOpen} data-history={historyOpen}>
+            <CouncilPanel />
+            <SolutionCard />
+            <div className="solution-divider" aria-hidden="true" />
+            <ConsensusPanel />
+            <BackgroundJobsPanel />
+            <HistoryPanel />
+            {sessionsOpen && (
+              <Splitter
+                axis="row"
+                variable="--sessions-h"
+                min={120}
+                max={620}
+                reset={280}
+                storageKey="code-auditor.layout.sessions"
+                invert
+              />
+            )}
+            <SessionSidebar />
+          </div>
         </div>
-      </div>
+      )}
 
       <BootScreen />
 
-      <InputBar />
+      {workspace === "council" && <InputBar />}
 
       <SettingsDialog />
 

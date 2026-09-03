@@ -59,9 +59,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             is open and nothing has mounted yet. It used to be a dark rectangle
             with nothing in it, which reads as a hang rather than a start.
 
-            It removes itself: `BootScreen` clears it once the app has state
-            worth showing, and the inline script below clears it too, so a
-            failure to hydrate cannot leave it stuck over a working app. */}
+            `BootScreen` fades it once the app has state worth showing, and the
+            inline script below does the same after a delay, so a failure to
+            hydrate cannot leave it stuck over a working app. */}
         <div id="boot" aria-hidden="true">
           <div className="boot-inner">
             <div className="boot-mark" aria-hidden="true">

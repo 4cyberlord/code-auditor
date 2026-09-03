@@ -111,6 +111,287 @@ fn default_max_tokens() -> u32 {
     8192
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalQwenRequest {
+    pub model: String,
+    /// Full chat-completions URL, for example http://127.0.0.1:8787/v1/chat/completions.
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    pub system_prompt: String,
+    pub user_text: String,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default)]
+    pub temperature: f32,
+    #[serde(default)]
+    pub messages: Option<Vec<Value>>,
+    #[serde(default)]
+    pub tools: Option<Vec<Value>>,
+    /// Identifies this run to the bridge so it can be stopped mid-flight. The
+    /// bridge tracks it under `x-bridge-run-id`; `cancel_local_qwen` sends the
+    /// same value back to tear the upstream call down.
+    #[serde(default)]
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalQwenCancelRequest {
+    /// Bridge root, e.g. http://127.0.0.1:8787/v1 — the same value the chat URL
+    /// is derived from.
+    pub base_url: String,
+    pub run_id: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalQwenInspectRequest {
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalQwenInspectResult {
+    pub health: Value,
+    pub models: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalQwenToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalQwenResponse {
+    pub content: String,
+    pub tool_calls: Vec<LocalQwenToolCall>,
+    /// The model's reasoning for this turn. The bridge forwards it as
+    /// `reasoning_content` when EXPOSE_REASONING is on; dropping it here left
+    /// the UI with tool calls and no account of why they were chosen.
+    #[serde(default)]
+    pub reasoning: String,
+}
+
+fn local_qwen_api_key(override_key: Option<&str>) -> String {
+    let saved_key = secrets::read_api_key("coding_bridge").ok();
+    override_key
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| saved_key.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+        .unwrap_or("local")
+        .to_string()
+}
+
+#[tauri::command]
+pub async fn inspect_local_qwen(req: LocalQwenInspectRequest) -> Result<LocalQwenInspectResult, String> {
+    crate::auth::require()?;
+    let base = req.base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err("Qwen base URL is empty.".into());
+    }
+    let api_key = local_qwen_api_key(req.api_key.as_deref());
+    let client = http_client()?;
+
+    let get_json = |url: String| {
+        client
+            .get(url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .timeout(ONCE_TIMEOUT)
+    };
+
+    let health_resp = get_json(format!("{base}/health"))
+        .send()
+        .await
+        .map_err(|e| format!("qwen health: {}", transport_detail(&e)))?;
+    let health_status = health_resp.status();
+    let health_text = health_resp.text().await.unwrap_or_default();
+    if !health_status.is_success() {
+        return Err(format!(
+            "qwen health {}: {}",
+            health_status,
+            truncate(&explain(&health_text), 600)
+        ));
+    }
+
+    let models_resp = get_json(format!("{base}/models"))
+        .send()
+        .await
+        .map_err(|e| format!("qwen models: {}", transport_detail(&e)))?;
+    let models_status = models_resp.status();
+    let models_text = models_resp.text().await.unwrap_or_default();
+    if !models_status.is_success() {
+        return Err(format!(
+            "qwen models {}: {}",
+            models_status,
+            truncate(&explain(&models_text), 600)
+        ));
+    }
+
+    Ok(LocalQwenInspectResult {
+        health: serde_json::from_str(&health_text)
+            .map_err(|e| format!("qwen health: response was not JSON ({e})"))?,
+        models: serde_json::from_str(&models_text)
+            .map_err(|e| format!("qwen models: response was not JSON ({e})"))?,
+    })
+}
+
+#[tauri::command]
+pub async fn run_local_qwen(req: LocalQwenRequest) -> Result<String, String> {
+    let response = run_local_qwen_step(req).await?;
+    if !response.content.trim().is_empty() {
+        return Ok(response.content);
+    }
+    if !response.tool_calls.is_empty() {
+        return Err("qwen returned tool calls, but this caller expected a final text response.".into());
+    }
+    Err("qwen returned an empty response.".into())
+}
+
+#[tauri::command]
+pub async fn run_local_qwen_step(req: LocalQwenRequest) -> Result<LocalQwenResponse, String> {
+    crate::auth::require()?;
+    let url = req.base_url.trim();
+    if url.is_empty() {
+        return Err("Qwen URL is empty.".into());
+    }
+
+    let messages = req.messages.unwrap_or_else(|| {
+        vec![
+            json!({ "role": "system", "content": req.system_prompt }),
+            json!({ "role": "user", "content": req.user_text }),
+        ]
+    });
+    let mut body = json!({
+        "model": req.model,
+        "temperature": req.temperature,
+        "max_tokens": req.max_tokens,
+        "messages": messages
+    });
+    if let Some(tools) = req.tools.filter(|tools| !tools.is_empty()) {
+        body["tools"] = Value::Array(tools);
+        body["tool_choice"] = json!("auto");
+    }
+    let api_key = local_qwen_api_key(req.api_key.as_deref());
+
+    let mut request = http_client()?
+        .post(url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .timeout(BRIDGE_TIMEOUT);
+    if let Some(run_id) = req.run_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        request = request.header("x-bridge-run-id", run_id);
+    }
+
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                // The generic transport wording sends people looking for a
+                // network fault. Past BRIDGE_TIMEOUT the bridge's own deadline
+                // has already come and gone, so the bridge is the thing to look
+                // at, not the connection.
+                format!(
+                    "qwen: the bridge did not answer within {}s. It is running, but a turn is \
+                     taking longer than its own {}s limit — check the bridge terminal for the \
+                     upstream error.",
+                    BRIDGE_TIMEOUT.as_secs(),
+                    240
+                )
+            } else {
+                format!("qwen: {}", transport_detail(&e))
+            }
+        })?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("qwen {}: {}", status, truncate(&explain(&text), 600)));
+    }
+    let v: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("qwen: response was not JSON ({e})"))?;
+    Ok(parse_local_qwen_response(&v))
+}
+
+/// Asks the bridge to stop a run. Deliberately forgiving: a run that already
+/// finished, or a bridge too old to know the endpoint, both mean "there is
+/// nothing left to stop", which is what the caller wanted.
+#[tauri::command]
+pub async fn cancel_local_qwen(req: LocalQwenCancelRequest) -> Result<bool, String> {
+    crate::auth::require()?;
+    let base = req.base_url.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return Err("Qwen base URL is empty.".into());
+    }
+    let run_id = req.run_id.trim();
+    if run_id.is_empty() {
+        return Err("Run id is empty.".into());
+    }
+    let api_key = local_qwen_api_key(req.api_key.as_deref());
+
+    let resp = http_client()?
+        .post(format!("{base}/cancel"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("x-bridge-run-id", run_id)
+        .json(&json!({ "id": run_id }))
+        // A stop that itself hangs is worse than no stop at all.
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| format!("qwen cancel: {}", transport_detail(&e)))?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err("This bridge does not support stopping a run; update it.".into());
+    }
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("qwen cancel {}: {}", status, truncate(&explain(&text), 300)));
+    }
+    Ok(serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|v| v["stopped"].as_bool())
+        .unwrap_or(true))
+}
+
+fn parse_local_qwen_response(v: &Value) -> LocalQwenResponse {
+    let message = &v["choices"][0]["message"];
+    let content = message["content"].as_str().unwrap_or_default().to_string();
+    // Different OpenAI-compatible servers name this differently; take whichever
+    // one is present rather than binding to the bridge's current choice.
+    let reasoning = message["reasoning_content"]
+        .as_str()
+        .or_else(|| message["reasoning"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    let tool_calls = message["tool_calls"]
+        .as_array()
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|call| {
+                    let function = &call["function"];
+                    let name = function["name"].as_str()?.to_string();
+                    let id = call["id"].as_str().unwrap_or("tool-call").to_string();
+                    let raw_args = function["arguments"].as_str().unwrap_or("{}");
+                    let arguments = serde_json::from_str(raw_args).unwrap_or_else(|_| json!({ "raw": raw_args }));
+                    Some(LocalQwenToolCall { id, name, arguments })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    LocalQwenResponse { content, tool_calls, reasoning }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DeltaPayload {
@@ -201,6 +482,16 @@ pub fn cancel_run(registry: State<'_, RunRegistry>, run_id: String) {
 /// to show it is alive and no cancel button wired to it. Bound it instead of
 /// letting the UI sit on "Judging…" indefinitely.
 const ONCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The coding bridge is not one model call: it runs a control loop of up to
+/// eight sequential upstream turns behind a single HTTP request. Held to
+/// ONCE_TIMEOUT it reliably loses the race, and the user is shown "operation
+/// timed out" with no sign of what the run had actually done.
+///
+/// The bridge bounds itself with MAX_RUN_SECONDS (240s by default) and returns
+/// what it has. This sits above that, so the bridge's own explanation is what
+/// arrives — the client timeout is the backstop, not the usual path.
+const BRIDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(420);
 
 /// One-shot, non-streaming call. Used by the consensus judge.
 #[tauri::command]

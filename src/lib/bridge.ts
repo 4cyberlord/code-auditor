@@ -86,6 +86,204 @@ export async function runOnce(req: RunRequest): Promise<string> {
   return invoke<string>("run_once", { req });
 }
 
+export interface LocalQwenRequest {
+  model: string;
+  /** Full chat-completions URL, for example http://127.0.0.1:8787/v1/chat/completions. */
+  baseUrl: string;
+  apiKey?: string;
+  systemPrompt: string;
+  userText: string;
+  maxTokens: number;
+  temperature: number;
+  messages?: unknown[];
+  tools?: unknown[];
+  /**
+   * Identifies the run to the bridge so `cancelLocalQwen` can stop it. Without
+   * one the request still works; it just cannot be called off once sent.
+   */
+  runId?: string;
+}
+
+export interface LocalQwenInspectRequest {
+  baseUrl: string;
+  apiKey?: string;
+}
+
+export interface LocalQwenCancelRequest {
+  /** Bridge root, e.g. http://127.0.0.1:8787/v1 (no /chat/completions). */
+  baseUrl: string;
+  runId: string;
+  apiKey?: string;
+}
+
+export interface LocalQwenInspectResult {
+  health: unknown;
+  models: unknown;
+}
+
+export interface LocalQwenToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface LocalQwenStepResponse {
+  content: string;
+  toolCalls: LocalQwenToolCall[];
+  /** The model's reasoning for this turn, when the bridge exposes it. */
+  reasoning: string;
+}
+
+export interface CodingToolRequest {
+  name: string;
+  root: string;
+  args: Record<string, unknown>;
+}
+
+/**
+ * Tool arguments arrive as a JSON string the model wrote, so malformed JSON is
+ * an ordinary outcome rather than a bug. Throwing here would abort the whole
+ * agent run; handing the raw text through lets the tool reject just that call.
+ */
+function parseToolArguments(raw: string | undefined): Record<string, unknown> {
+  if (!raw?.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : { raw };
+  } catch {
+    return { raw };
+  }
+}
+
+export async function runLocalQwen(req: LocalQwenRequest): Promise<string> {
+  if (!inTauri()) {
+    const res = await fetch(req.baseUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${req.apiKey?.trim() || "local"}`,
+        ...(req.runId ? { "x-bridge-run-id": req.runId } : {}),
+      },
+      body: JSON.stringify({
+        model: req.model,
+        temperature: req.temperature,
+        max_tokens: req.maxTokens,
+        messages: [
+          { role: "system", content: req.systemPrompt },
+          { role: "user", content: req.userText },
+        ],
+      }),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Qwen answered ${res.status}: ${text.slice(0, 600)}`);
+    const body = JSON.parse(text) as { choices?: Array<{ message?: { content?: string } }> };
+    const out = body.choices?.[0]?.message?.content ?? "";
+    if (!out.trim()) throw new Error("Qwen returned an empty response.");
+    return out;
+  }
+  return invoke<string>("run_local_qwen", { req });
+}
+
+export async function runLocalQwenStep(req: LocalQwenRequest): Promise<LocalQwenStepResponse> {
+  if (!inTauri()) {
+    const res = await fetch(req.baseUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${req.apiKey?.trim() || "local"}`,
+        ...(req.runId ? { "x-bridge-run-id": req.runId } : {}),
+      },
+      body: JSON.stringify({
+        model: req.model,
+        temperature: req.temperature,
+        max_tokens: req.maxTokens,
+        messages: req.messages ?? [
+          { role: "system", content: req.systemPrompt },
+          { role: "user", content: req.userText },
+        ],
+        tools: req.tools,
+        tool_choice: req.tools?.length ? "auto" : undefined,
+      }),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Qwen answered ${res.status}: ${text.slice(0, 600)}`);
+    const body = JSON.parse(text) as {
+      choices?: Array<{
+        message?: {
+          content?: string;
+          reasoning_content?: string;
+          reasoning?: string;
+          tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
+        };
+      }>;
+    };
+    const message = body.choices?.[0]?.message;
+    return {
+      content: message?.content ?? "",
+      reasoning: message?.reasoning_content ?? message?.reasoning ?? "",
+      toolCalls:
+        message?.tool_calls?.map((call) => ({
+          id: call.id ?? "tool-call",
+          name: call.function?.name ?? "",
+          arguments: parseToolArguments(call.function?.arguments),
+        })) ?? [],
+    };
+  }
+  return invoke<LocalQwenStepResponse>("run_local_qwen_step", { req });
+}
+
+/**
+ * Asks the bridge to stop a run mid-flight, tearing down the upstream call
+ * rather than waiting for it to finish. Returns whether anything was actually
+ * still running — a run that had just completed is not an error to stop.
+ */
+export async function cancelLocalQwen(req: LocalQwenCancelRequest): Promise<boolean> {
+  if (!inTauri()) {
+    const res = await fetch(`${req.baseUrl.replace(/\/+$/, "")}/cancel`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${req.apiKey?.trim() || "local"}`,
+        "x-bridge-run-id": req.runId,
+      },
+      body: JSON.stringify({ id: req.runId }),
+    });
+    if (res.status === 404) throw new Error("This bridge does not support stopping a run; update it.");
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Cancel ${res.status}: ${text.slice(0, 300)}`);
+    try {
+      return (JSON.parse(text) as { stopped?: boolean }).stopped ?? true;
+    } catch {
+      return true;
+    }
+  }
+  return invoke<boolean>("cancel_local_qwen", { req });
+}
+
+export async function executeCodingTool(req: CodingToolRequest): Promise<string> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  return invoke<string>("coding_tool_execute", { req });
+}
+
+export async function inspectLocalQwen(req: LocalQwenInspectRequest): Promise<LocalQwenInspectResult> {
+  if (!inTauri()) {
+    const headers = req.apiKey?.trim() ? { authorization: `Bearer ${req.apiKey.trim()}` } : undefined;
+    const [healthRes, modelsRes] = await Promise.all([
+      fetch(`${req.baseUrl.replace(/\/+$/, "")}/health`, { headers }),
+      fetch(`${req.baseUrl.replace(/\/+$/, "")}/models`, { headers }),
+    ]);
+    const healthText = await healthRes.text();
+    const modelsText = await modelsRes.text();
+    if (!healthRes.ok) throw new Error(`Health ${healthRes.status}: ${healthText.slice(0, 600)}`);
+    if (!modelsRes.ok) throw new Error(`Models ${modelsRes.status}: ${modelsText.slice(0, 600)}`);
+    return { health: JSON.parse(healthText), models: JSON.parse(modelsText) };
+  }
+  return invoke<LocalQwenInspectResult>("inspect_local_qwen", { req });
+}
+
+
 export interface Capture {
   /** PNG data URL, ready to hand to the downscale path. */
   dataUrl: string;

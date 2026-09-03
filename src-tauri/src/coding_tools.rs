@@ -1,0 +1,419 @@
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+
+use serde::Deserialize;
+use serde_json::Value;
+use tokio::process::Command;
+use tokio::time::{timeout, Duration};
+
+const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_LIST_ENTRIES: usize = 500;
+const MAX_BASH_BYTES: usize = 120_000;
+const MAX_MATCH_LINE_CHARS: usize = 400;
+
+/// Keeps one minified line from swallowing the whole tool result. Counts
+/// characters rather than bytes so a multi-byte char is never split.
+fn truncate_line(line: &str) -> String {
+    if line.chars().count() <= MAX_MATCH_LINE_CHARS {
+        return line.to_string();
+    }
+    let head: String = line.chars().take(MAX_MATCH_LINE_CHARS).collect();
+    format!("{head}…")
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodingToolRequest {
+    pub name: String,
+    pub root: String,
+    #[serde(default)]
+    pub args: Value,
+}
+
+#[tauri::command]
+pub async fn coding_tool_execute(req: CodingToolRequest) -> Result<String, String> {
+    crate::auth::require()?;
+    execute(req).await
+}
+
+async fn execute(req: CodingToolRequest) -> Result<String, String> {
+    let root = canonical_root(&req.root)?;
+    let name = req.name.trim().to_ascii_lowercase();
+    let args = req.args.as_object().ok_or("Tool arguments must be an object.")?;
+
+    match name.as_str() {
+        "read" => read_file(&root, path_arg(args)?),
+        "glob" => list_tree(&root, optional_path_arg(args).unwrap_or(".")),
+        "grep" => grep_tree(&root, optional_path_arg(args).unwrap_or("."), string_arg(args, &["pattern", "query", "search"])?),
+        "bash" => run_bash(&root, string_arg(args, &["command", "cmd", "shell"])?).await,
+        "edit" | "replace_in_file" => replace_in_file(
+            &root,
+            path_arg(args)?,
+            string_arg(args, &["oldString", "old_string", "oldText", "old_text", "before", "old"])?,
+            string_arg(args, &["newString", "new_string", "newText", "new_text", "after", "new"])?,
+        ),
+        "write" | "write_to_file" | "create_file" => {
+            write_file(&root, path_arg(args)?, string_arg(args, &["content", "contents", "text", "data"])?)
+        }
+        "delete_file" => delete_file(&root, path_arg(args)?),
+        "rename_file" | "move_file" => move_path(&root, source_arg(args)?, destination_arg(args)?),
+        "copy_file" => copy_file(&root, source_arg(args)?, destination_arg(args)?),
+        "create_folder" | "create_directory" => create_dir(&root, directory_arg(args)?),
+        "delete_folder" | "delete_directory" => delete_dir(&root, directory_arg(args)?),
+        "rename_folder" | "move_folder" => move_path(&root, source_arg(args)?, destination_arg(args)?),
+        "copy_folder" => copy_dir(&root, source_arg(args)?, destination_arg(args)?),
+        other => Err(format!("Unsupported coding tool: {other}")),
+    }
+}
+
+fn canonical_root(root: &str) -> Result<PathBuf, String> {
+    let p = PathBuf::from(root.trim());
+    if root.trim().is_empty() {
+        return Err("Set a project root before running coding tools.".into());
+    }
+    let p = p.canonicalize().map_err(|e| format!("Could not open project root: {e}"))?;
+    if !p.is_dir() {
+        return Err("Project root must be a directory.".into());
+    }
+    Ok(p)
+}
+
+fn resolve_existing(root: &Path, value: &str) -> Result<PathBuf, String> {
+    let path = safe_join(root, value)?;
+    path.canonicalize()
+        .map_err(|e| format!("Path does not exist inside project: {value} ({e})"))
+        .and_then(|p| ensure_inside(root, p))
+}
+
+fn resolve_target(root: &Path, value: &str) -> Result<PathBuf, String> {
+    let path = safe_join(root, value)?;
+    if let Some(parent) = path.parent() {
+        if parent.exists() {
+            let parent = parent
+                .canonicalize()
+                .map_err(|e| format!("Could not read target parent: {e}"))?;
+            ensure_inside(root, parent)?;
+        }
+    }
+    // A containing directory inside the root is not enough: the final
+    // component can itself be a symlink pointing out of the project, and
+    // fs::write/rename/copy would follow it. Refuse the link rather than
+    // writing through it.
+    if let Ok(meta) = fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() {
+            return Err("Target is a symlink; refusing to write through it.".into());
+        }
+    }
+    Ok(path)
+}
+
+fn safe_join(root: &Path, value: &str) -> Result<PathBuf, String> {
+    let raw = value.trim();
+    if raw.is_empty() {
+        return Err("Path argument is empty.".into());
+    }
+    let rel = Path::new(raw);
+    if rel.is_absolute() {
+        let canon = rel
+            .canonicalize()
+            .map_err(|e| format!("Absolute path must already exist inside project: {e}"))?;
+        return ensure_inside(root, canon);
+    }
+    if rel.components().any(|c| matches!(c, Component::ParentDir | Component::Prefix(_))) {
+        return Err("Path traversal is not allowed.".into());
+    }
+    Ok(root.join(rel))
+}
+
+fn ensure_inside(root: &Path, path: PathBuf) -> Result<PathBuf, String> {
+    if path.starts_with(root) {
+        Ok(path)
+    } else {
+        Err("Tool path is outside the configured project root.".into())
+    }
+}
+
+fn string_arg<'a>(args: &'a serde_json::Map<String, Value>, keys: &[&str]) -> Result<&'a str, String> {
+    for key in keys {
+        if let Some(value) = args.get(*key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+            return Ok(value);
+        }
+    }
+    Err(format!("Missing required argument: {}", keys[0]))
+}
+
+fn path_arg(args: &serde_json::Map<String, Value>) -> Result<&str, String> {
+    string_arg(args, &["filePath", "file_path", "path", "filename", "file"])
+}
+
+fn optional_path_arg(args: &serde_json::Map<String, Value>) -> Option<&str> {
+    args.get("path")
+        .or_else(|| args.get("directory"))
+        .or_else(|| args.get("dir"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+}
+
+fn directory_arg(args: &serde_json::Map<String, Value>) -> Result<&str, String> {
+    string_arg(args, &["directory", "dir", "folder", "folderPath", "folder_path", "path"])
+}
+
+fn source_arg(args: &serde_json::Map<String, Value>) -> Result<&str, String> {
+    string_arg(args, &["source", "src", "from", "oldPath", "old_path", "path"])
+}
+
+fn destination_arg(args: &serde_json::Map<String, Value>) -> Result<&str, String> {
+    string_arg(args, &["destination", "dest", "to", "target", "targetPath", "target_path", "newPath", "new_path"])
+}
+
+fn read_file(root: &Path, path: &str) -> Result<String, String> {
+    let path = resolve_existing(root, path)?;
+    let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("Read target is not a file.".into());
+    }
+    if meta.len() > MAX_READ_BYTES {
+        return Err(format!("File is too large to read safely ({} bytes).", meta.len()));
+    }
+    fs::read_to_string(&path).map_err(|e| format!("Could not read file: {e}"))
+}
+
+fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> {
+    let path = resolve_target(root, path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Could not create parent directory: {e}"))?;
+    }
+    fs::write(&path, content).map_err(|e| format!("Could not write file: {e}"))?;
+    Ok(format!("Wrote {}", display_rel(root, &path)))
+}
+
+fn replace_in_file(root: &Path, path: &str, old: &str, new: &str) -> Result<String, String> {
+    let path = resolve_existing(root, path)?;
+    let current = fs::read_to_string(&path).map_err(|e| format!("Could not read file: {e}"))?;
+    if !current.contains(old) {
+        return Err("Old text was not found in the target file.".into());
+    }
+    let next = current.replacen(old, new, 1);
+    fs::write(&path, next).map_err(|e| format!("Could not write edit: {e}"))?;
+    Ok(format!("Edited {}", display_rel(root, &path)))
+}
+
+fn delete_file(root: &Path, path: &str) -> Result<String, String> {
+    let path = resolve_existing(root, path)?;
+    if !path.is_file() {
+        return Err("Delete target is not a file.".into());
+    }
+    fs::remove_file(&path).map_err(|e| format!("Could not delete file: {e}"))?;
+    Ok(format!("Deleted {}", display_rel(root, &path)))
+}
+
+fn create_dir(root: &Path, path: &str) -> Result<String, String> {
+    let path = resolve_target(root, path)?;
+    fs::create_dir_all(&path).map_err(|e| format!("Could not create folder: {e}"))?;
+    Ok(format!("Created folder {}", display_rel(root, &path)))
+}
+
+fn delete_dir(root: &Path, path: &str) -> Result<String, String> {
+    let path = resolve_existing(root, path)?;
+    if path == root {
+        return Err("Refusing to delete the project root.".into());
+    }
+    if !path.is_dir() {
+        return Err("Delete target is not a folder.".into());
+    }
+    fs::remove_dir_all(&path).map_err(|e| format!("Could not delete folder: {e}"))?;
+    Ok(format!("Deleted folder {}", display_rel(root, &path)))
+}
+
+fn move_path(root: &Path, source: &str, destination: &str) -> Result<String, String> {
+    let source = resolve_existing(root, source)?;
+    let destination = resolve_target(root, destination)?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Could not create destination parent: {e}"))?;
+    }
+    fs::rename(&source, &destination).map_err(|e| format!("Could not move path: {e}"))?;
+    Ok(format!("Moved {} to {}", display_rel(root, &source), display_rel(root, &destination)))
+}
+
+fn copy_file(root: &Path, source: &str, destination: &str) -> Result<String, String> {
+    let source = resolve_existing(root, source)?;
+    let destination = resolve_target(root, destination)?;
+    if !source.is_file() {
+        return Err("Copy source is not a file.".into());
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Could not create destination parent: {e}"))?;
+    }
+    fs::copy(&source, &destination).map_err(|e| format!("Could not copy file: {e}"))?;
+    Ok(format!("Copied {} to {}", display_rel(root, &source), display_rel(root, &destination)))
+}
+
+fn copy_dir(root: &Path, source: &str, destination: &str) -> Result<String, String> {
+    let source = resolve_existing(root, source)?;
+    let destination = resolve_target(root, destination)?;
+    if !source.is_dir() {
+        return Err("Copy source is not a folder.".into());
+    }
+    copy_dir_recursive(&source, &destination)?;
+    Ok(format!("Copied folder {} to {}", display_rel(root, &source), display_rel(root, &destination)))
+}
+
+fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination).map_err(|e| format!("Could not create destination folder: {e}"))?;
+    for entry in fs::read_dir(source).map_err(|e| format!("Could not read source folder: {e}"))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let src = entry.path();
+        let dest = destination.join(entry.file_name());
+        if src.is_dir() {
+            copy_dir_recursive(&src, &dest)?;
+        } else {
+            fs::copy(&src, &dest).map_err(|e| format!("Could not copy file: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn list_tree(root: &Path, path: &str) -> Result<String, String> {
+    let base = resolve_existing(root, path)?;
+    if !base.is_dir() {
+        return Err("Glob target is not a folder.".into());
+    }
+    let mut out = Vec::new();
+    visit(&base, root, &mut out)?;
+    if out.is_empty() {
+        return Ok("(folder is empty)".into());
+    }
+    let mut text = out.join("\n");
+    if out.len() >= MAX_LIST_ENTRIES {
+        text.push_str(&format!("\n[listing truncated at {MAX_LIST_ENTRIES} entries]"));
+    }
+    Ok(text)
+}
+
+fn visit(dir: &Path, root: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    if out.len() >= MAX_LIST_ENTRIES {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir).map_err(|e| format!("Could not list folder: {e}"))? {
+        // Re-checked per entry, not just per directory: one flat folder with
+        // 50k files would otherwise blow straight past the cap.
+        if out.len() >= MAX_LIST_ENTRIES {
+            return Ok(());
+        }
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "node_modules" || name == ".git" || name == "target" || name == ".next" {
+            continue;
+        }
+        out.push(display_rel(root, &path));
+        if path.is_dir() {
+            visit(&path, root, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn grep_tree(root: &Path, path: &str, pattern: &str) -> Result<String, String> {
+    let base = resolve_existing(root, path)?;
+    let mut matches = Vec::new();
+    grep_visit(&base, root, pattern, &mut matches)?;
+    if matches.is_empty() {
+        // An empty string reads as a failed tool to the model, which then
+        // retries the same search. Say plainly that the search ran.
+        return Ok(format!("No matches for {pattern:?}."));
+    }
+    let mut text = matches.join("\n");
+    if matches.len() >= MAX_LIST_ENTRIES {
+        text.push_str(&format!("\n[results truncated at {MAX_LIST_ENTRIES} matches]"));
+    }
+    Ok(text)
+}
+
+fn grep_visit(path: &Path, root: &Path, pattern: &str, out: &mut Vec<String>) -> Result<(), String> {
+    if out.len() >= MAX_LIST_ENTRIES {
+        return Ok(());
+    }
+    if path.is_dir() {
+        for entry in fs::read_dir(path).map_err(|e| format!("Could not search folder: {e}"))? {
+            if out.len() >= MAX_LIST_ENTRIES {
+                return Ok(());
+            }
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "node_modules" || name == ".git" || name == "target" || name == ".next" {
+                continue;
+            }
+            grep_visit(&entry.path(), root, pattern, out)?;
+        }
+        return Ok(());
+    }
+    let Ok(meta) = fs::metadata(path) else { return Ok(()) };
+    if !meta.is_file() || meta.len() > MAX_READ_BYTES {
+        return Ok(());
+    }
+    let Ok(text) = fs::read_to_string(path) else { return Ok(()) };
+    for (i, line) in text.lines().enumerate() {
+        // A single minified bundle can match on every line, so the cap has to
+        // bind inside the file too, not only between files.
+        if out.len() >= MAX_LIST_ENTRIES {
+            return Ok(());
+        }
+        if line.contains(pattern) {
+            out.push(format!(
+                "{}:{}: {}",
+                display_rel(root, path),
+                i + 1,
+                truncate_line(line.trim())
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
+    if command.contains('\0') {
+        return Err("Command contains an invalid null byte.".into());
+    }
+
+    let output = timeout(
+        Duration::from_secs(120),
+        Command::new("sh")
+        .arg("-lc")
+        .arg(command)
+        .current_dir(root)
+        // Without this the timeout only drops the future: the shell and its
+        // children keep running unsupervised, and a `npm run dev` the model
+        // tried to verify with would hold the port until the app is killed.
+        .kill_on_drop(true)
+        .output(),
+    )
+    .await
+    .map_err(|_| "Command timed out after 120 seconds.".to_string())?
+        .map_err(|e| format!("Could not run command: {e}"))?;
+    let mut text = String::new();
+    if !output.stdout.is_empty() {
+        text.push_str(&String::from_utf8_lossy(&output.stdout));
+    }
+    if !output.stderr.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    if text.len() > MAX_BASH_BYTES {
+        text.truncate(MAX_BASH_BYTES);
+        text.push_str("\n[output truncated]");
+    }
+    if !output.status.success() {
+        return Err(format!("Command exited with status {}.\n{}", output.status, text));
+    }
+    Ok(if text.trim().is_empty() { "(command completed with no output)".into() } else { text })
+}
+
+fn display_rel(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
+}
