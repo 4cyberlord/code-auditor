@@ -7,6 +7,7 @@ import {
   CODING_BRIDGE_CONFIG_EVENT,
   CodingRunCancelled,
   cancelCodingRun,
+  cleanCodingError,
   codingRunMarkdown,
   createRunControl,
   humanizeList,
@@ -168,7 +169,7 @@ export default function CodingWorkspace() {
       setError("Run stopped.");
       return;
     }
-    setError(String(err).replace(/^Error:\s*/, ""));
+    setError(cleanCodingError(err));
   };
 
   const stopRun = async () => {
@@ -181,7 +182,7 @@ export default function CodingWorkspace() {
     } catch (err) {
       // The local flag is already set, so the loop ends regardless; the user
       // only needs to know the bridge did not confirm it.
-      setError(`Stop requested, but the bridge did not confirm: ${String(err).replace(/^Error:\s*/, "")}`);
+      setError(`Stop requested, but the bridge did not confirm: ${cleanCodingError(err)}`);
     }
   };
 
@@ -305,7 +306,7 @@ export default function CodingWorkspace() {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1400);
     } catch (err) {
-      setError(`Could not copy plan: ${String(err).replace(/^Error:\s*/, "")}`);
+      setError(`Could not copy plan: ${cleanCodingError(err)}`);
     }
   };
 

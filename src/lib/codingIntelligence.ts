@@ -298,6 +298,32 @@ export function humanizeList(value: unknown[] | undefined): string[] {
   return (value ?? []).map((item) => humanizeValue(item)).filter(Boolean);
 }
 
+export function cleanCodingError(err: unknown): string {
+  const raw =
+    String(err)
+      .replace(/^Error:\s*/, "")
+      .trim();
+  const lower =
+    raw.toLowerCase();
+
+  if (
+    lower.includes("concurrent task limit") ||
+    lower.includes("code 96") ||
+    lower.includes("up to 1 tasks")
+  ) {
+    return "Wiro already has one task running. Wait for that task to finish or stop it, then run this again. Your current Wiro balance allows 1 concurrent task.";
+  }
+
+  if (
+    lower.includes("wiro sse disconnected") ||
+    lower.includes("automatic replay is disabled")
+  ) {
+    return "Wiro disconnected after the task started. The bridge did not replay it to avoid duplicate billing. Use Continue once the current Wiro task is no longer running.";
+  }
+
+  return raw || "Coding run failed.";
+}
+
 export interface HumanSection {
   label: string;
   rows: string[];
