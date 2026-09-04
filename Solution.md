@@ -2,152 +2,129 @@
 
  ## 1. Issue
 
- The user wants the in-app display name of the product to read **"Council Editor 0.1.0"** (i.e. the version number `0.1.0` appended to the full product name) wherever the app shows its own name *inside the running application*.
+ The user has a **background process** implemented in the application (a Tauri desktop app called "Council Editor"). They want:
 
- Explicit constraint: **do not** change the name that appears on the macOS application bundle / window title bar (the "docker" = the macOS app shell). Only the text rendered *within* the app UI should gain the `0.1.0` suffix.
+ 1. **Investigation** – understand what the background process currently does (its lifecycle, what it triggers, how it communicates).
+ 2. **Stealth / undetectability** – when the user clicks a global shortcut, the background process should start and run *silently* so that no other application (or OS-level process monitor) can easily detect it.
+ 3. **Silent image processing** – when the user sends pictures (screenshots) to the process for processing, it should work without visible UI, tray icons, or window flashes.
+ 4. **Telegram delivery** – the results of the processing should be sent to the user via a Telegram bot.
 
- Observed symptom: the app currently shows "Council Editor" (no version) in its internal UI surfaces (boot screen, page header, etc.).
+ The user asks: *"how can we achieve this?"*
 
- ## 2. Root cause
+ ## 2. Root cause / Current state
 
- The product name is hard-coded as the string `"Council Editor"` in several places. The version `0.1.0` lives in `src-tauri/tauri.conf.json` (`"version": "0.1.0"`) but is never interpolated into the in-app display strings. The two in-app surfaces that render the product name to the user are:
+ From the evidence gathered (directory listing, README, package.json, and glob searches):
 
- - `src/app/layout.tsx` line 70 — the boot-screen wordmark `<p className="boot-name">Council Editor</p>` (shown before React hydrates, painted server-side).
- - `src/app/page.tsx` line 118 — the main page header text `Council Editor`.
+ - The project is a **Tauri v2 + Next.js** desktop application (`src-tauri/` contains the Rust backend; `src/` contains the React/Next frontend).
+ - `package.json` confirms dependencies on `@tauri-apps/api`, `@tauri-apps/plugin-global-shortcut`, `@tauri-apps/plugin-shell`, `@tauri-apps/plugin-fs`, `@tauri-apps/plugin-http`, `@tauri-apps/plugin-dialog`, `@tauri-apps/plugin-log`, `@tauri-apps/plugin-updater`, `@tauri-apps/plugin-autostart`.
+ - The README describes the app as "Council Editor" – four frontier models read the same screenshot, solve independently in four panes, and submit answers to a solution box.
+ - **Glob searches for `src/**/*background*`, `src/**/*worker*`, `src/**/*daemon*` returned no matches** – meaning there is no dedicated file named with those keywords yet. The "background process" is likely implemented as:
+ - A **Tauri sidecar / external binary** (see `Dockerfile.worker` at the repo root, suggesting a worker process), OR
+ - A **Tauri command / Rust thread** spawned from the main process, OR
+ - A **global-shortcut-triggered hidden window** that performs the work.
+ - The `src-tauri/` directory exists (confirmed by glob) but its internal files were not individually read in this session. The `Dockerfile.worker` at the root strongly implies a **separate worker binary/container** that the Tauri app shells out to.
+ - There is a `scripts/` directory and `out/` directory (likely build output for the sidecar).
 
- The macOS window title is set separately by Tauri via `src-tauri/tauri.conf.json` (`"productName": "Council Editor"` and `"title": "Council Editor"`), which is the "docker" name the user wants left alone.
+ **Key gap:** Without reading the actual Rust source in `src-tauri/src/` (main.rs, lib.rs, commands, etc.) and the `Dockerfile.worker`, we cannot enumerate the exact current behavior of the background process. However, the architecture is clear enough to plan the stealth + Telegram integration.
 
  ## 3. Evidence gathered
 
- ### `src-tauri/tauri.conf.json` (macOS app shell — DO NOT CHANGE)
- ```json
- {
- "productName": "Council Editor",
- ...
- "title": "Council Editor",
- "version": "0.1.0",
- ...
- }
- ```
- This drives the `.app` bundle name, the window title bar, and the DMG name (`Council Editor_0.1.0_aarch64.dmg`). Leave untouched.
+ | Resource | What it showed |
+ |---|---|
+ | `.` (root directory) | 43 entries. Key items: `src-tauri/`, `src/`, `Dockerfile.worker`, `scripts/`, `out/`, `package.json`, `README.md`, `IMPLEMENTATION_PLAN.md`, `TODO.md`, `docs/`, `ios/`, `supabase/`, `tests/`, `test-fixtures/`, `oracle/`, `council-runs/`, `bench-problems/`. Two `.p8` auth keys (Apple push). `.development.env`. |
+ | `README.md` (407 lines) | App is "Council Editor". Uses `npm run app:dev` / `npm run app:build`. Tauri + Next.js. Four model panes, solution box. Mentions `npm run typecheck`. |
+ | `package.json` | Confirms Tauri v2 plugins: `global-shortcut`, `shell`, `fs`, `http`, `dialog`, `log`, `updater`, `autostart`. Also `next`, `react`, `tailwindcss`, `zustand`, `lucide-react`, `@supabase/supabase-js`, `openai`, `@anthropic-ai/sdk`, `@google/genai`, `@mistralai/mistralai`. Scripts include `app:dev`, `app:build`, `typecheck`, `worker:build`, `worker:run`. |
+ | `glob: src/**/*background*` | **No matches** – no file with "background" in its name under `src/`. |
+ | `glob: src/**/*worker*` | **No matches** – no file with "worker" in its name under `src/`. |
+ | `glob: src/**/*daemon*` | **No matches** – no file with "daemon" in its name under `src/`. |
+ | `glob: src/**/*` | Confirmed `src/` has subdirectories (app, components, lib, hooks, etc.) but no background/worker/daemon-named files. |
+ | `glob: src-tauri/**/*` | Confirmed `src-tauri/` exists with Rust source, `Cargo.toml`, `tauri.conf.json`, `build.rs`, `icons/`, `capabilities/`, `gen/`, `resources/`, `sidecars/` (likely). |
 
- ### `src/app/layout.tsx` (in-app boot screen — CHANGE)
- Current relevant lines:
- ```tsx
- export const metadata: Metadata = {
- title: "Council Editor",
- description: "Independent multi-model solving, benchmarking, and consensus.",
- };
- ```
- and the boot screen markup:
- ```tsx
- <p className="boot-name">Council Editor</p>
- <p className="boot-note">Starting up…</p>
- ```
- The `metadata.title` sets the browser tab / document title (not the macOS window chrome, which Tauri overrides), so it is safe to update for consistency, but the user's explicit ask is the visible in-app name. The boot-screen `boot-name` paragraph is the clearest "on top of the app" in-app name.
+ ### Exact current code regions to be changed
 
- ### `src/app/page.tsx` (in-app main header — CHANGE)
- Line 118 contains the literal text `Council Editor` rendered as the page's primary heading/header inside the workbench UI. This is the most prominent in-app name the user sees after boot.
+ Because the individual Rust files under `src-tauri/src/` were not read in this session (only the directory was confirmed to exist), the plan below references the **expected file paths** based on standard Tauri v2 project layout. The executing run should read these files first:
 
- ### Other occurrences (intentionally NOT changed)
- - `src/components/HelperCard.tsx:122` — prose sentence "The capture hotkeys work while Council Editor is closed…" (descriptive copy, not a name label).
- - `login-preview.html` — standalone preview file, not part of the shipped app build.
- - `out/*` — build artifacts, regenerated on next build.
- - `ios/CodeEditorCompanion/*` — separate iOS companion, out of scope.
- - `scripts/*` — worker/server display strings, out of scope.
+ - `src-tauri/src/main.rs` – entry point, window creation, plugin registration.
+ - `src-tauri/src/lib.rs` – `run()` function, `tauri::Builder`, command registration.
+ - `src-tauri/src/commands.rs` (or `src-tauri/src/commands/mod.rs`) – Tauri command handlers.
+ - `src-tauri/tauri.conf.json` – window config (visible/hidden), bundle config, sidecar config.
+ - `src-tauri/Cargo.toml` – dependencies (tokio, reqwest, serde, etc.).
+ - `Dockerfile.worker` – worker build definition.
+ - `scripts/` – build/run scripts for the worker.
+ - `src/app/` or `src/components/` – React frontend that triggers the shortcut and displays results.
 
  ## 4. Changes to make
 
- ### Change 1 — `src/app/page.tsx` (main in-app header)
+ ### Change 1 – Make the main window hidden (stealth)
 
- - **File:** `src/app/page.tsx`
- - **Exact existing code to replace (line 118 context):**
+ **File:** `src-tauri/tauri.conf.json`
+
+ **Find the window configuration block** (exact text will be confirmed by reading the file). It likely looks like:
+
+ ```json
+ "windows": [
+ {
+ "title": "Council Editor",
+ "width": 1200,
+ "height": 800,
+ "visible": true,
+ ...
+ }
+ ]
  ```
- Council Editor
+
+ **Replace `"visible": true` with `"visible": false`** (or add `"visible": false` if absent). This makes the window invisible at launch. The user can still toggle visibility via the global shortcut if desired.
+
+ **Why:** A visible window is the most obvious sign of a running app. Hiding it means no window appears in the taskbar/dock/mission control.
+
+ ---
+
+ ### Change 2 – Register a global shortcut that toggles the hidden window
+
+ **File:** `src-tauri/src/lib.rs` (or `main.rs`)
+
+ In the `setup` closure of `tauri::Builder`, add (or verify) the global-shortcut plugin registration:
+
+ ```rust
+ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+
+ // Inside .setup(|app| { ... })
+ app.global_shortcut().register(
+ "cmd+shift+c", // or whatever shortcut the user prefers
+ move |app_handle, shortcut, event| {
+ if let ShortcutState::Pressed = event.state() {
+ if let Some(window) = app_handle.get_webview_window("main") {
+ if window.is_visible().unwrap_or(false) {
+ let _ = window.hide();
+ } else {
+ let _ = window.show();
+ let _ = window.set_focus();
+ }
+ }
+ }
+ },
+ )?;
  ```
- (the standalone text node on line 118 that renders the app's main header)
- - **Replacement code:**
+
+ **Why:** The user wants to trigger the process with a keyboard shortcut. The window stays hidden unless explicitly shown.
+
+ ---
+
+ ### Change 3 – Ensure the app does not show in the Dock / Taskbar
+
+ **File:** `src-tauri/tauri.conf.json`
+
+ Add to the window config:
+
+ ```json
+ "visibleOnAllWorkspaces": false,
+ "skipTaskbar": true
  ```
- Council Editor 0.1.0
- ```
- - **Why:** This is the primary in-app name the user sees in the workbench. Adding `0.1.0` makes the displayed name "Council Editor 0.1.0" as requested.
 
- ### Change 2 — `src/app/layout.tsx` (boot-screen wordmark)
+ On macOS, also set the activation policy to `Accessory` (no Dock icon) in `src-tauri/src/main.rs`:
 
- - **File:** `src/app/layout.tsx`
- - **Exact existing code to replace (line 70):**
- ```tsx
- <p className="boot-name">Council Editor</p>
- ```
- - **Replacement code:**
- ```tsx
- <p className="boot-name">Council Editor 0.1.0</p>
- ```
- - **Why:** The boot screen is the first thing visible "on top of" the app window before hydration. Updating it keeps the in-app name consistent from the moment the window opens.
-
- ### Change 3 (optional, for tab-title consistency) — `src/app/layout.tsx` metadata
-
- - **File:** `src/app/layout.tsx`
- - **Exact existing code to replace (line 6):**
- ```tsx
- title: "Council Editor",
- ```
- - **Replacement code:**
- ```tsx
- title: "Council Editor 0.1.0",
- ```
- - **Why:** Keeps the document/tab title aligned with the visible in-app name. In Tauri the window title is overridden by `tauri.conf.json`, so this does not affect the macOS chrome. If the user considers this out of scope, it can be reverted independently.
-
- ## 5. Order of operations
-
- 1. Edit `src/app/page.tsx` — replace the line-118 `Council Editor` text node with `Council Editor 0.1.0`.
- 2. Edit `src/app/layout.tsx` — replace `<p className="boot-name">Council Editor</p>` with `<p className="boot-name">Council Editor 0.1.0</p>`.
- 3. (Optional) Edit `src/app/layout.tsx` — replace `title: "Council Editor",` with `title: "Council Editor 0.1.0",`.
- 4. Rebuild the static output so the Tauri bundle picks up the new strings: `npm run build` (or `npm run app:build` for a full macOS bundle).
-
- No new files need to be created.
-
- ## 6. Verification
-
- 1. **Static check** — confirm the strings are present in source:
- ```bash
- grep -n "Council Editor 0.1.0" src/app/page.tsx src/app/layout.tsx
- ```
- Expected: one match in `page.tsx` (line ~118) and one or two matches in `layout.tsx` (boot-name and/or metadata title).
-
- 2. **Confirm macOS chrome unchanged:**
- ```bash
- grep -n '"productName"\|"title"' src-tauri/tauri.conf.json
- ```
- Expected: still `"productName": "Council Editor"` and `"title": "Council Editor"` (no `0.1.0` suffix).
-
- 3. **Build & visual check:**
- ```bash
- npm run app:build
- open "src-tauri/target/release/bundle/macos/Council Editor.app"
- ```
- - The macOS window title bar should still read **Council Editor** (no version).
- - The boot screen and the main workbench header should read **Council Editor 0.1.0**.
-
- 4. **Rebuild static output** (if only doing a web preview):
- ```bash
- npm run build
- grep -o "Council Editor 0.1.0" out/index.html
- ```
- Expected: at least one match.
-
- ## 7. Risks and rollback
-
- - **Risk:** If any CSS or layout assumes a fixed width for the name, the extra ` 0.1.0` could wrap or overflow. Mitigation: the `boot-name` and page header are plain text paragraphs/headings with no fixed-width constraint observed in the inspected code; visually verify in step 6.3.
- - **Risk:** The `out/` directory contains stale build artifacts. They will be regenerated by `npm run build`; no manual edit needed.
- - **Rollback:** Revert each edit by removing the ` 0.1.0` suffix (three one-line edits). No structural changes, so `git diff` will show exactly the touched lines.
-
- ## 8. Out of scope
-
- - `src-tauri/tauri.conf.json` — controls the macOS `.app` bundle name, window title, and DMG filename. User explicitly said not to change the "docker" (macOS app) name.
- - `login-preview.html` — standalone HTML preview, not shipped in the Tauri bundle.
- - `ios/CodeEditorCompanion/*` — separate iOS companion app.
- - `scripts/*.mjs` — background worker / cron / DMG packaging scripts; their log strings are operational, not user-facing in-app names.
- - `src/components/HelperCard.tsx` — descriptive prose mentioning "Council Editor" in a sentence, not a name label.
- - `out/*` — build artifacts, regenerated automatically.
- - All README / docs files — documentation, not runtime UI.
+ ```rust
+ #[cfg(target_os = "macos")]
+ mod macos {
+ use objc::runtime::Object;
+ use objc::{class, msg_send, sel
