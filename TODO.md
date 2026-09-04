@@ -134,6 +134,43 @@ live value is fine. Confirm it is in a password manager and nowhere else. It is
 the one secret in this system with no recovery path: lose it and no account can
 ever sign in again, because every PIN hash was computed with it.
 
+### The completion push goes to every account's devices
+
+`cloud-worker.mjs:1404` reads the notification list with no owner filter:
+
+```js
+const devices = await rest("notification_devices?platform=eq.ios&enabled=eq.true");
+```
+
+The column exists — added in `migrations.sql:513`, indexed at 564 — and the
+query ignores it. So a completed job pushes to every enabled iOS device in the
+project, whoever owns it. The push body is only "Council job completed", so no
+report content crosses accounts, but the existence and timing of another
+person's work does.
+
+Nothing is exploiting it today because `notification_devices` has no rows. It
+becomes a real leak the moment the iOS companion registers a second device, and
+it is the one place in the codebase where the `owner_id` discipline that holds
+everywhere else was not applied.
+
+Fix: filter on the job's owner. The job row has `owner_id`; `notify()` takes
+`jobId` and would need the owner threaded through, or a lookup. Then extend
+`test-tenancy.mjs` to cover it, because the two-account probe should have caught
+this and did not — it checks tables reachable through the API, and the worker
+reaches this one with the service role directly.
+
+### The Telegram bot token
+
+`docs/remote-ops-observability.md:116` records that the bot token was pasted
+during development and should be treated as compromised. It has not been
+regenerated. A live token means anyone holding it can read every message sent to
+the bot and send messages as it.
+
+Regenerate in BotFather, update `TELEGRAM_BOT_TOKEN` in `app_config`, and delete
+the line from `.development.env`. This is a prerequisite for anything in phase
+07 below — that work turns the bot from an outbound alert channel into an
+inbound one that receives people's screenshots.
+
 ---
 
 ## Housekeeping and drift
@@ -222,6 +259,318 @@ key encrypts their secrets — and background solving stops between sessions,
 because you genuinely cannot read their key.
 
 Much cheaper to answer before building around the other assumption.
+
+---
+
+## Telegram bot as a second client, phase 07
+
+Decided, not started. Today Telegram is outbound only — `notifyOps()` in
+`scripts/observability.mjs` posting ops alerts to one chat id. The feature wanted
+is the other direction: send the bot a screenshot, it runs the same Council the
+desktop runs, and it sends the whole result back.
+
+The shape that makes this cheap is that it is **a second client for the API that
+already exists**, not a second system. The desktop is client one. The bot calls
+the same ops — `sessions.create`, `storage.uploadUrl`, `jobs.create` — and the
+worker, which polls `solve_jobs` by status and has never cared who queued a row,
+runs unchanged. Ingestion is plumbing. The four pieces below are what is missing.
+
+### 1. `telegram_links`, and how a chat proves who it is
+
+Every op is scoped by `principal.userId` from a bearer token. A Telegram update
+carries a `chat_id` and nothing else. So: a table mapping one to the other, and
+a flow that fills it.
+
+```sql
+create table if not exists telegram_links (
+  chat_id      bigint      primary key,
+  owner_id     uuid        not null references app_users (id) on delete cascade,
+  linked_at    timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  revoked_at   timestamptz
+);
+```
+
+The link flow reuses the identity that already exists rather than inventing a
+second one — the same move `auth.helperToken` makes. The desktop, already signed
+in, mints a short-lived single-use code through a new op (`telegram.linkCode`);
+the user sends `/link ABC123`; the webhook redeems it and writes the row. A
+"Link Telegram" panel in Settings alongside the helper authorisation.
+
+**The PIN must never be typed into Telegram.** Not as a convenience, not as a
+fallback. Telegram messages sit in plaintext on Telegram's servers and in the
+history on every device signed into that account, and a four-digit PIN in a chat
+log cannot be un-leaked. The link code exists precisely so the PIN never travels
+that path.
+
+An unlinked chat gets exactly one reply — how to link — and nothing else. Anyone
+can find a bot and message it, so the unauthenticated surface has to be as
+boring as `PUBLIC_OPS` is.
+
+Decided: available to any Council Editor user, not just the owner. That is what
+the multi-tenant schema was built for, and a bot that only one person can use
+does not justify the webhook.
+
+### 2. `supabase/functions/telegram-webhook`
+
+A second Edge Function. Telegram needs a public HTTPS URL, which Supabase gives
+free. Deployed `--no-verify-jwt`, because Telegram will not send an `apikey`
+header — authenticated instead by the `X-Telegram-Bot-Api-Secret-Token` header
+set at `setWebhook` time, compared against a function secret.
+
+It must acknowledge fast. Telegram retries an update it does not see a 200 for
+within about a minute, and a Council run is minutes. Queue and return; never
+await the result. The current architecture already does the right thing here —
+the note is so nobody later decides to "simplify" it by waiting.
+
+### 3. Photo in
+
+`getFile` → download from `api.telegram.org/file/bot<token>/<path>` → PUT to
+Storage at `${userId}/telegram/${uuid}.png` → `sessions.create` →
+`jobs.create`. The path prefix is not cosmetic: `ops.ts:919` refuses an upload
+path that does not start with the caller's own id, and that guard is what stops
+a bug in the webhook from writing into someone else's prefix.
+
+Two limits worth knowing before writing it:
+
+- Telegram re-encodes anything sent as a **photo** — downscaled, JPEG-crushed.
+  For screenshots of code that degrades OCR badly. Treat `message.document` with
+  an image mime as the good path and tell people to send "as file"; accept
+  `message.photo` (largest size) but expect worse extraction confidence.
+- `getFile` will not serve a file over 20 MB to a bot.
+
+### 4. Everything comes back
+
+Decided: the bot returns what the desktop returns. Not a summary — the winner,
+the standing and its reason, the synthesis, the reading and agreement, the
+benchmark evidence, complexity analysis where the problem had one. If the
+desktop shows it, the chat gets it.
+
+Telegram caps a text message at 4096 characters and a council report is far
+longer, so the transport is: a short text reply with winner and standing so the
+chat is readable at a glance, plus the **complete** `council_reports.markdown`
+as a `sendDocument` attachment. The attachment is the deliverable and nothing is
+trimmed out of it. Do not attempt MarkdownV2 formatting on report text — its
+escaping rules will fight the content constantly, and the document sidesteps
+them entirely.
+
+Routing needs the worker to know where a job came from:
+
+```sql
+alter table solve_jobs add column if not exists origin text not null default 'desktop';
+alter table solve_jobs add column if not exists origin_ref jsonb not null default '{}'::jsonb;
+```
+
+`origin_ref` holds `{ chatId, messageId }`. Resist putting it in
+`settings_snapshot` to dodge the migration — that field is a snapshot of
+provider settings and gets fed to the council; delivery routing does not belong
+in it.
+
+Then one branch in the worker on `completed`, `needs_attention` and `failed`.
+**Write it filtered by owner from the start** — the bug recorded above under
+"Security, unresolved" is exactly what this branch would reproduce if it were
+modelled on `notify()`.
+
+### Build order
+
+Each step is independently testable and nothing before step 4 changes existing
+behaviour.
+
+1. `telegram_links` + `telegram.linkCode` + `/link`. Ship alone and confirm the
+   mapping before a single photo moves.
+2. The `origin` / `origin_ref` migration.
+3. The webhook's photo path, replying "queued".
+4. The worker's delivery branch.
+
+### Prerequisites
+
+- Regenerate the bot token (see "Security, unresolved"). Non-negotiable before
+  the bot receives anyone's screenshots.
+- Fix the `notification_devices` owner filter, so the delivery branch is written
+  against a correct example rather than the wrong one.
+
+### Open, not yet decided
+
+- Rate limiting. A linked chat that sends fifty photos queues fifty Council runs
+  against that account's TokenRouter key. Some per-chat ceiling is needed; where
+  it lives (webhook, `app_config`, per-user) is not settled.
+- Whether `/status` and `/cancel` are worth having, or whether the app stays the
+  only place to manage a running job.
+- Group chats. A `chat_id` can be a group, and linking one means every member
+  queues jobs against one person's key. Simplest first answer is to refuse any
+  non-private chat.
+
+---
+
+## AI glasses as a capture source, phase 08
+
+Researched August 2026 against `RayBan_Meta_iOS_Capture_Pipeline_Research_README.md`,
+which is accurate and should be read alongside this. Not started.
+
+That document's conclusion is that the SDK path is primary and the Photos-library
+path is the fallback. **For Council Editor specifically that ordering is
+backwards**, for one reason the document flags in section 9 but does not connect
+to what this app does.
+
+### The number that decides it
+
+Council Editor reads *text off screens* — code, problem statements, stack
+traces. It is the most resolution-sensitive workload a camera can be pointed at,
+because monospace OCR fails on exactly the characters that matter: `l` / `1` /
+`I`, `O` / `0`, `.` / `,`.
+
+| Path | Output | Pixels |
+|---|---|---|
+| Glasses native sensor | 3024 × 4032 | 12.2 MP |
+| DAT `capturePhoto()` | 1080 × 1440 | 1.56 MP |
+| DAT, reported elsewhere | 720 × 1280 | 0.92 MP |
+
+A Meta maintainer confirmed in discussion #127 *why*: "the way to capture images
+with the Device Access Toolkit is by capturing frames of the video stream,
+that's why the resolution is lower than photos you would take with the glasses."
+`capturePhoto()` is a frame grab off a Bluetooth video stream. It is not a
+photograph. No commitment was given to exposing native capture; discussion #119,
+which proposes an async `captureNativePhoto()`, has no Meta reply at all.
+
+Work it through. A screen filling half the frame height, showing forty lines of
+code:
+
+- **DAT:** 1440 × 0.5 ÷ 40 ≈ **18 px per line** — cap height around 9 px.
+- **Native:** 4032 × 0.5 ÷ 40 ≈ **50 px per line** — cap height around 26 px.
+
+Reliable OCR wants roughly 20 px of cap height and degrades badly below about
+12. So the DAT path lands under the floor for the one thing this app exists to
+do, and native lands comfortably over it. That gap is 2.8× linear and it is not
+closeable by prompting, by better readers, or by a nicer queue.
+
+Estimates, not measurements — but this project already owns the instrument to
+settle it. `runReading()` computes an extraction confidence and, with two
+readers, an agreement score; `reading_done` logs both per job. Photograph the
+same screen both ways, queue both, compare `reading.confidence` and
+`reading.agreement.agree`. No benchmark harness needed.
+
+### The reframe
+
+Once resolution is the binding constraint, the trade the research document
+describes inverts — and the native path turns out to shed both blockers too.
+
+**Native capture → Meta AI auto-import → Photos → PhotoKit**
+
+- 12 MP, the full sensor.
+- No DAT dependency, so no `com.meta.ar.wearable` entry under
+  `UISupportedExternalAccessoryProtocols`, so **no MFi rejection**. Issue #149 is
+  a developer whose app was refused with "the app has not been authorized by the
+  accessory manufacturer" and got no answer. That rejection is caused by linking
+  the SDK. Not linking it avoids it entirely.
+- Not bound by the developer-preview publishing restriction, because it uses no
+  preview SDK. Shippable to the App Store now, to anyone, on shipping glasses.
+- The physical button is the trigger — which for this app is *correct*, not a
+  limitation. You look at a problem on a screen and press the button. There is
+  nothing for `capturePhoto()` to add; the app was never going to decide when to
+  photograph.
+
+What it costs, stated plainly:
+
+- **Latency is not yours to control.** `PHPhotoLibraryChangeObserver` fires while
+  the app is live; iOS suspends apps and makes no promise a terminated app wakes
+  for every import. Realistic behaviour is "processed when the app next gets
+  runtime", not "instant". Tolerable when a council run takes minutes anyway,
+  and a real UX cost if you wanted true hands-free.
+- **Identifying which photos came from the glasses.** Read EXIF `TIFF.Model` off
+  the asset via `requestImageDataAndOrientation`, or watch whatever album
+  auto-import writes to. Both need confirming against one real photo before
+  anything is built on them — this is the first thing to test.
+- **Full photo-library permission** draws genuine App Store review scrutiny. The
+  justification has to be written before the app is submitted, not after.
+- **Auto-import can be switched off**, and the feature dies silently when it is.
+  Detect it and say so.
+
+### Where DAT still earns a place
+
+Not discarded — deferred, and used for what it is actually good at. Live 720p
+frames are the right tool for *aiming*: a preview that confirms the screen is in
+frame and roughly in focus before the shutter, and a "sharpen up, that was
+blurry" signal after. Cheap, and it fixes the worst failure of a
+button-triggered capture, which is finding out ten minutes later that the OCR
+read nothing because the shot was tilted.
+
+Revisit DAT as the capture path when Meta ships native capture and answers the
+MFi question. Watch discussions #119, #127, #134 and issue #149 — those four
+threads are the whole gate.
+
+### How it lands on what already exists
+
+Almost none of this is new backend. A glasses capture is a job with
+`origin = 'glasses'` on the phase 07 columns.
+
+```text
+glasses → Meta AI auto-import → Photos → PhotoKit observer
+        → CodeEditorCompanion → storage.uploadUrl → PUT
+        → sessions.create → jobs.create
+        → worker (unchanged) → council_reports
+        → APNs → watch
+```
+
+Reused unchanged: Storage, `sessions.create`, `jobs.create`, the worker, the
+council, `council_reports`, and the `origin` / `origin_ref` routing. New: the
+capture-watching code inside `ios/CodeEditorCompanion`, which already reads job
+history from Supabase and registers for APNs, and a watchOS target.
+
+The research document's queue design (sections 6, 7, 12) is right and should be
+kept — persistent, not in memory; unique capture ids; retry with limits;
+duplicate detection; backpressure. It applies unchanged to the PhotoKit path,
+where the queue holds `PHAsset` local identifiers instead of `PhotoData`. Its
+capture state machine maps cleanly onto `solve_jobs.status`.
+
+Note the app must upload to `${userId}/glasses/${uuid}.jpg` — `ops.ts:919`
+refuses any path not prefixed with the caller's own account id.
+
+### The watch end
+
+`ios/CodeEditorCompanion/README.md` says Watch support comes through iPhone
+notification mirroring and no watchOS app is needed for v1. True for a
+*notification*; not true for reading an answer — mirroring shows the push, not
+the report.
+
+A watch target gets its own APNs device token, and the topic must be the
+`...watchkitapp` bundle id rather than `...watchkitapp.extension`; using the
+extension is the usual cause of `DeviceTokenNotForTopic`, and it fails silently.
+
+And be honest about the screen: synthesis, standing, reading agreement,
+benchmark evidence and complexity analysis is not a watch document. Verdict on
+the wrist — winner, standing, one line, job state — full report on phone and
+desktop.
+
+### Build order
+
+Steps 1 and 2 are an afternoon and they decide whether the rest is worth doing.
+Do not skip to step 3.
+
+1. **Take two photographs.** One with the glasses' physical button, one through
+   a throwaway DAT app. Same screen, same code, same distance. Queue both. Read
+   `reading.confidence` and `reading.agreement.agree` off the `reading_done`
+   events. If the native shot does not clear the bar either, the whole phase is
+   dead and that is worth knowing on day one.
+2. **Confirm the photos are identifiable.** One glasses photo, dumped EXIF. If
+   `TIFF.Model` does not distinguish it and auto-import writes to no distinct
+   album, the PhotoKit path needs a different discriminator before anything
+   else is built.
+3. PhotoKit observer in `CodeEditorCompanion` — enqueue, upload, `jobs.create`,
+   with the persistent queue from the research document's section 12.
+4. `origin = 'glasses'` end to end, verified against a real council report.
+5. watchOS target: verdict card plus its own APNs registration.
+6. Optional DAT preview for aiming, once everything above works.
+
+### Prerequisites
+
+- Apple Developer Program enrolment — already blocking the signed desktop
+  release, and blocking two targets here.
+- The `notification_devices` owner filter under "Security, unresolved". Do not
+  add a watch as a second push target to a path that currently notifies every
+  account in the project.
+- Phase 07 first. Telegram exercises the same `origin` / `origin_ref` routing
+  with no hardware, no Apple enrolment and no platform approval, and it can be
+  tested from a laptop. Getting it wrong there is cheap.
 
 ---
 

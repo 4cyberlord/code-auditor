@@ -222,6 +222,69 @@ select {
   overflow: hidden;
 }
 
+.workspace-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.workspace-panel {
+  position: absolute;
+  inset: 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  opacity: 0;
+  transform: translateY(8px) scale(0.995);
+  pointer-events: none;
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+}
+
+.workspace-panel[data-active="true"] {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+  z-index: 1;
+}
+
+.workspace-input {
+  flex: none;
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition:
+    grid-template-rows 0.18s ease,
+    opacity 0.18s ease,
+    transform 0.18s ease;
+}
+
+.workspace-input[data-active="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.workspace-input > .inputbar {
+  min-height: 0;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-panel,
+  .workspace-input {
+    transition: none;
+    transform: none;
+  }
+}
+
 .titlebar {
   height: 38px;
   flex: none;
@@ -660,6 +723,10 @@ textarea.field {
   display: flex;
   flex-direction: column;
   background: var(--bg);
+  /* Clip here so the inner scroll region (coding-detail-scroll / plan stack)
+     scrolls within itself instead of stretching the column and breaking the
+     layout when there are many Build-details sections. */
+  overflow: hidden;
 }
 
 .coding-task-body {
@@ -673,7 +740,7 @@ textarea.field {
 }
 
 .coding-task-input {
-  min-height: 220px;
+  min-height: 90px;
   resize: vertical;
   line-height: 1.55;
 }
@@ -701,6 +768,11 @@ textarea.field {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  /* Show ~3 recent runs; the rest scroll inside the list itself rather than
+     unrolling the whole history at once. */
+  max-height: 196px;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .coding-history-item {
@@ -1134,6 +1206,12 @@ textarea.field {
   display: flex;
   flex-direction: column;
   gap: 7px;
+  /* Each rail section (Goal, Todos, Commands, Tests, Security, Memory, More
+     Context) shows a few rows and scrolls inside itself rather than unrolling
+     everything at once. */
+  max-height: 188px;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .coding-detail-rows > div {
@@ -4153,3 +4231,675 @@ body[data-dragging="row"] * {
   #boot { transition: none; }
   .boot-mark span { animation: none; opacity: 0.9; transform: none; }
 }
+
+/* ------------------------------------------------ coding: chat thread */
+
+/* The coding workspace as a one-on-one conversation: the user's messages on
+   the right, the agent's answers and questions on the left, thinking folded
+   into expandable rows, and tool calls as compact log lines. */
+.chat-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-row {
+  display: flex;
+  min-width: 0;
+}
+
+.chat-row.user {
+  justify-content: flex-end;
+}
+
+.chat-bubble {
+  max-width: 80%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-bubble.user {
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line));
+  border-bottom-right-radius: 4px;
+}
+
+.chat-bubble.assistant {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-bottom-left-radius: 4px;
+}
+
+.chat-meta {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-dim);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.chat-qa {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-think {
+  max-width: 92%;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.chat-think summary {
+  cursor: pointer;
+  padding: 6px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.chat-think-body {
+  padding: 0 10px 8px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-tool {
+  max-width: 92%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-sunken);
+  font-size: 11px;
+}
+
+.chat-tool summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 6px 10px;
+}
+
+.chat-tool summary code {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+.chat-tool-status {
+  color: var(--text-dim);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.chat-tool[data-status="ok"] .chat-tool-status {
+  color: var(--good);
+}
+
+.chat-tool[data-status="error"] .chat-tool-status {
+  color: var(--bad);
+}
+
+.chat-tool pre {
+  margin: 0;
+  padding: 2px 10px 8px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+/* A plan or final report is a document, not a bubble — full-width card. */
+.chat-card {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 4px 14px 12px;
+}
+
+.chat-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+/* Per-turn upstream cost/time notes — visible, but not a message. */
+.chat-meta-line {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+}
+
+.chat-typing {
+  padding: 2px 4px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  font-style: italic;
+}
+
+/* History rows pair the open button with a rename affordance. */
+.coding-history-row {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.coding-history-row .coding-history-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.coding-history-edit {
+  align-self: center;
+  flex-shrink: 0;
+}
+
+.coding-rename-input {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--accent);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+
+/* -------------------------------------- coding: chat column + name modal */
+
+/* The conversation lives in the left column, above the composer, and scrolls
+   on its own so the input stays put while the thread grows. */
+.coding-chat {
+  flex: 1;
+  min-height: 140px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/* The naming prompt reuses the shared modal shell, just narrower. */
+.modal.compact {
+  width: min(430px, 92vw);
+  max-height: none;
+}
+
+.modal.compact .content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* --------------------------------------- coding: execute-process timeline */
+
+/* Breathing room between a section's name and its count ("Todos  3"). */
+.rail-details summary .chip {
+  margin-left: 6px;
+}
+
+/* The step-by-step record under Execute Plan. Reads stay folded; mutations
+   sit open so the change itself is what you see. */
+.proc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.proc-tool {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-sunken);
+  overflow: hidden;
+}
+
+.proc-tool summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 7px 11px;
+  font-size: 11.5px;
+  list-style: none;
+}
+
+.proc-tool summary::-webkit-details-marker {
+  display: none;
+}
+
+.proc-tool summary strong {
+  font-size: 11.5px;
+}
+
+.proc-target {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.proc-tool[data-status="error"] {
+  border-color: color-mix(in srgb, var(--bad) 40%, transparent);
+}
+
+.proc-tool[data-status="running"] summary strong::after {
+  content: "";
+}
+
+.proc-code {
+  padding: 0 11px 8px;
+}
+
+.proc-code-label {
+  margin: 2px 0 4px;
+  color: var(--text-dim);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.proc-code pre {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.proc-outcome {
+  margin: 0;
+  padding: 0 11px 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* =========================================================================
+   Coding workspace — feature-builder polish (restored)
+   ========================================================================= */
+
+/* ---------------------------------------- GitHub-style two-tone diffs */
+
+.diff-block {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: auto;
+  background: var(--bg);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  max-height: 340px;
+}
+
+.diff-line {
+  display: flex;
+  gap: 8px;
+  padding: 0 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.diff-gutter {
+  flex: none;
+  width: 0.9em;
+  text-align: center;
+  opacity: 0.7;
+  user-select: none;
+}
+
+.diff-text { flex: 1; min-width: 0; }
+
+.diff-add {
+  background: color-mix(in srgb, var(--good) 15%, transparent);
+  color: color-mix(in srgb, var(--good) 55%, var(--text));
+}
+.diff-add .diff-gutter { color: var(--good); }
+
+.diff-del {
+  background: color-mix(in srgb, var(--bad) 14%, transparent);
+  color: color-mix(in srgb, var(--bad) 55%, var(--text));
+}
+.diff-del .diff-gutter { color: var(--bad); }
+
+/* ---------------------------------------- file traffic-light rail */
+
+.file-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 188px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.file-status-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--bg-sunken);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.file-status-icon {
+  flex: none;
+  width: 1.15em;
+  text-align: center;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.file-status-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.file-status-path {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.file-status-reason {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+.file-status-tag {
+  flex: none;
+  align-self: center;
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.file-status-row[data-state="done"] .file-status-icon,
+.file-status-row[data-state="done"] .file-status-tag { color: var(--good); }
+
+.file-status-row[data-state="done"] {
+  border-color: color-mix(in srgb, var(--good) 32%, var(--line));
+}
+
+.file-status-row[data-state="done"] .file-status-path {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--good) 70%, transparent);
+  opacity: 0.72;
+}
+
+.file-status-row[data-state="active"] .file-status-icon,
+.file-status-row[data-state="next"] .file-status-icon,
+.file-status-row[data-state="active"] .file-status-tag,
+.file-status-row[data-state="next"] .file-status-tag { color: var(--warn); }
+
+.file-status-row[data-state="active"],
+.file-status-row[data-state="next"] {
+  border-color: color-mix(in srgb, var(--warn) 34%, var(--line));
+  background: color-mix(in srgb, var(--warn) 8%, var(--bg-sunken));
+}
+
+.file-status-row[data-state="pending"] .file-status-icon {
+  color: var(--text-dim);
+  opacity: 0.6;
+}
+
+/* ---------------------------------------- typing indicator (three dots) */
+
+.chat-bubble.typing { display: inline-flex; flex-direction: column; gap: 4px; }
+
+.typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 12px;
+}
+
+.typing-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  opacity: 0.4;
+  animation: typing-pulse 1.2s ease-in-out infinite;
+}
+
+.typing-dots span:nth-child(2) { animation-delay: 0.18s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.36s; }
+
+@keyframes typing-pulse {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+/* ---------------------------------------- completion banner */
+
+.completion-banner {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--good) 40%, var(--line));
+  background: color-mix(in srgb, var(--good) 9%, var(--panel));
+  padding: 10px 14px 12px;
+}
+
+.completion-banner[data-tone="mixed"] {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
+  background: color-mix(in srgb, var(--warn) 9%, var(--panel));
+}
+
+.completion-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.completion-head strong { font-size: 12.5px; }
+
+.completion-badge { font-size: 14px; font-weight: 700; color: var(--good); }
+.completion-banner[data-tone="mixed"] .completion-badge { color: var(--warn); }
+
+.completion-count {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.completion-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.completion-item { display: flex; align-items: baseline; gap: 8px; font-size: 11px; }
+
+.completion-item-icon {
+  flex: none;
+  width: 1em;
+  text-align: center;
+  font-weight: 700;
+  color: var(--good);
+}
+
+.completion-item[data-ok="false"] .completion-item-icon { color: var(--bad); }
+
+.completion-item-tool {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text);
+}
+
+.completion-item-path {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+/* ---------------------------------------- reasoning on/off switch */
+
+.coding-reasoning { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+
+.reasoning-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.reasoning-switch:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+
+.reasoning-switch:disabled { opacity: 0.55; cursor: default; }
+
+.reasoning-track {
+  position: relative;
+  width: 30px;
+  height: 16px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-dim) 35%, transparent);
+  transition: background 0.15s ease;
+  flex: none;
+}
+
+.reasoning-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--panel);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: transform 0.15s ease;
+}
+
+.reasoning-switch[data-on] {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+.reasoning-switch[data-on] .reasoning-track { background: var(--accent); }
+.reasoning-switch[data-on] .reasoning-thumb { transform: translateX(14px); }
+
+.reasoning-label { white-space: nowrap; }
+.reasoning-hint { color: var(--text-dim); font-size: 10px; letter-spacing: 0.03em; }
+
+/* ---------------------------------------- live streaming bubble */
+
+.chat-bubble.streaming { max-width: 92%; }
+
+.streaming-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.stream-caret {
+  display: inline-block;
+  width: 7px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  border-radius: 1px;
+  animation: stream-caret-blink 1s steps(2, start) infinite;
+}
+
+@keyframes stream-caret-blink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+.chat-think.inline { margin-top: 4px; margin-bottom: 6px; max-width: 100%; }
+
+.chat-bubble.streaming .chat-think-body { max-height: 220px; overflow-y: auto; }
+
+/* ---------------------------------------- misc spacing */
+
+.coding-plan-stack { gap: 14px; }
+.chat-thread.coding-chat { display: flex; flex-direction: column; gap: 9px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-dots span { animation: none; opacity: 0.6; }
+  .stream-caret { animation: none; opacity: 1; }
+  .reasoning-thumb, .reasoning-track, .reasoning-switch { transition: none; }
+}
+
+/* Reconstruction list: done todos struck through but kept visible; failed
+   changes flagged red. */
+.coding-needs-list li[data-done] {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--good) 70%, transparent);
+  opacity: 0.78;
+}
+.coding-needs-list li[data-done] strong { color: var(--good); }
+.coding-needs-list li[data-ok="false"] { color: var(--bad); }
+.coding-needs-list code {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+/* Completion banner: changes applied but not yet verified by a test run. */
+.completion-banner[data-tone="unverified"] {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+}
+.completion-banner[data-tone="unverified"] .completion-badge { color: var(--accent); }

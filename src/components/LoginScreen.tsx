@@ -49,7 +49,7 @@ export default function LoginScreen({
   // timer open for the life of the app.
   const [left, setLeft] = useState(() => lockSecondsLeft(status?.lockedUntil ?? null));
   useEffect(() => {
-    setLeft(lockSecondsLeft(status?.lockedUntil ?? null));
+    queueMicrotask(() => setLeft(lockSecondsLeft(status?.lockedUntil ?? null)));
     if (!status?.lockedUntil) return;
     const id = setInterval(() => setLeft(lockSecondsLeft(status.lockedUntil)), 1000);
     return () => clearInterval(id);
@@ -65,7 +65,10 @@ export default function LoginScreen({
   // Rust knows the owner's name; the field should show it rather than making
   // someone type their own name at their own laptop every morning.
   useEffect(() => {
-    if (status?.username && !username) setUsername(status.username);
+    const owner = status?.username;
+    if (owner && !username) {
+      queueMicrotask(() => setUsername(owner));
+    }
   }, [status?.username, username]);
 
   /**

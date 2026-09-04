@@ -2,10 +2,21 @@ import * as bridge from "./bridge.ts";
 
 export const CODING_QWEN_MODEL = "qwen3.8-27b-uncensored";
 export const CODING_QWEN_URL = "http://127.0.0.1:8787/v1/chat/completions";
-export const CODING_QWEN_MAX_TOKENS = 8192;
+// Output budget per turn. Raised past the old 4096 once the bridge moved to
+// Wiro's `max_tokens` (the deprecated `max_new_tokens` was capped at 4096), so
+// a reasoning pass and the answer both fit instead of the answer being cut off.
+export const CODING_QWEN_MAX_TOKENS = 16384;
 export const CODING_BRIDGE_CONFIG_KEY = "code-auditor.coding-intelligence.bridge";
 export const CODING_BRIDGE_CONFIG_EVENT = "coding-bridge-config";
 export const CODING_RUN_HISTORY_KEY = "code-auditor.coding-intelligence.history";
+
+/**
+ * How many model turns one Build run may take before it hands back for a
+ * Continue. Raised past the old 18 so a full README (many todos, each read →
+ * edit → verify) gets through in one pass; the app also auto-continues while it
+ * keeps making progress, so a long plan still finishes end to end.
+ */
+export const MAX_EXECUTION_TURNS = 26;
 
 export interface CodingBridgeConfig {
   url: string;
@@ -13,6 +24,12 @@ export interface CodingBridgeConfig {
   maxTokens: number;
   temperature: number;
   projectRoot: string;
+  /**
+   * Whether the model runs its reasoning pass before answering. On is more
+   * deliberate but much slower on the 27B; off answers directly. Toggled from
+   * the composer and forwarded to the bridge per request.
+   */
+  reasoning: boolean;
 }
 
 export interface CodingBridgeHealth {
@@ -33,6 +50,7 @@ interface StoredBridgeConfig {
   maxTokens?: number;
   temperature?: number;
   projectRoot?: string;
+  reasoning?: boolean;
 }
 
 export const DEFAULT_CODING_BRIDGE_CONFIG: CodingBridgeConfig = {
@@ -41,6 +59,7 @@ export const DEFAULT_CODING_BRIDGE_CONFIG: CodingBridgeConfig = {
   maxTokens: CODING_QWEN_MAX_TOKENS,
   temperature: 0.2,
   projectRoot: "",
+  reasoning: true,
 };
 
 export interface CodingSolution {
@@ -94,11 +113,16 @@ export interface CodingSolution {
 }
 
 /** Why a run ended before the model said it was done. */
-export type CodingStopReason = "stopped" | "timeout" | "turn_budget";
+export type CodingStopReason = "stopped" | "timeout" | "turn_budget" | "incomplete";
 
 export interface CodingRun {
   id: string;
   task: string;
+  /**
+   * User-settable conversation name for History. Absent means "derive it from
+   * the task" — see titleForRun.
+   */
+  title?: string;
   raw: string;
   parsed: CodingSolution | null;
   events: CodingToolEvent[];
@@ -119,6 +143,17 @@ export interface CodingRun {
   mode?: "plan" | "execute";
   /** Reasoning, tool calls and injected instructions, in order. */
   activity?: CodingActivity[];
+  /**
+   * The upstream Wiro task id of every model turn, in order. Wiro keeps the
+   * full task record server-side (prompt, output, cost), retrievable by id —
+   * this is the audit trail that ties a run here to the billed work there.
+   */
+  wiroTasks?: Array<{
+    taskId: string;
+    elapsedSeconds: number | null;
+    totalCost: number | null;
+    turn: number;
+  }>;
 }
 
 export interface CodingToolEvent {
@@ -158,7 +193,7 @@ export interface CodingProgress {
  */
 export interface CodingActivity {
   id: string;
-  kind: "thinking" | "tool" | "note" | "instruction";
+  kind: "thinking" | "tool" | "note" | "instruction" | "question" | "meta";
   turn: number;
   text: string;
   /** Present on `tool` entries, pointing at the matching CodingToolEvent. */
@@ -182,6 +217,13 @@ export interface CodingRunOptions {
    * next decision rather than after the whole run finishes.
    */
   takePending?: () => string[];
+  /**
+   * Called when the model invokes the `question` tool. The run blocks on the
+   * returned promise, and the answer goes back as the tool result. When this
+   * is not provided the call resolves to an error result telling the model to
+   * proceed on its own judgement.
+   */
+  onQuestion?: (question: string) => Promise<string>;
 }
 
 export class CodingRunCancelled extends Error {
@@ -254,9 +296,30 @@ const HEADLINE_KEYS = [
  * with JSON.stringify put braces and quotes in front of the user for no gain:
  * the information was already prose, just wearing punctuation.
  */
+/**
+ * Removes the model's tool-call markup (`<function=…>`, `<parameter=…>`,
+ * `</tool_call>`, `<think>` …) from any text about to be shown to a person.
+ * The model sometimes leaves these fragments in its prose or its final report,
+ * and rendered raw they read as gibberish like a stray `</tool_call>`. Only
+ * tags are stripped — real prose and code are left untouched.
+ */
+export function stripToolTags(text: string): string {
+  return String(text ?? "")
+    .replace(/<\/?think(?:ing)?>/gi, "")
+    .replace(/<function\s*=[^>]*>/gi, "")
+    .replace(/<\/function>/gi, "")
+    .replace(/<parameter\s*=[^>]*>/gi, "")
+    .replace(/<\/parameter>/gi, "")
+    .replace(/<\/?tool_call>/gi, "")
+    .replace(/<\/?tool_code>/gi, "")
+    // Bare pseudo-tags the model wraps its answer/args in — plumbing, not prose.
+    .replace(/<\/?(?:answer|final_answer|response|result|path|summary|status|content)\s*>/gi, "")
+    .replace(/<(?:path|summary|status|content)\s*=[^>]*>/gi, "");
+}
+
 export function humanizeValue(value: unknown, depth = 0): string {
   if (value == null) return "";
-  if (typeof value === "string") return value.trim();
+  if (typeof value === "string") return stripToolTags(value).trim();
   if (typeof value === "number" || typeof value === "boolean") return String(value);
 
   if (Array.isArray(value)) {
@@ -314,6 +377,36 @@ export function cleanCodingError(err: unknown): string {
     return "Wiro already has one task running. Wait for that task to finish or stop it, then run this again. Your current Wiro balance allows 1 concurrent task.";
   }
 
+  // 402 wiro_billing_limit — the one failure only a top-up fixes, so say so.
+  if (
+    lower.includes("insufficient balance") ||
+    lower.includes("wiro_billing_limit") ||
+    lower.includes("code 97")
+  ) {
+    return "The Wiro account is out of balance. Top it up in the Wiro dashboard, then run this again.";
+  }
+
+  // 502 wiro_task_failed — the model task itself died upstream (pexit != 0).
+  if (
+    lower.includes("wiro_task_failed") ||
+    lower.includes("wiro task failed")
+  ) {
+    return "The model task failed on Wiro's side before it could answer. Nothing was applied. Run it again — if it repeats, the bridge terminal has the task's error detail.";
+  }
+
+  if (lower.includes("wiro_task_cancelled") || lower.includes("cancelled the task upstream")) {
+    return "The task was cancelled on Wiro's side, not here. Run it again when whatever stopped it is resolved.";
+  }
+
+  if (
+    lower.includes("wiro is still finishing") ||
+    lower.includes("wiro_upstream_settling")
+  ) {
+    // The prefix differs by transport: the browser fallback says "Qwen
+    // answered 429:", the desktop shell says "qwen 429:".
+    return raw.replace(/^(?:qwen answered|qwen)\s*429:\s*/i, "");
+  }
+
   if (
     lower.includes("wiro sse disconnected") ||
     lower.includes("automatic replay is disabled")
@@ -344,7 +437,7 @@ export function humanizeSolution(solution: CodingSolution | null): HumanSection[
     if (rows.length) out.push({ label, rows });
   };
 
-  const summary = trimmed(solution.summary);
+  const summary = stripToolTags(trimmed(solution.summary));
   if (summary) add("Summary", [summary]);
 
   // `understanding` is a fixed-key object, so its keys become the labels.
@@ -457,15 +550,140 @@ export function runMode(run: CodingRun): "plan" | "execute" {
   return run.mode ?? (run.events.length > 0 ? "execute" : "plan");
 }
 
-/** A run that ended before the model was done, and can be picked back up. */
+/** What a run is called in History: the user's name for it, else its task. */
+export function titleForRun(run: CodingRun): string {
+  const custom = run.title?.trim();
+  if (custom) return custom;
+  const firstLine = (run.task || "").trim().split("\n")[0].trim();
+  return firstLine.length > 60 ? `${firstLine.slice(0, 57)}…` : firstLine || "Untitled conversation";
+}
+
+/**
+ * The run's todo list at its latest known state: the most recent todowrite the
+ * agent sent, falling back to the plan's own todos. Each row keeps its status,
+ * so a resumed run can see what was already done.
+ */
+export function latestTodoRows(run: CodingRun): Array<{ title: string; status: string; detail: string }> {
+  const fromEvent = [...run.events]
+    .reverse()
+    .find((e) => e.tool.trim().toLowerCase() === "todowrite" && e.status !== "error");
+  const parseList = (value: unknown): Array<{ title: string; status: string; detail: string }> => {
+    let list: unknown = value;
+    if (typeof list === "string") {
+      try {
+        list = JSON.parse(list);
+      } catch {
+        return [];
+      }
+    }
+    if (!Array.isArray(list)) return [];
+    return list
+      .map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const r = item as Record<string, unknown>;
+        const title = trimmed(r.title ?? r.content ?? r.task);
+        if (!title) return null;
+        return { title, status: trimmed(r.status) || "pending", detail: trimmed(r.detail) };
+      })
+      .filter((x): x is { title: string; status: string; detail: string } => x !== null);
+  };
+  if (fromEvent) {
+    const rows = parseList(fromEvent.args?.todos);
+    if (rows.length) return rows;
+  }
+  return (run.parsed?.todos ?? [])
+    .map((t) => ({ title: trimmed(t?.title), status: trimmed(t?.status) || "pending", detail: trimmed(t?.detail) }))
+    .filter((t) => t.title);
+}
+
+/** Parse one todowrite call's argument into typed rows. */
+function parseTodoArgs(
+  args: Record<string, unknown> | undefined
+): Array<{ title: string; status: string; detail: string }> {
+  let list: unknown = args?.todos;
+  if (typeof list === "string") {
+    try {
+      list = JSON.parse(list);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const r = item as Record<string, unknown>;
+      const title = trimmed(r.title ?? r.content ?? r.task);
+      if (!title) return null;
+      return { title, status: trimmed(r.status) || "pending", detail: trimmed(r.detail) };
+    })
+    .filter((x): x is { title: string; status: string; detail: string } => x !== null);
+}
+
+/**
+ * Every todo the run ever had, merged across all todowrite calls in order, so a
+ * completed item stays on the list even if a later todowrite dropped it. Status
+ * is whatever the most recent call said; done items are kept, not removed.
+ */
+export function mergeTodoRows(
+  events: CodingToolEvent[],
+  parsed: CodingSolution | null
+): Array<{ title: string; status: string; detail: string }> {
+  const order: string[] = [];
+  const map = new Map<string, { title: string; status: string; detail: string }>();
+  const add = (row: { title: string; status: string; detail: string }) => {
+    const key = row.title.toLowerCase();
+    if (!map.has(key)) order.push(key);
+    const prev = map.get(key);
+    map.set(key, { title: row.title, status: row.status, detail: row.detail || prev?.detail || "" });
+  };
+  for (const t of parsed?.todos ?? []) {
+    const title = trimmed(t?.title);
+    if (title) add({ title, status: trimmed(t?.status) || "pending", detail: trimmed(t?.detail) });
+  }
+  for (const ev of events) {
+    if (ev.tool.trim().toLowerCase() !== "todowrite" || ev.status === "error") continue;
+    for (const row of parseTodoArgs(ev.args)) add(row);
+  }
+  return order.map((k) => map.get(k)!);
+}
+
+/** The merged todos as display strings ("status - title: detail"). */
+export function mergeTodoStringRows(
+  events: CodingToolEvent[],
+  parsed: CodingSolution | null
+): string[] {
+  return mergeTodoRows(events, parsed).map(
+    (t) => `${t.status} - ${t.title}${t.detail ? `: ${t.detail}` : ""}`
+  );
+}
+
+/** How many of a run's todos are done, and how many there are in total. */
+export function todoProgress(run: CodingRun): { done: number; total: number } {
+  const rows = mergeTodoRows(run.events, run.parsed);
+  const base = rows.length ? rows : latestTodoRows(run);
+  return { done: base.filter((r) => r.status.toLowerCase() === "done").length, total: base.length };
+}
+
+/**
+ * A run that can be picked back up: one that ended early (stoppedReason), or an
+ * execution run that reported back but still has unfinished todos — so a run
+ * that got 3 of 10 done can Continue from 4 rather than starting over.
+ */
 export function isResumable(run: CodingRun | null): boolean {
-  return Boolean(run?.stoppedReason);
+  if (!run) return false;
+  if (run.stoppedReason) return true;
+  if (runMode(run) !== "execute") return false;
+  const { done, total } = todoProgress(run);
+  return total > 0 && done < total;
 }
 
 export function stopReasonLabel(reason: CodingStopReason | undefined): string {
   if (reason === "stopped") return "You stopped this run.";
   if (reason === "timeout") return "The bridge cut this run short on one of its time limits.";
   if (reason === "turn_budget") return "This run used all of its turns before finishing.";
+  if (reason === "incomplete")
+    return "The model ended without a structured report — often the case with Reasoning off. Turn Reasoning on and Continue, or run it again.";
   return "";
 }
 
@@ -473,14 +691,17 @@ export function stopReasonLabel(reason: CodingStopReason | undefined): string {
  * Whether the model produced a plan there is actually something to execute,
  * as opposed to an acknowledgement or a request for more detail.
  *
- * The distinction matters because the Implementation plan pane is a launchpad:
- * everything in it leads to Run Work. Showing a skeleton there — steps like
- * "ask the user what they want" against files listed as `unknown` — invites
- * someone to execute a plan that was never about their code.
+ * The status field is deliberately NOT the gate beyond "blocked": planning
+ * runs have no tools, so an honest model often says "needs_context" about a
+ * plan that names real work and real files — the inspection it wants happens
+ * during execution, which does have tools. What makes a plan runnable is that
+ * it names work AND names where it lands. A skeleton — steps like "ask the
+ * user what they want" against files listed as `unknown` — fails that test
+ * and stays unexecutable.
  */
 export function isActionablePlan(solution: CodingSolution | null): boolean {
   if (!solution) return false;
-  if (solution.status && solution.status !== "ready") return false;
+  if (solution.status === "blocked") return false;
 
   const steps = (solution.implementation_approach ?? []).filter(
     (step) => trimmed(step?.title) || trimmed(step?.description)
@@ -540,6 +761,8 @@ Rules:
 13. Prefer real implementation over general advice.
 14. Use tools when the user asks to edit, create, delete, rename, move, or verify files/folders.
 15. After tool work is complete, return only the JSON object below.
+16. Keep the live todo list current with the todowrite tool as steps complete — send the full list, and only when something actually changed.
+17. If you are blocked on a decision or information only the user has, use the question tool rather than guessing.
 
 Return only a JSON object with this envelope:
 {
@@ -721,8 +944,8 @@ Use the available tools to inspect, edit, create, delete, move, copy, and verify
 Keep the final JSON report aligned to the plan and todos, marking completed work as done.
 
 The approved plan is also written to ${CODING_PLAN_DOC} in the project root. Read it
-if you need the full detail — it is the same plan, not a newer one. Do not edit that
-file yourself; it is regenerated from your final report when this run finishes.
+if you need the full detail — it is the same plan, not a newer one. Leave that
+plan document alone during execution; it is regenerated from your final report when this run finishes.
 `.trim();
 }
 
@@ -745,6 +968,19 @@ export function buildCodingResumeContext(
   const line = (event: CodingToolEvent) =>
     `- ${event.tool} ${eventSummary(event)} → ${event.result.slice(0, 200).replace(/\s+/g, " ")}`;
 
+  // The todo list as the previous attempt left it, so the model resumes at the
+  // first unfinished item instead of starting over from todo 1.
+  const todos = latestTodoRows(previous);
+  const { done, total } = todoProgress(previous);
+  const todoBlock = todos.length
+    ? `TODO PROGRESS (${done}/${total} done)\n\n${todos
+        .map((t) => {
+          const mark = t.status.toLowerCase() === "done" ? "[x]" : "[ ]";
+          return `- ${mark} ${t.title}${t.detail ? ` — ${t.detail}` : ""}`;
+        })
+        .join("\n")}\n`
+    : "";
+
   return `
 ${buildCodingExecutionContext(task, planRun)}
 
@@ -753,9 +989,11 @@ ${buildCodingExecutionContext(task, planRun)}
 THIS IS A CONTINUATION
 
 A previous attempt at this same task was interrupted: ${
-    stopReasonLabel(previous.stoppedReason) || "it ended before finishing."
+    stopReasonLabel(previous.stoppedReason) ||
+    (total ? `it reported back with ${done} of ${total} todos done.` : "it ended before finishing.")
   }
 
+${todoBlock}
 ALREADY APPLIED (${applied.length})
 
 ${applied.length ? applied.map(line).join("\n") : "(nothing was applied)"}
@@ -763,10 +1001,12 @@ ${applied.length ? applied.map(line).join("\n") : "(nothing was applied)"}
 ${failed.length ? `FAILED LAST TIME (${failed.length})\n\n${failed.map(line).join("\n")}\n` : ""}
 HOW TO CONTINUE
 
-Do not repeat work listed as already applied.
+Do not repeat work listed as already applied or any todo already marked [x].
+Start from the first unfinished todo and work through the rest in order.
 Read any file you intend to change before changing it — the previous attempt may
 have been cut off partway through a write, so do not assume its state.
-Carry on from where it stopped and finish the task.
+Keep the todo list current with todowrite as you complete each item, and carry
+on until every todo is done.
 `.trim();
 }
 
@@ -795,6 +1035,60 @@ export async function saveRunDocument(
   }
 }
 
+/** Server key prefix for a single run's stored report (Supabase settings table). */
+export const CODING_REPORT_KEY_PREFIX = "code-auditor.coding-intelligence.report.";
+
+export interface StoredRunReport {
+  id: string;
+  task: string;
+  title?: string;
+  createdAt: number;
+  status?: string;
+  stoppedReason?: CodingStopReason;
+  /** The structured report — Goal, todos, files, the machine-readable plan. */
+  report: CodingSolution | null;
+  /** The rendered README / IMPLEMENTATION_PLAN.md document. */
+  document: string;
+}
+
+/**
+ * Persists a run's structured report and its rendered README to the SERVER
+ * (Supabase, via the settings pipeline — settings_save holds no local database
+ * and writes nothing to disk). Keyed by run id, so each report is a first-class,
+ * retrievable record rather than only a line in a local file. Best-effort and
+ * never throws: the run history already carries the same data as a fallback.
+ */
+export async function saveRunReportToServer(
+  run: CodingRun,
+  previous?: CodingRun | null
+): Promise<boolean> {
+  const payload: StoredRunReport = {
+    id: run.id,
+    task: run.task,
+    createdAt: run.createdAt,
+    report: run.parsed,
+    document: buildRunDocument(run, previous),
+  };
+  if (run.title) payload.title = run.title;
+  if (run.parsed?.status) payload.status = String(run.parsed.status);
+  if (run.stoppedReason) payload.stoppedReason = run.stoppedReason;
+  try {
+    await bridge.settingsSave(`${CODING_REPORT_KEY_PREFIX}${run.id}`, payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Reads one run's stored report back from the server. Null when absent. */
+export async function loadRunReportFromServer(id: string): Promise<StoredRunReport | null> {
+  try {
+    return (await bridge.settingsLoad<StoredRunReport>(`${CODING_REPORT_KEY_PREFIX}${id}`)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function loadCodingBridgeConfig(): CodingBridgeConfig {
   if (typeof window === "undefined") return DEFAULT_CODING_BRIDGE_CONFIG;
   try {
@@ -812,6 +1106,10 @@ export function loadCodingBridgeConfig(): CodingBridgeConfig {
         ? Number(parsed.temperature)
         : DEFAULT_CODING_BRIDGE_CONFIG.temperature,
       projectRoot: parsed.projectRoot?.trim() || DEFAULT_CODING_BRIDGE_CONFIG.projectRoot,
+      reasoning:
+        typeof parsed.reasoning === "boolean"
+          ? parsed.reasoning
+          : DEFAULT_CODING_BRIDGE_CONFIG.reasoning,
     };
   } catch {
     return DEFAULT_CODING_BRIDGE_CONFIG;
@@ -828,6 +1126,7 @@ export function saveCodingBridgeConfig(config: CodingBridgeConfig) {
       maxTokens: config.maxTokens,
       temperature: config.temperature,
       projectRoot: config.projectRoot,
+      reasoning: config.reasoning,
     })
   );
   window.dispatchEvent(new CustomEvent(CODING_BRIDGE_CONFIG_EVENT, { detail: config }));
@@ -880,7 +1179,66 @@ export const CODING_TOOLS = [
   tool("rename_folder", "Rename or move a folder.", { source: stringSchema, destination: stringSchema }, ["source", "destination"]),
   tool("move_folder", "Move a folder.", { source: stringSchema, destination: stringSchema }, ["source", "destination"]),
   tool("copy_folder", "Copy a folder recursively.", { source: stringSchema, destination: stringSchema }, ["source", "destination"]),
+  // Answered by the user, not the filesystem — intercepted in the run loop.
+  tool("question", "Ask the user a blocking question when you cannot proceed without their decision or information. Their answer comes back as the tool result.", { question: stringSchema }, ["question"]),
+  // Repaints the todo rail live — also intercepted in the run loop.
+  tool("todowrite", "Replace the live todo list for this run. Send the FULL list each time, and only when something actually changed.", {
+    todos: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          title: stringSchema,
+          status: { type: "string", enum: ["pending", "working", "done", "blocked"] },
+          detail: stringSchema,
+        },
+        required: ["title", "status"],
+      },
+    },
+  }, ["todos"]),
 ];
+
+const canonTool = (name: string): string => name.trim().toLowerCase();
+
+/**
+ * The todo list as display rows, tolerant of the shapes models actually send:
+ * the array arrives stringified as often as not, and items vary between
+ * strings and objects with mixed key names.
+ */
+export function todoRowsFromArgs(args: Record<string, unknown>): string[] {
+  let list: unknown = args?.todos;
+  if (typeof list === "string") {
+    try {
+      list = JSON.parse(list);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(list)) return [];
+  return list
+    .slice(0, 50)
+    .map((item) => {
+      if (typeof item === "string") return item.trim() ? `pending - ${item.trim()}` : "";
+      if (!item || typeof item !== "object") return "";
+      const record = item as Record<string, unknown>;
+      const title = trimmed(record.title ?? record.content ?? record.task);
+      if (!title) return "";
+      const status = trimmed(record.status) || "pending";
+      const detail = trimmed(record.detail);
+      return `${status} - ${title}${detail ? `: ${detail}` : ""}`;
+    })
+    .filter(Boolean);
+}
+
+/** The question text however the model chose to field it. */
+function questionTextOf(args: Record<string, unknown>): string {
+  return (
+    trimmed(args?.question) ||
+    trimmed(args?.text) ||
+    trimmed(args?.raw) ||
+    "The agent is asking a question but sent it without text."
+  );
+}
 
 export function codingBridgeBaseUrl(chatUrl: string): string {
   return chatUrl
@@ -960,10 +1318,73 @@ export async function loadCodingRuns(): Promise<CodingRun[]> {
   return fromLocal();
 }
 
+/**
+ * The largest a single tool payload (a file read, a whole-file write) is kept
+ * at when persisting to localStorage. The live in-memory run keeps the full
+ * text; only the on-disk history copy is trimmed, and the diff/card views clip
+ * far below this anyway. Without a cap, one big read can push the whole store
+ * past the browser's quota and lose the run entirely.
+ */
+const MAX_STORED_EVENT_CHARS = 20000;
+
+function capStored(text: string): string {
+  return text.length > MAX_STORED_EVENT_CHARS
+    ? `${text.slice(0, MAX_STORED_EVENT_CHARS)}\n… (${
+        text.length - MAX_STORED_EVENT_CHARS
+      } more characters, trimmed from saved history)`
+    : text;
+}
+
+/** A copy of a run with oversized tool payloads trimmed, for persistence only. */
+function pruneRunForStorage(run: CodingRun): CodingRun {
+  const capArgs = (args: Record<string, unknown>): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(args)) {
+      out[key] = typeof value === "string" ? capStored(value) : value;
+    }
+    return out;
+  };
+  return {
+    ...run,
+    events: run.events.map((event) => ({
+      ...event,
+      result: capStored(event.result),
+      args: capArgs(event.args),
+    })),
+    activity: (run.activity ?? []).map((entry) => ({ ...entry, text: capStored(entry.text) })),
+  };
+}
+
 export async function saveCodingRuns(runs: CodingRun[]): Promise<void> {
   if (typeof window === "undefined") return;
   const trimmed = runs.slice(0, 30).map(normalizeRun);
-  localStorage.setItem(CODING_RUN_HISTORY_KEY, JSON.stringify(trimmed));
+
+  // localStorage has a hard per-origin quota (a few MB). A run whose log holds
+  // large reads or writes can exceed it, and an unguarded setItem throws —
+  // aborting the whole save and skipping the durable Tauri store below. So the
+  // local copy is trimmed, and if it still will not fit, older runs are dropped
+  // until it does rather than losing the newest one.
+  const persist = (list: CodingRun[]) =>
+    localStorage.setItem(CODING_RUN_HISTORY_KEY, JSON.stringify(list));
+  let local = trimmed.map(pruneRunForStorage);
+  for (;;) {
+    try {
+      persist(local);
+      break;
+    } catch {
+      if (local.length <= 1) {
+        // Even one full run will not fit — keep its report, drop the logs.
+        try {
+          persist(local.length ? [{ ...local[0], events: [], activity: [] }] : []);
+        } catch {}
+        break;
+      }
+      local = local.slice(0, Math.ceil(local.length / 2));
+    }
+  }
+
+  // The Tauri settings store is not quota-bound, so it keeps the full-fidelity
+  // history; loadCodingRuns prefers it and falls back to the trimmed local copy.
   try {
     await bridge.settingsSave(CODING_RUN_HISTORY_KEY, trimmed);
   } catch {}
@@ -987,7 +1408,7 @@ export async function runCodingIntelligence(
   config: CodingBridgeConfig,
   options: CodingRunOptions = {}
 ): Promise<CodingRun> {
-  const { control, onEvent, onProgress, onActivity, planRun, resumeFrom, takePending } = options;
+  const { control, onEvent, onProgress, onActivity, planRun, resumeFrom, takePending, onQuestion } = options;
   if (!config.projectRoot.trim()) {
     throw new Error("Set a project root in Bridge settings before running coding tools.");
   }
@@ -1007,6 +1428,7 @@ export async function runCodingIntelligence(
   let finished = false;
   const events: CodingToolEvent[] = [];
   const activity: CodingActivity[] = [];
+  const wiroTasks: NonNullable<CodingRun["wiroTasks"]> = [];
 
   const note = (
     kind: CodingActivity["kind"],
@@ -1028,7 +1450,7 @@ export async function runCodingIntelligence(
     onActivity?.(entry);
   };
 
-  for (let turn = 0; turn < 18; turn += 1) {
+  for (let turn = 0; turn < MAX_EXECUTION_TURNS; turn += 1) {
     if (control?.cancelled) break;
 
     // Follow-ups typed while this was running. Injected at the turn boundary so
@@ -1060,6 +1482,8 @@ export async function runCodingIntelligence(
       messages,
       tools: CODING_TOOLS,
       runId: control?.runId,
+      mode: "execute",
+      enableThinking: config.reasoning,
     });
 
     // The bridge answers a stop promptly rather than erroring, so whatever came
@@ -1071,6 +1495,20 @@ export async function runCodingIntelligence(
     note("thinking", turn + 1, step.reasoning);
     if (step.toolCalls.length && step.content.trim()) {
       note("note", turn + 1, step.content);
+    }
+
+    // Spend per turn, next to the work it bought. A paid upstream should never
+    // be invisible to the person paying for it.
+    if (step.wiro && (step.wiro.totalCost != null || step.wiro.elapsedSeconds != null)) {
+      note("meta", turn + 1, wiroTurnNote(step.wiro));
+    }
+    if (step.wiro?.taskId) {
+      wiroTasks.push({
+        taskId: step.wiro.taskId,
+        elapsedSeconds: step.wiro.elapsedSeconds ?? null,
+        totalCost: step.wiro.totalCost ?? null,
+        turn: turn + 1,
+      });
     }
 
     if (step.content.trim()) lastContent = step.content;
@@ -1115,6 +1553,56 @@ export async function runCodingIntelligence(
       };
       events.push(event);
       onEvent?.(event);
+
+      const toolName = canonTool(call.name);
+      let content: string;
+
+      // The question tool is answered by the user, not the filesystem. The
+      // run blocks here until the answer arrives — or until a stop resolves
+      // it without one.
+      if (toolName === "question") {
+        const questionText = questionTextOf(event.args);
+        note("question", turn + 1, questionText, event.id);
+        if (onQuestion) {
+          const answer = (await onQuestion(questionText)).trim();
+          content = answer
+            ? `User answer: ${answer}`
+            : "The run was stopped before the user answered. Do not wait for an answer.";
+          event.status = answer ? "ok" : "error";
+        } else {
+          content =
+            "Error: this client cannot answer questions. Proceed on your own judgement and note the assumption in the final report.";
+          event.status = "error";
+        }
+        event.result = content;
+        onEvent?.({ ...event });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content,
+        });
+        continue;
+      }
+
+      // todowrite only repaints the todo rail from the event log; there is
+      // nothing to execute against the project.
+      if (toolName === "todowrite") {
+        const rows = todoRowsFromArgs(event.args);
+        note("tool", turn + 1, "todowrite — todo list updated", event.id);
+        content = rows.length
+          ? `Todo list updated (${rows.length} items).`
+          : "Error: no todos were supplied. Send the full list as the todos array.";
+        event.status = rows.length ? "ok" : "error";
+        event.result = content;
+        onEvent?.({ ...event });
+        messages.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content,
+        });
+        continue;
+      }
+
       note(
         "tool",
         turn + 1,
@@ -1122,7 +1610,6 @@ export async function runCodingIntelligence(
         event.id
       );
 
-      let content: string;
       try {
         content = await bridge.executeCodingTool({
           name: call.name,
@@ -1148,22 +1635,38 @@ export async function runCodingIntelligence(
   // Why the loop ended decides whether this run can be picked back up. All
   // three cases have usually already changed files, so none of them throw the
   // work away — they record it and stay resumable.
-  const stoppedReason: CodingStopReason | undefined = control?.cancelled
+  let stoppedReason: CodingStopReason | undefined = control?.cancelled
     ? "stopped"
     : !finished
       ? "turn_budget"
       : inferStopReason(raw);
 
+  // The model said it was done but handed back nothing usable — no envelope,
+  // just stripped markup or an empty answer (common with Reasoning off, when
+  // it emits tool calls as inline text the bridge strips). That is not a hard
+  // failure: it usually read real files first, so salvage the log and mark the
+  // run resumable rather than throwing the work away.
+  if (finished && !stoppedReason && !raw.trim() && (events.length || lastContent.trim())) {
+    stoppedReason = "incomplete";
+  }
+
   if (stoppedReason && stoppedReason !== "timeout") {
     const applied = events.filter((event) => event.status === "ok");
-    raw = [
+    const headline =
       stoppedReason === "stopped"
         ? "Run stopped before the agent reported back."
-        : "Coding agent used all 18 turns without a final report.",
+        : stoppedReason === "incomplete"
+          ? "The model ended without a structured report."
+          : `Coding agent used all ${MAX_EXECUTION_TURNS} turns without a final report.`;
+    raw = [
+      headline,
       "",
       applied.length
         ? `${applied.length} tool call(s) succeeded first, so the project may already be partially changed. Review the execution log below, then Continue to pick up from here.`
         : "No tool call succeeded, so the project should be unchanged.",
+      ...(stoppedReason === "incomplete"
+        ? ["", "Tip: turn Reasoning on for multi-step tasks — the model keeps its output contract far better with a thinking pass."]
+        : []),
       "",
       "## Execution log",
       "",
@@ -1177,7 +1680,9 @@ export async function runCodingIntelligence(
   }
 
   if (!raw.trim()) {
-    throw new Error("Coding agent stopped before returning a final report.");
+    throw new Error(
+      "The model returned an empty response before doing any work. Try again — and if it repeats, turn Reasoning on."
+    );
   }
 
   return {
@@ -1190,6 +1695,7 @@ export async function runCodingIntelligence(
     createdAt: Date.now(),
     mode: "execute",
     ...(stoppedReason ? { stoppedReason } : {}),
+    ...(wiroTasks.length ? { wiroTasks } : {}),
     ...(options.resumeOf ? { continuedFrom: options.resumeOf } : {}),
   };
 }
@@ -1204,30 +1710,76 @@ function eventSummary(event: CodingToolEvent): string {
   return label ? `— ${label}` : "";
 }
 
+/** "Wiro task 2989353 · 6.0s · $0.00351" — one line per upstream turn. */
+function wiroTurnNote(wiro: NonNullable<bridge.LocalQwenStepResponse["wiro"]>): string {
+  const bits = [
+    wiro.taskId ? `task ${wiro.taskId}` : "",
+    wiro.elapsedSeconds != null ? `${wiro.elapsedSeconds.toFixed(1)}s` : "",
+    wiro.totalCost != null ? `$${formatCost(wiro.totalCost)}` : "",
+  ].filter(Boolean);
+  return `Wiro ${bits.join(" · ")}`;
+}
+
+function formatCost(cost: number): string {
+  if (!Number.isFinite(cost) || cost <= 0) return "0";
+  return cost.toFixed(6).replace(/\.?0+$/, "");
+}
+
 export async function runCodingPlan(
   task: string,
   config: CodingBridgeConfig,
-  options: Pick<CodingRunOptions, "control" | "onProgress"> = {}
+  options: Pick<CodingRunOptions, "control" | "onProgress"> & { promptOverride?: string } = {}
 ): Promise<CodingRun> {
   const { control, onProgress } = options;
   onProgress?.({ phase: "thinking", turn: 1, detail: "Analyzing the task" });
 
-  const raw = await bridge.runLocalQwen({
+  // The step variant, not the plain text call: the plan's reasoning is what
+  // the chat shows while the plan is being reviewed, and the wiro block is
+  // the run's cost record.
+  const step = await bridge.runLocalQwenStep({
     model: config.model,
     baseUrl: config.url,
     systemPrompt: CODING_PLAN_SYSTEM_PROMPT,
-    userText: buildCodingPlanContext(task),
+    userText: options.promptOverride ?? buildCodingPlanContext(task),
     maxTokens: config.maxTokens,
     temperature: config.temperature,
     runId: control?.runId,
+    mode: "plan",
+    enableThinking: config.reasoning,
   });
 
   if (control?.cancelled) throw new CodingRunCancelled();
+
+  if (step.toolCalls.length) {
+    throw new Error("The model tried to use tools while planning. Run the analysis again.");
+  }
+
+  const raw = step.content;
 
   // A plan cut short by one of the bridge's limits still comes back as an
   // ordinary response. Marking it lets Continue offer to re-plan rather than
   // leaving a truncated plan sitting there looking finished.
   const stoppedReason = inferStopReason(raw);
+
+  const activity: CodingActivity[] = [];
+  if (step.reasoning.trim()) {
+    activity.push({
+      id: `thinking-1-${Date.now()}`,
+      kind: "thinking",
+      turn: 1,
+      text: step.reasoning.trim(),
+      createdAt: Date.now(),
+    });
+  }
+  if (step.wiro && (step.wiro.totalCost != null || step.wiro.elapsedSeconds != null)) {
+    activity.push({
+      id: `meta-1-${Date.now()}`,
+      kind: "meta",
+      turn: 1,
+      text: wiroTurnNote(step.wiro),
+      createdAt: Date.now(),
+    });
+  }
 
   return {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -1235,9 +1787,22 @@ export async function runCodingPlan(
     raw,
     parsed: parseCodingSolution(raw),
     events: [],
+    activity,
     createdAt: Date.now(),
     mode: "plan",
     ...(stoppedReason ? { stoppedReason } : {}),
+    ...(step.wiro?.taskId
+      ? {
+          wiroTasks: [
+            {
+              taskId: step.wiro.taskId,
+              elapsedSeconds: step.wiro.elapsedSeconds ?? null,
+              totalCost: step.wiro.totalCost ?? null,
+              turn: 1,
+            },
+          ],
+        }
+      : {}),
   };
 }
 
@@ -1323,12 +1888,23 @@ export function buildRunDocument(run: CodingRun, previous?: CodingRun | null): s
   return lines.join("\n").replace(/\n{3,}/g, "\n\n");
 }
 
-export function codingRunMarkdown(run: CodingRun | null): string {
+export function codingRunMarkdown(
+  run: CodingRun | null,
+  opts: { includeTask?: boolean } = {}
+): string {
   if (!run) return "";
+
+  // The question the run answered, first — a plan read months later is
+  // meaningless without it. The chat view skips it: the task is already the
+  // user's own bubble there.
+  const taskLead =
+    (opts.includeTask ?? true) && run.task.trim() ? `## Task\n\n${run.task.trim()}` : "";
+
   const p = run.parsed;
-  if (!p) return run.raw;
+  if (!p) return stripToolTags([taskLead, run.raw].filter(Boolean).join("\n\n---\n\n"));
 
   const lines: string[] = [];
+  if (taskLead) lines.push(taskLead);
   if (p.summary) lines.push(`## Summary\n\n${p.summary}`);
   if (p.implementation_approach?.length) {
     lines.push(
@@ -1379,5 +1955,5 @@ export function codingRunMarkdown(run: CodingRun | null): string {
           .join("\n")
     );
   }
-  return lines.join("\n\n");
+  return stripToolTags(lines.join("\n\n"));
 }

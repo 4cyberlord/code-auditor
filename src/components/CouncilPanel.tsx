@@ -66,7 +66,7 @@ export default function CouncilPanel() {
 
   useEffect(() => {
     if (chatModels.length && selectedModels.size === 0) {
-      setSelectedModels(new Set(chatModels));
+      queueMicrotask(() => setSelectedModels(new Set(chatModels)));
     }
   }, [chatModels, selectedModels.size]);
 

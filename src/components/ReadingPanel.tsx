@@ -33,7 +33,9 @@ export default function ReadingPanel() {
   // A new reading is a new thing to judge, so it starts closed rather than
   // inheriting whatever the last one was left at.
   useEffect(() => {
-    if (status === "running" || status === "idle") setOpen(false);
+    if (status === "running" || status === "idle") {
+      queueMicrotask(() => setOpen(false));
+    }
   }, [status]);
 
   // Nothing to say before a run, and nothing to say at all in the mode where

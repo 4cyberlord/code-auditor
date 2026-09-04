@@ -622,11 +622,15 @@ function GatewayCard() {
   // so it asks once per opening, and the button stays as a refresh.
   useEffect(() => {
     if (!active) {
-      setAvailable(null);
-      setCatalogueFilter("");
+      queueMicrotask(() => {
+        setAvailable(null);
+        setCatalogueFilter("");
+      });
       return;
     }
-    if (available === null && !listing && !listError) void refreshModels();
+    if (available === null && !listing && !listError) {
+      queueMicrotask(() => void refreshModels());
+    }
   }, [active, available, listing, listError, refreshModels]);
 
   const save = async () => {
@@ -1722,7 +1726,7 @@ function CaptureCard() {
   }, []);
 
   useEffect(() => {
-    void refreshHelper();
+    queueMicrotask(() => void refreshHelper());
   }, [refreshHelper]);
 
   const setInstalled = async (install: boolean) => {

@@ -11,6 +11,8 @@ use std::{
     time::Duration,
 };
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
+#[cfg(target_os = "macos")]
+use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
 use uuid::Uuid;
 
 const SERVICE: &str = "com.charles.councileditor";
@@ -107,7 +109,29 @@ fn main() {
 
 fn run() -> Result<(), String> {
     log("helper starting");
-    let event_loop = EventLoopBuilder::new().build();
+    // No Dock icon, no menu bar.
+    //
+    // tao creates an NSApplication, and its default activation policy is
+    // `Regular` — which is correct for an app someone launched and wrong for
+    // this. The helper is a launch agent: it has no window, nothing to click,
+    // and appearing in the Dock invites someone to quit the thing that makes
+    // the hotkeys work.
+    //
+    // `Accessory` is what `LSUIElement` does for a bundled app. It cannot be
+    // set in a plist here because the helper is a bare executable inside the
+    // app bundle rather than a bundle of its own, so it is set in code.
+    //
+    // Not `Prohibited`: that also blocks the process from ever becoming
+    // active, and the permission prompts macOS raises for screen recording
+    // need a process that can come forward.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut event_loop = EventLoopBuilder::new().build();
+    #[cfg(target_os = "macos")]
+    {
+        // The policy is stashed on the app delegate here and applied when the
+        // loop starts, so it has to be set before `run` -- not after.
+        event_loop.set_activation_policy(ActivationPolicy::Accessory);
+    }
     let manager = GlobalHotKeyManager::new().map_err(|e| e.to_string())?;
     let start = hotkey("CODE_AUDITOR_HELPER_START_KEY", "Control+Alt+B")?;
     let capture = hotkey("CODE_AUDITOR_HELPER_CAPTURE_KEY", "Control+Alt+P")?;

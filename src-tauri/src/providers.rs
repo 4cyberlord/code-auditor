@@ -129,11 +129,20 @@ pub struct LocalQwenRequest {
     pub messages: Option<Vec<Value>>,
     #[serde(default)]
     pub tools: Option<Vec<Value>>,
+    /// Planning requests are read-only; execute requests are mutation tasks.
+    #[serde(default)]
+    pub mode: Option<String>,
     /// Identifies this run to the bridge so it can be stopped mid-flight. The
     /// bridge tracks it under `x-bridge-run-id`; `cancel_local_qwen` sends the
     /// same value back to tear the upstream call down.
     #[serde(default)]
     pub run_id: Option<String>,
+    /// Per-request override for the model's reasoning pass. `None` leaves the
+    /// bridge to fall back to its own `WIRO_ENABLE_THINKING` default; `Some`
+    /// forwards the caller's choice so a UI toggle can turn reasoning on or off
+    /// without restarting the bridge.
+    #[serde(default)]
+    pub enable_thinking: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,6 +179,14 @@ pub struct LocalQwenToolCall {
     pub arguments: Value,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WiroTurnInfo {
+    pub task_id: Option<String>,
+    pub elapsed_seconds: Option<f64>,
+    pub total_cost: Option<f64>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalQwenResponse {
@@ -180,6 +197,10 @@ pub struct LocalQwenResponse {
     /// the UI with tool calls and no account of why they were chosen.
     #[serde(default)]
     pub reasoning: String,
+    /// Upstream task metadata for this turn (id, elapsed, cost), when the
+    /// bridge reports it. Shown in the run log so spend is never invisible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wiro: Option<WiroTurnInfo>,
 }
 
 fn local_qwen_api_key(override_key: Option<&str>) -> String {
@@ -281,6 +302,14 @@ pub async fn run_local_qwen_step(req: LocalQwenRequest) -> Result<LocalQwenRespo
         body["tools"] = Value::Array(tools);
         body["tool_choice"] = json!("auto");
     }
+    if let Some(mode) = req.mode.as_deref().map(str::trim).filter(|mode| !mode.is_empty()) {
+        body["metadata"] = json!({ "mode": mode });
+    }
+    // Forward the reasoning choice only when the caller made one, so the bridge
+    // keeps its own default otherwise.
+    if let Some(enable_thinking) = req.enable_thinking {
+        body["enable_thinking"] = json!(enable_thinking);
+    }
     let api_key = local_qwen_api_key(req.api_key.as_deref());
 
     let mut request = http_client()?
@@ -299,14 +328,14 @@ pub async fn run_local_qwen_step(req: LocalQwenRequest) -> Result<LocalQwenRespo
             if e.is_timeout() {
                 // The generic transport wording sends people looking for a
                 // network fault. Past BRIDGE_TIMEOUT the bridge's own deadline
-                // has already come and gone, so the bridge is the thing to look
-                // at, not the connection.
+                // has already come and gone, and dropping this request tells
+                // the bridge to cancel the run and kill the upstream task —
+                // so nothing keeps billing. The bridge terminal is where the
+                // upstream error is, not the connection.
                 format!(
-                    "qwen: the bridge did not answer within {}s. It is running, but a turn is \
-                     taking longer than its own {}s limit — check the bridge terminal for the \
-                     upstream error.",
-                    BRIDGE_TIMEOUT.as_secs(),
-                    240
+                    "qwen: the bridge did not answer within {}s. The run was cancelled and its \
+                     upstream task killed — check the bridge terminal for the upstream error.",
+                    BRIDGE_TIMEOUT.as_secs()
                 )
             } else {
                 format!("qwen: {}", transport_detail(&e))
@@ -389,7 +418,17 @@ fn parse_local_qwen_response(v: &Value) -> LocalQwenResponse {
                 .collect()
         })
         .unwrap_or_default();
-    LocalQwenResponse { content, tool_calls, reasoning }
+    let w = &v["wiro"];
+    let wiro = if w.is_object() {
+        Some(WiroTurnInfo {
+            task_id: w["taskId"].as_str().map(str::to_string),
+            elapsed_seconds: w["elapsedSeconds"].as_f64(),
+            total_cost: w["totalCost"].as_f64(),
+        })
+    } else {
+        None
+    };
+    LocalQwenResponse { content, tool_calls, reasoning, wiro }
 }
 
 #[derive(Clone, Serialize)]
@@ -488,10 +527,11 @@ const ONCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 /// ONCE_TIMEOUT it reliably loses the race, and the user is shown "operation
 /// timed out" with no sign of what the run had actually done.
 ///
-/// The bridge bounds itself with MAX_RUN_SECONDS (240s by default) and returns
-/// what it has. This sits above that, so the bridge's own explanation is what
-/// arrives — the client timeout is the backstop, not the usual path.
-const BRIDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(420);
+/// The bridge bounds itself with MAX_RUN_SECONDS and returns what it has, and
+/// a client that disconnects makes it cancel the run and kill the upstream
+/// task. This timeout sits above the bridge's configured run budget, so the
+/// bridge's own explanation is what usually arrives — this is the backstop.
+const BRIDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1650);
 
 /// One-shot, non-streaming call. Used by the consensus judge.
 #[tauri::command]

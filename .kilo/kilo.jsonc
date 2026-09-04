@@ -1,0 +1,13 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "mcp": {
+    "wiro": {
+      "type": "remote",
+      "url": "https://mcp.wiro.ai/v1",
+      "headers": {
+        "Authorization": "Bearer fswg1ei3pd5vrxojgsvhp8ss8h97j0s2:2cca72f94dcccbe16c2c571a9203cfd69270ec8918f5dd6b0756ba8cacec50fb",
+      },
+      "enabled": true,
+    },
+  },
+}

@@ -97,11 +97,20 @@ export interface LocalQwenRequest {
   temperature: number;
   messages?: unknown[];
   tools?: unknown[];
+  /** Tells the bridge whether this request is planning-only or execution. */
+  mode?: "plan" | "execute";
   /**
    * Identifies the run to the bridge so `cancelLocalQwen` can stop it. Without
    * one the request still works; it just cannot be called off once sent.
    */
   runId?: string;
+  /**
+   * Per-request override for the model's reasoning pass. Omitted leaves the
+   * bridge on its own `WIRO_ENABLE_THINKING` default; `true`/`false` turns
+   * reasoning on or off for this call, so a UI toggle takes effect without a
+   * bridge restart.
+   */
+  enableThinking?: boolean;
 }
 
 export interface LocalQwenInspectRequest {
@@ -132,6 +141,12 @@ export interface LocalQwenStepResponse {
   toolCalls: LocalQwenToolCall[];
   /** The model's reasoning for this turn, when the bridge exposes it. */
   reasoning: string;
+  /** Upstream task id, elapsed time and cost for this turn, when the bridge reports them. */
+  wiro?: {
+    taskId?: string | null;
+    elapsedSeconds?: number | null;
+    totalCost?: number | null;
+  } | null;
 }
 
 export interface CodingToolRequest {
@@ -174,6 +189,9 @@ export async function runLocalQwen(req: LocalQwenRequest): Promise<string> {
           { role: "system", content: req.systemPrompt },
           { role: "user", content: req.userText },
         ],
+        ...(typeof req.enableThinking === "boolean"
+          ? { enable_thinking: req.enableThinking }
+          : {}),
       }),
     });
     const text = await res.text();
@@ -205,6 +223,10 @@ export async function runLocalQwenStep(req: LocalQwenRequest): Promise<LocalQwen
         ],
         tools: req.tools,
         tool_choice: req.tools?.length ? "auto" : undefined,
+        ...(req.mode ? { metadata: { mode: req.mode } } : {}),
+        ...(typeof req.enableThinking === "boolean"
+          ? { enable_thinking: req.enableThinking }
+          : {}),
       }),
     });
     const text = await res.text();
@@ -218,6 +240,11 @@ export async function runLocalQwenStep(req: LocalQwenRequest): Promise<LocalQwen
           tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
         };
       }>;
+      wiro?: {
+        taskId?: string | null;
+        elapsedSeconds?: number | null;
+        totalCost?: number | null;
+      } | null;
     };
     const message = body.choices?.[0]?.message;
     return {
@@ -229,6 +256,7 @@ export async function runLocalQwenStep(req: LocalQwenRequest): Promise<LocalQwen
           name: call.function?.name ?? "",
           arguments: parseToolArguments(call.function?.arguments),
         })) ?? [],
+      wiro: body.wiro ?? null,
     };
   }
   return invoke<LocalQwenStepResponse>("run_local_qwen_step", { req });

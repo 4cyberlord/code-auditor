@@ -1,13 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Markdown from "./Markdown";
 import Splitter from "./Splitter";
 import {
   CODING_BRIDGE_CONFIG_EVENT,
   CodingRunCancelled,
+  buildCodingPlanContext,
   cancelCodingRun,
   cleanCodingError,
+  codingBridgeBaseUrl,
   codingRunMarkdown,
   createRunControl,
   humanizeList,
@@ -18,12 +20,18 @@ import {
   loadCodingBridgeConfig,
   loadCodingRuns,
   missingContext,
+  saveCodingBridgeConfig,
   runMode,
   stopReasonLabel,
+  todoProgress,
   runCodingIntelligence,
+  mergeTodoStringRows,
   runCodingPlan,
   saveCodingRuns,
   saveRunDocument,
+  saveRunReportToServer,
+  stripToolTags,
+  titleForRun,
   type CodingActivity,
   type CodingBridgeConfig,
   type CodingProgress,
@@ -31,6 +39,9 @@ import {
   type CodingRunControl,
   type CodingToolEvent,
 } from "@/lib/codingIntelligence";
+
+/** Hard ceiling on self-resumes for one Build, so it can never loop forever. */
+const MAX_AUTO_CONTINUE = 8;
 
 function items(value: unknown[] | undefined): string[] {
   return humanizeList(value);
@@ -67,6 +78,104 @@ export default function CodingWorkspace() {
   const [queued, setQueued] = useState<string[]>([]);
   const [docPath, setDocPath] = useState<string | null>(null);
   const controlRef = useRef<CodingRunControl | null>(null);
+
+  // Auto-continue to completion: a Build run resumes itself while it keeps
+  // completing todos, so a full README finishes end to end without manual
+  // clicks. Bounded and progress-gated so it can never loop forever.
+  const autoContinueRef = useRef(0);
+  const prevDoneRef = useRef(0);
+
+  // Live token stream from the bridge (ChatGPT-style typing). Purely a display
+  // channel: it fills in while a turn runs and is cleared when the turn's real
+  // result lands. If it never connects, nothing shows and the run is unaffected.
+  const [live, setLive] = useState<{ thinking: string; answer: string; status: string }>({
+    thinking: "",
+    answer: "",
+    status: "",
+  });
+  const streamRef = useRef<EventSource | null>(null);
+
+  const closeStream = () => {
+    try {
+      streamRef.current?.close();
+    } catch {}
+    streamRef.current = null;
+  };
+
+  const openStream = (runId: string) => {
+    closeStream();
+    setLive({ thinking: "", answer: "", status: "" });
+    if (typeof EventSource === "undefined" || !runId) return;
+    try {
+      const root = codingBridgeBaseUrl(config.url);
+      const es = new EventSource(`${root}/stream?runId=${encodeURIComponent(runId)}`);
+      es.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data) as {
+            type?: string;
+            kind?: string;
+            delta?: string;
+            reset?: boolean;
+            status?: string;
+          };
+          if (msg.type === "done") {
+            closeStream();
+            return;
+          }
+          if (msg.kind === "status") {
+            setLive((c) => ({ ...c, status: String(msg.status ?? "") }));
+            return;
+          }
+          const delta = String(msg.delta ?? "");
+          if (msg.kind === "answer") {
+            setLive((c) => ({ ...c, answer: msg.reset ? delta : c.answer + delta }));
+          } else if (msg.kind === "thinking") {
+            setLive((c) => ({ ...c, thinking: msg.reset ? delta : c.thinking + delta }));
+          }
+        } catch {
+          /* a malformed frame is not worth breaking the stream over */
+        }
+      };
+      // A connection error just means no live preview; the run still completes
+      // through its own channel, so there is nothing to surface here.
+      es.onerror = () => {};
+      streamRef.current = es;
+    } catch {
+      /* EventSource unavailable or blocked — degrade to no live preview */
+    }
+  };
+
+  // The task of the run currently in flight. Until it is saved there is no
+  // CodingRun to read it from, and the chat thread still needs its first
+  // bubble.
+  const [busyTask, setBusyTask] = useState("");
+
+  // New Conversation sets this: without it the `?? runs[0]` fallback below
+  // resurrects the latest run and the view never actually clears.
+  const [cleared, setCleared] = useState(false);
+
+  // The center pane shows results only after the user opens them from the
+  // conversation — a fresh plan does not jump into the Implementation section
+  // uninvited.
+  const [resultsOpen, setResultsOpen] = useState(false);
+
+  // New Conversation asks for a name first; it lands on the next saved run.
+  const [namingOpen, setNamingOpen] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [pendingTitle, setPendingTitle] = useState("");
+
+  // A pending `question` tool call: the run loop is blocked awaiting this
+  // resolver, so the composer becomes the answer box while one is set.
+  const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
+  const questionResolverRef = useRef<((answer: string) => void) | null>(null);
+  const [openDetail, setOpenDetail] = useState<string | null>("Todos");
+
+  const settleQuestion = (answer: string) => {
+    const resolver = questionResolverRef.current;
+    questionResolverRef.current = null;
+    setPendingQuestion(null);
+    resolver?.(answer);
+  };
 
   // The queue is read from inside the run loop, which closed over its own
   // render. A ref is what lets that loop see follow-ups added after it started.
@@ -108,34 +217,110 @@ export default function CodingWorkspace() {
     };
   }, []);
 
-  const active = runs.find((r) => r.id === activeId) ?? runs[0] ?? null;
+  const active = cleared
+    ? null
+    : (runs.find((r) => r.id === activeId) ?? runs[0] ?? null);
   const markdown = useMemo(() => codingRunMarkdown(active), [active]);
+  // The chat thread already shows the task as the user's own bubble, so the
+  // card markdown leaves it out; Copy keeps the full document with the task.
+  const chatMarkdown = useMemo(
+    () => codingRunMarkdown(active, { includeTask: false }),
+    [active]
+  );
+  const chatTask = busy ? busyTask : (active?.task ?? "");
   const parsed = active?.parsed ?? null;
   const actionable = useMemo(() => isActionablePlan(parsed), [parsed]);
+
+  // When an execution run's own report is thin, the plan it was built on is the
+  // real structured report (what the app writes to IMPLEMENTATION_PLAN.md). Find
+  // it so the card and the Build-details rail still show Goal / Todos / Files.
+  const planRun = useMemo(() => {
+    if (!active) return null;
+    if (isActionablePlan(active.parsed)) return active;
+    const sameTask = (r: CodingRun) => r.task.trim() === active.task.trim();
+    return (
+      runs.find((r) => r.id === active.continuedFrom && isActionablePlan(r.parsed)) ??
+      runs.find(
+        (r) => r.id !== active.id && runMode(r) === "plan" && isActionablePlan(r.parsed) && sameTask(r)
+      ) ??
+      runs.find((r) => r.id !== active.id && isActionablePlan(r.parsed) && sameTask(r)) ??
+      null
+    );
+  }, [active, runs]);
+  // The parsed report the rail reads from: the run's own if it has one, else the
+  // linked plan's.
+  const railParsed = isActionablePlan(parsed) ? parsed : (planRun?.parsed ?? parsed);
+  // The card shows the run's own report, or the linked plan's when it has none.
+  const cardMarkdown = useMemo(() => {
+    if (chatMarkdown.trim()) return chatMarkdown;
+    if (planRun && planRun !== active) return codingRunMarkdown(planRun, { includeTask: false });
+    return "";
+  }, [chatMarkdown, planRun, active]);
   const resumable = isResumable(active);
-  const executionEvents = busyMode === "executing" && liveEvents.length ? liveEvents : active?.events ?? [];
-  // Mirrors the main pane: a skeleton is not a to-do list, and listing it here
-  // would put the same unexecutable steps back in front of the user.
-  const todoRows = !actionable
-    ? []
-    : [
-        ...(parsed?.todos ?? []).map((todo) => `${todo.status ?? "pending"} - ${todo.title ?? "Task"}${todo.detail ? `: ${todo.detail}` : ""}`),
-        ...(parsed?.implementation_approach ?? []).map((step, index) => `pending - ${step.title ?? `Step ${step.step ?? index + 1}`}: ${step.description ?? ""}`),
-      ];
+  const executionEvents = useMemo(
+    () => (busyMode === "executing" && liveEvents.length ? liveEvents : active?.events ?? []),
+    [busyMode, liveEvents, active]
+  );
+  // The plan's target files, tagged done/working/next/pending from the live
+  // (or saved) execution log — the traffic-light rail.
+  const fileRows = useMemo(
+    () => computeFileRows(railParsed?.affected_files ?? [], executionEvents, busy || resumable),
+    [railParsed, executionEvents, busy, resumable]
+  );
+  // Every todo the run has had, merged across all todowrite calls so DONE items
+  // stay on the list even after a later call drops them. Falls back to the
+  // plan's approach steps when the model never sent a todo list.
+  const todoRows = useMemo(() => {
+    const merged = mergeTodoStringRows(executionEvents, railParsed);
+    if (merged.length) return merged;
+    return (railParsed?.implementation_approach ?? []).map(
+      (step, index) => `pending - ${step.title ?? `Step ${step.step ?? index + 1}`}: ${step.description ?? ""}`
+    );
+  }, [executionEvents, railParsed]);
+
+  // The conversation's moving parts: the live run while one is in flight, the
+  // selected run otherwise.
+  const chatEntries = busy ? liveActivity : (active?.activity ?? []);
+  const chatEvents = busy ? liveEvents : (active?.events ?? []);
+  const resultsPending = !busy && !!active && !resultsOpen;
+
+  // Execution detail (reasoning and tool calls) belongs under Execute Plan;
+  // the conversation keeps the messages, the model's answers, and questions.
+  // During planning there is no execution, so the plan's own thinking stays in
+  // the conversation where it belongs.
+  const executeContext = busy
+    ? busyMode === "executing"
+    : !!active && runMode(active) === "execute";
+  const chatThreadEntries = executeContext
+    ? chatEntries.filter((entry) => entry.kind !== "thinking" && entry.kind !== "tool")
+    : chatEntries;
+  const processEntries = executeContext
+    ? chatEntries.filter((entry) => entry.kind === "thinking" || entry.kind === "tool")
+    : [];
 
   const saveRun = async (run: CodingRun, previous?: CodingRun | null) => {
-    const next = [run, ...runs.filter((item) => item.id !== run.id)].slice(0, 30);
+    // A name given at New Conversation lands on the first run saved after it.
+    const titled = pendingTitle.trim() ? { ...run, title: pendingTitle.trim() } : run;
+    if (pendingTitle.trim()) setPendingTitle("");
+    const next = [titled, ...runs.filter((item) => item.id !== titled.id)].slice(0, 30);
     setRuns(next);
     await saveCodingRuns(next);
-    setActiveId(run.id);
+    setActiveId(titled.id);
+    setCleared(false);
 
     // The document is the deliverable: one file in the project stating the
     // task, the plan and what was done. Written for every run that produced
     // something, so the execution phase can read it back and anything outside
     // this app can pick it up without going through the UI.
-    const worthSaving = isActionablePlan(run.parsed) || run.events.length > 0;
+    const worthSaving = isActionablePlan(titled.parsed) || titled.events.length > 0;
     if (!worthSaving) return;
-    const result = await saveRunDocument(run, config, previous);
+
+    // Persist the structured report to the server (Supabase) as its own record,
+    // independent of the local project file — this is the durable, retrievable
+    // copy of the plan/README.
+    void saveRunReportToServer(titled, previous);
+
+    const result = await saveRunDocument(titled, config, previous);
     setDocPath("error" in result ? null : result.path);
     if ("error" in result) setError(`Run finished, but the plan file could not be written: ${result.error}`);
   };
@@ -151,15 +336,24 @@ export default function CodingWorkspace() {
     setLiveEvents([]);
     setLiveActivity([]);
     setElapsed(0);
+    // A new run must not inherit a question its predecessor was waiting on.
+    settleQuestion("");
+    // Subscribe to the live token stream for this run.
+    openStream(control.runId);
     return control;
   };
 
   const endRun = () => {
     controlRef.current = null;
+    closeStream();
+    setLive({ thinking: "", answer: "", status: "" });
     setBusy(false);
     setBusyMode(null);
     setStopping(false);
     setProgress(null);
+    // If the run ended while a question was outstanding, unblock the loop
+    // rather than leaving its promise dangling.
+    settleQuestion("");
   };
 
   // A stop the user asked for is an outcome, not a failure, so it is reported
@@ -174,25 +368,76 @@ export default function CodingWorkspace() {
 
   const stopRun = async () => {
     const control = controlRef.current;
-    if (!control || control.cancelled) return;
+    // Guard on an in-flight cancel, not on the flag: a failed bridge call is
+    // exactly the case where the button must stay usable for a retry.
+    if (!control || stopping) return;
     setStopping(true);
     setProgress({ phase: "stopping", turn: 0, detail: "Stopping the model" });
     try {
       await cancelCodingRun(config, control);
     } catch (err) {
       // The local flag is already set, so the loop ends regardless; the user
-      // only needs to know the bridge did not confirm it.
+      // only needs to know the bridge did not confirm it — and to be able to
+      // press Stop again.
       setError(`Stop requested, but the bridge did not confirm: ${cleanCodingError(err)}`);
+      setStopping(false);
     }
+    // A run blocked on a question would otherwise sit waiting for an answer
+    // that is no longer coming.
+    settleQuestion("");
   };
 
-  const preparePlan = async () => {
-    const clean = task.trim();
+  // A changed message over an existing plan is a revision request, not a new
+  // topic: the model revises its previous plan with the feedback folded in.
+  const refinementPrompt = (feedback: string, previous: CodingRun): string =>
+    buildCodingPlanContext(
+      `${previous.task}\n\nREVISION REQUEST\n\nThe previous plan was reviewed and needs these changes:\n${feedback}\n\nPREVIOUS PLAN TO REVISE\n\n${codingRunMarkdown(previous, { includeTask: false }) || previous.raw}`
+    );
+
+  const preparePlan = async (text?: string) => {
+    const clean = (text ?? task).trim();
     if (!clean) return;
+    const refineOf =
+      active && runMode(active) === "plan" && clean !== (active.task || "").trim()
+        ? active
+        : null;
     const control = beginRun("planning");
+    setBusyTask(refineOf ? refineOf.task : clean);
+    setResultsOpen(false);
+    if (refineOf) {
+      // The follow-up belongs in the chat immediately, not only after the run.
+      setLiveActivity([
+        {
+          id: `instruction-live-${Date.now()}`,
+          kind: "instruction",
+          turn: 1,
+          text: clean,
+          createdAt: Date.now(),
+        },
+      ]);
+    }
     try {
-      const run = await runCodingPlan(clean, config, { control, onProgress: setProgress });
-      await saveRun(run);
+      const run = await runCodingPlan(refineOf ? refineOf.task : clean, config, {
+        control,
+        onProgress: setProgress,
+        ...(refineOf ? { promptOverride: refinementPrompt(clean, refineOf) } : {}),
+      });
+      const seeded = refineOf
+        ? {
+            ...run,
+            activity: [
+              {
+                id: `instruction-1-${Date.now()}`,
+                kind: "instruction" as const,
+                turn: 1,
+                text: clean,
+                createdAt: Date.now(),
+              },
+              ...(run.activity ?? []),
+            ],
+          }
+        : run;
+      await saveRun(seeded);
     } catch (err) {
       finishWith(err);
     } finally {
@@ -220,6 +465,8 @@ export default function CodingWorkspace() {
       ? (runs.find((r) => r.id === resume.continuedFrom) ?? resume)
       : base;
     const control = beginRun("executing");
+    setBusyTask(clean);
+    setResultsOpen(true);
     try {
       const run = await runCodingIntelligence(clean, config, {
         control,
@@ -227,10 +474,32 @@ export default function CodingWorkspace() {
         onProgress: setProgress,
         onEvent: trackEvent,
         onActivity: (entry) => setLiveActivity((current) => [...current, entry]),
+        onQuestion: (question) =>
+          new Promise<string>((resolve) => {
+            questionResolverRef.current = resolve;
+            setPendingQuestion(question);
+          }),
         takePending,
         ...(resume ? { resumeOf: resume.id, resumeFrom: resume } : {}),
       });
       await saveRun(run, resume);
+
+      // Auto-continue while it keeps finishing todos and more remain — so the
+      // whole README gets built to the end. Only continues on real progress
+      // (the done count went up) and within a hard bound, so a stuck model
+      // stops and hands back rather than looping. A hand stop ends it too.
+      const doneNow = todoProgress(run).done;
+      if (
+        !run.stoppedReason &&
+        isResumable(run) &&
+        doneNow > prevDoneRef.current &&
+        autoContinueRef.current < MAX_AUTO_CONTINUE
+      ) {
+        prevDoneRef.current = doneNow;
+        autoContinueRef.current += 1;
+        await execute(run); // the inner call owns endRun/stream from here
+        return;
+      }
     } catch (err) {
       finishWith(err);
     } finally {
@@ -238,7 +507,11 @@ export default function CodingWorkspace() {
     }
   };
 
-  const executePlan = () => execute(null);
+  const executePlan = () => {
+    autoContinueRef.current = 0;
+    prevDoneRef.current = active ? todoProgress(active).done : 0;
+    return execute(null);
+  };
 
   // Continuing a plan and continuing an execution are different jobs: a
   // truncated plan has nothing to resume from, so it is simply re-planned.
@@ -248,6 +521,8 @@ export default function CodingWorkspace() {
       const clean = (active.task || task).trim();
       if (!clean) return;
       const control = beginRun("planning");
+      setBusyTask(clean);
+      setResultsOpen(false);
       try {
         await saveRun(await runCodingPlan(clean, config, { control, onProgress: setProgress }));
       } catch (err) {
@@ -257,6 +532,8 @@ export default function CodingWorkspace() {
       }
       return;
     }
+    autoContinueRef.current = 0;
+    prevDoneRef.current = todoProgress(active).done;
     await execute(active);
   };
 
@@ -264,6 +541,8 @@ export default function CodingWorkspace() {
     queueRef.current = [];
     setTask("");
     setActiveId(null);
+    setCleared(true);
+    setResultsOpen(false);
     setError(null);
     setCopied(false);
     setLiveEvents([]);
@@ -272,31 +551,91 @@ export default function CodingWorkspace() {
     setElapsed(0);
     setQueued([]);
     setDocPath(null);
+    setBusyTask("");
+    settleQuestion("");
   };
 
   /**
-   * One composer, two meanings.
+   * One composer, three meanings.
    *
-   * Idle, a message starts the analysis. Mid-run it joins a queue the agent
-   * drains at its next turn boundary — so a correction spotted at step 3 is
-   * acted on at step 4, instead of waiting for a run that is now going the
-   * wrong way to finish.
+   * While the agent is waiting on a `question` call, a message answers it and
+   * the run continues immediately. Idle, a message starts the analysis.
+   * Mid-run it joins a queue the agent drains at its next turn boundary — so
+   * a correction spotted at step 3 is acted on at step 4, instead of waiting
+   * for a run that is now going the wrong way to finish.
    */
+  // During a Build (execution) the composer is locked — no new instructions can
+  // be submitted until it finishes or is paused — except to answer a question
+  // the agent itself asked.
+  const composerLocked = busyMode === "executing" && pendingQuestion === null;
+
   const submitMessage = () => {
     const clean = task.trim();
     if (!clean) return;
+    if (questionResolverRef.current) {
+      setTask("");
+      settleQuestion(clean);
+      return;
+    }
+    if (composerLocked) return;
     if (busy) {
       queueRef.current = [...queueRef.current, clean];
       setQueued(queueRef.current);
       setTask("");
       return;
     }
-    void preparePlan();
+    // The box empties once the message is sent — it lives in the chat now.
+    setTask("");
+    void preparePlan(clean);
   };
 
   const dropQueued = (index: number) => {
     queueRef.current = queueRef.current.filter((_, i) => i !== index);
     setQueued(queueRef.current);
+  };
+
+  // Opening a run from History switches the view to it. The task is already
+  // shown as the user's own chat bubble, so the composer is left empty rather
+  // than pre-filled with a copy of it — otherwise the same text appears twice.
+  const pickRun = (id: string) => {
+    setActiveId(id);
+    setCleared(false);
+    setResultsOpen(true);
+    if (busy) return;
+    const run = runs.find((item) => item.id === id);
+    if (!run) return;
+    setTask("");
+    setError(null);
+    setCopied(false);
+  };
+
+  const confirmNew = (name: string) => {
+    setPendingTitle(name.trim());
+    setNamingOpen(false);
+    newConversation();
+  };
+
+  // Discard the selected plan: it leaves History and the view resets, so a
+  // rejected approach does not get executed by accident later.
+  const discardRun = () => {
+    if (!active) return;
+    const next = runs.filter((r) => r.id !== active.id);
+    setRuns(next);
+    void saveCodingRuns(next);
+    newConversation();
+  };
+
+  const renameRun = async (id: string, title: string) => {
+    const clean = title.trim();
+    const next = runs.map((run) => {
+      if (run.id !== id) return run;
+      const updated = { ...run };
+      if (clean) updated.title = clean;
+      else delete updated.title;
+      return updated;
+    });
+    setRuns(next);
+    await saveCodingRuns(next);
   };
 
   const copyPlan = async () => {
@@ -310,27 +649,119 @@ export default function CodingWorkspace() {
     }
   };
 
+  // The reasoning switch. Persisted to the bridge config so it survives a
+  // reload, and forwarded to the bridge per run — no bridge restart needed.
+  const toggleReasoning = () => {
+    setConfig((current) => {
+      const next = { ...current, reasoning: !current.reasoning };
+      saveCodingBridgeConfig(next);
+      return next;
+    });
+  };
+
   return (
     <div className="coding-workspace">
       <section className="coding-task">
         <div className="pane-head">
           <span className="dot" style={{ background: "var(--accent)" }} />
           <div>
-            <div className="pane-title">What to build</div>
+            <div className="pane-title">
+              {busy && busyTask
+                ? busyTask.split("\n")[0].slice(0, 60)
+                : active
+                  ? titleForRun(active)
+                  : "Conversation"}
+            </div>
             <div className="pane-model">{config.model}</div>
           </div>
           <span className="spacer" />
           <span className="badge" data-tone={busy ? "live" : "good"}>
             {busyMode ?? "local"}
           </span>
-          <button className="btn tiny ghost" onClick={newConversation} disabled={busy}>
-            New
+          <button
+            className="btn tiny"
+            onClick={() => {
+              setNameDraft("");
+              setNamingOpen(true);
+            }}
+            disabled={busy}
+          >
+            New Conversation
           </button>
         </div>
 
         <div className="coding-task-body">
-          {busy && (
-            <RunStatus mode={busyMode} progress={progress} elapsed={elapsed} stopping={stopping} />
+          {/* The conversation: the request on the right, the model's thinking
+              and answers on the left, as it happens. Results stay out of here
+              — they open in the Implementation plan section when asked for. */}
+          {(chatTask || chatThreadEntries.length > 0 || busy) && (
+            <div className="chat-thread coding-chat">
+              {chatTask && (
+                <div className="chat-row user">
+                  <div className="chat-bubble user">
+                    <span className="chat-meta">You</span>
+                    {chatTask}
+                  </div>
+                </div>
+              )}
+
+              {/* The run's pulse belongs to the message it's answering. */}
+              {busy && (
+                <RunStatus
+                  mode={busyMode}
+                  progress={progress}
+                  elapsed={elapsed}
+                  stopping={stopping}
+                  waiting={pendingQuestion !== null}
+                />
+              )}
+
+              <ChatTimeline entries={chatThreadEntries} events={chatEvents} live={busy} />
+
+              {!busy && active && runMode(active) === "execute" && !active.stoppedReason && (
+                <CompletionBanner run={active} />
+              )}
+
+              {/* While planning, the model's live output belongs in the
+                  conversation. While executing, it belongs under Execute Plan
+                  with the file work — see the ProcessTimeline section. */}
+              {busy && busyMode !== "executing" && (live.thinking || live.answer) && (
+                <StreamingBubble
+                  thinking={live.thinking}
+                  answer={live.answer}
+                  status={live.status}
+                />
+              )}
+
+              {busy && busyMode !== "executing" && !chatThreadEntries.length && !live.thinking && !live.answer && (
+                <TypingBubble label="Thinking" />
+              )}
+
+              {resultsPending && active && (
+                <div className="chat-row">
+                  <div className="chat-card">
+                    <strong>Results ready</strong>
+                    <p className="hint">
+                      {runMode(active) === "plan"
+                        ? "The implementation plan is ready. Open it to review, approve or discard it — or send a follow-up here to revise it."
+                        : "The run report is ready to review."}
+                    </p>
+                    <div className="chat-card-actions">
+                      <button className="btn primary tiny" onClick={() => setResultsOpen(true)}>
+                        View results
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {pendingQuestion !== null && (
+            <div className="coding-resume">
+              <strong>The agent is asking</strong>
+              <p>{pendingQuestion}</p>
+            </div>
           )}
 
           {queued.length > 0 && (
@@ -352,12 +783,37 @@ export default function CodingWorkspace() {
             </div>
           )}
 
+          <div className="coding-reasoning">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={config.reasoning}
+              className="reasoning-switch"
+              data-on={config.reasoning || undefined}
+              onClick={toggleReasoning}
+              disabled={busy}
+              title="On: the model reasons step by step before answering — more thorough, much slower on the 27B. Off: it answers directly and fast."
+            >
+              <span className="reasoning-track" aria-hidden>
+                <span className="reasoning-thumb" />
+              </span>
+              <span className="reasoning-label">Reasoning {config.reasoning ? "on" : "off"}</span>
+            </button>
+            <span className="reasoning-hint">
+              {config.reasoning ? "Thorough · slower" : "Direct · faster"}
+            </span>
+          </div>
+
           <textarea
             className="field coding-task-input"
             placeholder={
-              busy
-                ? "Add a follow-up — it joins the queue and is picked up at the next step. ⌘↵ to send."
-                : "Describe the change, bug, refactor, or feature you want the coding agent to implement. ⌘↵ to analyze."
+              composerLocked
+                ? "Building — the composer is locked until it finishes or you pause it."
+                : pendingQuestion !== null
+                  ? "Answer the agent's question. ⌘↵ to send."
+                  : busy
+                    ? "Add a follow-up — it joins the queue and is picked up at the next step. ⌘↵ to send."
+                    : "Describe the feature, change, bug, or refactor you want. ⌘↵ to research it."
             }
             value={task}
             onChange={(e) => setTask(e.target.value)}
@@ -367,22 +823,42 @@ export default function CodingWorkspace() {
                 submitMessage();
               }
             }}
-            // Deliberately never disabled: the whole point of the queue is that
-            // you can keep typing while the agent works.
-            // Task descriptions are mostly paths, identifiers and code
-            // fragments, so macOS flags nearly every word and its spell daemon
-            // logs timeouts trying. InputBar made the same call.
+            // Locked during a Build so the implementation runs undisturbed to the
+            // end; open while planning (the queue) and to answer a question.
+            disabled={composerLocked}
+            // Task descriptions are mostly paths, identifiers and code fragments,
+            // so macOS flags nearly every word; spellcheck off stops the
+            // NSSpellServer console spam.
             spellCheck={false}
+            autoCapitalize="off"
           />
 
           {error && <div className="pane-error wrap">{error}</div>}
           <div className="coding-actions">
-            <button className="btn primary" onClick={submitMessage} disabled={!task.trim()}>
-              {busy ? "Queue follow-up" : busyMode === "planning" ? "Analyzing..." : "Analyze Plan"}
+            <button
+              className="btn primary"
+              onClick={submitMessage}
+              disabled={composerLocked || (pendingQuestion === null && !task.trim())}
+            >
+              {pendingQuestion !== null
+                ? "Answer"
+                : busyMode === "executing"
+                  ? "Building…"
+                  : busy
+                    ? "Queue follow-up"
+                    : busyMode === "planning"
+                      ? "Researching..."
+                      : "Research"}
             </button>
             {busy ? (
               <button className="btn danger" onClick={() => void stopRun()} disabled={stopping}>
-                {stopping ? "Stopping..." : "Stop"}
+                {busyMode === "executing"
+                  ? stopping
+                    ? "Pausing…"
+                    : "Pause"
+                  : stopping
+                    ? "Stopping..."
+                    : "Stop"}
               </button>
             ) : resumable ? (
               <button className="btn" onClick={() => void continueRun()}>
@@ -395,14 +871,20 @@ export default function CodingWorkspace() {
             )}
           </div>
 
-          {resumable && !busy && (
+          {resumable && !busy && active && (
             <div className="coding-resume">
               <strong>Run unfinished</strong>
               <p>
-                {stopReasonLabel(active?.stoppedReason)}{" "}
-                {active && runMode(active) === "plan"
+                {stopReasonLabel(active.stoppedReason) ||
+                  (() => {
+                    const { done, total } = todoProgress(active);
+                    return total
+                      ? `This run reported back with ${done} of ${total} todos done.`
+                      : "This run has work left to do.";
+                  })()}{" "}
+                {runMode(active) === "plan"
                   ? "Continue runs the analysis again."
-                  : "Continue picks up from the execution log without redoing what already applied."}
+                  : "Continue reads what it already did, then picks up from the first unfinished todo — no starting over."}
               </p>
             </div>
           )}
@@ -435,7 +917,7 @@ export default function CodingWorkspace() {
               <div className="pane-title">Implementation plan</div>
               <div className="pane-model">
                 {busy
-                  ? `${busyMode === "planning" ? "analyzing" : "running"} · ${clock(elapsed)}`
+                  ? `${busyMode === "planning" ? "researching" : "building"} · ${clock(elapsed)}`
                   : !active
                     ? "waiting"
                     : actionable
@@ -454,21 +936,55 @@ export default function CodingWorkspace() {
           </div>
           <div className="pane-body">
             <div className="coding-plan-stack">
-              {busy ? (
-                <ActivityFeed entries={liveActivity} events={liveEvents} live />
-              ) : !active ? (
-                <div className="empty">Write a task on the left and the plan appears here.</div>
-              ) : actionable ? (
-                <>
-                  <Markdown text={markdown} />
-                  <ActivityFeed entries={active.activity ?? []} events={active.events} />
-                </>
+              {resultsOpen && active ? (
+                <div className="chat-card">
+                  {runMode(active) === "plan" && !actionable ? (
+                    <NeedsDetail run={active} />
+                  ) : cardMarkdown.trim() ? (
+                    <Markdown text={cardMarkdown} />
+                  ) : (
+                    <RunReconstruction run={active} />
+                  )}
+                  {runMode(active) === "plan" && actionable && (
+                    <div className="chat-card-actions">
+                      {busy ? (
+                        /* Approved and running: the approval becomes the off switch. */
+                        <button
+                          className="btn danger tiny"
+                          onClick={() => void stopRun()}
+                          disabled={stopping}
+                        >
+                          {busyMode === "executing"
+                            ? stopping
+                              ? "Pausing…"
+                              : "Pause build"
+                            : stopping
+                              ? "Stopping…"
+                              : "Cancel run"}
+                        </button>
+                      ) : !resumable ? (
+                        <>
+                          <button className="btn primary tiny" onClick={() => void executePlan()}>
+                            Approve plan — run it
+                          </button>
+                          <button className="btn danger tiny" onClick={discardRun}>
+                            Discard
+                          </button>
+                        </>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
               ) : (
-                <>
-                  <NeedsDetail run={active} />
-                  <ActivityFeed entries={active.activity ?? []} events={active.events} />
-                </>
+                <div className="empty">
+                  {busy
+                    ? "The model is working — watch the conversation on the left."
+                    : active
+                      ? "Results are ready — open them from the conversation on the left."
+                      : "The plan and its results appear here once the model has answered."}
+                </div>
               )}
+
               <section className="coding-execute-plan">
                 <div className="coding-execute-head">
                   <div>
@@ -483,7 +999,13 @@ export default function CodingWorkspace() {
                   </div>
                   {busy ? (
                     <button className="btn danger tiny" onClick={() => void stopRun()} disabled={stopping}>
-                      {stopping ? "Stopping..." : "Stop"}
+                      {busyMode === "executing"
+                        ? stopping
+                          ? "Pausing…"
+                          : "Pause"
+                        : stopping
+                          ? "Stopping..."
+                          : "Stop"}
                     </button>
                   ) : resumable ? (
                     <button className="btn primary tiny" onClick={() => void continueRun()}>
@@ -495,25 +1017,35 @@ export default function CodingWorkspace() {
                       onClick={() => void executePlan()}
                       disabled={!actionable}
                     >
-                      Run Work
+                      Build Plan
                     </button>
                   )}
                 </div>
-                {executionEvents.length ? (
-                  <div className="coding-event-list">
-                    {executionEvents.map((event) => (
-                      <div key={event.id} className="coding-event" data-status={event.status}>
-                        <div>
-                          <strong>{event.tool}</strong>
-                          <span>{eventTarget(event)}</span>
-                        </div>
-                        <p>{event.result || "Running..."}</p>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="empty compact">File and folder updates appear here while the agent works.</div>
+                {/* The model's live output during execution — its reasoning
+                    about what to edit — belongs here with the file work, not in
+                    the conversation. */}
+                {busy && busyMode === "executing" && (live.thinking || live.answer) && (
+                  <StreamingBubble
+                    thinking={live.thinking}
+                    answer={live.answer}
+                    status={live.status}
+                  />
                 )}
+                {busy && busyMode === "executing" && !live.thinking && !live.answer && !processEntries.length && (
+                  <TypingBubble label="Working through the plan" />
+                )}
+                {processEntries.length ? (
+                  <ProcessTimeline
+                    entries={processEntries}
+                    events={executionEvents}
+                    live={busy && busyMode === "executing"}
+                  />
+                ) : !busy ? (
+                  <div className="empty compact">
+                    The agent&rsquo;s steps appear here while it works — what it reasoned, what it
+                    read, and every change it makes, as code you can open up.
+                  </div>
+                ) : null}
               </section>
             </div>
           </div>
@@ -538,42 +1070,92 @@ export default function CodingWorkspace() {
             </div>
           </div>
           <div className="coding-detail-scroll">
-            <Detail title="Todos" rows={todoRows} />
             <Detail
-              title="Files"
-              rows={(parsed?.affected_files ?? [])
-                .filter((f) => f.path && f.path.toLowerCase() !== "unknown")
-                .map((f) => `${f.path} - ${f.reason ?? ""}`)}
+              title="Goal"
+              openKey={openDetail}
+              onOpenKey={setOpenDetail}
+              rows={
+                railParsed?.understanding?.goal
+                  ? [humanizeValue(railParsed.understanding.goal)]
+                  : []
+              }
             />
-            <Detail title="Commands" rows={items(parsed?.commands)} mono />
-            <Detail title="Tests" rows={items(parsed?.tests)} />
-            <Detail title="Security" rows={items(parsed?.security_considerations)} />
-            <Detail title="Memory" rows={parsed?.architecture_memory ?? []} />
-            <Detail title="More Context" rows={missingContext(parsed)} />
-            <History runs={runs} activeId={active?.id ?? null} onPick={setActiveId} />
+            <Detail title="Todos" rows={todoRows} openKey={openDetail} onOpenKey={setOpenDetail} />
+            <FileStatus rows={fileRows} openKey={openDetail} onOpenKey={setOpenDetail} />
+            <Detail title="Commands" rows={items(railParsed?.commands)} mono openKey={openDetail} onOpenKey={setOpenDetail} />
+            <Detail title="Tests" rows={items(railParsed?.tests)} openKey={openDetail} onOpenKey={setOpenDetail} />
+            <Detail title="Security" rows={items(railParsed?.security_considerations)} openKey={openDetail} onOpenKey={setOpenDetail} />
+            <Detail title="Memory" rows={railParsed?.architecture_memory ?? []} openKey={openDetail} onOpenKey={setOpenDetail} />
+            <Detail title="More Context" rows={missingContext(railParsed)} openKey={openDetail} onOpenKey={setOpenDetail} />
+            <History
+              runs={runs}
+              activeId={active?.id ?? null}
+              onPick={pickRun}
+              onRename={(id, title) => void renameRun(id, title)}
+              openKey={openDetail}
+              onOpenKey={setOpenDetail}
+            />
           </div>
         </div>
       </section>
+
+      {namingOpen && (
+        <div
+          className="scrim"
+          onMouseDown={(e) => e.target === e.currentTarget && setNamingOpen(false)}
+        >
+          <div className="modal compact" role="dialog" aria-modal="true" aria-label="New conversation">
+            <header>
+              <h2>New conversation</h2>
+              <span className="spacer" />
+              <button className="btn ghost" onClick={() => setNamingOpen(false)}>
+                Cancel
+              </button>
+            </header>
+            <div className="content">
+              <p className="hint">
+                Name it so you can find it in History later — skip it and the conversation takes its
+                name from the task.
+              </p>
+              <input
+                className="coding-rename-input"
+                placeholder="e.g. Stealth dock refactor"
+                value={nameDraft}
+                autoFocus
+                spellCheck={false}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    confirmNew(nameDraft);
+                  }
+                  if (e.key === "Escape") setNamingOpen(false);
+                }}
+              />
+            </div>
+            <footer>
+              <button className="btn primary" onClick={() => confirmNew(nameDraft)}>
+                Start conversation
+              </button>
+              <button className="btn ghost" onClick={() => confirmNew("")}>
+                Skip naming
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-const ACTIVITY_LABEL: Record<CodingActivity["kind"], string> = {
-  thinking: "Thinking",
-  tool: "Tool",
-  note: "Said",
-  instruction: "You added",
-};
-
 /**
- * The run as it happened: what the model reasoned, what it ran, what it got
- * back, and any follow-up dropped in mid-flight — in order.
- *
- * Reasoning arrives per turn rather than per token, because the app talks to
- * the bridge without streaming; a turn's thinking lands when that turn resolves.
- * So this fills in step by step, not word by word.
+ * The run as a conversation: your messages on the right, the model's answers
+ * and questions on the left, its thinking folded into expandable rows, and
+ * tool calls as compact log lines. Reasoning lands per turn rather than per
+ * token because the bridge is not streamed — the thread fills in step by
+ * step, which is exactly how the agent actually worked through the task.
  */
-function ActivityFeed({
+function ChatTimeline({
   entries,
   events,
   live = false,
@@ -582,55 +1164,98 @@ function ActivityFeed({
   events: CodingToolEvent[];
   live?: boolean;
 }) {
-  const [open, setOpen] = useState(true);
-  const endRef = useRef<HTMLDivElement | null>(null);
   const byEvent = useMemo(
     () => new Map(events.map((event) => [event.id, event])),
     [events]
   );
+  const endRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (live && open) endRef.current?.scrollIntoView({ block: "nearest" });
-  }, [entries.length, live, open]);
-
-  if (!entries.length) {
-    return live ? (
-      <div className="empty compact">The agent&rsquo;s reasoning and tool calls appear here.</div>
-    ) : null;
-  }
+    if (live) endRef.current?.scrollIntoView({ block: "nearest" });
+  }, [entries.length, live]);
 
   return (
-    <section className="coding-activity">
-      <button className="coding-activity-head" onClick={() => setOpen((v) => !v)}>
-        <strong>{live ? "Working" : "How it worked"}</strong>
-        <span className="chip">{entries.length}</span>
-        <span className="spacer" />
-        <span className="hint">{open ? "hide" : "show"}</span>
-      </button>
+    <>
+      {entries.map((entry) => {
+        const event = entry.eventId ? byEvent.get(entry.eventId) : undefined;
 
-      {open && (
-        <div className="coding-activity-list">
-          {entries.map((entry) => {
-            const event = entry.eventId ? byEvent.get(entry.eventId) : undefined;
-            return (
-              <div key={entry.id} className="coding-activity-row" data-kind={entry.kind}>
-                <div className="coding-activity-meta">
-                  <span className="coding-activity-kind">{ACTIVITY_LABEL[entry.kind]}</span>
-                  <span className="coding-activity-turn">step {entry.turn}</span>
-                </div>
-                <div className="coding-activity-text">{entry.text}</div>
-                {event && (
-                  <div className="coding-activity-result" data-status={event.status}>
-                    {event.status === "running" ? "running…" : event.result || "(no output)"}
-                  </div>
-                )}
+        if (entry.kind === "instruction") {
+          return (
+            <div key={entry.id} className="chat-row user">
+              <div className="chat-bubble user">
+                <span className="chat-meta">You added</span>
+                {entry.text}
               </div>
-            );
-          })}
-          <div ref={endRef} />
-        </div>
-      )}
-    </section>
+            </div>
+          );
+        }
+
+        if (entry.kind === "question") {
+          const answer =
+            event && event.status === "ok"
+              ? event.result.replace(/^User answer:\s*/i, "")
+              : "";
+          return (
+            <div key={entry.id} className="chat-qa">
+              <div className="chat-row">
+                <div className="chat-bubble assistant">
+                  <span className="chat-meta">Question from the agent</span>
+                  {entry.text}
+                </div>
+              </div>
+              {answer && (
+                <div className="chat-row user">
+                  <div className="chat-bubble user">
+                    <span className="chat-meta">Your answer</span>
+                    {answer}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        }
+
+        if (entry.kind === "thinking") {
+          return (
+            <details key={entry.id} className="chat-think" {...(live ? { open: true } : {})}>
+              <summary>Thinking · step {entry.turn}</summary>
+              <div className="chat-think-body">{entry.text}</div>
+            </details>
+          );
+        }
+
+        if (entry.kind === "tool") {
+          return (
+            <details key={entry.id} className="chat-tool" data-status={event?.status ?? "ok"}>
+              <summary>
+                <code>{entry.text}</code>
+                <span className="spacer" />
+                <span className="chat-tool-status">
+                  {event ? (event.status === "running" ? "running…" : event.status) : "done"}
+                </span>
+              </summary>
+              {event && event.result ? <pre>{event.result}</pre> : null}
+            </details>
+          );
+        }
+
+        // Wiro task id / time / cost lines are billing plumbing, not part of
+        // the conversation — kept in the saved run's data but not shown here.
+        if (entry.kind === "meta") {
+          return null;
+        }
+
+        return (
+          <div key={entry.id} className="chat-row">
+            <div className="chat-bubble assistant">
+              <span className="chat-meta">Assistant</span>
+              {entry.text}
+            </div>
+          </div>
+        );
+      })}
+      <div ref={endRef} />
+    </>
   );
 }
 
@@ -638,6 +1263,487 @@ function clock(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return m ? `${m}m ${String(s).padStart(2, "0")}s` : `${s}s`;
+}
+
+/** Tools that change the project — their payload is the change itself. */
+const MUTATION_TOOL_NAMES = new Set([
+  "edit",
+  "replace_in_file",
+  "apply_patch",
+  "apply_diff",
+  "patch",
+  "write",
+  "write_to_file",
+  "create_file",
+  "delete_file",
+  "rename_file",
+  "move_file",
+  "copy_file",
+  "create_folder",
+  "create_directory",
+  "delete_folder",
+  "delete_directory",
+  "rename_folder",
+  "move_folder",
+  "copy_folder",
+]);
+
+/** The lifecycle of a file the plan says it will touch. */
+type FileState = "done" | "active" | "next" | "pending";
+
+interface FileRow {
+  path: string;
+  reason: string;
+  state: FileState;
+}
+
+const FILE_STATE_META: Record<FileState, { icon: string; label: string }> = {
+  done: { icon: "✓", label: "done" },
+  active: { icon: "◐", label: "working" },
+  next: { icon: "→", label: "next" },
+  pending: { icon: "○", label: "pending" },
+};
+
+/** Which path a tool call acted on, across the arg-name variants models use. */
+function eventTouchedPath(event: CodingToolEvent): string {
+  const v =
+    event.args?.path ??
+    event.args?.filePath ??
+    event.args?.file_path ??
+    event.args?.source ??
+    event.args?.destination ??
+    "";
+  return typeof v === "string" ? v.trim() : "";
+}
+
+/** Suffix-tolerant match, so "src/a.ts" lines up with "./src/a.ts". */
+function pathsMatch(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const na = a.replace(/^\.\//, "").replace(/^\/+/, "");
+  const nb = b.replace(/^\.\//, "").replace(/^\/+/, "");
+  return na === nb || na.endsWith(`/${nb}`) || nb.endsWith(`/${na}`);
+}
+
+/**
+ * The plan's target files, each tagged with where it stands: a file a mutation
+ * tool successfully touched is done (green), one being written right now is
+ * working (yellow), the next one queued is next (yellow arrow), the rest are
+ * pending (gray) — the traffic-light rail the user asked for.
+ */
+function computeFileRows(
+  files: Array<{ path?: string; reason?: string; action?: string }>,
+  events: CodingToolEvent[],
+  running: boolean
+): FileRow[] {
+  const rows: FileRow[] = files
+    .map((f) => ({
+      path: (f.path ?? "").trim(),
+      reason: (f.reason ?? f.action ?? "").trim(),
+      state: "pending" as FileState,
+    }))
+    .filter((f) => f.path && f.path.toLowerCase() !== "unknown")
+    .map((f) => {
+      for (const ev of events) {
+        if (!MUTATION_TOOL_NAMES.has(ev.tool.trim().toLowerCase())) continue;
+        if (!pathsMatch(f.path, eventTouchedPath(ev))) continue;
+        if (ev.status === "ok") return { ...f, state: "done" };
+        if (ev.status === "running") f.state = "active";
+      }
+      return f;
+    });
+
+  // With work in flight and nothing mid-write, the first pending file is next.
+  if (running && !rows.some((r) => r.state === "active")) {
+    const next = rows.find((r) => r.state === "pending");
+    if (next) next.state = "next";
+  }
+  return rows;
+}
+
+/* Long payloads (a whole file read, a big write) are clipped in the card; the
+   full text is in the saved run's event log either way. */
+const PROC_CODE_CAP = 6000;
+
+function clipCode(text: string): string {
+  return text.length > PROC_CODE_CAP
+    ? `${text.slice(0, PROC_CODE_CAP)}\n… (${text.length - PROC_CODE_CAP} more characters)`
+    : text;
+}
+
+/** A tool card's body, typed by how it should render. */
+type ToolPayload =
+  | { kind: "diff"; label: string; removed: string; added: string }
+  | { kind: "added"; label: string; added: string }
+  | { kind: "result"; label: string; code: string };
+
+/** What a tool card shows as its body, in order of usefulness. */
+function toolPayload(event: CodingToolEvent): ToolPayload | null {
+  const a = event.args ?? {};
+  const name = event.tool.trim().toLowerCase();
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+
+  // Edits show a red/green before → after diff, GitHub-review style.
+  if (["edit", "replace_in_file", "apply_patch", "apply_diff", "patch"].includes(name)) {
+    const before = str(a.oldString ?? a.old_string);
+    const after = str(a.newString ?? a.new_string ?? a.content);
+    if (before || after) return { kind: "diff", label: "Change", removed: before, added: after };
+  }
+  // Writes/creates: the whole file is new, so every line reads as an addition.
+  if (["write", "write_to_file", "create_file"].includes(name)) {
+    const content = str(a.content);
+    if (content) return { kind: "added", label: "Contents written", added: content };
+  }
+  // Reads, searches, commands: the payload is what came back.
+  if (event.result.trim()) return { kind: "result", label: "Result", code: event.result };
+  return null;
+}
+
+/**
+ * A GitHub-style two-tone diff: removed lines in red, added lines in green,
+ * each with its own gutter sign. Both sides are clipped so a whole-file write
+ * does not blow the card open.
+ */
+function DiffBlock({ removed, added }: { removed?: string; added?: string }) {
+  const rows: Array<{ sign: "-" | "+"; text: string }> = [];
+  if (removed?.trim())
+    for (const line of clipCode(removed).split("\n")) rows.push({ sign: "-", text: line });
+  if (added?.trim())
+    for (const line of clipCode(added).split("\n")) rows.push({ sign: "+", text: line });
+  if (!rows.length) return null;
+  return (
+    <pre className="diff-block">
+      {rows.map((row, i) => (
+        <div key={i} className={row.sign === "+" ? "diff-line diff-add" : "diff-line diff-del"}>
+          <span className="diff-gutter">{row.sign}</span>
+          <span className="diff-text">{row.text || " "}</span>
+        </div>
+      ))}
+    </pre>
+  );
+}
+
+/**
+ * The execution process under Execute Plan: what the model reasoned and every
+ * tool it ran, in order. Reads stay folded until opened; edits and writes sit
+ * open so the change itself is visible as it lands.
+ */
+function ProcessTimeline({
+  entries,
+  events,
+  live = false,
+}: {
+  entries: CodingActivity[];
+  events: CodingToolEvent[];
+  live?: boolean;
+}) {
+  const byEvent = useMemo(() => new Map(events.map((event) => [event.id, event])), [events]);
+  const endRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (live) endRef.current?.scrollIntoView({ block: "nearest" });
+  }, [entries.length, live]);
+
+  return (
+    <div className="proc-list">
+      {entries.map((entry) => {
+        if (entry.kind === "thinking") {
+          return (
+            <details key={entry.id} className="chat-think" {...(live ? { open: true } : {})}>
+              <summary>Thinking · step {entry.turn}</summary>
+              <div className="chat-think-body">{entry.text}</div>
+            </details>
+          );
+        }
+        if (entry.kind !== "tool") return null;
+        const event = entry.eventId ? byEvent.get(entry.eventId) : undefined;
+        if (!event) return null;
+        return <ToolCard key={entry.id} event={event} />;
+      })}
+      <div ref={endRef} />
+    </div>
+  );
+}
+
+function ToolCard({ event }: { event: CodingToolEvent }) {
+  const payload = toolPayload(event);
+  const opens = MUTATION_TOOL_NAMES.has(event.tool.trim().toLowerCase());
+
+  return (
+    <details className="proc-tool" data-status={event.status} open={opens || undefined}>
+      <summary>
+        <strong>{event.tool}</strong>
+        <span className="proc-target">{eventTarget(event)}</span>
+        <span className="spacer" />
+        <span className="chat-tool-status">
+          {event.status === "running" ? "running…" : event.status}
+        </span>
+      </summary>
+      {payload ? (
+        <div className="proc-code">
+          <div className="proc-code-label">{payload.label}</div>
+          {payload.kind === "diff" ? (
+            <DiffBlock removed={payload.removed} added={payload.added} />
+          ) : payload.kind === "added" ? (
+            <DiffBlock added={payload.added} />
+          ) : (
+            <pre>{clipCode(payload.code)}</pre>
+          )}
+        </div>
+      ) : (
+        <p className="proc-outcome">
+          {event.status === "running" ? "Running…" : event.result || "(no output)"}
+        </p>
+      )}
+    </details>
+  );
+}
+
+/** Remove model-written tool blocks from the live prose stream. */
+function stripLiveToolBlocks(text: string): string {
+  return String(text ?? "")
+    .replace(/<function\s*=[^>]*>[\s\S]*?<\/function>/gi, "")
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
+    .replace(/<tool_code>[\s\S]*?<\/tool_code>/gi, "")
+    .replace(/<parameter\s*=[^>]*>[\s\S]*?<\/parameter>/gi, "")
+    // During streaming the closing tag may not have arrived yet. Hide the
+    // partial block too; the parsed tool card appears in the timeline after the
+    // bridge receives the complete turn.
+    .replace(/<(?:function\s*=|parameter\s*=|tool_call|tool_code)\b[\s\S]*$/gi, "");
+}
+
+/**
+ * Make a live token slice readable: turn escaped "\n"/"\t" into real breaks and
+ * strip machine plumbing. Tool calls are hidden from the prose stream because
+ * otherwise their arguments leak as orphan text like `package.json`.
+ */
+function cleanStreamText(text: string): string {
+  return stripToolTags(stripLiveToolBlocks(text))
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "  ")
+    .replace(/\\"/g, '"')
+    .replace(/^\s*\.\s*$/gm, "")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+/** True when the streamed text is the raw JSON report envelope being written. */
+function looksLikeEnvelope(text: string): boolean {
+  const t = text.trimStart();
+  return t.startsWith("{") && /"(status|summary|implementation_approach|todos|understanding)"/.test(t);
+}
+
+/** How a raw task-stage token reads to a person: "task_preprocess_end" → "preprocess". */
+function prettyStage(status: string): string {
+  const s = status.replace(/^task_/, "").replace(/_/g, " ").trim();
+  if (!s) return "";
+  if (s.startsWith("queue")) return "queued";
+  if (s.startsWith("accept")) return "accepted";
+  if (s.startsWith("start")) return "generating";
+  if (s.startsWith("output")) return "generating";
+  if (s.startsWith("end")) return "finishing";
+  return s;
+}
+
+/**
+ * The model's turn as it streams in — thinking folded above, the answer typing
+ * out below with a blinking caret, ChatGPT-style. Fed by the bridge's live
+ * side-channel; replaced by the real result the moment the turn lands.
+ */
+function StreamingBubble({
+  thinking,
+  answer,
+  status,
+}: {
+  thinking: string;
+  answer: string;
+  status: string;
+}) {
+  const endRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: "nearest" });
+  }, [thinking, answer]);
+
+  const stage = prettyStage(status);
+  const cleanThinking = cleanStreamText(thinking).trim();
+  const rawAnswer = cleanStreamText(answer).trim();
+  // Once the model starts emitting the JSON report, show a friendly note rather
+  // than raw braces — the structured card renders it properly when the turn ends.
+  const cleanAnswer = looksLikeEnvelope(rawAnswer) ? "Composing the structured report…" : rawAnswer;
+
+  return (
+    <div className="chat-row">
+      <div className="chat-bubble assistant streaming">
+        <span className="chat-meta">{stage ? `Model · ${stage}` : "Model"}</span>
+        {cleanThinking && (
+          <details className="chat-think inline" open>
+            <summary>Thinking…</summary>
+            <div className="chat-think-body">{cleanThinking}</div>
+          </details>
+        )}
+        {cleanAnswer ? (
+          <div className="streaming-text">
+            {cleanAnswer}
+            <span className="stream-caret" aria-hidden />
+          </div>
+        ) : (
+          <span className="typing-dots" aria-label="working">
+            <span />
+            <span />
+            <span />
+          </span>
+        )}
+        <div ref={endRef} />
+      </div>
+    </div>
+  );
+}
+
+/** A WhatsApp/ChatGPT-style three-dot pulse while the model works between turns. */
+function TypingBubble({ label }: { label: string }) {
+  return (
+    <div className="chat-row">
+      <div className="chat-bubble assistant typing">
+        <span className="chat-meta">{label}</span>
+        <span className="typing-dots" aria-label="working">
+          <span />
+          <span />
+          <span />
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The end-of-run verdict. Once an execution finishes with the plan carried out,
+ * this states it plainly — "Implementation successful" — and lists each change
+ * with a green check for what landed and a red cross for what failed, the
+ * green-field/red-x summary the user asked for.
+ */
+function CompletionBanner({ run }: { run: CodingRun }) {
+  const mutations = run.events.filter((e) =>
+    MUTATION_TOOL_NAMES.has(e.tool.trim().toLowerCase())
+  );
+  if (!mutations.length) return null; // nothing was changed — not a success story
+  const ok = mutations.filter((e) => e.status === "ok");
+  const failed = mutations.filter((e) => e.status === "error");
+  const mixed = failed.length > 0;
+  // Verification = a successful shell/test command run after the edits. Only a
+  // verified, all-green run earns "Implementation successful"; without a passing
+  // test we say the changes are applied but unverified.
+  const verified = run.events.some(
+    (e) => e.tool.trim().toLowerCase() === "bash" && e.status === "ok"
+  );
+  const tone = mixed ? "mixed" : verified ? "ok" : "unverified";
+  const headline = mixed
+    ? "Implementation finished with issues"
+    : verified
+      ? "Implementation successful"
+      : "Changes applied — not yet verified";
+
+  return (
+    <div className="chat-row">
+      <div className="completion-banner" data-tone={tone}>
+        <div className="completion-head">
+          <span className="completion-badge" aria-hidden>
+            {mixed ? "◑" : verified ? "✓" : "•"}
+          </span>
+          <strong>{headline}</strong>
+          <span className="spacer" />
+          <span className="completion-count">
+            {ok.length} applied{mixed ? ` · ${failed.length} failed` : ""}
+            {verified ? " · verified" : ""}
+          </span>
+        </div>
+        <div className="completion-list">
+          {mutations.map((e) => (
+            <div key={e.id} className="completion-item" data-ok={e.status === "ok"}>
+              <span className="completion-item-icon" aria-hidden>
+                {e.status === "ok" ? "✓" : "✗"}
+              </span>
+              <span className="completion-item-tool">{e.tool}</span>
+              <span className="completion-item-path">{eventTarget(e)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The plan's target files as a traffic-light rail: a green check for what has
+ * been changed, a yellow marker for what is being worked on or is next, gray
+ * for what is still pending. Done rows are struck through so completion reads
+ * at a glance.
+ */
+function RailDetails({
+  title,
+  chip,
+  openKey,
+  onOpenKey,
+  children,
+}: {
+  title: string;
+  chip?: string | number;
+  openKey: string | null;
+  onOpenKey: (key: string | null) => void;
+  children: ReactNode;
+}) {
+  const open = openKey === title;
+  return (
+    <details className="rail-details" open={open}>
+      <summary
+        onClick={(e) => {
+          e.preventDefault();
+          onOpenKey(open ? null : title);
+        }}
+      >
+        <strong>{title}</strong>
+        {chip != null && <span className="chip">{chip}</span>}
+      </summary>
+      {children}
+    </details>
+  );
+}
+
+function FileStatus({
+  rows,
+  openKey,
+  onOpenKey,
+}: {
+  rows: FileRow[];
+  openKey: string | null;
+  onOpenKey: (key: string | null) => void;
+}) {
+  const done = rows.filter((r) => r.state === "done").length;
+  return (
+    <RailDetails
+      title="Files"
+      chip={rows.length ? `${done}/${rows.length}` : rows.length}
+      openKey={openKey}
+      onOpenKey={onOpenKey}
+    >
+      {rows.length ? (
+        <div className="file-status-list">
+          {rows.map((row, i) => (
+            <div key={`${row.path}-${i}`} className="file-status-row" data-state={row.state}>
+              <span className="file-status-icon" aria-hidden>
+                {FILE_STATE_META[row.state].icon}
+              </span>
+              <span className="file-status-body">
+                <span className="file-status-path">{row.path}</span>
+                {row.reason && <span className="file-status-reason">{row.reason}</span>}
+              </span>
+              <span className="file-status-tag">{FILE_STATE_META[row.state].label}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="hint">No target files yet — they appear once the plan names them.</p>
+      )}
+    </RailDetails>
+  );
 }
 
 /**
@@ -653,17 +1759,21 @@ function RunStatus({
   progress,
   elapsed,
   stopping,
+  waiting = false,
 }: {
   mode: "planning" | "executing" | null;
   progress: CodingProgress | null;
   elapsed: number;
   stopping: boolean;
+  waiting?: boolean;
 }) {
   const headline = stopping
     ? "Stopping"
-    : mode === "planning"
-      ? "Analyzing the task"
-      : "Working through the plan";
+    : waiting
+      ? "Waiting for your answer"
+      : mode === "planning"
+        ? "Researching the codebase"
+        : "Working through the plan";
 
   return (
     <section className="coding-status" data-stopping={stopping || undefined}>
@@ -676,9 +1786,11 @@ function RunStatus({
       <p className="coding-status-detail">
         {stopping
           ? "Releasing this run. The model call is dropped here, but a task already accepted upstream finishes on its own."
-          : (progress?.detail ?? "Sending the task to the model")}
+          : waiting
+            ? "The agent asked a question below — answer it and the run continues."
+            : (progress?.detail ?? "Sending the task to the model")}
       </p>
-      {!stopping && (
+      {!stopping && !waiting && (
         <p className="hint">
           {progress?.phase === "tool"
             ? `Step ${progress.turn} — running tools against the project.`
@@ -696,6 +1808,58 @@ function RunStatus({
  * because the task did not describe any actual work. Kept visually distinct
  * from a real plan so nobody executes an outline about their own project.
  */
+/**
+ * Shown when a run saved no readable final report (its output was tool markup
+ * or an empty answer). Rather than a blank card, this reconstructs what the run
+ * actually did from its own log — the todo plan (done items kept), the files it
+ * targeted, what it inspected (its research), and what it changed — so the plan
+ * the user remembers is still there.
+ */
+function RunReconstruction({ run }: { run: CodingRun }) {
+  const inspected = run.events.filter(
+    (e) => ["read", "glob", "grep"].includes(e.tool.trim().toLowerCase()) && e.status === "ok"
+  );
+  const changed = run.events.filter((e) => MUTATION_TOOL_NAMES.has(e.tool.trim().toLowerCase()));
+
+  return (
+    <section className="coding-needs-detail">
+      <div className="section-label">No structured report</div>
+      <p>
+        This run didn&rsquo;t save a structured report, and no plan was found for it. Its todos and
+        files are in the Build-details rail; its raw steps are below.
+      </p>
+
+      {inspected.length > 0 && (
+        <>
+          <div className="section-label">Inspected (research)</div>
+          <ul className="coding-needs-list">
+            {inspected.map((e) => (
+              <li key={e.id}>
+                <code>{e.tool}</code> {eventTarget(e)}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {changed.length > 0 && (
+        <>
+          <div className="section-label">Changes applied</div>
+          <ul className="coding-needs-list">
+            {changed.map((e) => (
+              <li key={e.id} data-ok={e.status === "ok"}>
+                <code>{e.tool}</code> {eventTarget(e)} — {e.status}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      <p className="hint">Use Continue to finish the remaining todos.</p>
+    </section>
+  );
+}
+
 function NeedsDetail({ run }: { run: CodingRun }) {
   const parsed = run.parsed;
   const asks = missingContext(parsed);
@@ -720,7 +1884,7 @@ function NeedsDetail({ run }: { run: CodingRun }) {
       )}
       <p className="hint">
         Describe the change against this project — the file or area to touch, and what should be
-        different afterwards — then run Analyze Plan again.
+        different afterwards — then run Research again.
       </p>
       <ModelResponse run={run} />
     </section>
@@ -794,13 +1958,21 @@ function ModelResponse({ run }: { run: CodingRun }) {
   );
 }
 
-function Detail({ title, rows, mono = false }: { title: string; rows: string[]; mono?: boolean }) {
+function Detail({
+  title,
+  rows,
+  mono = false,
+  openKey,
+  onOpenKey,
+}: {
+  title: string;
+  rows: string[];
+  mono?: boolean;
+  openKey: string | null;
+  onOpenKey: (key: string | null) => void;
+}) {
   return (
-    <details className="rail-details" open={title === "Todos" || title === "Files"}>
-      <summary>
-        <strong>{title}</strong>
-        <span className="chip">{rows.length}</span>
-      </summary>
+    <RailDetails title={title} chip={rows.length} openKey={openKey} onOpenKey={onOpenKey}>
       {rows.length ? (
         <div className={mono ? "coding-detail-rows mono" : "coding-detail-rows"}>
           {rows.map((row, i) => (
@@ -810,7 +1982,7 @@ function Detail({ title, rows, mono = false }: { title: string; rows: string[]; 
       ) : (
         <p className="hint">Nothing reported yet.</p>
       )}
-    </details>
+    </RailDetails>
   );
 }
 
@@ -818,37 +1990,80 @@ function History({
   runs,
   activeId,
   onPick,
+  onRename,
+  openKey,
+  onOpenKey,
 }: {
   runs: CodingRun[];
   activeId: string | null;
   onPick: (id: string) => void;
+  onRename: (id: string, title: string) => void;
+  openKey: string | null;
+  onOpenKey: (key: string | null) => void;
 }) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+
+  const startEdit = (run: CodingRun) => {
+    setEditingId(run.id);
+    setDraft(run.title ?? titleForRun(run));
+  };
+
+  const commit = () => {
+    if (editingId) onRename(editingId, draft);
+    setEditingId(null);
+  };
+
   return (
-    <details className="rail-details" open>
-      <summary>
-        <strong>History</strong>
-        <span className="chip">{runs.length}</span>
-      </summary>
+    <RailDetails title="History" chip={runs.length} openKey={openKey} onOpenKey={onOpenKey}>
       {runs.length ? (
         <div className="coding-history-list">
-          {runs.map((run) => (
-            <button
-              key={run.id}
-              className="coding-history-item"
-              data-on={run.id === activeId}
-              onClick={() => onPick(run.id)}
-            >
-              <span>
-                {new Date(run.createdAt).toLocaleString()}
-                {run.stoppedReason ? " · unfinished" : ""}
-              </span>
-              <strong>{run.task}</strong>
-            </button>
-          ))}
+          {runs.map((run) =>
+            editingId === run.id ? (
+              <input
+                key={run.id}
+                className="coding-rename-input"
+                value={draft}
+                autoFocus
+                spellCheck={false}
+                placeholder="Name this conversation"
+                onChange={(e) => setDraft(e.target.value)}
+                onBlur={commit}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    commit();
+                  }
+                  if (e.key === "Escape") setEditingId(null);
+                }}
+              />
+            ) : (
+              <div key={run.id} className="coding-history-row">
+                <button
+                  className="coding-history-item"
+                  data-on={run.id === activeId}
+                  onClick={() => onPick(run.id)}
+                >
+                  <span>
+                    {new Date(run.createdAt).toLocaleString()}
+                    {run.stoppedReason ? " · unfinished" : ""}
+                  </span>
+                  <strong>{titleForRun(run)}</strong>
+                </button>
+                <button
+                  className="btn tiny ghost coding-history-edit"
+                  title="Rename this conversation"
+                  onClick={() => startEdit(run)}
+                >
+                  ✎
+                </button>
+              </div>
+            )
+          )}
         </div>
       ) : (
         <p className="hint">No coding history yet.</p>
       )}
-    </details>
+    </RailDetails>
   );
 }

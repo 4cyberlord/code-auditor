@@ -50,6 +50,7 @@ export default function BackgroundJobsPanel() {
   const [loading, setLoading] = useState(false);
   const [queueing, setQueueing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   const workspaceImages = useStore((s) => s.images);
   const settings = useStore((s) => s.settings);
@@ -77,11 +78,11 @@ export default function BackgroundJobsPanel() {
    * job still unclaimed after that is not slow, it is unattended.
    */
   const stalled = useMemo(() => {
-    const cutoff = Date.now() - 120_000;
+    const cutoff = now - 120_000;
     return jobs.filter(
       (job) => job.status === "queued" && !job.claimedAt && new Date(job.createdAt).getTime() < cutoff
     );
-  }, [jobs]);
+  }, [jobs, now]);
 
   const poke = async () => {
     setPoking(true);
@@ -124,8 +125,12 @@ export default function BackgroundJobsPanel() {
 
   useEffect(() => {
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 15000);
-    return () => window.clearInterval(timer);
+    const refreshTimer = window.setInterval(() => void refresh(), 15000);
+    const clockTimer = window.setInterval(() => setNow(Date.now()), 15000);
+    return () => {
+      window.clearInterval(refreshTimer);
+      window.clearInterval(clockTimer);
+    };
   }, []);
 
   const queueCurrent = async () => {
@@ -184,13 +189,15 @@ export default function BackgroundJobsPanel() {
 
   useEffect(() => {
     if (!selectedJob) {
-      setEvents([]);
-      setImages([]);
-      setReport(null);
+      queueMicrotask(() => {
+        setEvents([]);
+        setImages([]);
+        setReport(null);
+      });
       return;
     }
     let live = true;
-    setError(null);
+    queueMicrotask(() => setError(null));
     devLog("cloud-jobs", "detail load started", { jobId: selectedJob.id });
     void Promise.all([
       listSolveJobEvents(selectedJob.id),

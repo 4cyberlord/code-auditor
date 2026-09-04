@@ -22,6 +22,7 @@ export default function HelperCard() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(async () => {
     try {
@@ -32,8 +33,13 @@ export default function HelperCard() {
   }, []);
 
   useEffect(() => {
-    void refresh();
+    queueMicrotask(() => void refresh());
   }, [refresh]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const authorise = async () => {
     setBusy(true);
@@ -76,7 +82,7 @@ export default function HelperCard() {
     : null;
 
   const daysLeft = auth?.expiresAt
-    ? Math.ceil((new Date(auth.expiresAt).getTime() - Date.now()) / 86_400_000)
+    ? Math.ceil((new Date(auth.expiresAt).getTime() - now) / 86_400_000)
     : null;
   const expiringSoon = daysLeft !== null && daysLeft <= 7 && daysLeft > 0;
 
