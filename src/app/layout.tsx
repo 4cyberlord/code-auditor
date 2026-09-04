@@ -3,7 +3,7 @@ import "./globals.css";
 import ThemeProvider from "@/components/ThemeProvider";
 
 export const metadata: Metadata = {
-  title: "Council Editor",
+  title: "Council Editor 0.1.0",
   description: "Independent multi-model solving, benchmarking, and consensus.",
 };
 
@@ -67,7 +67,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <div className="boot-mark" aria-hidden="true">
               <span /><span /><span /><span />
             </div>
-            <p className="boot-name">Council Editor</p>
+            <p className="boot-name">Council Editor 0.1.0</p>
             <p className="boot-note">Starting up…</p>
           </div>
         </div>

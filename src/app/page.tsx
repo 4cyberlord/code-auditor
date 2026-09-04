@@ -115,7 +115,7 @@ function Workbench() {
     <div className="shell">
       <div className="titlebar" data-tauri-drag-region>
         <span className="brand" data-tauri-drag-region>
-          Council Editor
+          Council Editor 0.1.0
           <span data-tauri-drag-region>
             {running
               ? "running"
