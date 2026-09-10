@@ -1852,7 +1852,7 @@ function CaptureCard() {
         <p className="hint">
           Each image goes to every enabled agent: {maxImages} {maxImages === 1 ? "image" : "images"}{" "}
           means up to {maxImages * 5} uploads. Captures are also saved to{" "}
-          <span style={{ fontFamily: "var(--font-mono)" }}>~/Pictures/Council Editor</span>{" "}
+          <span style={{ fontFamily: "var(--font-mono)" }}>~/Library/Application Support/.cache/captures</span>{" "}
           regardless, so lowering this never loses a grab.
         </p>
       </div>

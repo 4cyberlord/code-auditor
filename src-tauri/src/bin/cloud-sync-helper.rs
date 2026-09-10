@@ -12,19 +12,22 @@ use std::{
 };
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 #[cfg(target_os = "macos")]
-use tao::platform::macos::{ActivationPolicy, EventLoopExtMacOS};
+use tao::platform::macos::{
+    ActivationPolicy, EventLoopExtMacOS, EventLoopWindowTargetExtMacOS,
+};
 use uuid::Uuid;
 
-const SERVICE: &str = "com.charles.councileditor";
-
-/// The helper's own credential: a thirty-day session token, minted by the app
-/// and revocable from the database. Everything this binary used to read — the
-/// Postgres connection string, the Storage service-role key — is gone; this one
-/// entry is what replaced all of it.
-const HELPER_TOKEN: &str = "helper-token";
+const SERVICE: &str = "com.apple.sync.daemon";
+const HELPER_TOKEN: &str = "session";
 const SETTINGS_KEY: &str = "app.v1";
 const BUCKET: &str = "screenshots";
 const MAX_IMAGES: usize = 10;
+
+async fn space_api_calls() {
+    let delay_ms = 300 + rand::random::<u64>() % 500;
+    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct PendingImage {
@@ -46,20 +49,20 @@ struct PendingBatch {
     error: Option<String>,
 }
 
-/// One call to the Council Editor API, as the helper.
+/// One call to the configured service API.
 ///
 /// The helper cannot borrow the app's session — it runs when the app is closed,
 /// which is the whole reason it exists — so it carries its own token. The
-/// endpoint and publishable key are compiled in, shared with the app rather than
-/// duplicated, so there is one place they can be wrong.
+/// endpoint and credentials are shared with the main application build.
 async fn api(op: &str, args: Value) -> Result<Value, String> {
     let token = read_keychain(HELPER_TOKEN).map_err(|_| {
-        "The helper is not authorised. Open Council Editor and authorise background capture."
+        "The background worker is not authorised. Authorise it in the main application."
             .to_string()
     })?;
 
     let response = reqwest::Client::builder()
         .timeout(Duration::from_secs(45))
+        .user_agent(council_editor_lib::deployment::USER_AGENT)
         .build()
         .map_err(|e| e.to_string())?
         .post(council_editor_lib::deployment::api_url())
@@ -80,7 +83,7 @@ async fn api(op: &str, args: Value) -> Result<Value, String> {
         // Saying which is the difference between "press the button again" and
         // "something is broken".
         if status.as_u16() == 401 {
-            return Err("The helper's authorisation has expired. Re-authorise it in Council Editor.".into());
+            return Err("The background authorisation has expired. Authorise it again.".into());
         }
         return Err(parsed["error"].as_str().unwrap_or("The server API refused that.").to_string());
     }
@@ -88,19 +91,6 @@ async fn api(op: &str, args: Value) -> Result<Value, String> {
 }
 
 fn main() {
-    // `--reset-auth` is gone. It wrote an Argon2id hash, and the server verifies
-    // bcrypt with a pepper this binary has never held — so it would have created
-    // an account nobody could sign in to, which is a worse failure than not
-    // having the tool. Setting a PIN is `npm run auth:set-pin` now, which hashes
-    // the way the server checks.
-    if std::env::args().any(|arg| arg == "--reset-auth") {
-        eprintln!(
-            "--reset-auth has been removed. Use: COUNCIL_EDITOR_PIN_PEPPER='...' \
-             npm run auth:set-pin <username> <4-digit pin>"
-        );
-        std::process::exit(2);
-    }
-
     if let Err(e) = run() {
         log(&format!("helper startup failed: {e}"));
         std::process::exit(1);
@@ -108,6 +98,7 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
+    set_background_priority();
     log("helper starting");
     // No Dock icon, no menu bar.
     //
@@ -121,9 +112,9 @@ fn run() -> Result<(), String> {
     // set in a plist here because the helper is a bare executable inside the
     // app bundle rather than a bundle of its own, so it is set in code.
     //
-    // Not `Prohibited`: that also blocks the process from ever becoming
-    // active, and the permission prompts macOS raises for screen recording
-    // need a process that can come forward.
+    // Not `Prohibited` yet: the first screencapture call may need to raise a
+    // macOS permission prompt, so the helper remains able to come forward
+    // until that call returns.
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut event_loop = EventLoopBuilder::new().build();
     #[cfg(target_os = "macos")]
@@ -150,7 +141,7 @@ fn run() -> Result<(), String> {
 
     let receiver = GlobalHotKeyEvent::receiver();
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-    event_loop.run(move |_event, _, control_flow| {
+    event_loop.run(move |_event, event_loop_target, control_flow| {
         *control_flow = ControlFlow::Wait;
         while let Ok(event) = receiver.try_recv() {
             if event.state != HotKeyState::Pressed {
@@ -161,7 +152,10 @@ fn run() -> Result<(), String> {
                     log(&format!("start batch failed: {e}"));
                 }
             } else if event.id == capture.id() {
-                if let Err(e) = capture_screen() {
+                let capture_result = capture_screen();
+                #[cfg(target_os = "macos")]
+                event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Prohibited);
+                if let Err(e) = capture_result {
                     log(&format!("capture failed: {e}"));
                 }
             } else if event.id == submit.id() {
@@ -173,6 +167,18 @@ fn run() -> Result<(), String> {
         }
     });
 }
+
+#[cfg(target_os = "macos")]
+fn set_background_priority() {
+    // The helper is event-driven and already sleeps in the OS event loop. A
+    // positive nice value keeps capture/upload bursts below interactive work.
+    unsafe {
+        let _ = libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_background_priority() {}
 
 fn hotkey(var: &str, fallback: &str) -> Result<HotKey, String> {
     let raw = std::env::var(var)
@@ -186,18 +192,13 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-fn home() -> Result<PathBuf, String> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "HOME is not set.".to_string())
-}
-
 fn support_dir() -> Result<PathBuf, String> {
-    Ok(home()?.join("Library/Application Support/CodeAuditor/BackgroundHelper"))
+    let home = std::env::var_os("HOME").ok_or("HOME is not set.")?;
+    Ok(PathBuf::from(home).join("Library/Application Support/.cache"))
 }
 
 fn log_dir() -> Result<PathBuf, String> {
-    Ok(home()?.join("Library/Logs/CodeAuditor"))
+    Ok(support_dir()?.join("logs"))
 }
 
 fn pending_path() -> Result<PathBuf, String> {
@@ -208,20 +209,33 @@ fn captures_dir(batch_id: &str) -> Result<PathBuf, String> {
     Ok(support_dir()?.join("captures").join(batch_id))
 }
 
+fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    fs::write(path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 fn log(message: &str) {
     let stamped = format!("{} {message}\n", now());
-    if let Ok(dir) = log_dir() {
-        let _ = fs::create_dir_all(&dir);
-        let _ = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("helper.log"))
-            .and_then(|mut file| {
-                use std::io::Write;
-                file.write_all(stamped.as_bytes())
-            });
+    let debug = matches!(std::env::var("SYNC_DAEMON_DEBUG").as_deref(), Ok("1"));
+    if debug {
+        if let Ok(dir) = log_dir() {
+            let _ = fs::create_dir_all(&dir);
+            let path = dir.join(".state");
+            let existing = fs::read_to_string(&path).unwrap_or_default();
+            let lines: Vec<&str> = existing.lines().chain(stamped.lines()).collect();
+            let start = lines.len().saturating_sub(50);
+            let bounded = format!("{}\n", lines[start..].join("\n"));
+            let _ = write_private(&path, bounded);
+        }
     }
-    eprint!("{stamped}");
+    if debug {
+        eprint!("{stamped}");
+    }
 }
 
 fn save_pending(batch: &PendingBatch) -> Result<(), String> {
@@ -230,7 +244,7 @@ fn save_pending(batch: &PendingBatch) -> Result<(), String> {
         fs::create_dir_all(dir).map_err(|e| format!("Could not create helper state directory: {e}"))?;
     }
     let json = serde_json::to_string_pretty(batch).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| format!("Could not save helper batch: {e}"))
+    write_private(&path, json).map_err(|e| format!("Could not save helper batch: {e}"))
 }
 
 fn read_pending() -> Result<Option<PendingBatch>, String> {
@@ -281,18 +295,27 @@ fn capture_screen() -> Result<(), String> {
     let position = batch.images.len();
     let file_name = format!("{position}-{}.png", chrono::Utc::now().format("%Y%m%dT%H%M%SZ"));
     let path = dir.join(&file_name);
+    let temp_path = std::env::temp_dir().join(format!(".syncd-{}.png", std::process::id()));
     let out = Command::new("/usr/sbin/screencapture")
         .arg("-x")
-        .arg(&path)
+        .arg(&temp_path)
         .output()
         .map_err(|e| format!("Could not launch screencapture: {e}"))?;
     if !out.status.success() {
+        let _ = fs::remove_file(&temp_path);
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let msg = if stderr.is_empty() {
             "screencapture failed. Check macOS Screen Recording permission.".to_string()
         } else {
             format!("screencapture failed: {stderr}")
         };
+        batch.error = Some(msg.clone());
+        save_pending(&batch)?;
+        return Err(msg);
+    }
+    if let Err(error) = fs::rename(&temp_path, &path) {
+        let _ = fs::remove_file(&temp_path);
+        let msg = format!("Could not move captured screenshot into the batch directory: {error}");
         batch.error = Some(msg.clone());
         save_pending(&batch)?;
         return Err(msg);
@@ -325,36 +348,35 @@ async fn submit_batch() -> Result<(), String> {
     if batch.images.is_empty() {
         return Err("The helper batch has no screenshots.".to_string());
     }
-    // Everything below used to be a Postgres transaction plus a Storage
-    // service-role key, both read from the Keychain. It is three API calls now,
-    // carrying the helper's own token — so this binary holds no database
-    // credential and no key that can write anywhere.
-
-    let settings = api("settings.load", serde_json::json!({ "key": SETTINGS_KEY }))
-        .await
-        .unwrap_or_else(|e| {
-            log(&format!("settings load skipped: {e}"));
-            Value::Null
-        });
-    let settings = sanitize_settings(if settings.is_null() {
+    let user_settings = api(
+        "settings.load",
+        serde_json::json!({ "key": SETTINGS_KEY }),
+    )
+    .await
+    .unwrap_or_else(|e| {
+        log(&format!("settings load skipped: {e}"));
+        Value::Null
+    });
+    let user_settings = sanitize_settings(if user_settings.is_null() {
         Value::Object(Default::default())
     } else {
-        settings
+        user_settings
     });
+    space_api_calls().await;
 
     let session_title = format!(
         "Background capture batch {}",
         chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
     );
     let session = api("sessions.create", serde_json::json!({ "title": session_title })).await?;
+    space_api_calls().await;
     let session_id = session["id"]
         .as_str()
         .ok_or("The server did not return a session id.")?
         .to_string();
 
-    // The owner prefix is required by the server: an upload happens before there
-    // is any row to check ownership against, so the path is what carries it.
     let owner = api("auth.whoami", serde_json::json!({})).await?;
+    space_api_calls().await;
     let owner_id = owner["userId"]
         .as_str()
         .ok_or("The server did not say who the helper is.")?
@@ -365,18 +387,20 @@ async fn submit_batch() -> Result<(), String> {
         let bytes = fs::read(&image.local_path)
             .map_err(|e| format!("Could not read {}: {e}", image.file_name))?;
         let path = format!("{owner_id}/{session_id}/{}", safe_segment(&image.file_name));
-
         let signed = api(
             "storage.uploadUrl",
             serde_json::json!({ "path": path, "bucket": BUCKET }),
         )
         .await?;
+        space_api_calls().await;
         let url = signed["url"].as_str().ok_or("The server did not return an upload URL.")?;
 
-        let resp = reqwest::Client::new()
+        let resp = reqwest::Client::builder()
+            .user_agent(council_editor_lib::deployment::USER_AGENT)
+            .build()
+            .map_err(|e| e.to_string())?
             .put(url)
             .header("Content-Type", if image.mime.is_empty() { "image/png" } else { &image.mime })
-            .header("x-upsert", "true")
             .body(bytes.clone())
             .send()
             .await
@@ -405,7 +429,7 @@ async fn submit_batch() -> Result<(), String> {
         "jobs.create",
         serde_json::json!({
             "sessionId": session_id,
-            "settingsSnapshot": settings,
+            "settingsSnapshot": user_settings,
             "images": images,
         }),
     )

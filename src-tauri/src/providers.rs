@@ -1236,11 +1236,6 @@ pub async fn list_gateway_models(base_url: Option<String>) -> Result<Vec<String>
     Ok(ids)
 }
 
-/// One client for the process. Building a fresh `reqwest::Client` per call throws
-/// away the connection pool and repeats the TLS setup, which on a four-agent fan-out
-/// means four separate handshakes to hosts we are about to talk to again.
-static HTTP: std::sync::OnceLock<Result<reqwest::Client, String>> = std::sync::OnceLock::new();
-
 /// The real reason a request failed, not reqwest's summary of it.
 ///
 /// `reqwest::Error` renders as "error sending request for url (...)" and keeps
@@ -1484,15 +1479,13 @@ async fn send_governed(
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
-    HTTP.get_or_init(|| {
-        reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(20))
-            // No overall timeout: reasoning models can think for minutes before the
-            // first token arrives. Cancellation is user-driven instead.
-            .build()
-            .map_err(|e| e.to_string())
-    })
-    .clone()
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .user_agent(crate::deployment::USER_AGENT)
+        // No overall timeout: reasoning models can think for minutes before the
+        // first token arrives. Cancellation is user-driven instead.
+        .build()
+        .map_err(|e| e.to_string())
 }
 
 // ------------------------------------------------------- request construction

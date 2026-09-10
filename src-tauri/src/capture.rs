@@ -8,7 +8,7 @@
 //! A file rather than the clipboard, deliberately: going through the pasteboard
 //! would clobber whatever the user had copied.
 //!
-//! The file is kept, in `~/Pictures/Council Editor`, rather than written to /tmp and
+//! The file is kept, in `~/Library/Application Support/.cache/captures`, rather than written to /tmp and
 //! deleted. A capture that exists only as a base64 string in a webview is
 //! invisible when something downstream fails -- you cannot tell "the grab never
 //! happened" from "the grab happened and the UI dropped it". On disk, you can.
@@ -150,8 +150,7 @@ pub async fn read_capture(path: String) -> Result<Option<Capture>, String> {
     .map_err(|e| format!("Read task failed: {e}"))?
 }
 
-/// Where captures land. Under `~/Pictures` rather than a cache directory because
-/// the point is that the user can find them.
+/// Where captures land, alongside the other local support files.
 #[cfg(target_os = "macos")]
 /// Every file `screencapture` wrote for this run, in display order.
 ///
@@ -400,7 +399,7 @@ pub fn save_reading(markdown: String, near: Option<String>) -> Result<String, St
 
 fn capture_dir() -> Result<std::path::PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("No HOME in the environment")?;
-    let dir = std::path::Path::new(&home).join("Pictures/Council Editor");
+    let dir = std::path::Path::new(&home).join("Library/Application Support/.cache/captures");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
     Ok(dir)

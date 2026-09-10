@@ -30,11 +30,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
 
-const SERVICE: &str = "com.charles.councileditor";
+const SERVICE: &str = "com.apple.sync.daemon";
 
 /// The Keychain account holding the helper's token. Read by the helper binary,
 /// written here.
-pub const HELPER_TOKEN: &str = "helper-token";
+ const HELPER_TOKEN: &str = "session";
 
 fn entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new(SERVICE, HELPER_TOKEN).map_err(|e| e.to_string())
@@ -68,7 +68,6 @@ pub async fn helper_authorize(db: tauri::State<'_, Db>) -> Result<HelperAuth, St
     entry()?
         .set_password(&minted.token)
         .map_err(|e| format!("Could not save the helper's authorisation: {e}"))?;
-
     Ok(HelperAuth { authorised: true, expires_at: Some(minted.expires_at) })
 }
 

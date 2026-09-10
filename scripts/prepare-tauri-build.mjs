@@ -30,31 +30,31 @@ function targetTriple() {
 
 const extension = process.platform === "win32" ? ".exe" : "";
 const dir = join(srcTauri, "binaries");
-const helperName = "cloud-sync-helper";
-const to = join(dir, `${helperName}-${targetTriple()}${extension}`);
 mkdirSync(dir, { recursive: true });
 
-// Tauri validates externalBin paths in the package build script. That script
-// runs even while Cargo is building this helper binary, so a first clean release
-// build needs a placeholder before the real helper exists. The real binary
-// overwrites this file a few lines later.
+const helperName = "cloud-sync-helper";
+const to = join(dir, `${helperName}-${targetTriple()}${extension}`);
+// Tauri validates the sidecar path before Cargo has built the helper, so a
+// clean release build needs a placeholder before the real binary exists.
 if (!existsSync(to)) {
   writeFileSync(to, "#!/bin/sh\nexit 70\n");
   chmodSync(to, 0o755);
 }
 
-run("cargo", [
-  "build",
-  "--manifest-path",
-  join(srcTauri, "Cargo.toml"),
-  "--bin",
-  helperName,
-  "--release",
-]);
+{
+  run("cargo", [
+    "build",
+    "--manifest-path",
+    join(srcTauri, "Cargo.toml"),
+    "--bin",
+    helperName,
+    "--release",
+  ]);
 
-const from = join(srcTauri, "target", "release", `${helperName}${extension}`);
-copyFileSync(from, to);
-chmodSync(to, 0o755);
-console.log(`Prepared helper sidecar: ${to}`);
+  const from = join(srcTauri, "target", "release", `${helperName}${extension}`);
+  copyFileSync(from, to);
+  chmodSync(to, 0o755);
+  console.log(`Prepared helper sidecar: ${to}`);
+}
 
 run("npm", ["run", "build"]);

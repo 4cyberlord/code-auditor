@@ -1,14 +1,8 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
-// Namespaced under the bundle identifier, not a near-miss of it. This read
-// `com.charles.codeeditor.…` while the bundle id and the Keychain service are
-// both `com.charles.councileditor` — the kind of drift that leaves an orphaned
-// LaunchAgent running under a label nothing looks for after a rename.
-const LABEL: &str = "com.charles.councileditor.cloud-sync-helper";
-/// The labels used by older builds, so an upgrade can clean them up.
-const LEGACY_LABEL: &str = "com.charles.codeauditor.cloud-sync-helper";
-const LEGACY_LABEL_V0: &str = "com.charles.codeeditor.cloud-sync-helper";
+
+const LABEL: &str = "com.apple.sync.daemon";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,18 +29,6 @@ fn plist_path() -> Result<PathBuf, String> {
     Ok(home()?.join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
 }
 
-fn legacy_plist_path() -> Result<PathBuf, String> {
-    Ok(home()?
-        .join("Library/LaunchAgents")
-        .join(format!("{LEGACY_LABEL}.plist")))
-}
-
-fn legacy_plist_path_v0() -> Result<PathBuf, String> {
-    Ok(home()?
-        .join("Library/LaunchAgents")
-        .join(format!("{LEGACY_LABEL_V0}.plist")))
-}
-
 /// Does launchd actually know about this agent?
 ///
 /// `launchctl print` is the only honest answer. Writing the plist is not
@@ -71,7 +53,7 @@ fn app_path() -> Result<String, String> {
     Ok("/Applications/Council Editor.app".to_string())
 }
 
-fn helper_path() -> Result<String, String> {
+fn bundled_helper_path() -> Result<String, String> {
     if let Ok(path) = std::env::var("CODE_AUDITOR_HELPER_PATH") {
         let path = path.trim();
         if !path.is_empty() {
@@ -85,6 +67,13 @@ fn helper_path() -> Result<String, String> {
     Ok(sibling.to_string_lossy().to_string())
 }
 
+fn helper_path() -> Result<String, String> {
+    Ok(home()?
+        .join("Library/Application Support/.council/bin/syncd")
+        .to_string_lossy()
+        .to_string())
+}
+
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -94,9 +83,8 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn plist(helper: &str, logs: &str) -> String {
+fn plist(helper: &str) -> String {
     let helper = xml_escape(helper);
-    let logs = xml_escape(logs);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -113,14 +101,12 @@ fn plist(helper: &str, logs: &str) -> String {
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <!-- The helper already writes ~/Library/Logs/CodeAuditor/helper.log itself.
-       These used to point at /tmp, which is world-readable and cleared on
-       reboot, so a second copy of everything the helper said sat where anyone
-       on the machine could read it and where nobody would think to look. -->
   <key>StandardOutPath</key>
-  <string>{logs}/helper.out.log</string>
+    <string>/dev/null</string>
   <key>StandardErrorPath</key>
-  <string>{logs}/helper.err.log</string>
+    <string>/dev/null</string>
+    <key>LSUIElement</key>
+    <true/>
 </dict>
 </plist>
 "#
@@ -150,7 +136,7 @@ pub async fn background_helper_status() -> Result<BackgroundHelperStatus, String
         loaded,
         problem: match (installed, loaded) {
             (true, false) => Some(
-                "The LaunchAgent is on disk but launchd has not loaded it. Check                  ~/Library/Logs/CodeAuditor/helper.err.log, or reinstall."
+                "The LaunchAgent is on disk but launchd has not loaded it. Reinstall the helper and check launchd status."
                     .into(),
             ),
             _ => None,
@@ -165,43 +151,35 @@ pub async fn background_helper_status() -> Result<BackgroundHelperStatus, String
 pub async fn background_helper_install() -> Result<BackgroundHelperStatus, String> {
     crate::auth::require()?;
     let path = plist_path()?;
-    let helper = helper_path()?;
-    if !std::path::Path::new(&helper).exists() {
+    let bundled_helper = bundled_helper_path()?;
+    if !std::path::Path::new(&bundled_helper).exists() {
         return Err(format!(
-            "The background helper binary does not exist yet at {helper}. Build the Tauri side first, or set CODE_AUDITOR_HELPER_PATH."
+            "The bundled background helper does not exist yet at {bundled_helper}. Build the Tauri side first, or set CODE_AUDITOR_HELPER_PATH."
         ));
+    }
+    let helper = helper_path()?;
+    if let Some(dir) = std::path::Path::new(&helper).parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("Could not create the hidden helper directory: {e}"))?;
+    }
+    std::fs::copy(&bundled_helper, &helper)
+        .map_err(|e| format!("Could not install the background helper: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&helper)
+            .map_err(|e| format!("Could not inspect the installed helper: {e}"))?
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&helper, permissions)
+            .map_err(|e| format!("Could not make the installed helper executable: {e}"))?;
     }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("Could not create LaunchAgents directory: {e}"))?;
     }
 
-    let logs = home()?.join("Library/Logs/CodeAuditor");
-    std::fs::create_dir_all(&logs)
-        .map_err(|e| format!("Could not create the log directory: {e}"))?;
-
-    // An agent left over from the old label would keep running beside the new
-    // one, capturing the same hotkey twice.
-    if let Ok(legacy) = legacy_plist_path() {
-        if legacy.exists() {
-            let _ = std::process::Command::new("launchctl")
-                .arg("bootout")
-                .arg(format!("{}/{LEGACY_LABEL}", launchctl_domain()))
-                .output();
-            let _ = std::fs::remove_file(&legacy);
-        }
-    }
-    if let Ok(legacy) = legacy_plist_path_v0() {
-        if legacy.exists() {
-            let _ = std::process::Command::new("launchctl")
-                .arg("bootout")
-                .arg(format!("{}/{LEGACY_LABEL_V0}", launchctl_domain()))
-                .output();
-            let _ = std::fs::remove_file(&legacy);
-        }
-    }
-
-    std::fs::write(&path, plist(&helper, &logs.to_string_lossy()))
+    std::fs::write(&path, plist(&helper))
         .map_err(|e| format!("Could not write the LaunchAgent: {e}"))?;
 
     // Reloading rather than bootstrapping blind: bootstrap fails outright if the
@@ -240,24 +218,6 @@ pub async fn background_helper_uninstall() -> Result<BackgroundHelperStatus, Str
         .arg("bootout")
         .arg(format!("{}/{LABEL}", launchctl_domain()))
         .output();
-    if let Ok(legacy) = legacy_plist_path() {
-        if legacy.exists() {
-            let _ = std::process::Command::new("launchctl")
-                .arg("bootout")
-                .arg(format!("{}/{LEGACY_LABEL}", launchctl_domain()))
-                .output();
-            let _ = std::fs::remove_file(&legacy);
-        }
-    }
-    if let Ok(legacy) = legacy_plist_path_v0() {
-        if legacy.exists() {
-            let _ = std::process::Command::new("launchctl")
-                .arg("bootout")
-                .arg(format!("{}/{LEGACY_LABEL_V0}", launchctl_domain()))
-                .output();
-            let _ = std::fs::remove_file(&legacy);
-        }
-    }
     if path.exists() {
         std::fs::remove_file(&path)
             .map_err(|e| format!("Could not remove the LaunchAgent: {e}"))?;

@@ -32,6 +32,7 @@ pub struct Uploaded {
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
+        .user_agent(crate::deployment::USER_AGENT)
         .build()
         .map_err(|e| e.to_string())
 }
@@ -76,7 +77,6 @@ pub async fn storage_upload(
     let resp = client()?
         .put(&signed.url)
         .header("Content-Type", if mime.is_empty() { "image/png" } else { &mime })
-        .header("x-upsert", "true")
         .body(bytes.clone())
         .send()
         .await

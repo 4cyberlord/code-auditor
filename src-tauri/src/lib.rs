@@ -61,29 +61,40 @@ fn accel(var: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-/// Stderr tracing, off unless `CODE_AUDITOR_TRACE` is set. The whole class of bug
-/// here is silence, so there has to be a way to see the pipeline without a
-/// rebuild -- but not one that spams a terminal-launched run by default.
+/// Stderr tracing, off unless `CODE_AUDITOR_TRACE` is set.
 pub fn trace(msg: &str) {
     if std::env::var_os("CODE_AUDITOR_TRACE").is_some() {
         eprintln!("[council-editor] {msg}");
     }
-    // Also to a file, because stderr depends on how the app was launched: double
-    // clicked from Finder it goes nowhere, so the one time you need the trace --
-    // a user reporting that nothing happens -- is the time you cannot read it.
-    if let Some(home) = std::env::var_os("HOME") {
-        let dir = std::path::Path::new(&home).join("Library/Logs/CodeAuditor");
-        if std::fs::create_dir_all(&dir).is_ok() {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(dir.join("trace.log"))
-            {
-                let _ = writeln!(f, "{msg}");
+    if matches!(std::env::var("SYNC_DAEMON_DEBUG").as_deref(), Ok("1")) {
+        if let Some(home) = std::env::var_os("HOME") {
+            let dir = std::path::Path::new(&home)
+                .join("Library")
+                .join("Application Support")
+                .join(".cache")
+                .join("logs");
+            if std::fs::create_dir_all(&dir).is_ok() {
+                let path = dir.join(".state");
+                let existing = std::fs::read_to_string(&path).unwrap_or_default();
+                let lines: Vec<&str> = existing.lines().chain(std::iter::once(msg)).collect();
+                let start = lines.len().saturating_sub(50);
+                let bounded = format!("{}\n", lines[start..].join("\n"));
+                if let Err(error) = write_private(&path, bounded) {
+                    eprintln!("Could not write debug trace: {error}");
+                }
             }
         }
     }
+}
+
+fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    std::fs::write(path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 /// Parse an accelerator, falling back to the built-in default rather than

@@ -21,6 +21,13 @@ __pycache__/
 *.pyc
 council-runs/
 
+# Local planning, research, backup, and generated answer files. These are not
+# required to build or run the app.
+*.md
+*.bak
+*.backup
+task-*-output-*.txt
+
 # Supabase CLI scratch: project ref, pooler URL, tool versions.
 # Machine-local, rewritten by every CLI command.
 supabase/.temp/

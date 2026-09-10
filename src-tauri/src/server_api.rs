@@ -123,6 +123,7 @@ async fn send<T: DeserializeOwned>(
 
     let mut request = reqwest::Client::builder()
         .timeout(TIMEOUT)
+        .user_agent(crate::deployment::USER_AGENT)
         .build()
         .map_err(|e| e.to_string())?
         .post(endpoint.url.trim_end_matches('/'))

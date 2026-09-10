@@ -41,22 +41,21 @@ pub struct RunCodeResult {
 
 /// Where scratch directories live.
 ///
-/// Under Caches rather than Documents or the app's own folder: this is disposable
-/// by definition, and macOS already understands that a Caches directory may be
-/// emptied at any time.
+/// Under the shared support root rather than Documents or the app's own folder:
+/// this is disposable by definition.
 fn scratch_root() -> PathBuf {
-    let base = dirs_cache().unwrap_or_else(std::env::temp_dir);
-    base.join("CodeAuditor").join("exec")
+    let base = support_root().unwrap_or_else(std::env::temp_dir);
+    base.join("exec")
 }
 
-fn dirs_cache() -> Option<PathBuf> {
+fn support_root() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    let p = PathBuf::from(home).join("Library").join("Caches");
-    if p.is_dir() {
-        Some(p)
-    } else {
-        None
-    }
+    Some(
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join(".cache"),
+    )
 }
 
 /// Runs a block of model-written code and reports what happened.

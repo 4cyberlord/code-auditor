@@ -15,6 +15,10 @@
 //!
 //!   COUNCIL_EDITOR_API_URL=... SUPABASE_PUBLISHABLE_KEY=... npm run app:build
 
+/// Browser-like User-Agent shared by the app and its background helper.
+pub const USER_AGENT: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+
 /// `https://<ref>.supabase.co/functions/v1/council-editor-api`
 pub fn api_url() -> &'static str {
     match option_env!("COUNCIL_EDITOR_API_URL") {
