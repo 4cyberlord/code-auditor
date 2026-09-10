@@ -149,6 +149,18 @@ export interface LocalQwenStepResponse {
   } | null;
 }
 
+export interface CodingModelStepRequest {
+  provider: TransportId;
+  model: string;
+  baseUrl?: string | null;
+  maxTokens: number;
+  temperature: number;
+  messages: unknown[];
+  tools?: unknown[];
+}
+
+export type CodingModelStepResponse = LocalQwenStepResponse;
+
 export interface CodingToolRequest {
   name: string;
   root: string;
@@ -260,6 +272,13 @@ export async function runLocalQwenStep(req: LocalQwenRequest): Promise<LocalQwen
     };
   }
   return invoke<LocalQwenStepResponse>("run_local_qwen_step", { req });
+}
+
+export async function runCodingModelStep(
+  req: CodingModelStepRequest
+): Promise<CodingModelStepResponse> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  return invoke<CodingModelStepResponse>("run_coding_model_step", { req });
 }
 
 /**

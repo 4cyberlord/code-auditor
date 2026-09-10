@@ -340,17 +340,7 @@ export const STORAGE = {
 
 export type StorageId = typeof STORAGE.id;
 
-export const CODING_BRIDGE = {
-  id: "coding_bridge",
-  label: "Coding Bridge",
-  vendor: "Local Wiro",
-  keyHint: "optional BRIDGE_API_KEY",
-  accent: "#14a085",
-} as const;
-
-export type CodingBridgeId = typeof CODING_BRIDGE.id;
-
-export type KeyId = TransportId | "database-url" | StorageId | CodingBridgeId;
+export type KeyId = TransportId | "database-url" | StorageId;
 
 /** The transcriber's human label. No key: the engine is on the device. */
 export const TRANSCRIBER_LABEL = "Apple Vision";

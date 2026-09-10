@@ -4,12 +4,10 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Markdown from "./Markdown";
 import Splitter from "./Splitter";
 import {
-  CODING_BRIDGE_CONFIG_EVENT,
   CodingRunCancelled,
   buildCodingPlanContext,
   cancelCodingRun,
   cleanCodingError,
-  codingBridgeBaseUrl,
   codingRunMarkdown,
   createRunControl,
   humanizeList,
@@ -17,10 +15,8 @@ import {
   humanizeValue,
   isActionablePlan,
   isResumable,
-  loadCodingBridgeConfig,
   loadCodingRuns,
   missingContext,
-  saveCodingBridgeConfig,
   runMode,
   stopReasonLabel,
   todoProgress,
@@ -33,12 +29,15 @@ import {
   stripToolTags,
   titleForRun,
   type CodingActivity,
-  type CodingBridgeConfig,
+  type CodingAgentConfig,
   type CodingProgress,
   type CodingRun,
   type CodingRunControl,
   type CodingToolEvent,
 } from "@/lib/codingIntelligence";
+import { ALL_AGENTS, agentSpec } from "@/lib/models";
+import { endpointForCouncilModel } from "@/lib/council";
+import { routeFor, useStore, type Route } from "@/lib/store";
 
 /** Hard ceiling on self-resumes for one Build, so it can never loop forever. */
 const MAX_AUTO_CONTINUE = 8;
@@ -61,6 +60,19 @@ function eventTarget(event: CodingToolEvent): string {
   return humanizeValue(value);
 }
 
+interface CodingModelChoice {
+  key: string;
+  id: string;
+  label: string;
+  route: Route | null;
+  available: boolean;
+  reason: string;
+}
+
+function supportsCodingTools(route: Route | null): boolean {
+  return !!route && ["openai", "moonshot", "tokenrouter"].includes(route.provider);
+}
+
 export default function CodingWorkspace() {
   const [task, setTask] = useState("");
   const [runs, setRuns] = useState<CodingRun[]>([]);
@@ -68,7 +80,6 @@ export default function CodingWorkspace() {
   const [busy, setBusy] = useState(false);
   const [busyMode, setBusyMode] = useState<"planning" | "executing" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [config, setConfig] = useState<CodingBridgeConfig>(() => loadCodingBridgeConfig());
   const [copied, setCopied] = useState(false);
   const [liveEvents, setLiveEvents] = useState<CodingToolEvent[]>([]);
   const [progress, setProgress] = useState<CodingProgress | null>(null);
@@ -78,6 +89,52 @@ export default function CodingWorkspace() {
   const [queued, setQueued] = useState<string[]>([]);
   const [docPath, setDocPath] = useState<string | null>(null);
   const controlRef = useRef<CodingRunControl | null>(null);
+  const settings = useStore((s) => s.settings);
+  const keys = useStore((s) => s.keys);
+  const gatewayKey = useStore((s) => s.gatewayKey);
+
+  const modelChoices = useMemo<CodingModelChoice[]>(
+    () =>
+      ALL_AGENTS.filter((id) => settings.enabled[id]).map((id) => {
+        const spec = agentSpec(id);
+        const route = routeFor(id, settings, keys, gatewayKey);
+        const endpoint = route ? endpointForCouncilModel(settings.councilModels, route.model) : "chat";
+        const unsupportedEndpoint = endpoint !== "chat";
+        const unsupportedProvider = !supportsCodingTools(route);
+        const available = !!route && !unsupportedEndpoint && !unsupportedProvider;
+        const reason = !route
+          ? "Setup needed"
+          : unsupportedEndpoint || unsupportedProvider
+            ? "Unavailable"
+            : "Ready";
+        return {
+          key: `${route?.provider ?? "missing"}-${id}`,
+          id: route?.model ?? id,
+          label: `${spec.label} · ${route?.model ?? "not configured"}`,
+          route,
+          available,
+          reason,
+        };
+      }),
+    [gatewayKey, keys, settings]
+  );
+
+  const selectedChoice =
+    modelChoices.find((choice) => choice.available && choice.id === settings.codingModel) ??
+    modelChoices.find((choice) => choice.available) ??
+    null;
+
+  const config: CodingAgentConfig | null = selectedChoice?.route
+    ? {
+        provider: selectedChoice.route.provider,
+        model: selectedChoice.route.model,
+        baseUrl: selectedChoice.route.baseUrl,
+        maxTokens: settings.codingMaxTokens,
+        temperature: settings.codingTemperature,
+        projectRoot: settings.codingProjectRoot,
+        reasoning: settings.codingReasoning,
+      }
+    : null;
 
   // Auto-continue to completion: a Build run resumes itself while it keeps
   // completing todos, so a full README finishes end to end without manual
@@ -105,44 +162,7 @@ export default function CodingWorkspace() {
   const openStream = (runId: string) => {
     closeStream();
     setLive({ thinking: "", answer: "", status: "" });
-    if (typeof EventSource === "undefined" || !runId) return;
-    try {
-      const root = codingBridgeBaseUrl(config.url);
-      const es = new EventSource(`${root}/stream?runId=${encodeURIComponent(runId)}`);
-      es.onmessage = (e) => {
-        try {
-          const msg = JSON.parse(e.data) as {
-            type?: string;
-            kind?: string;
-            delta?: string;
-            reset?: boolean;
-            status?: string;
-          };
-          if (msg.type === "done") {
-            closeStream();
-            return;
-          }
-          if (msg.kind === "status") {
-            setLive((c) => ({ ...c, status: String(msg.status ?? "") }));
-            return;
-          }
-          const delta = String(msg.delta ?? "");
-          if (msg.kind === "answer") {
-            setLive((c) => ({ ...c, answer: msg.reset ? delta : c.answer + delta }));
-          } else if (msg.kind === "thinking") {
-            setLive((c) => ({ ...c, thinking: msg.reset ? delta : c.thinking + delta }));
-          }
-        } catch {
-          /* a malformed frame is not worth breaking the stream over */
-        }
-      };
-      // A connection error just means no live preview; the run still completes
-      // through its own channel, so there is nothing to surface here.
-      es.onerror = () => {};
-      streamRef.current = es;
-    } catch {
-      /* EventSource unavailable or blocked — degrade to no live preview */
-    }
+    void runId;
   };
 
   // The task of the run currently in flight. Until it is saved there is no
@@ -152,7 +172,7 @@ export default function CodingWorkspace() {
 
   // New Conversation sets this: without it the `?? runs[0]` fallback below
   // resurrects the latest run and the view never actually clears.
-  const [cleared, setCleared] = useState(false);
+  const [cleared, setCleared] = useState(true);
 
   // The center pane shows results only after the user opens them from the
   // conversation — a fresh plan does not jump into the Implementation section
@@ -206,20 +226,17 @@ export default function CodingWorkspace() {
   useEffect(() => {
     void loadCodingRuns().then((stored) => {
       setRuns(stored);
-      setActiveId(stored[0]?.id ?? null);
+      setActiveId(null);
+      setCleared(true);
     });
-    const onConfig = () => setConfig(loadCodingBridgeConfig());
-    window.addEventListener(CODING_BRIDGE_CONFIG_EVENT, onConfig);
-    window.addEventListener("storage", onConfig);
     return () => {
-      window.removeEventListener(CODING_BRIDGE_CONFIG_EVENT, onConfig);
-      window.removeEventListener("storage", onConfig);
+      closeStream();
     };
   }, []);
 
-  const active = cleared
+  const active = cleared || !activeId
     ? null
-    : (runs.find((r) => r.id === activeId) ?? runs[0] ?? null);
+    : (runs.find((r) => r.id === activeId) ?? null);
   const markdown = useMemo(() => codingRunMarkdown(active), [active]);
   // The chat thread already shows the task as the user's own bubble, so the
   // card markdown leaves it out; Copy keeps the full document with the task.
@@ -320,6 +337,10 @@ export default function CodingWorkspace() {
     // copy of the plan/README.
     void saveRunReportToServer(titled, previous);
 
+    if (!config) {
+      setError("Run finished, but no Coding model route is selected for saving the plan document.");
+      return;
+    }
     const result = await saveRunDocument(titled, config, previous);
     setDocPath("error" in result ? null : result.path);
     if ("error" in result) setError(`Run finished, but the plan file could not be written: ${result.error}`);
@@ -374,7 +395,8 @@ export default function CodingWorkspace() {
     setStopping(true);
     setProgress({ phase: "stopping", turn: 0, detail: "Stopping the model" });
     try {
-      await cancelCodingRun(config, control);
+      if (config) await cancelCodingRun(config, control);
+      else control.cancelled = true;
     } catch (err) {
       // The local flag is already set, so the loop ends regardless; the user
       // only needs to know the bridge did not confirm it — and to be able to
@@ -397,6 +419,10 @@ export default function CodingWorkspace() {
   const preparePlan = async (text?: string) => {
     const clean = (text ?? task).trim();
     if (!clean) return;
+    if (!config) {
+      setError("Choose a reachable TokenRouter, OpenAI, or Moonshot chat model before researching.");
+      return;
+    }
     const refineOf =
       active && runMode(active) === "plan" && clean !== (active.task || "").trim()
         ? active
@@ -461,6 +487,10 @@ export default function CodingWorkspace() {
     const base = resume ?? active;
     const clean = (base?.task || task).trim();
     if (!clean) return;
+    if (!config) {
+      setError("Choose a reachable TokenRouter, OpenAI, or Moonshot chat model before building.");
+      return;
+    }
     const planBase = resume
       ? (runs.find((r) => r.id === resume.continuedFrom) ?? resume)
       : base;
@@ -517,6 +547,10 @@ export default function CodingWorkspace() {
   // truncated plan has nothing to resume from, so it is simply re-planned.
   const continueRun = async () => {
     if (!active) return;
+    if (!config) {
+      setError("Choose a reachable TokenRouter, OpenAI, or Moonshot chat model before continuing.");
+      return;
+    }
     if (runMode(active) === "plan") {
       const clean = (active.task || task).trim();
       if (!clean) return;
@@ -649,15 +683,12 @@ export default function CodingWorkspace() {
     }
   };
 
-  // The reasoning switch. Persisted to the bridge config so it survives a
-  // reload, and forwarded to the bridge per run — no bridge restart needed.
-  const toggleReasoning = () => {
-    setConfig((current) => {
-      const next = { ...current, reasoning: !current.reasoning };
-      saveCodingBridgeConfig(next);
-      return next;
-    });
-  };
+  const selectedStatus = selectedChoice?.available ? "Ready" : "Setup needed";
+  const canResearch = !!config && !!task.trim() && !composerLocked;
+  const projectName =
+    settings.codingProjectName ||
+    settings.codingProjectRoot.split(/[\\/]/).filter(Boolean).at(-1) ||
+    "No project selected";
 
   return (
     <div className="coding-workspace">
@@ -672,11 +703,11 @@ export default function CodingWorkspace() {
                   ? titleForRun(active)
                   : "Conversation"}
             </div>
-            <div className="pane-model">{config.model}</div>
+            <div className="pane-model">{config?.model ?? "choose a model"}</div>
           </div>
           <span className="spacer" />
-          <span className="badge" data-tone={busy ? "live" : "good"}>
-            {busyMode ?? "local"}
+          <span className="badge" data-tone={busy ? "live" : selectedChoice?.available ? "good" : "warn"}>
+            {busyMode ?? selectedStatus}
           </span>
           <button
             className="btn tiny"
@@ -783,93 +814,92 @@ export default function CodingWorkspace() {
             </div>
           )}
 
-          <div className="coding-reasoning">
-            <button
-              type="button"
-              role="switch"
-              aria-checked={config.reasoning}
-              className="reasoning-switch"
-              data-on={config.reasoning || undefined}
-              onClick={toggleReasoning}
-              disabled={busy}
-              title="On: the model reasons step by step before answering — more thorough, much slower on the 27B. Off: it answers directly and fast."
-            >
-              <span className="reasoning-track" aria-hidden>
-                <span className="reasoning-thumb" />
+          <div className="coding-composer">
+            <textarea
+              className="coding-composer-input"
+              placeholder={
+                composerLocked
+                  ? "Building..."
+                  : pendingQuestion !== null
+                    ? "Answer the agent"
+                    : busy
+                      ? "Ask for follow-up changes"
+                      : "Ask for code changes"
+              }
+              value={task}
+              onChange={(e) => setTask(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                  e.preventDefault();
+                  submitMessage();
+                }
+              }}
+              // Locked during a Build so the implementation runs undisturbed to the
+              // end; open while planning (the queue) and to answer a question.
+              disabled={composerLocked}
+              // Task descriptions are mostly paths, identifiers and code fragments,
+              // so macOS flags nearly every word; spellcheck off stops the
+              // NSSpellServer console spam.
+              spellCheck={false}
+              autoCapitalize="off"
+            />
+            <div className="coding-composer-bar">
+              <button className="composer-icon" type="button" disabled title="Attach context">
+                +
+              </button>
+              <span className="composer-access">Full access</span>
+              <span className="spacer" />
+              <span className="composer-model" title={config?.model ?? "Choose a model in Settings"}>
+                {config?.model ?? "No model"}
               </span>
-              <span className="reasoning-label">Reasoning {config.reasoning ? "on" : "off"}</span>
-            </button>
-            <span className="reasoning-hint">
-              {config.reasoning ? "Thorough · slower" : "Direct · faster"}
-            </span>
+              {busy && pendingQuestion === null && task.trim() && !composerLocked && (
+                <button
+                  className="composer-submit"
+                  type="button"
+                  onClick={submitMessage}
+                  disabled={pendingQuestion === null ? !canResearch : false}
+                >
+                  Queue
+                </button>
+              )}
+              <button
+                className={busy ? "composer-stop" : "composer-submit"}
+                type="button"
+                onClick={busy ? () => void stopRun() : submitMessage}
+                disabled={busy ? stopping : pendingQuestion === null ? !canResearch : false}
+                title={busy ? "Stop current run" : "Send instruction"}
+              >
+                {busy
+                  ? stopping
+                    ? "..."
+                    : "Stop"
+                  : pendingQuestion !== null
+                    ? "Answer"
+                    : "Research"}
+              </button>
+            </div>
           </div>
 
-          <textarea
-            className="field coding-task-input"
-            placeholder={
-              composerLocked
-                ? "Building — the composer is locked until it finishes or you pause it."
-                : pendingQuestion !== null
-                  ? "Answer the agent's question. ⌘↵ to send."
-                  : busy
-                    ? "Add a follow-up — it joins the queue and is picked up at the next step. ⌘↵ to send."
-                    : "Describe the feature, change, bug, or refactor you want. ⌘↵ to research it."
-            }
-            value={task}
-            onChange={(e) => setTask(e.target.value)}
-            onKeyDown={(e) => {
-              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-                e.preventDefault();
-                submitMessage();
-              }
-            }}
-            // Locked during a Build so the implementation runs undisturbed to the
-            // end; open while planning (the queue) and to answer a question.
-            disabled={composerLocked}
-            // Task descriptions are mostly paths, identifiers and code fragments,
-            // so macOS flags nearly every word; spellcheck off stops the
-            // NSSpellServer console spam.
-            spellCheck={false}
-            autoCapitalize="off"
-          />
+          <div className="coding-local-row">
+            <span className="local-icon" aria-hidden="true" />
+            <span>Work locally</span>
+            <strong>{projectName}</strong>
+          </div>
 
           {error && <div className="pane-error wrap">{error}</div>}
-          <div className="coding-actions">
-            <button
-              className="btn primary"
-              onClick={submitMessage}
-              disabled={composerLocked || (pendingQuestion === null && !task.trim())}
-            >
-              {pendingQuestion !== null
-                ? "Answer"
-                : busyMode === "executing"
-                  ? "Building…"
-                  : busy
-                    ? "Queue follow-up"
-                    : busyMode === "planning"
-                      ? "Researching..."
-                      : "Research"}
-            </button>
-            {busy ? (
-              <button className="btn danger" onClick={() => void stopRun()} disabled={stopping}>
-                {busyMode === "executing"
-                  ? stopping
-                    ? "Pausing…"
-                    : "Pause"
-                  : stopping
-                    ? "Stopping..."
-                    : "Stop"}
-              </button>
-            ) : resumable ? (
-              <button className="btn" onClick={() => void continueRun()}>
-                Continue
-              </button>
-            ) : (
-              <button className="btn ghost" onClick={() => setTask("")} disabled={!task}>
-                Clear
-              </button>
-            )}
-          </div>
+          {!busy && (
+            <div className="coding-actions compact">
+              {resumable ? (
+                <button className="btn" onClick={() => void continueRun()}>
+                  Continue
+                </button>
+              ) : (
+                <button className="btn ghost" onClick={() => setTask("")} disabled={!task}>
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
 
           {resumable && !busy && active && (
             <div className="coding-resume">
@@ -889,8 +919,6 @@ export default function CodingWorkspace() {
             </div>
           )}
 
-          <div className="section-label">Project</div>
-          <div className="coding-root-readout">{config.projectRoot || "Set the editable project root in Bridge settings."}</div>
           {docPath && (
             <>
               <div className="section-label">Plan document</div>
@@ -1239,8 +1267,7 @@ function ChatTimeline({
           );
         }
 
-        // Wiro task id / time / cost lines are billing plumbing, not part of
-        // the conversation — kept in the saved run's data but not shown here.
+        // Provider metadata is not part of the conversation.
         if (entry.kind === "meta") {
           return null;
         }

@@ -1,13 +1,6 @@
 import * as bridge from "./bridge.ts";
+import type { TransportId } from "./models.ts";
 
-export const CODING_QWEN_MODEL = "qwen3.8-27b-uncensored";
-export const CODING_QWEN_URL = "http://127.0.0.1:8787/v1/chat/completions";
-// Output budget per turn. Raised past the old 4096 once the bridge moved to
-// Wiro's `max_tokens` (the deprecated `max_new_tokens` was capped at 4096), so
-// a reasoning pass and the answer both fit instead of the answer being cut off.
-export const CODING_QWEN_MAX_TOKENS = 16384;
-export const CODING_BRIDGE_CONFIG_KEY = "code-auditor.coding-intelligence.bridge";
-export const CODING_BRIDGE_CONFIG_EVENT = "coding-bridge-config";
 export const CODING_RUN_HISTORY_KEY = "code-auditor.coding-intelligence.history";
 
 /**
@@ -18,9 +11,10 @@ export const CODING_RUN_HISTORY_KEY = "code-auditor.coding-intelligence.history"
  */
 export const MAX_EXECUTION_TURNS = 26;
 
-export interface CodingBridgeConfig {
-  url: string;
+export interface CodingAgentConfig {
+  provider: TransportId;
   model: string;
+  baseUrl: string | null;
   maxTokens: number;
   temperature: number;
   projectRoot: string;
@@ -31,36 +25,6 @@ export interface CodingBridgeConfig {
    */
   reasoning: boolean;
 }
-
-export interface CodingBridgeHealth {
-  ok?: boolean;
-  bridge?: string;
-  model?: string;
-  upstream?: string;
-  manual_tool_translation?: boolean;
-  mutation_completion_enforced?: boolean;
-  verification_after_mutation?: boolean;
-  allowed_tools?: string[];
-  max_output_tokens?: number;
-}
-
-interface StoredBridgeConfig {
-  url?: string;
-  model?: string;
-  maxTokens?: number;
-  temperature?: number;
-  projectRoot?: string;
-  reasoning?: boolean;
-}
-
-export const DEFAULT_CODING_BRIDGE_CONFIG: CodingBridgeConfig = {
-  url: CODING_QWEN_URL,
-  model: CODING_QWEN_MODEL,
-  maxTokens: CODING_QWEN_MAX_TOKENS,
-  temperature: 0.2,
-  projectRoot: "",
-  reasoning: true,
-};
 
 export interface CodingSolution {
   status?: "ready" | "needs_context" | "blocked" | string;
@@ -143,17 +107,6 @@ export interface CodingRun {
   mode?: "plan" | "execute";
   /** Reasoning, tool calls and injected instructions, in order. */
   activity?: CodingActivity[];
-  /**
-   * The upstream Wiro task id of every model turn, in order. Wiro keeps the
-   * full task record server-side (prompt, output, cost), retrievable by id —
-   * this is the audit trail that ties a run here to the billed work there.
-   */
-  wiroTasks?: Array<{
-    taskId: string;
-    elapsedSeconds: number | null;
-    totalCost: number | null;
-    turn: number;
-  }>;
 }
 
 export interface CodingToolEvent {
@@ -246,14 +199,10 @@ export function createRunControl(): CodingRunControl {
  * the UI stuck on a run nobody can stop.
  */
 export async function cancelCodingRun(
-  config: CodingBridgeConfig,
+  _config: CodingAgentConfig,
   control: CodingRunControl
 ): Promise<void> {
   control.cancelled = true;
-  await bridge.cancelLocalQwen({
-    baseUrl: codingBridgeBaseUrl(config.url),
-    runId: control.runId,
-  });
 }
 
 function trimmed(value: unknown): string {
@@ -366,54 +315,6 @@ export function cleanCodingError(err: unknown): string {
     String(err)
       .replace(/^Error:\s*/, "")
       .trim();
-  const lower =
-    raw.toLowerCase();
-
-  if (
-    lower.includes("concurrent task limit") ||
-    lower.includes("code 96") ||
-    lower.includes("up to 1 tasks")
-  ) {
-    return "Wiro already has one task running. Wait for that task to finish or stop it, then run this again. Your current Wiro balance allows 1 concurrent task.";
-  }
-
-  // 402 wiro_billing_limit — the one failure only a top-up fixes, so say so.
-  if (
-    lower.includes("insufficient balance") ||
-    lower.includes("wiro_billing_limit") ||
-    lower.includes("code 97")
-  ) {
-    return "The Wiro account is out of balance. Top it up in the Wiro dashboard, then run this again.";
-  }
-
-  // 502 wiro_task_failed — the model task itself died upstream (pexit != 0).
-  if (
-    lower.includes("wiro_task_failed") ||
-    lower.includes("wiro task failed")
-  ) {
-    return "The model task failed on Wiro's side before it could answer. Nothing was applied. Run it again — if it repeats, the bridge terminal has the task's error detail.";
-  }
-
-  if (lower.includes("wiro_task_cancelled") || lower.includes("cancelled the task upstream")) {
-    return "The task was cancelled on Wiro's side, not here. Run it again when whatever stopped it is resolved.";
-  }
-
-  if (
-    lower.includes("wiro is still finishing") ||
-    lower.includes("wiro_upstream_settling")
-  ) {
-    // The prefix differs by transport: the browser fallback says "Qwen
-    // answered 429:", the desktop shell says "qwen 429:".
-    return raw.replace(/^(?:qwen answered|qwen)\s*429:\s*/i, "");
-  }
-
-  if (
-    lower.includes("wiro sse disconnected") ||
-    lower.includes("automatic replay is disabled")
-  ) {
-    return "Wiro disconnected after the task started. The bridge did not replay it to avoid duplicate billing. Use Continue once the current Wiro task is no longer running.";
-  }
-
   return raw || "Coding run failed.";
 }
 
@@ -520,7 +421,6 @@ export function humanizeSolution(solution: CodingSolution | null): HumanSection[
 const STOP_PATTERNS: Array<[CodingStopReason, RegExp]> = [
   // The bridge's own limits: stall, per-turn, whole-run deadline, hard backstop.
   ["timeout", /\[Bridge note:[^\]]*\b(?:stopped on turn|stopped after|no response within|abandoned)\b/i],
-  ["timeout", /\bWiro turn ended early\b/i],
   // Upstream dropped the stream mid-generation. Not replayed (already billed),
   // so what came back is partial and the run is worth continuing.
   ["timeout", /\bclosed the connection mid-turn\b/i],
@@ -859,6 +759,11 @@ Return only a JSON object with this envelope:
 }
 `.trim();
 
+function codingSystemPrompt(base: string, config: CodingAgentConfig): string {
+  if (config.reasoning) return base;
+  return `${base}\n\nKeep internal analysis brief and move directly to the requested output.`;
+}
+
 export function buildCodingContext(task: string): string {
   return `
 PROJECT
@@ -880,7 +785,7 @@ This is the new Coding Intelligence workspace.
 The intended workflow is:
 1. User enters a coding task.
 2. The local app owns repository context and memory.
-3. The Qwen bridge performs reasoning only.
+3. The selected active app model performs planning and coding decisions.
 4. The app renders the implementation plan, files, code changes, tests, risks, commands, and memory notes.
 
 CURRENT IMPLEMENTATION LEVEL
@@ -1019,7 +924,7 @@ on until every todo is done.
  */
 export async function saveRunDocument(
   run: CodingRun,
-  config: CodingBridgeConfig,
+  config: Pick<CodingAgentConfig, "projectRoot">,
   previous?: CodingRun | null
 ): Promise<{ path: string } | { error: string }> {
   if (!config.projectRoot.trim()) return { error: "No project root is set." };
@@ -1087,49 +992,6 @@ export async function loadRunReportFromServer(id: string): Promise<StoredRunRepo
   } catch {
     return null;
   }
-}
-
-export function loadCodingBridgeConfig(): CodingBridgeConfig {
-  if (typeof window === "undefined") return DEFAULT_CODING_BRIDGE_CONFIG;
-  try {
-    const parsed = JSON.parse(
-      localStorage.getItem(CODING_BRIDGE_CONFIG_KEY) || "{}"
-    ) as StoredBridgeConfig;
-    return {
-      ...DEFAULT_CODING_BRIDGE_CONFIG,
-      url: parsed.url?.trim() || DEFAULT_CODING_BRIDGE_CONFIG.url,
-      model: parsed.model?.trim() || DEFAULT_CODING_BRIDGE_CONFIG.model,
-      maxTokens: Number.isFinite(parsed.maxTokens)
-        ? Number(parsed.maxTokens)
-        : DEFAULT_CODING_BRIDGE_CONFIG.maxTokens,
-      temperature: Number.isFinite(parsed.temperature)
-        ? Number(parsed.temperature)
-        : DEFAULT_CODING_BRIDGE_CONFIG.temperature,
-      projectRoot: parsed.projectRoot?.trim() || DEFAULT_CODING_BRIDGE_CONFIG.projectRoot,
-      reasoning:
-        typeof parsed.reasoning === "boolean"
-          ? parsed.reasoning
-          : DEFAULT_CODING_BRIDGE_CONFIG.reasoning,
-    };
-  } catch {
-    return DEFAULT_CODING_BRIDGE_CONFIG;
-  }
-}
-
-export function saveCodingBridgeConfig(config: CodingBridgeConfig) {
-  if (typeof window === "undefined") return;
-  localStorage.setItem(
-    CODING_BRIDGE_CONFIG_KEY,
-    JSON.stringify({
-      url: config.url,
-      model: config.model,
-      maxTokens: config.maxTokens,
-      temperature: config.temperature,
-      projectRoot: config.projectRoot,
-      reasoning: config.reasoning,
-    })
-  );
-  window.dispatchEvent(new CustomEvent(CODING_BRIDGE_CONFIG_EVENT, { detail: config }));
 }
 
 const stringSchema = { type: "string" };
@@ -1238,44 +1100,6 @@ function questionTextOf(args: Record<string, unknown>): string {
     trimmed(args?.raw) ||
     "The agent is asking a question but sent it without text."
   );
-}
-
-export function codingBridgeBaseUrl(chatUrl: string): string {
-  return chatUrl
-    .trim()
-    .replace(/\/chat\/completions\/?$/, "")
-    .replace(/\/+$/, "");
-}
-
-export async function fetchCodingBridgeJson<T>(
-  url: string,
-  apiKey: string
-): Promise<T> {
-  const res = await fetch(url, {
-    headers: apiKey.trim() ? { authorization: `Bearer ${apiKey.trim()}` } : undefined,
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`${res.status}: ${text.slice(0, 600)}`);
-  return JSON.parse(text) as T;
-}
-
-export async function inspectCodingBridge(
-  config: CodingBridgeConfig,
-  apiKey: string
-): Promise<{ health: CodingBridgeHealth; config: CodingBridgeConfig }> {
-  const root = codingBridgeBaseUrl(config.url);
-  const inspected = await bridge.inspectLocalQwen({ baseUrl: root, apiKey });
-  const health = inspected.health as CodingBridgeHealth;
-  const models = inspected.models as { data?: Array<{ id?: string }> };
-  const model = models.data?.find((m) => m.id)?.id;
-  return {
-    health,
-    config: {
-      ...config,
-      model: model || health.model || config.model,
-      maxTokens: health.max_output_tokens || config.maxTokens,
-    },
-  };
 }
 
 function jsonSlice(text: string): string {
@@ -1405,12 +1229,12 @@ function normalizeRun(run: CodingRun): CodingRun {
 
 export async function runCodingIntelligence(
   task: string,
-  config: CodingBridgeConfig,
+  config: CodingAgentConfig,
   options: CodingRunOptions = {}
 ): Promise<CodingRun> {
   const { control, onEvent, onProgress, onActivity, planRun, resumeFrom, takePending, onQuestion } = options;
   if (!config.projectRoot.trim()) {
-    throw new Error("Set a project root in Bridge settings before running coding tools.");
+    throw new Error("Choose a project folder in the Coding workspace before running coding tools.");
   }
 
   // Built once and reused for both the seed message and userText, so a
@@ -1420,7 +1244,7 @@ export async function runCodingIntelligence(
     : buildCodingExecutionContext(task, planRun);
 
   const messages: Array<Record<string, unknown>> = [
-    { role: "system", content: CODING_SYSTEM_PROMPT },
+    { role: "system", content: codingSystemPrompt(CODING_SYSTEM_PROMPT, config) },
     { role: "user", content: userText },
   ];
   let raw = "";
@@ -1428,7 +1252,6 @@ export async function runCodingIntelligence(
   let finished = false;
   const events: CodingToolEvent[] = [];
   const activity: CodingActivity[] = [];
-  const wiroTasks: NonNullable<CodingRun["wiroTasks"]> = [];
 
   const note = (
     kind: CodingActivity["kind"],
@@ -1472,18 +1295,14 @@ export async function runCodingIntelligence(
       detail: turn === 0 ? "Reading the plan and the project" : "Deciding the next step",
     });
 
-    const step = await bridge.runLocalQwenStep({
+    const step = await bridge.runCodingModelStep({
+      provider: config.provider,
       model: config.model,
-      baseUrl: config.url,
-      systemPrompt: CODING_SYSTEM_PROMPT,
-      userText,
+      baseUrl: config.baseUrl,
       maxTokens: config.maxTokens,
       temperature: config.temperature,
       messages,
       tools: CODING_TOOLS,
-      runId: control?.runId,
-      mode: "execute",
-      enableThinking: config.reasoning,
     });
 
     // The bridge answers a stop promptly rather than erroring, so whatever came
@@ -1495,20 +1314,6 @@ export async function runCodingIntelligence(
     note("thinking", turn + 1, step.reasoning);
     if (step.toolCalls.length && step.content.trim()) {
       note("note", turn + 1, step.content);
-    }
-
-    // Spend per turn, next to the work it bought. A paid upstream should never
-    // be invisible to the person paying for it.
-    if (step.wiro && (step.wiro.totalCost != null || step.wiro.elapsedSeconds != null)) {
-      note("meta", turn + 1, wiroTurnNote(step.wiro));
-    }
-    if (step.wiro?.taskId) {
-      wiroTasks.push({
-        taskId: step.wiro.taskId,
-        elapsedSeconds: step.wiro.elapsedSeconds ?? null,
-        totalCost: step.wiro.totalCost ?? null,
-        turn: turn + 1,
-      });
     }
 
     if (step.content.trim()) lastContent = step.content;
@@ -1695,7 +1500,6 @@ export async function runCodingIntelligence(
     createdAt: Date.now(),
     mode: "execute",
     ...(stoppedReason ? { stoppedReason } : {}),
-    ...(wiroTasks.length ? { wiroTasks } : {}),
     ...(options.resumeOf ? { continuedFrom: options.resumeOf } : {}),
   };
 }
@@ -1710,42 +1514,26 @@ function eventSummary(event: CodingToolEvent): string {
   return label ? `— ${label}` : "";
 }
 
-/** "Wiro task 2989353 · 6.0s · $0.00351" — one line per upstream turn. */
-function wiroTurnNote(wiro: NonNullable<bridge.LocalQwenStepResponse["wiro"]>): string {
-  const bits = [
-    wiro.taskId ? `task ${wiro.taskId}` : "",
-    wiro.elapsedSeconds != null ? `${wiro.elapsedSeconds.toFixed(1)}s` : "",
-    wiro.totalCost != null ? `$${formatCost(wiro.totalCost)}` : "",
-  ].filter(Boolean);
-  return `Wiro ${bits.join(" · ")}`;
-}
-
-function formatCost(cost: number): string {
-  if (!Number.isFinite(cost) || cost <= 0) return "0";
-  return cost.toFixed(6).replace(/\.?0+$/, "");
-}
-
 export async function runCodingPlan(
   task: string,
-  config: CodingBridgeConfig,
+  config: CodingAgentConfig,
   options: Pick<CodingRunOptions, "control" | "onProgress"> & { promptOverride?: string } = {}
 ): Promise<CodingRun> {
   const { control, onProgress } = options;
   onProgress?.({ phase: "thinking", turn: 1, detail: "Analyzing the task" });
 
   // The step variant, not the plain text call: the plan's reasoning is what
-  // the chat shows while the plan is being reviewed, and the wiro block is
-  // the run's cost record.
-  const step = await bridge.runLocalQwenStep({
+  // the chat shows while the plan is being reviewed.
+  const step = await bridge.runCodingModelStep({
+    provider: config.provider,
     model: config.model,
-    baseUrl: config.url,
-    systemPrompt: CODING_PLAN_SYSTEM_PROMPT,
-    userText: options.promptOverride ?? buildCodingPlanContext(task),
+    baseUrl: config.baseUrl,
     maxTokens: config.maxTokens,
     temperature: config.temperature,
-    runId: control?.runId,
-    mode: "plan",
-    enableThinking: config.reasoning,
+    messages: [
+      { role: "system", content: codingSystemPrompt(CODING_PLAN_SYSTEM_PROMPT, config) },
+      { role: "user", content: options.promptOverride ?? buildCodingPlanContext(task) },
+    ],
   });
 
   if (control?.cancelled) throw new CodingRunCancelled();
@@ -1771,16 +1559,6 @@ export async function runCodingPlan(
       createdAt: Date.now(),
     });
   }
-  if (step.wiro && (step.wiro.totalCost != null || step.wiro.elapsedSeconds != null)) {
-    activity.push({
-      id: `meta-1-${Date.now()}`,
-      kind: "meta",
-      turn: 1,
-      text: wiroTurnNote(step.wiro),
-      createdAt: Date.now(),
-    });
-  }
-
   return {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     task,
@@ -1791,18 +1569,6 @@ export async function runCodingPlan(
     createdAt: Date.now(),
     mode: "plan",
     ...(stoppedReason ? { stoppedReason } : {}),
-    ...(step.wiro?.taskId
-      ? {
-          wiroTasks: [
-            {
-              taskId: step.wiro.taskId,
-              elapsedSeconds: step.wiro.elapsedSeconds ?? null,
-              totalCost: step.wiro.totalCost ?? null,
-              turn: 1,
-            },
-          ],
-        }
-      : {}),
   };
 }
 

@@ -187,6 +187,7 @@ pub fn run() {
             secrets::has_api_key,
             providers::run_agent,
             providers::run_once,
+            providers::run_coding_model_step,
             providers::run_local_qwen,
             providers::run_local_qwen_step,
             providers::cancel_local_qwen,

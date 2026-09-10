@@ -203,6 +203,24 @@ pub struct LocalQwenResponse {
     pub wiro: Option<WiroTurnInfo>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodingModelStepRequest {
+    /// "openai" | "moonshot" | "tokenrouter"; direct Anthropic/Gemini tools are
+    /// intentionally not claimed here until their native tool wires are mapped.
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default)]
+    pub temperature: f32,
+    pub messages: Vec<Value>,
+    #[serde(default)]
+    pub tools: Vec<Value>,
+}
+
 fn local_qwen_api_key(override_key: Option<&str>) -> String {
     let saved_key = secrets::read_api_key("coding_bridge").ok();
     override_key
@@ -211,6 +229,69 @@ fn local_qwen_api_key(override_key: Option<&str>) -> String {
         .or_else(|| saved_key.as_deref().map(str::trim).filter(|s| !s.is_empty()))
         .unwrap_or("local")
         .to_string()
+}
+
+#[tauri::command]
+pub async fn run_coding_model_step(req: CodingModelStepRequest) -> Result<LocalQwenResponse, String> {
+    crate::auth::require()?;
+    let provider = req.provider.trim();
+    if !matches!(provider, "openai" | "moonshot" | "tokenrouter") {
+        return Err(format!(
+            "{provider} is not available for Coding yet. Choose a TokenRouter, OpenAI, or Moonshot chat model."
+        ));
+    }
+    let model = req.model.trim();
+    if model.is_empty() {
+        return Err("Choose a coding model before running.".into());
+    }
+    if req.messages.is_empty() {
+        return Err("Coding model request must include messages.".into());
+    }
+
+    let key = secrets::read_api_key(provider)?;
+    let base = req.base_url.clone().filter(|b| !b.trim().is_empty()).unwrap_or_else(|| {
+        match provider {
+            "openai" => "https://api.openai.com/v1".into(),
+            "tokenrouter" => "https://api.tokenrouter.com/v1".into(),
+            _ => "https://api.moonshot.ai/v1".into(),
+        }
+    });
+    let mut body = json!({
+        "model": model,
+        "messages": req.messages,
+        "stream": false
+    });
+    if provider == "openai" {
+        body["max_completion_tokens"] = json!(req.max_tokens);
+    } else {
+        body["max_tokens"] = json!(req.max_tokens);
+    }
+    if req.temperature > 0.0 {
+        body["temperature"] = json!(req.temperature);
+    }
+    if !req.tools.is_empty() {
+        body["tools"] = Value::Array(req.tools);
+        body["tool_choice"] = json!("auto");
+    }
+
+    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+    let client = http_client()?;
+    let key_c = key.clone();
+    let body_c = body.clone();
+    let sent = send_governed(
+        || client.post(&url).header("Authorization", format!("Bearer {key_c}")).json(&body_c).timeout(ONCE_TIMEOUT),
+        provider == GATEWAY,
+    )
+    .await
+    .map_err(|e| format!("{provider}: {}", transport_detail(&e)))?;
+    let status = sent.status();
+    let text = sent.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("{provider} {status}: {}", truncate(&explain(&text), 600)));
+    }
+    let v: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{provider}: response was not JSON ({e})"))?;
+    Ok(parse_local_qwen_response(&v))
 }
 
 #[tauri::command]

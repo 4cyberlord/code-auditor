@@ -6,10 +6,12 @@ src-tauri/binaries/*
 !src-tauri/binaries/.gitkeep
 *.log
 .DS_Store
+.dockerignore
 *.tsbuildinfo
 .eslintcache
-.qodo/
-.claude/
+.[!.]*/
+..?*/
+!.gitignore
 .development.env
 .env
 .env.*
@@ -20,14 +22,30 @@ login-preview.html
 __pycache__/
 *.pyc
 council-runs/
+deploy/
+vps-proxy/
+Dockerfile.worker
 
-# Local planning, research, backup, and generated answer files. These are not
-# required to build or run the app.
 *.md
+!/README.md
+!/README.MD
 *.bak
 *.backup
 task-*-output-*.txt
 
-# Supabase CLI scratch: project ref, pooler URL, tool versions.
-# Machine-local, rewritten by every CLI command.
+*.key
+*.pem
+*.crt
+*.cer
+*.p12
+*.mobileprovision
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.zip
+*.tar
+*.tgz
+*.gz
+
 supabase/.temp/

@@ -527,6 +527,18 @@ interface Settings {
    * asked, so this costs nothing where it cannot be used.
    */
   reasoningEffort: "off" | "low" | "medium" | "high";
+  /** Model id used by the Coding workspace. Empty means the first reachable active model. */
+  codingModel: string;
+  /** Project folder the Coding workspace can inspect and modify. */
+  codingProjectRoot: string;
+  /** Friendly project name shown in the Coding workspace instead of the full path. */
+  codingProjectName: string;
+  /** Output budget for each Coding workspace model turn. */
+  codingMaxTokens: number;
+  /** Sampling temperature for Coding workspace model turns. */
+  codingTemperature: number;
+  /** Whether the Coding workspace asks the selected model to think harder. */
+  codingReasoning: boolean;
   /**
    * Which language to reach for when the question does not fix one, in order of
    * preference. A default, never an override: a screenshot showing a Python stub
@@ -834,6 +846,12 @@ const defaultSettings = (): Settings => ({
   workerTickUrl: "",
   workerTickSecret: "",
   reasoningEffort: "high",
+  codingModel: "",
+  codingProjectRoot: "",
+  codingProjectName: "",
+  codingMaxTokens: 16384,
+  codingTemperature: 0.2,
+  codingReasoning: true,
   solutionLanguages: ["C++", "Python"],
   memoryTargetKb: 20 * 1024,
   transcribeScreenshots: false,
@@ -990,6 +1008,17 @@ function normalizeSettings(s: Settings): Settings {
     )
       ? (s.reasoningEffort as Settings["reasoningEffort"])
       : base.reasoningEffort,
+    codingModel: typeof s.codingModel === "string" ? s.codingModel.trim() : base.codingModel,
+    codingProjectRoot:
+      typeof s.codingProjectRoot === "string" ? s.codingProjectRoot.trim() : base.codingProjectRoot,
+    codingProjectName:
+      typeof s.codingProjectName === "string" ? s.codingProjectName.trim() : base.codingProjectName,
+    codingMaxTokens: Math.round(
+      clampTo(s.codingMaxTokens, MAX_TOKENS_RANGE.min, MAX_TOKENS_RANGE.max, base.codingMaxTokens)
+    ),
+    codingTemperature: clampTo(s.codingTemperature, 0, 2, base.codingTemperature),
+    codingReasoning:
+      typeof s.codingReasoning === "boolean" ? s.codingReasoning : base.codingReasoning,
     solutionLanguages:
       Array.isArray(s.solutionLanguages) && s.solutionLanguages.some((x) => typeof x === "string" && x.trim())
         ? (s.solutionLanguages as string[]).filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim())
