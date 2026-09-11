@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import UserNotifications
 
 @main
@@ -13,13 +14,22 @@ struct CodeEditorCompanionApp: App {
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    var window: UIWindow?
+
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
         requestNotifications(application)
+        DispatchQueue.main.async {
+            self.attachOverlayIfPossible()
+        }
         return true
+    }
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        attachOverlayIfPossible()
     }
 
     private func requestNotifications(_ application: UIApplication) {
@@ -56,5 +66,22 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             return
         }
         NotificationCenter.default.post(name: .openJobFromNotification, object: jobId)
+    }
+
+    private func attachOverlayIfPossible() {
+        guard let appWindow = activeAppWindow() else { return }
+        window = appWindow
+        OverlayManager.shared.attach(to: appWindow)
+    }
+
+    private func activeAppWindow() -> UIWindow? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+            .flatMap { scene in
+                scene.windows.first { window in
+                    window.isKeyWindow && !(window is OverlayWindow)
+                } ?? scene.windows.first { !($0 is OverlayWindow) }
+            }
     }
 }

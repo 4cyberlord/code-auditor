@@ -176,6 +176,11 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+:root[data-overlay="capture-exempt"],
+:root[data-overlay="capture-exempt"] body {
+  background: transparent;
+}
+
 button {
   font: inherit;
   color: inherit;
@@ -374,6 +379,70 @@ select {
   padding: 0 8px;
   font-size: 11px;
   border-radius: 6px;
+}
+
+.coding-capture-exempt-overlay {
+  width: 100vw;
+  height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.capture-exempt-panel {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  padding: 18px 22px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.018)),
+    rgba(16, 24, 34, 0.035);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.035),
+    0 18px 48px rgba(0, 0, 0, 0.10);
+  backdrop-filter: blur(18px) saturate(1.28);
+  -webkit-backdrop-filter: blur(18px) saturate(1.28);
+}
+
+.capture-exempt-pane {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  padding: 0 18px;
+}
+
+.capture-exempt-pane + .capture-exempt-pane {
+  border-left: 1px solid rgba(255, 255, 255, 0.28);
+}
+
+.capture-exempt-pane span {
+  max-width: 100%;
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+  overflow-wrap: anywhere;
+  text-shadow: 0 1px 14px rgba(0, 0, 0, 0.28);
+}
+
+@media (prefers-color-scheme: dark) {
+  .capture-exempt-panel {
+    border-color: rgba(255, 255, 255, 0.12);
+    background:
+      linear-gradient(135deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.014)),
+      rgba(7, 12, 18, 0.055);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.16),
+      inset 0 -1px 0 rgba(255, 255, 255, 0.03),
+      0 18px 48px rgba(0, 0, 0, 0.16);
+  }
 }
 
 .field {

@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "next dev -p 3001",
+    "helper:dev": "cargo run --manifest-path src-tauri/Cargo.toml --bin cloud-sync-helper",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",

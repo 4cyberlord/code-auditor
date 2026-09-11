@@ -10,10 +10,14 @@ use std::{
     str::FromStr,
     time::Duration,
 };
+use tao::{
+    dpi::{LogicalPosition, LogicalSize},
+    window::{Window, WindowBuilder},
+};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 #[cfg(target_os = "macos")]
 use tao::platform::macos::{
-    ActivationPolicy, EventLoopExtMacOS, EventLoopWindowTargetExtMacOS,
+    ActivationPolicy, EventLoopExtMacOS, EventLoopWindowTargetExtMacOS, WindowExtMacOS,
 };
 use uuid::Uuid;
 
@@ -22,6 +26,8 @@ const HELPER_TOKEN: &str = "session";
 const SETTINGS_KEY: &str = "app.v1";
 const BUCKET: &str = "screenshots";
 const MAX_IMAGES: usize = 10;
+const OVERLAY_WIDTH: f64 = 1320.0;
+const OVERLAY_HEIGHT: f64 = 950.0;
 
 async fn space_api_calls() {
     let delay_ms = 300 + rand::random::<u64>() % 500;
@@ -127,18 +133,24 @@ fn run() -> Result<(), String> {
     let start = hotkey("CODE_AUDITOR_HELPER_START_KEY", "Control+Alt+B")?;
     let capture = hotkey("CODE_AUDITOR_HELPER_CAPTURE_KEY", "Control+Alt+P")?;
     let submit = hotkey("CODE_AUDITOR_HELPER_SUBMIT_KEY", "Control+Alt+Enter")?;
+    let overlay_toggle = hotkey("CODE_AUDITOR_HELPER_OVERLAY_KEY", "Control+Alt+O")?;
 
     manager.register(start).map_err(|e| format!("start hotkey: {e}"))?;
     manager
         .register(capture)
         .map_err(|e| format!("capture hotkey: {e}"))?;
     manager.register(submit).map_err(|e| format!("submit hotkey: {e}"))?;
+    manager
+        .register(overlay_toggle)
+        .map_err(|e| format!("overlay hotkey: {e}"))?;
 
     log(&format!(
-        "hotkeys registered: start={}, capture={}, submit={}",
-        start, capture, submit
+        "hotkeys registered: start={}, capture={}, submit={}, overlay={}",
+        start, capture, submit, overlay_toggle
     ));
 
+    let overlay = helper_overlay_window(&event_loop)?;
+    let mut overlay_visible = false;
     let receiver = GlobalHotKeyEvent::receiver();
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     event_loop.run(move |_event, event_loop_target, control_flow| {
@@ -163,9 +175,109 @@ fn run() -> Result<(), String> {
                     log(&format!("submit failed: {e}"));
                     let _ = update_pending_error(&e);
                 }
+            } else if event.id == overlay_toggle.id() {
+                overlay_visible = !overlay_visible;
+                #[cfg(target_os = "macos")]
+                event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
+                    ActivationPolicy::Accessory
+                } else {
+                    ActivationPolicy::Prohibited
+                });
+                if let Err(e) = show_helper_overlay(&overlay, overlay_visible) {
+                    log(&format!("overlay toggle failed: {e}"));
+                }
             }
         }
     });
+}
+
+fn helper_overlay_window<T>(
+    event_loop: &tao::event_loop::EventLoop<T>,
+) -> Result<Window, String> {
+    let window = WindowBuilder::new()
+        .with_title("Capture Exempt Overlay")
+        .with_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT))
+        .with_position(helper_overlay_position(event_loop))
+        .with_visible(false)
+        .with_decorations(false)
+        .with_resizable(false)
+        .with_transparent(true)
+        .with_always_on_top(true)
+        .with_focused(false)
+        .with_focusable(false)
+        .with_content_protection(true)
+        .with_visible_on_all_workspaces(true)
+        .build(event_loop)
+        .map_err(|e| format!("Could not create helper overlay: {e}"))?;
+
+    let _ = window.set_ignore_cursor_events(true);
+    tune_helper_overlay_for_macos(&window)?;
+    Ok(window)
+}
+
+fn helper_overlay_position<T>(
+    event_loop: &tao::event_loop::EventLoop<T>,
+) -> LogicalPosition<f64> {
+    if let Some(monitor) = event_loop.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let size = monitor.size();
+        let position = monitor.position();
+        let x = (position.x as f64 / scale) + ((size.width as f64 / scale - OVERLAY_WIDTH) / 2.0);
+        let y = (position.y as f64 / scale)
+            + ((size.height as f64 / scale - OVERLAY_HEIGHT) / 2.0)
+            + 40.0;
+        return LogicalPosition::new(x.max(0.0), y.max(0.0));
+    }
+    LogicalPosition::new(320.0, 100.0)
+}
+
+fn show_helper_overlay(window: &Window, visible: bool) -> Result<(), String> {
+    window.set_always_on_top(true);
+    window
+        .set_ignore_cursor_events(true)
+        .map_err(|e| format!("Could not keep helper overlay click-through: {e}"))?;
+    window.set_visible(visible);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn tune_helper_overlay_for_macos(window: &Window) -> Result<(), String> {
+    use objc2_app_kit::{
+        NSScreenSaverWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowSharingType,
+    };
+    use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+
+    unsafe {
+        let ns_window = window.ns_window();
+        if ns_window.is_null() {
+            return Err("Could not access helper overlay window.".into());
+        }
+        let ns_window = &*ns_window.cast::<NSWindow>();
+        ns_window.setLevel(NSScreenSaverWindowLevel);
+        ns_window.setAlphaValue(0.46);
+        ns_window.setSharingType(NSWindowSharingType::None);
+        ns_window.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::FullScreenAuxiliary
+                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::IgnoresCycle,
+        );
+    }
+
+    apply_vibrancy(
+        window,
+        NSVisualEffectMaterial::HudWindow,
+        Some(NSVisualEffectState::Active),
+        Some(16.0),
+    )
+    .map_err(|e| format!("Could not apply helper overlay vibrancy: {e}"))?;
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn tune_helper_overlay_for_macos(_window: &Window) -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

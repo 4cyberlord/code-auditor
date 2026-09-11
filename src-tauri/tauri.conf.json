@@ -11,6 +11,7 @@
     "beforeBuildCommand": "node scripts/prepare-tauri-build.mjs"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "Council Editor",

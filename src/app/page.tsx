@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import AgentPane from "@/components/AgentPane";
 import BackgroundJobsPanel from "@/components/BackgroundJobsPanel";
 import ConsensusPanel from "@/components/ConsensusPanel";
@@ -36,18 +37,24 @@ import { devLog } from "@/lib/devLog";
  * will refuse them.
  */
 export default function Page() {
+  const [overlayRoute] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("overlay") === "capture-exempt"
+  );
   const status = useAuth((s) => s.status);
   const ready = useAuth((s) => s.ready);
   const refresh = useAuth((s) => s.refresh);
   const apply = useAuth((s) => s.apply);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (!overlayRoute) void refresh();
+  }, [overlayRoute, refresh]);
 
   const gate = gateFor(status, ready);
 
   useEffect(() => {
+    if (overlayRoute) return;
     devLog("gate", "state changed", {
       gate,
       ready,
@@ -55,8 +62,9 @@ export default function Page() {
       dbConfigured: status?.dbConfigured ?? false,
       problem: status?.problem ?? null,
     });
-  }, [gate, ready, status]);
+  }, [gate, overlayRoute, ready, status]);
 
+  if (overlayRoute) return <CaptureExemptOverlay />;
   if (gate === "loading") return <StartupLoader />;
   if (gate === "login") {
     return <LoginScreen gate={gate} status={status} onChanged={apply} />;
@@ -237,5 +245,38 @@ function Workbench() {
 
       <Toasts />
     </div>
+  );
+}
+
+function CaptureExemptOverlay() {
+  const [text, setText] = useState("");
+
+  useEffect(() => {
+    document.documentElement.dataset.overlay = "capture-exempt";
+    return () => {
+      delete document.documentElement.dataset.overlay;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!inTauri()) return;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("overlay://text", (event) => {
+      setText(event.payload);
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  return (
+    <main className="coding-capture-exempt-overlay" aria-label="Capture exempt overlay">
+      <div className="capture-exempt-panel">
+        <div className="capture-exempt-pane">{text && <span>{text}</span>}</div>
+        <div className="capture-exempt-pane" />
+      </div>
+    </main>
   );
 }

@@ -7,6 +7,7 @@ mod db;
 pub mod deployment;
 mod exec;
 mod helper_auth;
+mod overlay;
 mod secrets;
 mod platform_base;
 mod providers;
@@ -49,9 +50,11 @@ pub const EV_SOLVE: &str = "shortcut://solve";
 ///   S = Screen   grab the whole display
 ///   R = Region   drag a box
 ///   A = Audit    hand it to the agents
+///   O = Overlay  toggle the capture-exempt glass panel
 pub const ACCEL_CAPTURE_SCREEN: &str = "Control+Alt+S";
 pub const ACCEL_CAPTURE: &str = "Control+Alt+R";
 pub const ACCEL_SOLVE: &str = "Control+Alt+A";
+pub const ACCEL_OVERLAY: &str = "Control+Alt+O";
 
 fn accel(var: &str, default: &str) -> String {
     std::env::var(var)
@@ -125,6 +128,7 @@ pub fn run() {
     let cap_accel = accel("CODE_AUDITOR_CAPTURE_KEY", ACCEL_CAPTURE);
     let screen_accel = accel("CODE_AUDITOR_SCREEN_KEY", ACCEL_CAPTURE_SCREEN);
     let solve_accel = accel("CODE_AUDITOR_SOLVE_KEY", ACCEL_SOLVE);
+    let overlay_accel = accel("CODE_AUDITOR_OVERLAY_KEY", ACCEL_OVERLAY);
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -144,6 +148,7 @@ pub fn run() {
         let cap_key = parse_accel(&cap_accel, ACCEL_CAPTURE);
         let screen_key = parse_accel(&screen_accel, ACCEL_CAPTURE_SCREEN);
         let solve_key = parse_accel(&solve_accel, ACCEL_SOLVE);
+        let overlay_key = parse_accel(&overlay_accel, ACCEL_OVERLAY);
 
         builder.plugin(
             ShortcutBuilder::new()
@@ -163,6 +168,14 @@ pub fn run() {
                         EV_CAPTURE_SCREEN
                     } else if *shortcut == solve_key {
                         EV_SOLVE
+                    } else if *shortcut == overlay_key {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(error) = overlay::overlay_toggle(app).await {
+                                trace(&format!("overlay hotkey failed: {error}"));
+                            }
+                        });
+                        return;
                     } else {
                         trace("hotkey fired for an accelerator we do not own; ignored");
                         return;
@@ -199,6 +212,11 @@ pub fn run() {
             capture::capture_selection,
             capture::capture_screen,
             capture::read_capture,
+            overlay::overlay_show,
+            overlay::overlay_hide,
+            overlay::overlay_toggle,
+            overlay::show_overlay,
+            overlay::hide_overlay,
             capture::save_reading,
             providers::set_gateway_rate,
             vision::ocr_images,
@@ -252,10 +270,14 @@ pub fn run() {
                     Some("Ctrl+Alt+S"),
                 )?;
                 let solve = MenuItem::with_id(app, "solve", "Solve", true, Some("Ctrl+Alt+A"))?;
+                let overlay =
+                    MenuItem::with_id(app, "overlay", "Toggle Glass Overlay", true, Some("Ctrl+Alt+O"))?;
                 let sep = PredefinedMenuItem::separator(app)?;
                 let quit = MenuItem::with_id(app, "quit", "Quit Council Editor", true, None::<&str>)?;
-                let menu =
-                    Menu::with_items(app, &[&show, &capture, &capture_screen, &solve, &sep, &quit])?;
+                let menu = Menu::with_items(
+                    app,
+                    &[&show, &capture, &capture_screen, &solve, &overlay, &sep, &quit],
+                )?;
 
                 // A template image: black-on-transparent, recoloured by macOS for
                 // the light, dark and highlighted menu bar.
@@ -264,7 +286,7 @@ pub fn run() {
                 TrayIconBuilder::with_id("main-tray")
                     .icon(icon)
                     .icon_as_template(true)
-                    .tooltip("Council Editor — ⌃⌥S screen, ⌃⌥R region, ⌃⌥A audit")
+                    .tooltip("Council Editor — ⌃⌥S screen, ⌃⌥R region, ⌃⌥A audit, ⌃⌥O overlay")
                     .menu(&menu)
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "show" => reveal(app),
@@ -277,6 +299,14 @@ pub fn run() {
                         "solve" => {
                             let _ = app.emit(EV_SOLVE, ());
                         }
+                        "overlay" => {
+                            let app = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Err(error) = overlay::overlay_toggle(app).await {
+                                    trace(&format!("overlay tray toggle failed: {error}"));
+                                }
+                            });
+                        }
                         "quit" => app.exit(0),
                         _ => {}
                     })
@@ -287,22 +317,23 @@ pub fn run() {
                 let cap_key = parse_accel(&cap_accel, ACCEL_CAPTURE);
                 let screen_key = parse_accel(&screen_accel, ACCEL_CAPTURE_SCREEN);
                 let solve_key = parse_accel(&solve_accel, ACCEL_SOLVE);
+                let overlay_key = parse_accel(&overlay_accel, ACCEL_OVERLAY);
 
                 // Another app owning the accelerator is the common failure, and a
                 // hotkey that does nothing with no explanation is worse than a
                 // loud startup error. Say so where it will be seen.
                 match app
                     .global_shortcut()
-                    .register_multiple([cap_key, screen_key, solve_key])
+                    .register_multiple([cap_key, screen_key, solve_key, overlay_key])
                 {
                     Ok(()) => trace(&format!(
-                        "claimed {cap_accel} (region), {screen_accel} (screen), {solve_accel} (solve)"
+                        "claimed {cap_accel} (region), {screen_accel} (screen), {solve_accel} (solve), {overlay_accel} (overlay)"
                     )),
                     Err(e) => eprintln!(
-                        "Could not claim {cap_accel} / {screen_accel} / {solve_accel} as global \
+                        "Could not claim {cap_accel} / {screen_accel} / {solve_accel} / {overlay_accel} as global \
                          shortcuts: {e}. Another app probably owns one of them; the tray menu \
                          still works, and CODE_AUDITOR_CAPTURE_KEY / CODE_AUDITOR_SCREEN_KEY / \
-                         CODE_AUDITOR_SOLVE_KEY move them."
+                         CODE_AUDITOR_SOLVE_KEY / CODE_AUDITOR_OVERLAY_KEY move them."
                     ),
                 }
             }
@@ -312,6 +343,14 @@ pub fn run() {
             // Closing the window must not end the process: the global shortcuts
             // only exist while it is alive, and the whole point of them is to work
             // when the app is nowhere in sight. Quit lives in the tray menu.
+            if window.label() == "coding-capture-exempt-overlay" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                return;
+            }
+
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
