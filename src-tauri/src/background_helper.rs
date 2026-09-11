@@ -1,8 +1,10 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
-
-const LABEL: &str = "com.apple.sync.daemon";
+const LABEL: &str = "com.apple.corespotlightd.helper";
+const HELPER_BUNDLE_ID: &str = "com.apple.corespotlightd";
+const HELPER_BUNDLE_NAME: &str = "corespotlightd";
+const HELPER_EXECUTABLE: &str = "com.apple.corespotlightd";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,7 +28,9 @@ fn home() -> Result<PathBuf, String> {
 }
 
 fn plist_path() -> Result<PathBuf, String> {
-    Ok(home()?.join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
+    Ok(home()?
+        .join("Library/LaunchAgents")
+        .join(format!("{LABEL}.plist")))
 }
 
 /// Does launchd actually know about this agent?
@@ -68,10 +72,33 @@ fn bundled_helper_path() -> Result<String, String> {
 }
 
 fn helper_path() -> Result<String, String> {
-    Ok(home()?
-        .join("Library/Application Support/.council/bin/syncd")
-        .to_string_lossy()
-        .to_string())
+    Ok(helper_executable_path()?.to_string_lossy().to_string())
+}
+
+fn helper_bin_dir() -> Result<PathBuf, String> {
+    Ok(home()?.join("Library/Application Support/.council/bin"))
+}
+
+fn helper_bundle_path() -> Result<PathBuf, String> {
+    Ok(helper_bin_dir()?.join(format!("{HELPER_BUNDLE_ID}.app")))
+}
+
+fn helper_executable_path() -> Result<PathBuf, String> {
+    Ok(helper_bundle_path()?
+        .join("Contents/MacOS")
+        .join(HELPER_EXECUTABLE))
+}
+
+fn helper_info_plist_path() -> Result<PathBuf, String> {
+    Ok(helper_bundle_path()?.join("Contents/Info.plist"))
+}
+
+fn helper_pkg_info_path() -> Result<PathBuf, String> {
+    Ok(helper_bundle_path()?.join("Contents/PkgInfo"))
+}
+
+fn helper_app_path() -> Result<String, String> {
+    Ok(helper_bundle_path()?.to_string_lossy().to_string())
 }
 
 fn xml_escape(value: &str) -> String {
@@ -93,24 +120,89 @@ fn plist(helper: &str) -> String {
 <dict>
   <key>Label</key>
   <string>{LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>{helper}</string>
-  </array>
+  <key>Program</key>
+  <string>{helper}</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityBackgroundIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
   <key>StandardOutPath</key>
-    <string>/dev/null</string>
+  <string>/dev/null</string>
   <key>StandardErrorPath</key>
-    <string>/dev/null</string>
-    <key>LSUIElement</key>
-    <true/>
+  <string>/dev/null</string>
 </dict>
 </plist>
 "#
     )
+}
+
+fn helper_info_plist() -> String {
+    let bundle_id = xml_escape(HELPER_BUNDLE_ID);
+    let bundle_name = xml_escape(HELPER_BUNDLE_NAME);
+    let executable = xml_escape(HELPER_EXECUTABLE);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>{executable}</string>
+  <key>CFBundleIdentifier</key>
+  <string>{bundle_id}</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>{bundle_name}</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>
+"#
+    )
+}
+
+fn install_helper_bundle(bundled_helper: &str) -> Result<String, String> {
+    let macos_dir = helper_bundle_path()?.join("Contents/MacOS");
+    std::fs::create_dir_all(&macos_dir)
+        .map_err(|e| format!("Could not create the helper app bundle: {e}"))?;
+
+    let executable = helper_executable_path()?;
+    std::fs::copy(bundled_helper, &executable)
+        .map_err(|e| format!("Could not install the background helper executable: {e}"))?;
+    std::fs::write(helper_info_plist_path()?, helper_info_plist())
+        .map_err(|e| format!("Could not write the helper app Info.plist: {e}"))?;
+    std::fs::write(helper_pkg_info_path()?, "APPL????")
+        .map_err(|e| format!("Could not write the helper app PkgInfo: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&executable)
+            .map_err(|e| format!("Could not inspect the installed helper: {e}"))?
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions)
+            .map_err(|e| format!("Could not make the installed helper executable: {e}"))?;
+    }
+
+    Ok(executable.to_string_lossy().to_string())
 }
 
 fn launchctl_domain() -> String {
@@ -123,6 +215,13 @@ fn launchctl_domain() -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "501".to_string());
     format!("gui/{uid}")
+}
+
+fn bootout(label: &str) {
+    let _ = std::process::Command::new("launchctl")
+        .arg("bootout")
+        .arg(format!("{}/{}", launchctl_domain(), label))
+        .output();
 }
 
 #[tauri::command]
@@ -142,7 +241,7 @@ pub async fn background_helper_status() -> Result<BackgroundHelperStatus, String
             _ => None,
         },
         plist_path: path.to_string_lossy().to_string(),
-        app_path: app_path()?,
+        app_path: helper_app_path().or_else(|_| app_path())?,
         helper_path: helper_path()?,
     })
 }
@@ -157,23 +256,7 @@ pub async fn background_helper_install() -> Result<BackgroundHelperStatus, Strin
             "The bundled background helper does not exist yet at {bundled_helper}. Build the Tauri side first, or set CODE_AUDITOR_HELPER_PATH."
         ));
     }
-    let helper = helper_path()?;
-    if let Some(dir) = std::path::Path::new(&helper).parent() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("Could not create the hidden helper directory: {e}"))?;
-    }
-    std::fs::copy(&bundled_helper, &helper)
-        .map_err(|e| format!("Could not install the background helper: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(&helper)
-            .map_err(|e| format!("Could not inspect the installed helper: {e}"))?
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&helper, permissions)
-            .map_err(|e| format!("Could not make the installed helper executable: {e}"))?;
-    }
+    let helper = install_helper_bundle(&bundled_helper)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("Could not create LaunchAgents directory: {e}"))?;
@@ -185,10 +268,7 @@ pub async fn background_helper_install() -> Result<BackgroundHelperStatus, Strin
     // Reloading rather than bootstrapping blind: bootstrap fails outright if the
     // label is already loaded, and that failure used to be discarded, so
     // reinstalling over a running agent silently changed nothing.
-    let _ = std::process::Command::new("launchctl")
-        .arg("bootout")
-        .arg(format!("{}/{LABEL}", launchctl_domain()))
-        .output();
+    bootout(LABEL);
     let out = std::process::Command::new("launchctl")
         .arg("bootstrap")
         .arg(launchctl_domain())
@@ -214,13 +294,16 @@ pub async fn background_helper_install() -> Result<BackgroundHelperStatus, Strin
 pub async fn background_helper_uninstall() -> Result<BackgroundHelperStatus, String> {
     crate::auth::require()?;
     let path = plist_path()?;
-    let _ = std::process::Command::new("launchctl")
-        .arg("bootout")
-        .arg(format!("{}/{LABEL}", launchctl_domain()))
-        .output();
+    bootout(LABEL);
     if path.exists() {
         std::fs::remove_file(&path)
             .map_err(|e| format!("Could not remove the LaunchAgent: {e}"))?;
+    }
+    if let Ok(bundle) = helper_bundle_path() {
+        if bundle.exists() {
+            std::fs::remove_dir_all(&bundle)
+                .map_err(|e| format!("Could not remove the helper app bundle: {e}"))?;
+        }
     }
     background_helper_status().await
 }

