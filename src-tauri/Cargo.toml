@@ -1,14 +1,10 @@
 [package]
 name = "council-editor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Multi-agent code & research auditor"
 authors = ["Charles"]
 edition = "2021"
 rust-version = "1.77"
-# Two binaries live in this crate — the app and the background sync helper — so a
-# bare `cargo run` has no way to choose, and `tauri dev` issues exactly that.
-# Naming the app as the default is what makes `npm run app:dev` work; the helper
-# is still reachable with the helper scripts.
 default-run = "council-editor"
 
 [lib]
@@ -27,7 +23,6 @@ path = "src/bin/com.apple.corespotlightd.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# tray-icon keeps the app alive in the menu bar; image-png loads the template icon.
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
@@ -38,10 +33,6 @@ tokio-util = "0.7"
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "native-tls"] }
 thiserror = "2"
-# sqlx, argon2, hmac and sha2 were all dropped when the app stopped talking to
-# Postgres directly. Queries live in the Edge Function and in plpgsql now, and
-# the PIN is hashed and verified server-side — so the client links neither a
-# database driver nor a password hasher, and builds a good deal faster for it.
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.9"
 global-hotkey = "0.8"
@@ -49,7 +40,6 @@ tao = "0.35"
 wry = "0.55"
 chrono = { version = "0.4", features = ["serde"] }
 
-# No mobile implementation exists, so keep it off the mobile targets entirely.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-global-shortcut = "2"
 
@@ -57,16 +47,13 @@ tauri-plugin-global-shortcut = "2"
 libc = "0.2"
 keyring = { version = "3", features = ["apple-native"] }
 security-framework = "3.7"
-# The transcriber is Apple's on-device Vision framework: no key, no quota, no
-# network. Defaults pull in VNRecognizeTextRequest, VNObservation, VNRequest,
-# VNRequestHandler, VNTypes, VNUtils and the core-foundation geometry types.
 objc2-vision = "0.3"
-objc2 = "0.6"                  # Retained, ClassType
+objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSWindow"] }
-objc2-foundation = "0.3"       # NSData, NSArray, NSDictionary, NSString, NSError
-objc2-core-foundation = "0.3"  # CGRect, CGSize (bounding box -> pixel conversion)
-window-vibrancy = "0.6"        # native frosted-glass panel for the background helper overlay
-base64 = "0.22"                # decode ImageInput.data -> bytes (raw base64)
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
+window-vibrancy = "0.6"
+base64 = "0.22"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

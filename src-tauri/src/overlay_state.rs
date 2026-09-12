@@ -17,6 +17,31 @@ fn socket_path() -> PathBuf {
     PathBuf::from(format!("/tmp/.csp_{}.sock", std::process::id()))
 }
 
+pub fn cleanup_socket() {
+    let path = socket_path();
+    let _ = std::fs::remove_file(path);
+}
+
+fn remove_stale_socket(path: &PathBuf) {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let Some(pid) = name
+        .strip_prefix(".csp_")
+        .and_then(|value| value.strip_suffix(".sock"))
+        .and_then(|value| value.parse::<libc::pid_t>().ok())
+    else {
+        return;
+    };
+
+    // kill(pid, 0) only probes process existence. Never remove a socket that
+    // could still belong to a running process.
+    let running = unsafe { libc::kill(pid, 0) == 0 };
+    if !running {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn overlay_socket() -> Result<&'static OverlaySocket, String> {
     if let Some(socket) = OVERLAY_SOCKET.get() {
         return Ok(socket);
@@ -24,7 +49,7 @@ fn overlay_socket() -> Result<&'static OverlaySocket, String> {
 
     let path = socket_path();
     if path.exists() {
-        let _ = std::fs::remove_file(&path);
+        remove_stale_socket(&path);
     }
     let listener = UnixListener::bind(&path).map_err(|e| {
         format!(

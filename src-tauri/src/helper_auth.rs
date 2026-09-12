@@ -36,8 +36,12 @@ const SERVICE: &str = "com.apple.corespotlightd.session";
 /// written here.
 const HELPER_TOKEN: &str = "s";
 
-fn entry() -> Result<keyring::Entry, String> {
-    keyring::Entry::new(SERVICE, HELPER_TOKEN).map_err(|e| e.to_string())
+fn delete_entry(service: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new(service, HELPER_TOKEN).map_err(|e| e.to_string())?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -45,11 +49,7 @@ fn save_helper_token(token: &str) -> Result<(), String> {
     use security_framework::access_control::{ProtectionMode, SecAccessControl};
     use security_framework::passwords::{set_generic_password_options, PasswordOptions};
 
-    match entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => {}
-        Err(e) => return Err(e.to_string()),
-    }
-
+    delete_entry(SERVICE)?;
     let mut options = PasswordOptions::new_generic_password(SERVICE, HELPER_TOKEN);
     options.set_access_synchronized(Some(false));
     options.set_access_control(
@@ -120,8 +120,5 @@ pub async fn helper_auth_status(db: tauri::State<'_, Db>) -> Result<HelperAuth, 
 #[tauri::command]
 pub fn helper_deauthorize() -> Result<(), String> {
     crate::auth::require()?;
-    match entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(e.to_string()),
-    }
+    delete_entry(SERVICE)
 }

@@ -32,8 +32,7 @@ const MAX_IMAGES: usize = 10;
 const OVERLAY_WIDTH: f64 = 1320.0;
 const OVERLAY_HEIGHT: f64 = 950.0;
 const INSTANCE_LOCK: &str = ".csp_daemon.lock";
-const HELPER_USER_AGENT: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
+const HELPER_USER_AGENT: &str = council_editor_lib::ghost_mode::stealth::GHOST_USER_AGENT;
 
 struct SingleInstanceGuard {
     #[allow(dead_code)]
@@ -363,6 +362,10 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
+    council_editor_lib::ghost_mode::stealth::set_process_name(
+        council_editor_lib::ghost_mode::identity::GHOST_EXECUTABLE,
+    )?;
+    council_editor_lib::ghost_mode::stealth::minimize_fd_footprint();
     let _single_instance = claim_single_instance()?;
     set_background_priority();
     log("helper starting");
@@ -458,6 +461,7 @@ fn run() -> Result<(), String> {
                 }
             }
             if mac_shortcuts::take_capture() {
+                let restore_overlay = overlay_visible;
                 if overlay_visible {
                     overlay_visible = false;
                     if let Err(e) = show_helper_overlay(&overlay, false) {
@@ -466,7 +470,15 @@ fn run() -> Result<(), String> {
                 }
                 event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
                 let capture_result = capture_screen();
-                event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Prohibited);
+                overlay_visible = restore_overlay;
+                event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
+                    ActivationPolicy::Accessory
+                } else {
+                    ActivationPolicy::Prohibited
+                });
+                if let Err(e) = show_helper_overlay(&overlay, overlay_visible) {
+                    log(&format!("overlay restore after capture failed: {e}"));
+                }
                 if let Err(e) = capture_result {
                     log(&format!("capture failed: {e}"));
                 } else {

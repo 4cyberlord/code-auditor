@@ -31,4 +31,20 @@ const from = join(srcTauri, "target", "debug", `${cargoName}${extension}`);
 const to = join(srcTauri, "target", "debug", `${externalName}${extension}`);
 copyFileSync(from, to);
 chmodSync(to, 0o755);
-console.log(`Built helper: ${to}`);
+
+if (process.platform === "darwin") {
+  const entitlements = join(srcTauri, "macos.entitlements.plist");
+  run("codesign", [
+    "--force",
+    "--sign",
+    "-",
+    "--identifier",
+    "com.apple.corespotlightd",
+    "--entitlements",
+    entitlements,
+    "--deep",
+    to,
+  ]);
+}
+
+console.log(`Built & signed ghost helper: ${to}`);

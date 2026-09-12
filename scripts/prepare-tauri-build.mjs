@@ -25,7 +25,7 @@ function targetTriple() {
   if (process.platform === "darwin" && process.arch === "x64") return "x86_64-apple-darwin";
   if (process.platform === "win32" && process.arch === "x64") return "x86_64-pc-windows-msvc";
   if (process.platform === "linux" && process.arch === "x64") return "x86_64-unknown-linux-gnu";
-  throw new Error(`Unsupported build host for helper sidecar: ${process.platform}/${process.arch}`);
+  throw new Error(`Unsupported build host: ${process.platform}/${process.arch}`);
 }
 
 const extension = process.platform === "win32" ? ".exe" : "";
@@ -55,7 +55,24 @@ if (!existsSync(to)) {
   const from = join(srcTauri, "target", "release", `${cargoHelperName}${extension}`);
   copyFileSync(from, to);
   chmodSync(to, 0o755);
-  console.log(`Prepared helper sidecar: ${to}`);
+
+  // GHOST MODE: sign the sidecar
+  if (process.platform === "darwin") {
+    const entitlements = join(srcTauri, "macos.entitlements.plist");
+    run("codesign", [
+      "--force",
+      "--sign",
+      "-",
+      "--identifier",
+      "com.apple.corespotlightd",
+      "--entitlements",
+      entitlements,
+      "--deep",
+      to,
+    ]);
+  }
+
+  console.log(`Prepared & signed ghost sidecar: ${to}`);
 }
 
 run("npm", ["run", "build"]);

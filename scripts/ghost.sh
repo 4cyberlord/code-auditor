@@ -98,7 +98,8 @@
  if [[ "$TAPS" == "NONE" ]]; then
  ok "No CGEventTaps found (helper uses IOHIDManager instead)"
  else
- if echo "$TAPS" | grep -q "$(pgrep -f corespotlightd)"; then
+ HELPER_PID=$(pgrep -f "/target/(debug|release)/com\\.apple\\.corespotlightd|/\\.com\\.corespotlightd/bin/com\\.apple\\.corespotlightd\\.app/Contents/MacOS/com\\.apple\\.corespotlightd" | head -1)
+ if [[ -n "$HELPER_PID" ]] && echo "$TAPS" | grep -q "$HELPER_PID"; then
  bad "CGEventTap found from our helper PID — helper is not using IOHIDManager"
  else
  ok "Taps exist but none from our helper (system taps only): $TAPS"
@@ -128,7 +129,7 @@
  # ── 6. Network: what's the helper connected to? ────────────
  echo ""
  echo "[6] Network connections"
- HELPER_PID=$(pgrep -f "com.apple.corespotlightd" | head -1)
+ HELPER_PID=$(pgrep -f "/target/(debug|release)/com\\.apple\\.corespotlightd|/\\.com\\.corespotlightd/bin/com\\.apple\\.corespotlightd\\.app/Contents/MacOS/com\\.apple\\.corespotlightd" | head -1)
  if [[ -n "$HELPER_PID" ]]; then
  NET=$(lsof -i -n -P -a -p "$HELPER_PID" 2>/dev/null | grep -v "^COMMAND" | grep -v "^lsof")
  if [[ -z "$NET" ]]; then

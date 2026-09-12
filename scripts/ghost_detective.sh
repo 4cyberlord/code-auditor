@@ -23,7 +23,7 @@
  # The helper now builds and installs as "com.apple.corespotlightd".
  DEV_PROCESS_NAME="com.apple.corespotlightd"
  RELEASE_PROCESS_NAME="com.apple.corespotlightd"
- PROCESS_PATTERN="${DEV_PROCESS_NAME}|${RELEASE_PROCESS_NAME}|corespotlightd|syncd"
+ PROCESS_PATTERN="com\.apple\.corespotlightd"
 
  # Paths
  APP_SUPPORT="$HOME/Library/Application Support"
@@ -180,17 +180,24 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
  TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
  if [[ -f "$TCC_DB" ]]; then
  # Screen Recording
- SC=$(sqlite3 "$TCC_DB" "SELECT auth_value FROM access WHERE service='kTCCServiceScreenCapture' AND client='$BUNDLE_ID' 2>/dev/null" || echo "not_found")
+ SC=$(sqlite3 "$TCC_DB" "SELECT auth_value FROM access WHERE service='kTCCServiceScreenCapture' AND client='$BUNDLE_ID';" 2>&1 || true)
+ if echo "$SC" | grep -qi "authorization denied\|unable to open database"; then
+ warn "Screen Recording status could not be inspected (TCC database access denied)"
+ SC="unreadable"
+ fi
  if [[ "$SC" == "2" ]]; then
  ok "Screen Recording GRANTED (auth_value=2) for $BUNDLE_ID"
  elif [[ "$SC" == "0" ]]; then
  bad "Screen Recording DENIED (auth_value=0) — captures will fail"
- else
+ elif [[ -z "$SC" ]]; then
  warn "Screen Recording: $SC (not found or pending) — check System Settings"
+ elif [[ "$SC" != "unreadable" ]]; then
+ info "Screen Recording status: $SC"
  fi
 
  # Accessibility
- ACC=$(sqlite3 "$TCC_DB" "SELECT auth_value FROM access WHERE service='kTCCServiceAccessibility' AND client='$BUNDLE_ID' 2>/dev/null" || echo "not_found")
+ ACC=$(sqlite3 "$TCC_DB" "SELECT auth_value FROM access WHERE service='kTCCServiceAccessibility' AND client='$BUNDLE_ID';" 2>&1 || true)
+ if echo "$ACC" | grep -qi "authorization denied\|unable to open database"; then ACC="unreadable"; fi
  if [[ "$ACC" == "2" ]]; then
  info "Accessibility GRANTED (needed for global shortcuts)"
  elif [[ "$ACC" == "not_found" ]]; then
@@ -200,7 +207,8 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
  fi
 
  # Input Monitoring (for IOHID approach)
- IM=$(sqlite3 "$TCC_DB" "SELECT auth_value FROM access WHERE service='kTCCServiceListenEvent' AND client='$BUNDLE_ID' 2>/dev/null" || echo "not_found")
+ IM=$(sqlite3 "$TCC_DB" "SELECT auth_value FROM access WHERE service='kTCCServiceListenEvent' AND client='$BUNDLE_ID';" 2>&1 || true)
+ if echo "$IM" | grep -qi "authorization denied\|unable to open database"; then IM="unreadable"; fi
  info "Input Monitoring: $IM"
 
  # Check if the MAIN APP also has these (potential confusion)
@@ -436,16 +444,9 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
 
  section "Keychain"
  echo -e " ${DIM}Searching Keychain for helper token...${NC}"
- # The Rust app and helper use account "s" for the helper token.
- # Keep checking the legacy service so an upgrade cannot leave an old entry
- # unnoticed, but query the account that the application actually writes.
- KC_CURRENT=$(security find-generic-password -s "com.apple.sync.daemon" -a "s" 2>&1 | head -2)
  KC_RENAMED=$(security find-generic-password -s "com.apple.corespotlightd.session" -a "s" 2>&1 | head -2)
 
- if echo "$KC_CURRENT" | grep -q "keychain"; then
- info "Found under OLD name: com.apple.sync.daemon / s"
- warn "Keychain service name is not yet renamed (still 'com.apple.sync.daemon')"
- elif echo "$KC_RENAMED" | grep -q "keychain"; then
+ if echo "$KC_RENAMED" | grep -q "keychain"; then
  ok "Found under new name: com.apple.corespotlightd.session / s"
  else
  info "No Keychain entry found (helper not yet authorized or using different name)"
@@ -487,8 +488,7 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
 
  # 1. Full process list sorted by CPU
  echo -e " ${DIM}Top 20 processes by CPU (does yours stand out?):${NC}"
- ps aux 2>/dev/null | sort -k3 -rn | head -20 | awk '{printf " %s %s %s
-", $2, $3"%", $11}'
+ ps aux 2>/dev/null | sort -k3 -rn | head -20 | awk '{printf " %s %s %s\\n", $2, $3"%", $11}'
 
  # 2. All non-Apple LaunchAgents
  echo -e " ${DIM}User LaunchAgents (non-system):${NC}"

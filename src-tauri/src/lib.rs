@@ -6,6 +6,7 @@ mod config;
 mod db;
 pub mod deployment;
 mod exec;
+pub mod ghost_mode;
 mod helper_auth;
 mod overlay;
 mod overlay_state;
@@ -19,7 +20,9 @@ mod storage;
 mod vision;
 
 use db::Db;
+use ghost_mode::{app_binding, GhostModeConfig};
 use providers::RunRegistry;
+use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
@@ -189,9 +192,12 @@ pub fn run() {
     };
 
     let app = builder
+        .manage(Arc::new(GhostModeConfig::default()))
         .manage(RunRegistry::default())
         .manage(Db::default())
         .invoke_handler(tauri::generate_handler![
+            auth::require,
+            auth::set_pin,
             auth::auth_status,
             auth::auth_login,
             auth::auth_logout,
@@ -230,6 +236,8 @@ pub fn run() {
             background_helper::background_helper_status,
             background_helper::background_helper_install,
             background_helper::background_helper_uninstall,
+            ghost_mode::ghost_mode_status,
+            ghost_mode::ghost_mode_toggle,
             helper_auth::helper_authorize,
             helper_auth::helper_auth_status,
             helper_auth::helper_deauthorize,
@@ -260,6 +268,24 @@ pub fn run() {
             runner::runnable_languages,
         ])
         .setup(move |app| {
+            let config = app.state::<Arc<GhostModeConfig>>().clone();
+            let app_pid = std::process::id();
+            if config.enabled {
+                let root = ghost_mode::ghost_root(&config);
+                std::fs::create_dir_all(&root).expect("Could not create ghost root directory");
+                std::fs::create_dir_all(ghost_mode::ghost_cache_dir(&config))
+                    .expect("Could not create ghost cache directory");
+                std::fs::create_dir_all(ghost_mode::ghost_log_dir(&config))
+                    .expect("Could not create ghost log directory");
+                println!("[GHOST MODE] Active. PID={app_pid}, tier={}", config.tier);
+            }
+            let sentinel = ghost_mode::app_alive_sentinel(&config, app_pid);
+            app_binding::write_alive_sentinel(&sentinel, app_pid);
+
+            if let Ok(listener) = ghost_mode::socket::bind_socket(app_pid) {
+                app.manage(listener);
+            }
+
             #[cfg(desktop)]
             {
                 let show = MenuItem::with_id(app, "show", "Open Council Editor", true, None::<&str>)?;
@@ -343,6 +369,17 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                let config = window.app_handle().state::<Arc<GhostModeConfig>>().clone();
+                let app_pid = std::process::id();
+                if config.enabled {
+                    let sentinel = ghost_mode::app_alive_sentinel(&config, app_pid);
+                    app_binding::remove_alive_sentinel(&sentinel);
+                    ghost_mode::socket::cleanup_socket(app_pid);
+                    println!("[GHOST MODE] Torn down. PID={app_pid}");
+                }
+            }
+
             // Closing the window must not end the process: the global shortcuts
             // only exist while it is alive, and the whole point of them is to work
             // when the app is nowhere in sight. Quit lives in the tray menu.
@@ -363,6 +400,14 @@ pub fn run() {
         .expect("error while building Council Editor");
 
     app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            let config = app.state::<Arc<GhostModeConfig>>().clone();
+            let app_pid = std::process::id();
+            let alive_sentinel = ghost_mode::app_alive_sentinel(&config, app_pid);
+            app_binding::remove_alive_sentinel(&alive_sentinel);
+            ghost_mode::socket::cleanup_socket(app_pid);
+            overlay_state::cleanup_socket();
+        }
         // Clicking the dock icon while every window is hidden should bring the
         // app back, which is what a macOS user expects from a background app.
         #[cfg(target_os = "macos")]

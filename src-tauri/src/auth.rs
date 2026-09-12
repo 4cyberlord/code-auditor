@@ -75,6 +75,7 @@ pub fn current() -> Option<Principal> {
 }
 
 /// The guard. Cheap enough to call on every command.
+#[tauri::command]
 pub fn require() -> Result<(), String> {
     if current().is_some() {
         Ok(())
@@ -378,6 +379,16 @@ pub async fn auth_change_pin(
     }
 
     Err("The server API is not configured for this build.".into())
+}
+
+#[tauri::command]
+pub async fn set_pin(
+    db: tauri::State<'_, Db>,
+    current_pin: String,
+    next_pin: String,
+    confirm: String,
+) -> Result<(), String> {
+    auth_change_pin(db, current_pin, next_pin, confirm).await
 }
 
 #[cfg(test)]

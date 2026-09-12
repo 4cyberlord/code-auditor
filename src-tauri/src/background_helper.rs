@@ -1,10 +1,11 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
-const LABEL: &str = "com.apple.corespotlightd.helper";
-const HELPER_BUNDLE_ID: &str = "com.apple.corespotlightd";
-const HELPER_BUNDLE_NAME: &str = "corespotlightd";
-const HELPER_EXECUTABLE: &str = "com.apple.corespotlightd";
+use crate::ghost_mode::identity;
+
+const LABEL: &str = identity::GHOST_LABEL;
+const HELPER_BUNDLE_ID: &str = identity::GHOST_BUNDLE_ID;
+const HELPER_EXECUTABLE: &str = identity::GHOST_EXECUTABLE;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,42 +143,6 @@ fn plist(helper: &str) -> String {
     )
 }
 
-fn helper_info_plist() -> String {
-    let bundle_id = xml_escape(HELPER_BUNDLE_ID);
-    let bundle_name = xml_escape(HELPER_BUNDLE_NAME);
-    let executable = xml_escape(HELPER_EXECUTABLE);
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleDevelopmentRegion</key>
-  <string>en</string>
-  <key>CFBundleExecutable</key>
-  <string>{executable}</string>
-  <key>CFBundleIdentifier</key>
-  <string>{bundle_id}</string>
-  <key>CFBundleInfoDictionaryVersion</key>
-  <string>6.0</string>
-  <key>CFBundleName</key>
-  <string>{bundle_name}</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
-  <key>CFBundleVersion</key>
-  <string>1</string>
-  <key>LSUIElement</key>
-  <true/>
-  <key>NSHighResolutionCapable</key>
-  <true/>
-</dict>
-</plist>
-"#
-    )
-}
-
 fn install_helper_bundle(bundled_helper: &str) -> Result<String, String> {
     let macos_dir = helper_bundle_path()?.join("Contents/MacOS");
     std::fs::create_dir_all(&macos_dir)
@@ -186,7 +151,7 @@ fn install_helper_bundle(bundled_helper: &str) -> Result<String, String> {
     let executable = helper_executable_path()?;
     std::fs::copy(bundled_helper, &executable)
         .map_err(|e| format!("Could not install the background helper executable: {e}"))?;
-    std::fs::write(helper_info_plist_path()?, helper_info_plist())
+    std::fs::write(helper_info_plist_path()?, identity::info_plist())
         .map_err(|e| format!("Could not write the helper app Info.plist: {e}"))?;
     std::fs::write(helper_pkg_info_path()?, "APPL????")
         .map_err(|e| format!("Could not write the helper app PkgInfo: {e}"))?;
@@ -201,6 +166,9 @@ fn install_helper_bundle(bundled_helper: &str) -> Result<String, String> {
         std::fs::set_permissions(&executable, permissions)
             .map_err(|e| format!("Could not make the installed helper executable: {e}"))?;
     }
+
+    #[cfg(target_os = "macos")]
+    identity::sign_helper(&executable)?;
 
     Ok(executable.to_string_lossy().to_string())
 }
@@ -303,6 +271,21 @@ pub async fn background_helper_uninstall() -> Result<BackgroundHelperStatus, Str
         if bundle.exists() {
             std::fs::remove_dir_all(&bundle)
                 .map_err(|e| format!("Could not remove the helper app bundle: {e}"))?;
+        }
+    }
+    let support = home()?.join("Library/Application Support/.com.apple.corespotlightd");
+    for relative in [
+        ".csp_daemon.lock",
+        "cache/pending-batch.json",
+        "cache/submitted-job.json",
+        "logs/helper.out.log",
+        "logs/helper.err.log",
+        "logs/.state",
+    ] {
+        let path = support.join(relative);
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("Could not remove helper state {}: {e}", path.display()))?;
         }
     }
     background_helper_status().await
