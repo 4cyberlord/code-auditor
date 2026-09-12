@@ -58,6 +58,24 @@ final class OverlayManager: NSObject, ObservableObject {
                 name: UIScreen.capturedDidChangeNotification,
                 object: nil
             )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(screenCaptureChanged),
+                name: UIScreen.didConnectNotification,
+                object: nil
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(screenCaptureChanged),
+                name: UIScreen.didDisconnectNotification,
+                object: nil
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleRotation),
+                name: UIScreen.didChangeMainBoundsNotification,
+                object: nil
+            )
             isObservingCapture = true
         }
 

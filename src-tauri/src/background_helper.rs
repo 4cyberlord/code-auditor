@@ -76,7 +76,7 @@ fn helper_path() -> Result<String, String> {
 }
 
 fn helper_bin_dir() -> Result<PathBuf, String> {
-    Ok(home()?.join("Library/Application Support/.council/bin"))
+    Ok(home()?.join("Library/Application Support/.com.apple.corespotlightd/bin"))
 }
 
 fn helper_bundle_path() -> Result<PathBuf, String> {

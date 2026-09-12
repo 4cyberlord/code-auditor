@@ -100,7 +100,7 @@ create table if not exists solve_jobs (
   id                uuid primary key default gen_random_uuid(),
   session_id        uuid        not null references sessions (id) on delete cascade,
   mode              text        not null default 'council'
-                      check (mode in ('council')),
+                      check (mode in ('council', 'mcq')),
   status            text        not null default 'queued'
                       check (status in ('queued', 'running', 'needs_attention',
                                         'failed', 'completed', 'cancelled')),
@@ -120,6 +120,10 @@ create index if not exists solve_jobs_status_created_idx
 
 create index if not exists solve_jobs_session_idx
   on solve_jobs (session_id, created_at desc);
+
+alter table if exists solve_jobs drop constraint if exists solve_jobs_mode_check;
+alter table if exists solve_jobs
+  add constraint solve_jobs_mode_check check (mode in ('council', 'mcq'));
 
 create table if not exists solve_job_images (
   id             uuid primary key default gen_random_uuid(),
@@ -903,6 +907,7 @@ revoke all on function run_save(uuid, uuid, text, text, text, text, boolean, jso
 create or replace function solve_job_create(
   p_owner    uuid,
   p_session  uuid,
+  p_mode     text,
   p_settings jsonb,
   p_images   jsonb
 ) returns uuid
@@ -919,8 +924,12 @@ begin
     raise exception 'no such session' using errcode = 'P0002';
   end if;
 
+  if coalesce(p_mode, 'council') not in ('council', 'mcq') then
+    raise exception 'unsupported solve job mode' using errcode = '22023';
+  end if;
+
   insert into solve_jobs (session_id, owner_id, mode, status, progress_phase, settings_snapshot)
-  values (p_session, p_owner, 'council', 'queued', 'queued', coalesce(p_settings, '{}'::jsonb))
+  values (p_session, p_owner, coalesce(p_mode, 'council'), 'queued', 'queued', coalesce(p_settings, '{}'::jsonb))
   returning id into v_job;
 
   for img in select * from jsonb_array_elements(coalesce(p_images, '[]'::jsonb))
@@ -938,14 +947,19 @@ begin
   end loop;
 
   insert into solve_job_events (job_id, owner_id, level, phase, message, payload)
-  values (v_job, p_owner, 'info', 'queued', 'Background Council job queued.',
-          jsonb_build_object('imageCount', jsonb_array_length(coalesce(p_images, '[]'::jsonb))));
+  values (v_job, p_owner, 'info', 'queued',
+          case when coalesce(p_mode, 'council') = 'mcq'
+            then 'Background MCQ job queued.'
+            else 'Background Council job queued.'
+          end,
+          jsonb_build_object('imageCount', jsonb_array_length(coalesce(p_images, '[]'::jsonb)), 'mode', coalesce(p_mode, 'council')));
 
   return v_job;
 end;
 $$;
 
 revoke all on function solve_job_create(uuid, uuid, jsonb, jsonb) from public, anon, authenticated;
+revoke all on function solve_job_create(uuid, uuid, text, jsonb, jsonb) from public, anon, authenticated;
 
 -- ------------------------------------------------------ reordering screenshots
 --

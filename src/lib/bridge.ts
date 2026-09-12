@@ -8,6 +8,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { KeyId, TransportId } from "./models.ts";
+import type { OverlayState } from "./overlayState.ts";
 
 export const inTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -79,6 +80,11 @@ const NOT_TAURI =
 export async function runAgent(req: RunRequest): Promise<void> {
   if (!inTauri()) throw new Error(NOT_TAURI);
   await invoke("run_agent", { req });
+}
+
+export async function writeOverlayState(state: OverlayState): Promise<void> {
+  if (!inTauri()) return;
+  await invoke("overlay_state_write", { state });
 }
 
 export async function runOnce(req: RunRequest): Promise<string> {
@@ -397,6 +403,22 @@ export async function hideCaptureExemptOverlay(): Promise<void> {
 export async function hideOverlay(): Promise<void> {
   if (!inTauri()) return;
   await invoke("hide_overlay");
+}
+
+export interface OverlayVisibilityStatus {
+  sharingType: number;
+  windowLevel: number;
+  collectionBehavior: number;
+  isVisible: boolean;
+  sharingDisabled: boolean;
+  allSpaces: boolean;
+  fullscreenAuxiliary: boolean;
+  ignoresCycle: boolean;
+}
+
+export async function overlayVisibilityStatus(): Promise<OverlayVisibilityStatus> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  return invoke<OverlayVisibilityStatus>("overlay_visibility_status");
 }
 
 export async function toggleCaptureExemptOverlay(): Promise<boolean> {

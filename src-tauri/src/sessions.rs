@@ -186,7 +186,10 @@ pub struct NewSolveJob {
 // ------------------------------------------------------------------ sessions
 
 #[tauri::command]
-pub async fn session_list(db: tauri::State<'_, Db>, status: String) -> Result<Vec<Session>, String> {
+pub async fn session_list(
+    db: tauri::State<'_, Db>,
+    status: String,
+) -> Result<Vec<Session>, String> {
     crate::server_api::call(
         db.inner(),
         "sessions.list",

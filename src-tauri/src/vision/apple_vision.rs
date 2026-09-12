@@ -23,7 +23,7 @@ use objc2_vision::{
     VNRequest, VNRequestTextRecognitionLevel,
 };
 
-use super::{OcrWord, split_words};
+use super::{split_words, OcrWord};
 
 /// base64 -> bytes. The app's own capture path encodes losslessly, so a decode
 /// failure here is a corrupt payload rather than a user mistake, and "could
@@ -57,10 +57,9 @@ pub(super) fn recognize(bytes: &[u8], img_w: u32, img_h: u32) -> Result<Vec<OcrW
     // what makes the synchronous `performRequests` sound. The supertype cast
     // can fail in principle but not here: the class being downcast to is one
     // this one is an instance of by construction.
-    let requests = NSArray::from_retained_slice(&[objc2::rc::Retained::downcast::<VNRequest>(
-        req.clone(),
-    )
-    .expect("the class being downcast to is a superclass of the one we started with")]);
+    let requests =
+        NSArray::from_retained_slice(&[objc2::rc::Retained::downcast::<VNRequest>(req.clone())
+            .expect("the class being downcast to is a superclass of the one we started with")]);
     handler
         .performRequests_error(&requests)
         .map_err(|e| format!("On-device text recognition failed: {}", e))?;

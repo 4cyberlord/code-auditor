@@ -17,7 +17,6 @@
 
 use serde::Serialize;
 
-
 /// Where screenshots go. One bucket, private.
 pub const BUCKET: &str = "screenshots";
 
@@ -76,7 +75,10 @@ pub async fn storage_upload(
     let started = std::time::Instant::now();
     let resp = client()?
         .put(&signed.url)
-        .header("Content-Type", if mime.is_empty() { "image/png" } else { &mime })
+        .header(
+            "Content-Type",
+            if mime.is_empty() { "image/png" } else { &mime },
+        )
         .body(bytes.clone())
         .send()
         .await
@@ -93,7 +95,11 @@ pub async fn storage_upload(
         bytes.len(),
         started.elapsed().as_millis()
     ));
-    Ok(Uploaded { bucket: BUCKET.to_string(), path, bytes: bytes.len() })
+    Ok(Uploaded {
+        bucket: BUCKET.to_string(),
+        path,
+        bytes: bytes.len(),
+    })
 }
 
 /// A time-limited URL for one stored screenshot.
@@ -278,4 +284,3 @@ fn explain_storage(status: reqwest::StatusCode, body: &str) -> String {
     let snippet: String = body.chars().take(300).collect();
     format!("Supabase Storage returned {status}: {snippet}")
 }
-

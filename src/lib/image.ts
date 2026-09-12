@@ -286,7 +286,7 @@ export const humanBytes = (n: number): string =>
  *
  * A whole-screen grab becomes several tiles named `capture-<ms>.png (2 of 4)`,
  * and a pasted or dragged image is named whatever the user's machine called it.
- * Only a real capture has a file in `~/Library/Application Support/.cache/captures` to sit next to, so
+ * Only a real capture has a file in `~/Library/Application Support/.com.apple.corespotlightd/cache/captures` to sit next to, so
  * only a real capture gets its reading named after it — everything else falls
  * back to a timestamp, which is honest about there being no picture on disk.
  */

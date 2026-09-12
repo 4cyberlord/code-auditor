@@ -15,6 +15,7 @@ import {
   type ProviderId,
   type TransportId,
 } from "./models.ts";
+import { normalizeMcqEndpoint, normalizeOverlayMode, type McqEndpoint, type OverlayMode } from "./mcq.ts";
 import { parseFinal, type AgentFinal } from "./parse.ts";
 import { computeConsensus, type ConsensusResult } from "./consensus.ts";
 import {
@@ -57,6 +58,7 @@ import { titleFor, placeholderTitle, isPlaceholder } from "./title.ts";
 import { resolveAnswerLanguage } from "./answerLanguage.ts";
 import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from "./probeFit.ts";
 import { knowledgePackFor } from "./knowledge.ts";
+import { buildOverlayState } from "./overlayState.ts";
 import {
   COUNCIL_DEFAULT_JUDGES,
   COUNCIL_DEFAULT_MODELS,
@@ -430,6 +432,12 @@ interface Settings {
   raiseOnCapture: boolean;
   /** Images per run, 1..MAX_IMAGES. Every one is sent to every enabled agent. */
   maxImages: number;
+  /** Which helper overlay workflow to use for background captures. */
+  overlayMode: OverlayMode;
+  /** Model id used for helper-only multiple-choice answers. */
+  mcqModel: string;
+  /** API surface used by the MCQ model; auto follows the roster/default route. */
+  mcqEndpoint: McqEndpoint;
   /**
    * Whether to route through the gateway when a gateway key exists.
    *
@@ -792,6 +800,29 @@ const DB_SETTINGS_KEY = "app.v1";
  */
 export const MAX_IMAGES = 10;
 
+function publishOverlayState(s: State): void {
+  const consensus = computeConsensus(
+    s.agents
+      .filter((a) => a.enabled && a.final)
+      .map((a) => ({ id: a.id, name: agentSpec(a.provider).label, final: a.final! })),
+    s.settings.threshold
+  );
+  void bridge.writeOverlayState(
+    buildOverlayState({
+      runId: s.runId,
+      running: s.running,
+      agents: s.agents,
+      representative: consensus.representative ?? "",
+      review: {
+        status: s.review.status,
+        data: s.review.data,
+        language: s.review.language,
+      },
+      testSuites: s.council.testSuites,
+    })
+  );
+}
+
 const defaultSettings = (): Settings => ({
   mode: "auto",
   threshold: 0.55,
@@ -826,6 +857,9 @@ const defaultSettings = (): Settings => ({
   railPanel: "consensus",
   raiseOnCapture: false,
   maxImages: MAX_IMAGES,
+  overlayMode: "auto",
+  mcqModel: "anthropic/claude-fable-5",
+  mcqEndpoint: "auto",
   useGateway: true,
   gatewayBaseUrl: GATEWAY.defaultBaseUrl,
   // On by default. The panel alone answers "did four models agree", which is a
@@ -968,6 +1002,12 @@ function normalizeSettings(s: Settings): Settings {
     raiseOnCapture:
       typeof s.raiseOnCapture === "boolean" ? s.raiseOnCapture : base.raiseOnCapture,
     maxImages: Math.round(clampTo(s.maxImages, 1, MAX_IMAGES, base.maxImages)),
+    overlayMode: normalizeOverlayMode(s.overlayMode),
+    mcqModel:
+      typeof s.mcqModel === "string" && s.mcqModel.trim()
+        ? s.mcqModel.trim()
+        : base.mcqModel,
+    mcqEndpoint: normalizeMcqEndpoint(s.mcqEndpoint),
     useGateway: typeof s.useGateway === "boolean" ? s.useGateway : base.useGateway,
     gatewayBaseUrl:
       typeof s.gatewayBaseUrl === "string" && s.gatewayBaseUrl.trim()
@@ -2254,6 +2294,7 @@ export const useStore = create<State>((set, get) => ({
         };
       }),
     }));
+    publishOverlayState(get());
 
     // The vision pass, when asked for, happens before anyone reasons. The panes
     // sit at "queued" through it, which is the truth: they are waiting on the
@@ -2354,6 +2395,7 @@ export const useStore = create<State>((set, get) => ({
           : a
       ),
     }));
+    publishOverlayState(get());
   },
 
   retry: async (agentId) => {
@@ -2390,6 +2432,7 @@ export const useStore = create<State>((set, get) => ({
           : a
       ),
     }));
+    publishOverlayState(get());
     // Reuse the reading the rest of the panel was given rather than extracting
     // again: a second vision pass could transcribe slightly differently, and this
     // pane's answer would then be to a subtly different question than its
@@ -2432,8 +2475,9 @@ export const useStore = create<State>((set, get) => ({
   },
 
   appendDeltas: (batch) =>
-    set((s) => ({
-      agents: s.agents.map((a) => {
+    set((s) => {
+      const next = {
+        agents: s.agents.map((a) => {
         // Tokens from a superseded launch reach us for as long as it takes the
         // cancel to land; matching on the attempt drops them instead of
         // splicing them into whatever the pane is showing now.
@@ -2443,8 +2487,11 @@ export const useStore = create<State>((set, get) => ({
         // pulled back into "streaming" by tokens still in flight behind it.
         if (a.status !== "queued" && a.status !== "streaming") return a;
         return { ...a, status: "streaming" as const, text: a.text + entry.delta };
-      }),
-    })),
+        }),
+      };
+      publishOverlayState({ ...s, ...next });
+      return next;
+    }),
 
   finishAgent: (e) => {
     const s0 = get();
@@ -2486,7 +2533,9 @@ export const useStore = create<State>((set, get) => ({
       const stillGoing =
         agents.some((a) => a.status === "streaming" || a.status === "queued") ||
         COUNCIL_ACTIVE.includes(s.council.phase);
-      return { agents, running: stillGoing };
+      const next = { agents, running: stillGoing };
+      publishOverlayState({ ...s, ...next });
+      return next;
     });
     get().maybeAutoJudge();
     get().maybeStartCouncil();
@@ -2519,7 +2568,9 @@ export const useStore = create<State>((set, get) => ({
       const stillGoing =
         agents.some((a) => a.status === "streaming" || a.status === "queued") ||
         COUNCIL_ACTIVE.includes(s.council.phase);
-      return { agents, running: stillGoing };
+      const next = { agents, running: stillGoing };
+      publishOverlayState({ ...s, ...next });
+      return next;
     });
     get().maybeAutoJudge();
     get().maybeStartCouncil();
@@ -2912,6 +2963,7 @@ export const useStore = create<State>((set, get) => ({
       set((st) => ({
         review: { ...st.review, status: "error", data: null, error: "No agent produced code to review." },
       }));
+      publishOverlayState(get());
       return;
     }
 
@@ -2920,10 +2972,12 @@ export const useStore = create<State>((set, get) => ({
       set((st) => ({
         review: { ...st.review, status: "error", data: null, error: "No route for the reviewer model." },
       }));
+      publishOverlayState(get());
       return;
     }
 
     set((st) => ({ review: { ...st.review, status: "running", error: null } }));
+    publishOverlayState(get());
     try {
       const text = await bridge.runOnce({
         runId: `review-${Date.now().toString(36)}`,
@@ -2951,8 +3005,10 @@ export const useStore = create<State>((set, get) => ({
           ? { ...st.review, status: "done", data, error: null }
           : { ...st.review, status: "error", data: null, error: "The reviewer did not answer in the expected form." },
       }));
+      publishOverlayState(get());
     } catch (err) {
       set((st) => ({ review: { ...st.review, status: "error", data: null, error: cleanError(String(err)) } }));
+      publishOverlayState(get());
     }
   },
 
@@ -3354,6 +3410,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       console.warn("Council spec pass failed:", cleanError(String(err)));
     }
     set((st) => ({ council: { ...st.council, testSuites: suites } }));
+    publishOverlayState(get());
   }
 
   // -------------------------------------------------------- round 2c: verify
@@ -3642,4 +3699,8 @@ function isStale(s: State, e: { agentId: string; attemptId: string }): boolean {
   // cannot do, because a rerun deliberately keeps the same one.
   if (agent.attemptId !== e.attemptId) return true;
   return agent.status !== "queued" && agent.status !== "streaming";
+}
+
+if (typeof window !== "undefined") {
+  window.setTimeout(() => publishOverlayState(useStore.getState()), 0);
 }

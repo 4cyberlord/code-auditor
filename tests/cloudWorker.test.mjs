@@ -26,6 +26,7 @@ let HARNESS_WRONG = false;
 let DEAD_MODEL = "";
 // Scenario 5: a route with no reasoning mode, which must not read as a dead seat.
 let REJECTS_REASONING = "";
+let MCQ_READING = false;
 const responsesCalls = [];
 const abort = () => Object.assign(new Error("aborted"), { name: "AbortError" });
 
@@ -106,6 +107,26 @@ globalThis.fetch = async (url, init = {}) => {
     }
     const system = req.messages[0].content;
     if (system.includes("You are reading a screenshot and turning it into structured data")) {
+      if (MCQ_READING) {
+        return modelReply(
+          JSON.stringify({
+            kind: "other",
+            language: "english",
+            framework: "",
+            fileName: "",
+            filePath: "",
+            code: "",
+            errors: [],
+            terminalCommands: [],
+            terminalOutput: "",
+            url: "",
+            observations: ["A. 18", "B. 9", "C. 27", "D. 0"],
+            problemSummary: "What is 18 + 9?",
+            ambiguities: [],
+            confidence: 0.94,
+          })
+        );
+      }
       return modelReply(
         JSON.stringify({
           kind: "code",
@@ -124,6 +145,27 @@ globalThis.fetch = async (url, init = {}) => {
           confidence: 0.9,
         })
       );
+    }
+    if (system.includes("You answer multiple-choice questions from screenshots")) {
+      return modelReply(JSON.stringify({
+        kind: "mcq",
+        question: "What is 18 + 9?",
+        options: [
+          { label: "A", text: "18" },
+          { label: "B", text: "9" },
+          { label: "C", text: "27" },
+          { label: "D", text: "0" },
+        ],
+        answer: { label: "C", text: "27" },
+        reason: "18 plus 9 equals 27, so C is the only matching choice.",
+        whyNot: [
+          { label: "A", reason: "18 omits the added 9." },
+          { label: "B", reason: "9 omits the 18." },
+          { label: "D", reason: "0 is not the sum." },
+        ],
+        knowledgeUsed: true,
+        model: req.model,
+      }));
     }
     if (system.includes("You write test harnesses for candidate solutions")) {
       return modelReply(`<<<TESTS
@@ -436,6 +478,77 @@ check(
 check("the model was not benched for it", !events.some((e) => e.phase === "model_benched"));
 check("the job completed", patches.some((p) => p.status === "completed"));
 REJECTS_REASONING = "";
+
+// --- MCQ mode uses the focused helper-only path ---------------------------
+console.log("\n6. MCQ mode writes a structured answer report");
+MCQ_READING = true;
+events.length = 0;
+patches.length = 0;
+reports.length = 0;
+modelCalls.length = 0;
+responsesCalls.length = 0;
+
+await runCouncilJob({
+  id: "job-6",
+  session_id: "session-1",
+  mode: "mcq",
+  settings_snapshot: {
+    overlayMode: "mcq",
+    mcqModel: "anthropic/claude-fable-5",
+    mcqEndpoint: "chat",
+    maxTokens: 2048,
+    gatewayBaseUrl: "https://api.tokenrouter.com/v1",
+    councilModels: [
+      { id: "anthropic/claude-fable-5", endpoint: "chat", vision: true },
+      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat", vision: true },
+    ],
+    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+  },
+});
+
+const mcqReport = reports[0]?.report || {};
+const mcqCall = modelCalls.find((c) => String(c.messages?.[0]?.content || "").includes("multiple-choice"));
+check("MCQ report is tagged", mcqReport.kind === "mcq", JSON.stringify(mcqReport));
+check("MCQ answer is stored", mcqReport.answer?.label === "C", JSON.stringify(mcqReport.answer));
+check("MCQ why-not reasons are stored", mcqReport.whyNot?.length === 3, JSON.stringify(mcqReport.whyNot));
+check("MCQ checked knowledge first", events.some((e) => e.phase === "knowledge_selected"));
+check("MCQ used the configured model", mcqCall?.model === "anthropic/claude-fable-5", String(mcqCall?.model));
+check("MCQ completed", patches.some((p) => p.status === "completed" && p.mode === "mcq"));
+MCQ_READING = false;
+
+// --- Auto overlay mode reads first and routes MCQ like the helper overlay ---
+console.log("\n7. Auto overlay mode detects MCQ before the coding council path");
+MCQ_READING = true;
+events.length = 0;
+patches.length = 0;
+reports.length = 0;
+modelCalls.length = 0;
+responsesCalls.length = 0;
+
+await runCouncilJob({
+  id: "job-7",
+  session_id: "session-1",
+  mode: "council",
+  settings_snapshot: {
+    overlayMode: "auto",
+    mcqModel: "anthropic/claude-fable-5",
+    mcqEndpoint: "chat",
+    maxTokens: 2048,
+    gatewayBaseUrl: "https://api.tokenrouter.com/v1",
+    councilModels: [
+      { id: "anthropic/claude-fable-5", endpoint: "chat", vision: true },
+      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat", vision: true },
+    ],
+    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+  },
+});
+
+check("Auto mode read the screenshot first", events.some((e) => e.phase === "reading_done"));
+check("Auto mode detected MCQ", events.some((e) => e.phase === "mcq_detected"));
+check("Auto mode wrote an MCQ report", reports[0]?.report?.kind === "mcq", JSON.stringify(reports[0]?.report));
+check("Auto mode skipped benchmark/council phases", !events.some((e) => e.phase === "benchmark_done"));
+check("Auto mode completed as MCQ", patches.some((p) => p.status === "completed" && p.mode === "mcq"));
+MCQ_READING = false;
 
 // --- and when nothing anywhere can see, say so instead of guessing ---------
 console.log("\n3c. a bench with no eyes fails clearly rather than expensively");

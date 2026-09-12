@@ -8,7 +8,7 @@
 //! A file rather than the clipboard, deliberately: going through the pasteboard
 //! would clobber whatever the user had copied.
 //!
-//! The file is kept, in `~/Library/Application Support/.cache/captures`, rather than written to /tmp and
+//! The file is kept, in `~/Library/Application Support/.com.apple.corespotlightd/cache/captures`, rather than written to /tmp and
 //! deleted. A capture that exists only as a base64 string in a webview is
 //! invisible when something downstream fails -- you cannot tell "the grab never
 //! happened" from "the grab happened and the UI dropped it". On disk, you can.
@@ -28,8 +28,16 @@ fn base64(data: &[u8]) -> String {
         let n = (b1 << 16) | (b2 << 8) | b3;
         out.push(B64[(n >> 18 & 63) as usize] as char);
         out.push(B64[(n >> 12 & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { B64[(n >> 6 & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { B64[(n & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            B64[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -177,9 +185,11 @@ fn siblings_of(path: &Path) -> Vec<PathBuf> {
                 .map(|e| e.path())
                 .filter(|p| {
                     p.extension().and_then(|x| x.to_str()) == Some("png")
-                        && p.file_stem()
-                            .and_then(|s| s.to_str())
-                            .is_some_and(|s| s == stem || s.starts_with(&format!("{stem} ")) || s.starts_with(&format!("{stem}-")))
+                        && p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| {
+                            s == stem
+                                || s.starts_with(&format!("{stem} "))
+                                || s.starts_with(&format!("{stem}-"))
+                        })
                 })
                 .collect::<Vec<_>>()
         })
@@ -239,7 +249,10 @@ mod capture_file_tests {
         assert_eq!(got.len(), 3, "{got:?}");
         let mut sorted = got.clone();
         sorted.sort();
-        assert_eq!(got, sorted, "display order must be stable, not filesystem order");
+        assert_eq!(
+            got, sorted,
+            "display order must be stable, not filesystem order"
+        );
     }
 
     #[test]
@@ -278,7 +291,10 @@ mod fingerprint_tests {
 
     #[test]
     fn the_same_bytes_fingerprint_the_same() {
-        assert_eq!(fingerprint(b"mirrored screen"), fingerprint(b"mirrored screen"));
+        assert_eq!(
+            fingerprint(b"mirrored screen"),
+            fingerprint(b"mirrored screen")
+        );
     }
 
     #[test]
@@ -399,7 +415,8 @@ pub fn save_reading(markdown: String, near: Option<String>) -> Result<String, St
 
 fn capture_dir() -> Result<std::path::PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("No HOME in the environment")?;
-    let dir = std::path::Path::new(&home).join("Library/Application Support/.cache/captures");
+    let dir = std::path::Path::new(&home)
+        .join("Library/Application Support/.com.apple.corespotlightd/cache/captures");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
     Ok(dir)
@@ -459,7 +476,9 @@ fn capture_blocking(mode: Mode) -> Result<Option<Vec<Capture>>, String> {
     let mut shots = Vec::new();
     let mut seen: Vec<u64> = Vec::new();
     for file in siblings_of(&path) {
-        let Ok(bytes) = std::fs::read(&file) else { continue };
+        let Ok(bytes) = std::fs::read(&file) else {
+            continue;
+        };
         if bytes.is_empty() {
             // Do not leave a zero-byte file to be mistaken later for a capture
             // that worked.

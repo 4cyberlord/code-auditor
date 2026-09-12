@@ -677,11 +677,13 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
 
   // ------------------------------------------------------------ solve jobs
 
-  /** Queue a Council job: the job, its screenshots and its first event, atomically. */
+  /** Queue a background solve job: the job, its screenshots and its first event, atomically. */
   "jobs.create": async ({ admin, principal }, args) => {
+    const mode = args.mode === "mcq" ? "mcq" : "council";
     const { data, error } = await admin.rpc("solve_job_create", {
       p_owner: principal.userId,
       p_session: uuid(args.sessionId, "sessionId"),
+      p_mode: mode,
       p_settings: args.settingsSnapshot ?? {},
       p_images: Array.isArray(args.images) ? args.images : [],
     });

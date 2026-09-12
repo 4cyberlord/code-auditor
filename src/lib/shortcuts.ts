@@ -53,7 +53,7 @@ async function captureIntoApp(whole: boolean) {
     for (const capture of captures) {
       const blob = await (await fetch(capture.dataUrl)).blob();
       // Named after the file on disk, so what is on screen and what is in
-      // ~/Library/Application Support/.cache/captures can be matched up by eye.
+      // ~/Library/Application Support/.com.apple.corespotlightd/cache/captures can be matched up by eye.
       const name = capture.path.split("/").pop() || "capture.png";
       // The staging path travels with the asset so the file can be deleted the
       // moment its bytes have a row in the project behind them.

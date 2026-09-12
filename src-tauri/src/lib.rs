@@ -1,6 +1,6 @@
 mod auth;
-mod capture;
 mod background_helper;
+mod capture;
 mod coding_tools;
 mod config;
 mod db;
@@ -8,10 +8,11 @@ pub mod deployment;
 mod exec;
 mod helper_auth;
 mod overlay;
-mod secrets;
+mod overlay_state;
 mod platform_base;
 mod providers;
 mod runner;
+mod secrets;
 mod server_api;
 mod sessions;
 mod storage;
@@ -74,7 +75,7 @@ pub fn trace(msg: &str) {
             let dir = std::path::Path::new(&home)
                 .join("Library")
                 .join("Application Support")
-                .join(".cache")
+                .join(".com.apple.corespotlightd")
                 .join("logs");
             if std::fs::create_dir_all(&dir).is_ok() {
                 let path = dir.join(".state");
@@ -217,6 +218,8 @@ pub fn run() {
             overlay::overlay_toggle,
             overlay::show_overlay,
             overlay::hide_overlay,
+            overlay::overlay_visibility_status,
+            overlay_state::overlay_state_write,
             capture::save_reading,
             providers::set_gateway_rate,
             vision::ocr_images,

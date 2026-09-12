@@ -34,6 +34,7 @@ const valid: CloudSolveJobDraft = {
   images: [image(0), image(1)],
 };
 check("valid draft passes", validateCloudSolveJobDraft(valid).length === 0);
+check("mcq draft passes", validateCloudSolveJobDraft({ ...valid, mode: "mcq" }).length === 0);
 
 const tooMany: CloudSolveJobDraft = {
   ...valid,

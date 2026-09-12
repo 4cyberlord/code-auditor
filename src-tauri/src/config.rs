@@ -94,5 +94,8 @@ pub async fn config_delete(db: tauri::State<'_, Db>, key: String) -> Result<(), 
 pub(crate) async fn value(db: &Db, key: &str) -> Result<Option<String>, String> {
     let all: std::collections::HashMap<String, String> =
         crate::server_api::call(db, "secrets.load", serde_json::json!({})).await?;
-    Ok(all.get(key.trim()).cloned().filter(|v| !v.trim().is_empty()))
+    Ok(all
+        .get(key.trim())
+        .cloned()
+        .filter(|v| !v.trim().is_empty()))
 }

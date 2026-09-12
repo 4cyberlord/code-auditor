@@ -45,7 +45,8 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.9"
 global-hotkey = "0.8"
-tao = "0.37"
+tao = "0.35"
+wry = "0.55"
 chrono = { version = "0.4", features = ["serde"] }
 
 # No mobile implementation exists, so keep it off the mobile targets entirely.
@@ -55,6 +56,7 @@ tauri-plugin-global-shortcut = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 keyring = { version = "3", features = ["apple-native"] }
+security-framework = "3.7"
 # The transcriber is Apple's on-device Vision framework: no key, no quota, no
 # network. Defaults pull in VNRecognizeTextRequest, VNObservation, VNRequest,
 # VNRequestHandler, VNTypes, VNUtils and the core-foundation geometry types.

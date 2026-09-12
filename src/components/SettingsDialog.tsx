@@ -1638,6 +1638,10 @@ const SHORTCUTS = [
 function CaptureCard() {
   const raise = useStore((s) => s.settings.raiseOnCapture);
   const maxImages = useStore((s) => s.settings.maxImages);
+  const overlayMode = useStore((s) => s.settings.overlayMode);
+  const mcqModel = useStore((s) => s.settings.mcqModel);
+  const mcqEndpoint = useStore((s) => s.settings.mcqEndpoint);
+  const availableModels = useStore((s) => s.settings.availableModels);
   const patch = useStore((s) => s.patchSettings);
   const [helper, setHelper] = useState<bridge.BackgroundHelperStatus | null>(null);
   const [helperBusy, setHelperBusy] = useState(false);
@@ -1742,6 +1746,58 @@ function CaptureCard() {
 
       <div className="provider-card">
         <div className="top">
+          <span className="name">Overlay screens</span>
+          <span className="spacer" />
+          <span className="vendor">Coding + MCQ</span>
+        </div>
+        <div className="segmented" style={{ marginBottom: 10 }}>
+          {(["auto", "coding", "mcq"] as const).map((mode) => (
+            <button
+              key={mode}
+              data-on={overlayMode === mode}
+              onClick={() => patch({ overlayMode: mode })}
+              type="button"
+            >
+              {mode === "auto" ? "Auto" : mode === "coding" ? "Coding" : "MCQ"}
+            </button>
+          ))}
+        </div>
+        <p className="hint" style={{ marginTop: 0 }}>
+          Auto lets the background worker switch to MCQ when the captured text has answer choices.
+          Force MCQ when you want the helper to treat the next batch as a multiple-choice question.
+        </p>
+        <div className="row">
+          <label htmlFor="mcq-model">MCQ model</label>
+          <input
+            id="mcq-model"
+            className="field mono"
+            list="mcq-models"
+            value={mcqModel}
+            onChange={(e) => patch({ mcqModel: e.target.value })}
+          />
+          <datalist id="mcq-models">
+            {Array.from(new Set(["anthropic/claude-fable-5", ...availableModels])).map((model) => (
+              <option key={model} value={model} />
+            ))}
+          </datalist>
+        </div>
+        <div className="row">
+          <label htmlFor="mcq-endpoint">MCQ API</label>
+          <select
+            id="mcq-endpoint"
+            className="field"
+            value={mcqEndpoint}
+            onChange={(e) => patch({ mcqEndpoint: e.target.value as never })}
+          >
+            <option value="auto">Auto route</option>
+            <option value="chat">Chat Completions</option>
+            <option value="responses">Responses API</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="provider-card">
+        <div className="top">
           <span className="name">After a capture</span>
           <span className="spacer" />
           <button
@@ -1778,7 +1834,7 @@ function CaptureCard() {
         <p className="hint">
           Each image goes to every enabled agent: {maxImages} {maxImages === 1 ? "image" : "images"}{" "}
           means up to {maxImages * 5} uploads. Captures are also saved to{" "}
-          <span style={{ fontFamily: "var(--font-mono)" }}>~/Library/Application Support/.cache/captures</span>{" "}
+          <span style={{ fontFamily: "var(--font-mono)" }}>~/Library/Application Support/.com.apple.corespotlightd/cache/captures</span>{" "}
           regardless, so lowering this never loses a grab.
         </p>
       </div>

@@ -28,7 +28,7 @@ export interface QueuedSolveImage {
 
 export interface CloudSolveJobDraft {
   sessionId: string;
-  mode: "council";
+  mode: "council" | "mcq";
   settingsSnapshot: Record<string, unknown>;
   images: QueuedSolveImage[];
 }
@@ -64,7 +64,9 @@ function sanitizeNested(value: unknown): unknown {
 export function validateCloudSolveJobDraft(draft: CloudSolveJobDraft): string[] {
   const errors: string[] = [];
   if (!draft.sessionId.trim()) errors.push("sessionId is required");
-  if (draft.mode !== "council") errors.push("v1 cloud solving only supports council mode");
+  if (!["council", "mcq"].includes(draft.mode)) {
+    errors.push("cloud solving only supports council and mcq modes");
+  }
   if (!draft.images.length) errors.push("at least one screenshot is required");
   if (draft.images.length > CLOUD_SOLVER_MAX_IMAGES) {
     errors.push(`no more than ${CLOUD_SOLVER_MAX_IMAGES} screenshots can be submitted`);

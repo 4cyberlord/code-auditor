@@ -39,28 +39,59 @@ pub async fn coding_tool_execute(req: CodingToolRequest) -> Result<String, Strin
 async fn execute(req: CodingToolRequest) -> Result<String, String> {
     let root = canonical_root(&req.root)?;
     let name = req.name.trim().to_ascii_lowercase();
-    let args = req.args.as_object().ok_or("Tool arguments must be an object.")?;
+    let args = req
+        .args
+        .as_object()
+        .ok_or("Tool arguments must be an object.")?;
 
     match name.as_str() {
         "read" => read_file(&root, path_arg(args)?),
         "glob" => list_tree(&root, optional_path_arg(args).unwrap_or(".")),
-        "grep" => grep_tree(&root, optional_path_arg(args).unwrap_or("."), string_arg(args, &["pattern", "query", "search"])?),
+        "grep" => grep_tree(
+            &root,
+            optional_path_arg(args).unwrap_or("."),
+            string_arg(args, &["pattern", "query", "search"])?,
+        ),
         "bash" => run_bash(&root, string_arg(args, &["command", "cmd", "shell"])?).await,
         "edit" | "replace_in_file" => replace_in_file(
             &root,
             path_arg(args)?,
-            string_arg(args, &["oldString", "old_string", "oldText", "old_text", "before", "old"])?,
-            string_arg(args, &["newString", "new_string", "newText", "new_text", "after", "new"])?,
+            string_arg(
+                args,
+                &[
+                    "oldString",
+                    "old_string",
+                    "oldText",
+                    "old_text",
+                    "before",
+                    "old",
+                ],
+            )?,
+            string_arg(
+                args,
+                &[
+                    "newString",
+                    "new_string",
+                    "newText",
+                    "new_text",
+                    "after",
+                    "new",
+                ],
+            )?,
         ),
-        "write" | "write_to_file" | "create_file" => {
-            write_file(&root, path_arg(args)?, string_arg(args, &["content", "contents", "text", "data"])?)
-        }
+        "write" | "write_to_file" | "create_file" => write_file(
+            &root,
+            path_arg(args)?,
+            string_arg(args, &["content", "contents", "text", "data"])?,
+        ),
         "delete_file" => delete_file(&root, path_arg(args)?),
         "rename_file" | "move_file" => move_path(&root, source_arg(args)?, destination_arg(args)?),
         "copy_file" => copy_file(&root, source_arg(args)?, destination_arg(args)?),
         "create_folder" | "create_directory" => create_dir(&root, directory_arg(args)?),
         "delete_folder" | "delete_directory" => delete_dir(&root, directory_arg(args)?),
-        "rename_folder" | "move_folder" => move_path(&root, source_arg(args)?, destination_arg(args)?),
+        "rename_folder" | "move_folder" => {
+            move_path(&root, source_arg(args)?, destination_arg(args)?)
+        }
         "copy_folder" => copy_dir(&root, source_arg(args)?, destination_arg(args)?),
         other => Err(format!("Unsupported coding tool: {other}")),
     }
@@ -71,7 +102,9 @@ fn canonical_root(root: &str) -> Result<PathBuf, String> {
     if root.trim().is_empty() {
         return Err("Set a project root before running coding tools.".into());
     }
-    let p = p.canonicalize().map_err(|e| format!("Could not open project root: {e}"))?;
+    let p = p
+        .canonicalize()
+        .map_err(|e| format!("Could not open project root: {e}"))?;
     if !p.is_dir() {
         return Err("Project root must be a directory.".into());
     }
@@ -119,7 +152,10 @@ fn safe_join(root: &Path, value: &str) -> Result<PathBuf, String> {
             .map_err(|e| format!("Absolute path must already exist inside project: {e}"))?;
         return ensure_inside(root, canon);
     }
-    if rel.components().any(|c| matches!(c, Component::ParentDir | Component::Prefix(_))) {
+    if rel
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+    {
         return Err("Path traversal is not allowed.".into());
     }
     Ok(root.join(rel))
@@ -133,9 +169,16 @@ fn ensure_inside(root: &Path, path: PathBuf) -> Result<PathBuf, String> {
     }
 }
 
-fn string_arg<'a>(args: &'a serde_json::Map<String, Value>, keys: &[&str]) -> Result<&'a str, String> {
+fn string_arg<'a>(
+    args: &'a serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Result<&'a str, String> {
     for key in keys {
-        if let Some(value) = args.get(*key).and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+        if let Some(value) = args
+            .get(*key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+        {
             return Ok(value);
         }
     }
@@ -155,15 +198,40 @@ fn optional_path_arg(args: &serde_json::Map<String, Value>) -> Option<&str> {
 }
 
 fn directory_arg(args: &serde_json::Map<String, Value>) -> Result<&str, String> {
-    string_arg(args, &["directory", "dir", "folder", "folderPath", "folder_path", "path"])
+    string_arg(
+        args,
+        &[
+            "directory",
+            "dir",
+            "folder",
+            "folderPath",
+            "folder_path",
+            "path",
+        ],
+    )
 }
 
 fn source_arg(args: &serde_json::Map<String, Value>) -> Result<&str, String> {
-    string_arg(args, &["source", "src", "from", "oldPath", "old_path", "path"])
+    string_arg(
+        args,
+        &["source", "src", "from", "oldPath", "old_path", "path"],
+    )
 }
 
 fn destination_arg(args: &serde_json::Map<String, Value>) -> Result<&str, String> {
-    string_arg(args, &["destination", "dest", "to", "target", "targetPath", "target_path", "newPath", "new_path"])
+    string_arg(
+        args,
+        &[
+            "destination",
+            "dest",
+            "to",
+            "target",
+            "targetPath",
+            "target_path",
+            "newPath",
+            "new_path",
+        ],
+    )
 }
 
 fn read_file(root: &Path, path: &str) -> Result<String, String> {
@@ -173,7 +241,10 @@ fn read_file(root: &Path, path: &str) -> Result<String, String> {
         return Err("Read target is not a file.".into());
     }
     if meta.len() > MAX_READ_BYTES {
-        return Err(format!("File is too large to read safely ({} bytes).", meta.len()));
+        return Err(format!(
+            "File is too large to read safely ({} bytes).",
+            meta.len()
+        ));
     }
     fs::read_to_string(&path).map_err(|e| format!("Could not read file: {e}"))
 }
@@ -181,7 +252,8 @@ fn read_file(root: &Path, path: &str) -> Result<String, String> {
 fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> {
     let path = resolve_target(root, path)?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Could not create parent directory: {e}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create parent directory: {e}"))?;
     }
     fs::write(&path, content).map_err(|e| format!("Could not write file: {e}"))?;
     Ok(format!("Wrote {}", display_rel(root, &path)))
@@ -229,10 +301,15 @@ fn move_path(root: &Path, source: &str, destination: &str) -> Result<String, Str
     let source = resolve_existing(root, source)?;
     let destination = resolve_target(root, destination)?;
     if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Could not create destination parent: {e}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create destination parent: {e}"))?;
     }
     fs::rename(&source, &destination).map_err(|e| format!("Could not move path: {e}"))?;
-    Ok(format!("Moved {} to {}", display_rel(root, &source), display_rel(root, &destination)))
+    Ok(format!(
+        "Moved {} to {}",
+        display_rel(root, &source),
+        display_rel(root, &destination)
+    ))
 }
 
 fn copy_file(root: &Path, source: &str, destination: &str) -> Result<String, String> {
@@ -242,10 +319,15 @@ fn copy_file(root: &Path, source: &str, destination: &str) -> Result<String, Str
         return Err("Copy source is not a file.".into());
     }
     if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Could not create destination parent: {e}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create destination parent: {e}"))?;
     }
     fs::copy(&source, &destination).map_err(|e| format!("Could not copy file: {e}"))?;
-    Ok(format!("Copied {} to {}", display_rel(root, &source), display_rel(root, &destination)))
+    Ok(format!(
+        "Copied {} to {}",
+        display_rel(root, &source),
+        display_rel(root, &destination)
+    ))
 }
 
 fn copy_dir(root: &Path, source: &str, destination: &str) -> Result<String, String> {
@@ -255,11 +337,16 @@ fn copy_dir(root: &Path, source: &str, destination: &str) -> Result<String, Stri
         return Err("Copy source is not a folder.".into());
     }
     copy_dir_recursive(&source, &destination)?;
-    Ok(format!("Copied folder {} to {}", display_rel(root, &source), display_rel(root, &destination)))
+    Ok(format!(
+        "Copied folder {} to {}",
+        display_rel(root, &source),
+        display_rel(root, &destination)
+    ))
 }
 
 fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
-    fs::create_dir_all(destination).map_err(|e| format!("Could not create destination folder: {e}"))?;
+    fs::create_dir_all(destination)
+        .map_err(|e| format!("Could not create destination folder: {e}"))?;
     for entry in fs::read_dir(source).map_err(|e| format!("Could not read source folder: {e}"))? {
         let entry = entry.map_err(|e| e.to_string())?;
         let src = entry.path();
@@ -285,7 +372,9 @@ fn list_tree(root: &Path, path: &str) -> Result<String, String> {
     }
     let mut text = out.join("\n");
     if out.len() >= MAX_LIST_ENTRIES {
-        text.push_str(&format!("\n[listing truncated at {MAX_LIST_ENTRIES} entries]"));
+        text.push_str(&format!(
+            "\n[listing truncated at {MAX_LIST_ENTRIES} entries]"
+        ));
     }
     Ok(text)
 }
@@ -325,12 +414,19 @@ fn grep_tree(root: &Path, path: &str, pattern: &str) -> Result<String, String> {
     }
     let mut text = matches.join("\n");
     if matches.len() >= MAX_LIST_ENTRIES {
-        text.push_str(&format!("\n[results truncated at {MAX_LIST_ENTRIES} matches]"));
+        text.push_str(&format!(
+            "\n[results truncated at {MAX_LIST_ENTRIES} matches]"
+        ));
     }
     Ok(text)
 }
 
-fn grep_visit(path: &Path, root: &Path, pattern: &str, out: &mut Vec<String>) -> Result<(), String> {
+fn grep_visit(
+    path: &Path,
+    root: &Path,
+    pattern: &str,
+    out: &mut Vec<String>,
+) -> Result<(), String> {
     if out.len() >= MAX_LIST_ENTRIES {
         return Ok(());
     }
@@ -348,11 +444,15 @@ fn grep_visit(path: &Path, root: &Path, pattern: &str, out: &mut Vec<String>) ->
         }
         return Ok(());
     }
-    let Ok(meta) = fs::metadata(path) else { return Ok(()) };
+    let Ok(meta) = fs::metadata(path) else {
+        return Ok(());
+    };
     if !meta.is_file() || meta.len() > MAX_READ_BYTES {
         return Ok(());
     }
-    let Ok(text) = fs::read_to_string(path) else { return Ok(()) };
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok(());
+    };
     for (i, line) in text.lines().enumerate() {
         // A single minified bundle can match on every line, so the cap has to
         // bind inside the file too, not only between files.
@@ -379,18 +479,18 @@ async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
     let output = timeout(
         Duration::from_secs(120),
         Command::new("sh")
-        .arg("-lc")
-        .arg(command)
-        .current_dir(root)
-        // Without this the timeout only drops the future: the shell and its
-        // children keep running unsupervised, and a `npm run dev` the model
-        // tried to verify with would hold the port until the app is killed.
-        .kill_on_drop(true)
-        .output(),
+            .arg("-lc")
+            .arg(command)
+            .current_dir(root)
+            // Without this the timeout only drops the future: the shell and its
+            // children keep running unsupervised, and a `npm run dev` the model
+            // tried to verify with would hold the port until the app is killed.
+            .kill_on_drop(true)
+            .output(),
     )
     .await
     .map_err(|_| "Command timed out after 120 seconds.".to_string())?
-        .map_err(|e| format!("Could not run command: {e}"))?;
+    .map_err(|e| format!("Could not run command: {e}"))?;
     let mut text = String::new();
     if !output.stdout.is_empty() {
         text.push_str(&String::from_utf8_lossy(&output.stdout));
@@ -406,9 +506,16 @@ async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
         text.push_str("\n[output truncated]");
     }
     if !output.status.success() {
-        return Err(format!("Command exited with status {}.\n{}", output.status, text));
+        return Err(format!(
+            "Command exited with status {}.\n{}",
+            output.status, text
+        ));
     }
-    Ok(if text.trim().is_empty() { "(command completed with no output)".into() } else { text })
+    Ok(if text.trim().is_empty() {
+        "(command completed with no output)".into()
+    } else {
+        text
+    })
 }
 
 fn display_rel(root: &Path, path: &Path) -> String {

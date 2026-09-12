@@ -491,8 +491,20 @@ mod tests {
     #[test]
     fn confidence_is_the_mean_of_what_was_scored() {
         let words = vec![
-            OcrWord { text: "a".into(), left: 0, right: 8, confidence: 1.0, ends_line: false },
-            OcrWord { text: "b".into(), left: 16, right: 24, confidence: 0.5, ends_line: true },
+            OcrWord {
+                text: "a".into(),
+                left: 0,
+                right: 8,
+                confidence: 1.0,
+                ends_line: false,
+            },
+            OcrWord {
+                text: "b".into(),
+                left: 16,
+                right: 24,
+                confidence: 0.5,
+                ends_line: true,
+            },
         ];
         let p = assemble(&words);
         assert!((p.confidence - 0.75).abs() < 0.001, "{}", p.confidence);

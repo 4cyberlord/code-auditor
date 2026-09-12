@@ -106,6 +106,7 @@ const [
   { titleFor, isPlaceholder },
   extraction,
   { knowledgePackFor },
+  mcq,
 ] = await Promise.all([
   import("../src/lib/prompts.ts"),
   import("../src/lib/parse.ts"),
@@ -114,7 +115,10 @@ const [
   import("../src/lib/title.ts"),
   import("../src/lib/extraction.ts"),
   import("../src/lib/knowledge.ts"),
+  import("../src/lib/mcq.ts"),
 ]);
+
+const { detectMcq, parseMcqAnswer } = mcq;
 
 const {
   EXTRACTION_SYSTEM,
@@ -1351,6 +1355,167 @@ async function saveCouncilReport(job, report) {
   return markdown;
 }
 
+async function saveMcqReport(job, answer, reading, raw = "") {
+  const markdown = [
+    `# MCQ Answer`,
+    "",
+    `**Answer:** ${answer.answer?.label || ""}${answer.answer?.text ? ` — ${answer.answer.text}` : ""}`,
+    "",
+    answer.reason || "",
+    "",
+    answer.whyNot?.length ? "## Why the others are not best" : "",
+    ...(answer.whyNot || []).map((x) => `- ${x.label}: ${x.reason}`),
+  ].filter(Boolean).join("\n");
+  const report = {
+    kind: "mcq",
+    ...answer,
+    reading: {
+      readers: reading?.readers || [],
+      agree: reading?.agreement?.agree ?? null,
+      confidence: reading?.extraction?.confidence ?? 0,
+      markdown: reading?.markdown || "",
+    },
+    raw,
+  };
+  await rest("council_reports", {
+    method: "POST",
+    body: JSON.stringify({
+      job_id: job.id,
+      session_id: job.session_id,
+      winner: answer.answer?.label || null,
+      synthesis: answer.reason || "",
+      markdown,
+      report,
+    }),
+  });
+  return markdown;
+}
+
+function mcqSystemPrompt() {
+  return [
+    "You answer multiple-choice questions from screenshots.",
+    "First use any LOCAL KNOWLEDGE section as the preferred source. If it does not directly answer the question, reason from the question and choices.",
+    "Return ONLY JSON with this exact shape:",
+    '{"kind":"mcq","question":"...","options":[{"label":"A","text":"..."}],"answer":{"label":"A","text":"..."},"reason":"why this answer is valid","whyNot":[{"label":"B","reason":"why not"}],"knowledgeUsed":false,"model":"MODEL_ID"}',
+  ].join("\n");
+}
+
+function mcqUserPrompt({ readingText, knowledge, detection, model }) {
+  return [
+    "QUESTION / SCREEN READING",
+    readingText || "(No reliable transcription was produced; use the attached image if present.)",
+    "",
+    detection?.options?.length ? `DETECTED OPTIONS\n${detection.options.map((o) => `${o.label}. ${o.text}`).join("\n")}` : "",
+    "",
+    knowledge?.trim() ? `LOCAL KNOWLEDGE\n${knowledge.trim()}` : "LOCAL KNOWLEDGE\nNo local exact answer was found.",
+    "",
+    `Set model to ${model}. Choose the single best answer and explain why it beats the other choices.`,
+  ].filter(Boolean).join("\n");
+}
+
+function mcqEndpointFor(settings, model) {
+  if (settings?.mcqEndpoint === "chat" || settings?.mcqEndpoint === "responses") return settings.mcqEndpoint;
+  return endpointForCouncilModel(settings?.councilModels, model);
+}
+
+async function mcqGenerate({ settings, baseUrl, model, system, user, images = [], maxTokens = 2048 }) {
+  const args = { baseUrl, model, system, user, images, maxTokens, reasoning: reasoningForModel(settings, model) };
+  return mcqEndpointFor(settings, model) === "responses"
+    ? tokenRouterResponses(args)
+    : tokenRouterChat(args);
+}
+
+function mcqModel(settings, models) {
+  const preferred = String(settings?.mcqModel || "anthropic/claude-fable-5").trim();
+  const available = reachableSeats([{ id: preferred }], (m) => m?.id, settings?.availableModels).reachable;
+  if (available.length) return preferred;
+  return models[0]?.id || preferred;
+}
+
+async function runMcqJob(job, { images = null, reading = null, bench = null } = {}) {
+  await addEvent(job.id, "info", "claimed", "Cloud worker claimed the MCQ job.");
+  await notify(job.id, APP_DISPLAY_NAME, "MCQ job started.");
+  await addEvent(job.id, "info", "mcq", "MCQ overlay workflow selected.");
+  await loadOwnerSecrets(job.owner_id);
+  if (!secret("TOKENROUTER_API_KEY")) {
+    const message = "No TokenRouter key is saved for the account that owns this job.";
+    await addEvent(job.id, "error", "needs_attention", message);
+    await patchJob(job.id, { status: "needs_attention", progress_phase: "needs_attention", error: message, finished_at: new Date().toISOString() });
+    return;
+  }
+
+  const settings = job.settings_snapshot || {};
+  const baseUrl = gatewayBaseUrl(settings);
+  const roster = Array.isArray(settings.councilModels) && settings.councilModels.length
+    ? settings.councilModels
+    : COUNCIL_DEFAULT_MODELS;
+  const models = reachableSeats(roster, (m) => m?.id, settings.availableModels).reachable;
+  const model = mcqModel(settings, models);
+  const localBench = bench || createBench(job);
+
+  await patchJob(job.id, { progress_phase: "mcq_reading", mode: "mcq" });
+  const jobImages = images || await downloadJobImages(job.id);
+  const imageRefs = jobImages.map((img) => ({ group: String(img.fileName || "") }));
+  const readerPool = partitionByVision(
+    localBench.keep([{ id: model }, ...models], (m) => m.id),
+    (m) => m.id,
+    settings.probes,
+    settings.councilModels
+  ).seeing.filter((m) => !localBench.isBlind(m.id));
+  const mcqReading = reading || await readScreenshots({
+    job,
+    settings,
+    baseUrl,
+    models: readerPool.length ? readerPool : [{ id: model }],
+    images: jobImages,
+    imageRefs,
+    bench: localBench,
+  });
+  const readingText = [mcqReading.context, mcqReading.markdown].filter(Boolean).join("\n\n");
+  const detection = detectMcq(readingText);
+  const knowledge = knowledgePackFor(
+    [detection.question, ...detection.options.map((o) => `${o.label}. ${o.text}`), readingText].filter(Boolean).join("\n"),
+    Math.max(1, Number(settings.knowledgeLimit || 5))
+  );
+  await addEvent(job.id, knowledge.trim() ? "info" : "warn", "knowledge_selected", knowledge.trim() ? "Checked local knowledge before MCQ solving." : "Local knowledge had no matching MCQ guidance.", {
+    bytes: Buffer.byteLength(knowledge || "", "utf8"),
+    options: detection.options.length,
+  });
+
+  await patchJob(job.id, { progress_phase: "mcq_solving" });
+  const raw = await mcqGenerate({
+    settings,
+    baseUrl,
+    model,
+    system: mcqSystemPrompt(),
+    user: mcqUserPrompt({ readingText, knowledge, detection, model }),
+    images: detection.isMcq ? [] : jobImages,
+    maxTokens: Math.min(Number(settings.maxTokens || 4096), 4096),
+  });
+  const parsed = parseMcqAnswer(raw, {
+    question: detection.question,
+    options: detection.options,
+    knowledgeUsed: Boolean(knowledge.trim()),
+    model,
+  });
+  if (!parsed?.answer?.label && !parsed?.answer?.text) {
+    throw new Error("The MCQ model answered, but no selected answer could be parsed.");
+  }
+  parsed.model = parsed.model || model;
+  parsed.knowledgeUsed = Boolean(parsed.knowledgeUsed || knowledge.trim());
+  const markdown = await saveMcqReport(job, parsed, mcqReading, raw);
+  await patchJob(job.id, {
+    status: "completed",
+    progress_phase: "completed",
+    mode: "mcq",
+    error: null,
+    result_summary: `${parsed.answer.label ? `${parsed.answer.label}: ` : ""}${parsed.answer.text || parsed.reason}`.slice(0, 500),
+    finished_at: new Date().toISOString(),
+  });
+  await addEvent(job.id, "info", "completed", "MCQ job completed.", { markdownBytes: Buffer.byteLength(markdown, "utf8"), model });
+  await notify(job.id, APP_DISPLAY_NAME, "MCQ answer ready.");
+}
+
 function b64url(input) {
   return Buffer.from(input)
     .toString("base64")
@@ -1462,6 +1627,11 @@ async function claim(job) {
 }
 
 export async function runCouncilJob(job) {
+  if (job.mode === "mcq") {
+    await runMcqJob(job);
+    return;
+  }
+
   await addEvent(job.id, "info", "claimed", "Cloud worker claimed the job.");
   await notify(job.id, APP_DISPLAY_NAME, "Council job started.");
 
@@ -1582,11 +1752,15 @@ export async function runCouncilJob(job) {
     );
   }
 
-  // Transcription is off by default and exists for exactly one case: nobody on
-  // the bench can see. Then a reading is the difference between an answer and
-  // no answer, and the cost stops being a matter of taste.
+  // Transcription is off by default for pure coding runs, but Auto overlay mode
+  // needs a short read before solving so it can decide whether this is MCQ or
+  // coding. That keeps MCQ a sibling of the existing overlay mechanism instead
+  // of a separate manual-only path.
   const mustTranscribe = seeing.length === 0;
-  const wantsTranscript = settings.transcribeScreenshots === true || mustTranscribe;
+  const wantsTranscript =
+    settings.transcribeScreenshots === true ||
+    mustTranscribe ||
+    settings.overlayMode === "auto";
 
   // Readers are drawn from the whole reachable roster, not from the four solver
   // seats. This used to hand the picture to `available` — which, when the
@@ -1625,6 +1799,13 @@ export async function runCouncilJob(job) {
   const reading = wantsTranscript
     ? await readScreenshots({ job, settings, baseUrl, models: readerPool, images, imageRefs, bench })
     : { extraction: null, context: "", markdown: "", readers: [], agreement: null };
+
+  const overlayReadingText = [reading.context, reading.markdown].filter(Boolean).join("\n\n");
+  if (settings.overlayMode === "auto" && overlayReadingText && detectMcq(overlayReadingText).isMcq) {
+    await addEvent(job.id, "info", "mcq_detected", "Auto overlay mode detected multiple-choice answer options.");
+    await runMcqJob({ ...job, settings_snapshot: settings, mode: "mcq" }, { images, reading, bench });
+    return;
+  }
 
   // Who actually solves: the seeing models, or — only when none can see — the
   // whole bench working from the transcription.

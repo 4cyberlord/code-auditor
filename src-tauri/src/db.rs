@@ -46,13 +46,17 @@ pub struct Db;
 // on connect, because it no longer connects. Schema changes are applied with
 // the Supabase CLI or the SQL editor.
 
-
 // ------------------------------------------------------------------ settings
 
 #[tauri::command]
 pub async fn settings_load(db: tauri::State<'_, Db>, key: String) -> Result<Option<Value>, String> {
     crate::auth::require()?;
-    crate::server_api::call(db.inner(), "settings.load", serde_json::json!({ "key": key.trim() })).await
+    crate::server_api::call(
+        db.inner(),
+        "settings.load",
+        serde_json::json!({ "key": key.trim() }),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -76,4 +80,3 @@ pub async fn settings_save(
 }
 
 // -------------------------------------------------------------------- health
-

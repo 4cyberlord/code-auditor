@@ -226,13 +226,20 @@ fn local_qwen_api_key(override_key: Option<&str>) -> String {
     override_key
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .or_else(|| saved_key.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+        .or_else(|| {
+            saved_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or("local")
         .to_string()
 }
 
 #[tauri::command]
-pub async fn run_coding_model_step(req: CodingModelStepRequest) -> Result<LocalQwenResponse, String> {
+pub async fn run_coding_model_step(
+    req: CodingModelStepRequest,
+) -> Result<LocalQwenResponse, String> {
     crate::auth::require()?;
     let provider = req.provider.trim();
     if !matches!(provider, "openai" | "moonshot" | "tokenrouter") {
@@ -249,13 +256,15 @@ pub async fn run_coding_model_step(req: CodingModelStepRequest) -> Result<LocalQ
     }
 
     let key = secrets::read_api_key(provider)?;
-    let base = req.base_url.clone().filter(|b| !b.trim().is_empty()).unwrap_or_else(|| {
-        match provider {
+    let base = req
+        .base_url
+        .clone()
+        .filter(|b| !b.trim().is_empty())
+        .unwrap_or_else(|| match provider {
             "openai" => "https://api.openai.com/v1".into(),
             "tokenrouter" => "https://api.tokenrouter.com/v1".into(),
             _ => "https://api.moonshot.ai/v1".into(),
-        }
-    });
+        });
     let mut body = json!({
         "model": model,
         "messages": req.messages,
@@ -279,7 +288,13 @@ pub async fn run_coding_model_step(req: CodingModelStepRequest) -> Result<LocalQ
     let key_c = key.clone();
     let body_c = body.clone();
     let sent = send_governed(
-        || client.post(&url).header("Authorization", format!("Bearer {key_c}")).json(&body_c).timeout(ONCE_TIMEOUT),
+        || {
+            client
+                .post(&url)
+                .header("Authorization", format!("Bearer {key_c}"))
+                .json(&body_c)
+                .timeout(ONCE_TIMEOUT)
+        },
         provider == GATEWAY,
     )
     .await
@@ -287,7 +302,10 @@ pub async fn run_coding_model_step(req: CodingModelStepRequest) -> Result<LocalQ
     let status = sent.status();
     let text = sent.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("{provider} {status}: {}", truncate(&explain(&text), 600)));
+        return Err(format!(
+            "{provider} {status}: {}",
+            truncate(&explain(&text), 600)
+        ));
     }
     let v: Value = serde_json::from_str(&text)
         .map_err(|e| format!("{provider}: response was not JSON ({e})"))?;
@@ -295,7 +313,9 @@ pub async fn run_coding_model_step(req: CodingModelStepRequest) -> Result<LocalQ
 }
 
 #[tauri::command]
-pub async fn inspect_local_qwen(req: LocalQwenInspectRequest) -> Result<LocalQwenInspectResult, String> {
+pub async fn inspect_local_qwen(
+    req: LocalQwenInspectRequest,
+) -> Result<LocalQwenInspectResult, String> {
     crate::auth::require()?;
     let base = req.base_url.trim().trim_end_matches('/');
     if base.is_empty() {
@@ -354,7 +374,9 @@ pub async fn run_local_qwen(req: LocalQwenRequest) -> Result<String, String> {
         return Ok(response.content);
     }
     if !response.tool_calls.is_empty() {
-        return Err("qwen returned tool calls, but this caller expected a final text response.".into());
+        return Err(
+            "qwen returned tool calls, but this caller expected a final text response.".into(),
+        );
     }
     Err("qwen returned an empty response.".into())
 }
@@ -383,7 +405,12 @@ pub async fn run_local_qwen_step(req: LocalQwenRequest) -> Result<LocalQwenRespo
         body["tools"] = Value::Array(tools);
         body["tool_choice"] = json!("auto");
     }
-    if let Some(mode) = req.mode.as_deref().map(str::trim).filter(|mode| !mode.is_empty()) {
+    if let Some(mode) = req
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+    {
         body["metadata"] = json!({ "mode": mode });
     }
     // Forward the reasoning choice only when the caller made one, so the bridge
@@ -398,37 +425,43 @@ pub async fn run_local_qwen_step(req: LocalQwenRequest) -> Result<LocalQwenRespo
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&body)
         .timeout(BRIDGE_TIMEOUT);
-    if let Some(run_id) = req.run_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(run_id) = req
+        .run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         request = request.header("x-bridge-run-id", run_id);
     }
 
-    let resp = request
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                // The generic transport wording sends people looking for a
-                // network fault. Past BRIDGE_TIMEOUT the bridge's own deadline
-                // has already come and gone, and dropping this request tells
-                // the bridge to cancel the run and kill the upstream task —
-                // so nothing keeps billing. The bridge terminal is where the
-                // upstream error is, not the connection.
-                format!(
-                    "qwen: the bridge did not answer within {}s. The run was cancelled and its \
+    let resp = request.send().await.map_err(|e| {
+        if e.is_timeout() {
+            // The generic transport wording sends people looking for a
+            // network fault. Past BRIDGE_TIMEOUT the bridge's own deadline
+            // has already come and gone, and dropping this request tells
+            // the bridge to cancel the run and kill the upstream task —
+            // so nothing keeps billing. The bridge terminal is where the
+            // upstream error is, not the connection.
+            format!(
+                "qwen: the bridge did not answer within {}s. The run was cancelled and its \
                      upstream task killed — check the bridge terminal for the upstream error.",
-                    BRIDGE_TIMEOUT.as_secs()
-                )
-            } else {
-                format!("qwen: {}", transport_detail(&e))
-            }
-        })?;
+                BRIDGE_TIMEOUT.as_secs()
+            )
+        } else {
+            format!("qwen: {}", transport_detail(&e))
+        }
+    })?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("qwen {}: {}", status, truncate(&explain(&text), 600)));
+        return Err(format!(
+            "qwen {}: {}",
+            status,
+            truncate(&explain(&text), 600)
+        ));
     }
-    let v: Value = serde_json::from_str(&text)
-        .map_err(|e| format!("qwen: response was not JSON ({e})"))?;
+    let v: Value =
+        serde_json::from_str(&text).map_err(|e| format!("qwen: response was not JSON ({e})"))?;
     Ok(parse_local_qwen_response(&v))
 }
 
@@ -465,7 +498,11 @@ pub async fn cancel_local_qwen(req: LocalQwenCancelRequest) -> Result<bool, Stri
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("qwen cancel {}: {}", status, truncate(&explain(&text), 300)));
+        return Err(format!(
+            "qwen cancel {}: {}",
+            status,
+            truncate(&explain(&text), 300)
+        ));
     }
     Ok(serde_json::from_str::<Value>(&text)
         .ok()
@@ -493,8 +530,13 @@ fn parse_local_qwen_response(v: &Value) -> LocalQwenResponse {
                     let name = function["name"].as_str()?.to_string();
                     let id = call["id"].as_str().unwrap_or("tool-call").to_string();
                     let raw_args = function["arguments"].as_str().unwrap_or("{}");
-                    let arguments = serde_json::from_str(raw_args).unwrap_or_else(|_| json!({ "raw": raw_args }));
-                    Some(LocalQwenToolCall { id, name, arguments })
+                    let arguments = serde_json::from_str(raw_args)
+                        .unwrap_or_else(|_| json!({ "raw": raw_args }));
+                    Some(LocalQwenToolCall {
+                        id,
+                        name,
+                        arguments,
+                    })
                 })
                 .collect()
         })
@@ -509,7 +551,12 @@ fn parse_local_qwen_response(v: &Value) -> LocalQwenResponse {
     } else {
         None
     };
-    LocalQwenResponse { content, tool_calls, reasoning, wiro }
+    LocalQwenResponse {
+        content,
+        tool_calls,
+        reasoning,
+        wiro,
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -584,7 +631,12 @@ pub async fn run_agent(
             Err(message) => {
                 let _ = app.emit(
                     EV_ERROR,
-                    ErrorPayload { run_id, agent_id, attempt_id, message },
+                    ErrorPayload {
+                        run_id,
+                        agent_id,
+                        attempt_id,
+                        message,
+                    },
                 );
             }
         }
@@ -677,7 +729,12 @@ async fn run_once_responses(req: &RunRequest) -> Result<String, String> {
     let status = resp.status();
     let body_text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("{} {}: {}", req.provider, status, truncate(&explain(&body_text), 600)));
+        return Err(format!(
+            "{} {}: {}",
+            req.provider,
+            status,
+            truncate(&explain(&body_text), 600)
+        ));
     }
     parse_responses_text(&req.provider, &body_text).map(|(text, _)| text)
 }
@@ -729,7 +786,12 @@ async fn execute(
                 truncate(&explain(&body), 300)
             ));
         }
-        return Err(format!("{} {}: {}", req.provider, status, truncate(&explain(&body), 600)));
+        return Err(format!(
+            "{} {}: {}",
+            req.provider,
+            status,
+            truncate(&explain(&body), 600)
+        ));
     }
 
     let mut stream = resp.bytes_stream();
@@ -763,12 +825,16 @@ async fn execute(
             buffer.drain(..lead);
 
             for line in frame.lines() {
-                let Some(data) = line.strip_prefix("data:") else { continue };
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
                 let data = data.trim();
                 if data.is_empty() || data == "[DONE]" {
                     continue;
                 }
-                let Ok(v) = serde_json::from_str::<Value>(data) else { continue };
+                let Ok(v) = serde_json::from_str::<Value>(data) else {
+                    continue;
+                };
 
                 // Providers can fail *inside* a 200 response (overloaded, content
                 // filter, quota). Without this the stream just stops and the user
@@ -864,7 +930,12 @@ async fn execute_responses(
     let status = resp.status();
     let body_text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(format!("{} {}: {}", req.provider, status, truncate(&explain(&body_text), 600)));
+        return Err(format!(
+            "{} {}: {}",
+            req.provider,
+            status,
+            truncate(&explain(&body_text), 600)
+        ));
     }
 
     let (out, usage) = parse_responses_text(&req.provider, &body_text)?;
@@ -936,7 +1007,9 @@ fn parse_responses_text(provider: &str, body_text: &str) -> Result<(String, Usag
     }
 
     if out.trim().is_empty() {
-        return Err(format!("{provider}: responded, but the reply had no text content."));
+        return Err(format!(
+            "{provider}: responded, but the reply had no text content."
+        ));
     }
     Ok((out, usage))
 }
@@ -1070,7 +1143,12 @@ pub async fn probe_models(
         let key_c = key.clone();
         let body_c = body.clone();
         let sent = send_governed(
-            || client.post(&url_c).header("Authorization", format!("Bearer {key_c}")).json(&body_c),
+            || {
+                client
+                    .post(&url_c)
+                    .header("Authorization", format!("Bearer {key_c}"))
+                    .json(&body_c)
+            },
             true,
         )
         .await;
@@ -1082,7 +1160,10 @@ pub async fn probe_models(
                 model: model.clone(),
                 ok: false,
                 ms,
-                error: Some(format!("Could not reach the router: {}", transport_detail(&e))),
+                error: Some(format!(
+                    "Could not reach the router: {}",
+                    transport_detail(&e)
+                )),
                 reply: None,
                 vision: vision.as_ref().map(|v| v.0),
                 vision_note: vision.clone().map(|v| v.1),
@@ -1116,7 +1197,10 @@ pub async fn probe_models(
                                             .filter(|item| item["type"] == "message")
                                             .filter_map(|item| item["content"].as_array())
                                             .flatten()
-                                            .filter(|part| part["type"] == "output_text" || part["type"] == "text")
+                                            .filter(|part| {
+                                                part["type"] == "output_text"
+                                                    || part["type"] == "text"
+                                            })
                                             .filter_map(|part| part["text"].as_str())
                                             .collect::<Vec<_>>()
                                             .join("")
@@ -1161,7 +1245,11 @@ pub async fn probe_models(
                             reply: Some(if confirmed {
                                 truncate(&reply, 80)
                             } else {
-                                format!("replied \"{}\" (asked for {})", truncate(&reply, 60), model)
+                                format!(
+                                    "replied \"{}\" (asked for {})",
+                                    truncate(&reply, 60),
+                                    model
+                                )
                             }),
                             vision: vision.as_ref().map(|v| v.0),
                             vision_note: vision.map(|v| v.1),
@@ -1220,7 +1308,10 @@ async fn probe_vision(
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
-                return (false, format!("{status}: {}", truncate(&explain(&text), 200)));
+                return (
+                    false,
+                    format!("{status}: {}", truncate(&explain(&text), 200)),
+                );
             }
             let reply = serde_json::from_str::<Value>(&text)
                 .ok()
@@ -1232,7 +1323,13 @@ async fn probe_vision(
                 .unwrap_or_default();
 
             if reply.contains("red") {
-                (true, format!("Read the test image correctly (\"{}\").", truncate(&reply, 40)))
+                (
+                    true,
+                    format!(
+                        "Read the test image correctly (\"{}\").",
+                        truncate(&reply, 40)
+                    ),
+                )
             } else if reply.is_empty() {
                 (false, "Accepted the image but replied with nothing.".into())
             } else {
@@ -1241,7 +1338,10 @@ async fn probe_vision(
                 // trusted with a screenshot.
                 (
                     false,
-                    format!("Did not describe the image; said \"{}\".", truncate(&reply, 40)),
+                    format!(
+                        "Did not describe the image; said \"{}\".",
+                        truncate(&reply, 40)
+                    ),
                 )
             }
         }
@@ -1346,7 +1446,9 @@ fn transport_detail(e: &reqwest::Error) -> String {
         );
     }
     if low.contains("timed out") || low.contains("timeout") {
-        return format!("{joined}\n\nNothing came back in time. Rerunning that pane often clears it.");
+        return format!(
+            "{joined}\n\nNothing came back in time. Rerunning that pane often clears it."
+        );
     }
     if low.contains("dns") || low.contains("resolve") {
         return format!("{joined}\n\nThe address did not resolve. Check the Base URL in Settings.");
@@ -1418,9 +1520,10 @@ fn gate() -> &'static Gate {
 /// Tells the governor how many requests a minute this key is allowed.
 #[tauri::command]
 pub fn set_gateway_rate(per_minute: u32) {
-    gate()
-        .per_window
-        .store((per_minute.max(1)) as usize, std::sync::atomic::Ordering::Relaxed);
+    gate().per_window.store(
+        (per_minute.max(1)) as usize,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// Waits until sending one more gateway request is within budget, and returns
@@ -1578,13 +1681,14 @@ fn build_request(
     let key = secrets::read_api_key(&req.provider)?;
     match req.provider.as_str() {
         "openai" | "moonshot" | "tokenrouter" => {
-            let base = req.base_url.clone().unwrap_or_else(|| {
-                match req.provider.as_str() {
+            let base = req
+                .base_url
+                .clone()
+                .unwrap_or_else(|| match req.provider.as_str() {
                     "openai" => "https://api.openai.com/v1".into(),
                     "tokenrouter" => "https://api.tokenrouter.com/v1".into(),
                     _ => "https://api.moonshot.ai/v1".into(),
-                }
-            });
+                });
             let mut content = vec![json!({ "type": "text", "text": req.user_text })];
             for img in &req.images {
                 content.push(json!({
@@ -1681,7 +1785,12 @@ fn build_request(
                 "generateContent"
             };
             Ok((
-                format!("{}/models/{}:{}", base.trim_end_matches('/'), req.model, verb),
+                format!(
+                    "{}/models/{}:{}",
+                    base.trim_end_matches('/'),
+                    req.model,
+                    verb
+                ),
                 vec![("x-goog-api-key".into(), key)],
                 body,
             ))

@@ -164,7 +164,9 @@ pub fn validate_pin(pin: &str) -> Result<(), String> {
 
     let step = d[1] - d[0];
     if (step == 1 || step == -1) && d.windows(2).all(|w| w[1] - w[0] == step) {
-        return Err("That PIN is a run of consecutive digits. Pick something less guessable.".into());
+        return Err(
+            "That PIN is a run of consecutive digits. Pick something less guessable.".into(),
+        );
     }
 
     // Repeating pairs: 1212, 6969, 1010.
@@ -304,7 +306,10 @@ pub async fn auth_login(
             .map_err(|_| "The server returned an account id this app does not understand.")?;
 
         hold_token(Some(signed.token));
-        sign_in(Principal { user_id, username: signed.username });
+        sign_in(Principal {
+            user_id,
+            username: signed.username,
+        });
 
         // `remember_me` has nothing left to do: there is no store to remember
         // into. The checkbox is gone from the login screen; the parameter stays
@@ -418,7 +423,9 @@ mod tests {
 
     #[test]
     fn the_obvious_pins_are_refused() {
-        for bad in ["0000", "1111", "9999", "1234", "4321", "1212", "6969", "1010", "2000"] {
+        for bad in [
+            "0000", "1111", "9999", "1234", "4321", "1212", "6969", "1010", "2000",
+        ] {
             assert!(validate_pin(bad).is_err(), "{bad} should be refused");
         }
     }

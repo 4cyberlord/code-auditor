@@ -73,7 +73,10 @@ fn built_in() -> Option<Endpoint> {
     if url.is_empty() || key.is_empty() {
         return None;
     }
-    Some(Endpoint { url: url.to_string(), key: key.to_string() })
+    Some(Endpoint {
+        url: url.to_string(),
+        key: key.to_string(),
+    })
 }
 
 /// Is this build pointed at a deployment?
@@ -104,11 +107,7 @@ pub async fn call<T: DeserializeOwned>(db: &Db, op: &str, args: Value) -> Result
 /// Separate from [`call`] rather than an `Option` parameter, because "which
 /// requests go out unauthenticated" is a question worth being able to answer by
 /// searching for one function name.
-pub async fn call_public<T: DeserializeOwned>(
-    db: &Db,
-    op: &str,
-    args: Value,
-) -> Result<T, String> {
+pub async fn call_public<T: DeserializeOwned>(db: &Db, op: &str, args: Value) -> Result<T, String> {
     send(db, op, args, None).await
 }
 

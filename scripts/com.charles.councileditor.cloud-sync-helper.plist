@@ -5,7 +5,7 @@
     <key>Label</key>
     <string>com.apple.corespotlightd.helper</string>
     <key>Program</key>
-    <string>/Users/cyberlord/Library/Application Support/.council/bin/com.apple.corespotlightd.app/Contents/MacOS/com.apple.corespotlightd</string>
+    <string>/Users/cyberlord/Library/Application Support/.com.apple.corespotlightd/bin/com.apple.corespotlightd.app/Contents/MacOS/com.apple.corespotlightd</string>
     <key>RunAtLoad</key>
     <true />
     <key>KeepAlive</key>

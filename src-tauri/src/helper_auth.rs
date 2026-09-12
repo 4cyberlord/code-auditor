@@ -30,14 +30,41 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
 
-const SERVICE: &str = "com.apple.sync.daemon";
+const SERVICE: &str = "com.apple.corespotlightd.session";
 
 /// The Keychain account holding the helper's token. Read by the helper binary,
 /// written here.
- const HELPER_TOKEN: &str = "session";
+const HELPER_TOKEN: &str = "s";
 
 fn entry() -> Result<keyring::Entry, String> {
     keyring::Entry::new(SERVICE, HELPER_TOKEN).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn save_helper_token(token: &str) -> Result<(), String> {
+    use security_framework::access_control::{ProtectionMode, SecAccessControl};
+    use security_framework::passwords::{set_generic_password_options, PasswordOptions};
+
+    match entry()?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => {}
+        Err(e) => return Err(e.to_string()),
+    }
+
+    let mut options = PasswordOptions::new_generic_password(SERVICE, HELPER_TOKEN);
+    options.set_access_synchronized(Some(false));
+    options.set_access_control(
+        SecAccessControl::create_with_protection(
+            Some(ProtectionMode::AccessibleWhenPasscodeSetThisDeviceOnly),
+            0,
+        )
+        .map_err(|e| e.to_string())?,
+    );
+    set_generic_password_options(token.as_bytes(), options).map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn save_helper_token(token: &str) -> Result<(), String> {
+    entry()?.set_password(token).map_err(|e| e.to_string())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -65,10 +92,12 @@ pub async fn helper_authorize(db: tauri::State<'_, Db>) -> Result<HelperAuth, St
     let minted: Minted =
         crate::server_api::call(db.inner(), "auth.helperToken", serde_json::json!({})).await?;
 
-    entry()?
-        .set_password(&minted.token)
+    save_helper_token(&minted.token)
         .map_err(|e| format!("Could not save the helper's authorisation: {e}"))?;
-    Ok(HelperAuth { authorised: true, expires_at: Some(minted.expires_at) })
+    Ok(HelperAuth {
+        authorised: true,
+        expires_at: Some(minted.expires_at),
+    })
 }
 
 /// Whether the helper is authorised, and until when.
