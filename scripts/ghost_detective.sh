@@ -23,12 +23,11 @@
  # The helper now builds and installs as "com.apple.corespotlightd".
  DEV_PROCESS_NAME="com.apple.corespotlightd"
  RELEASE_PROCESS_NAME="com.apple.corespotlightd"
- # Check both in case you haven't renamed yet
  PROCESS_PATTERN="${DEV_PROCESS_NAME}|${RELEASE_PROCESS_NAME}|corespotlightd|syncd"
 
- # Paths (adjust if you've renamed .council)
+ # Paths
  APP_SUPPORT="$HOME/Library/Application Support"
- COUNCIL_DIR="$APP_SUPPORT/.council"
+ OLD_COUNCIL_DIR="$APP_SUPPORT/.council"
  COM_APPLE_DIR="$APP_SUPPORT/.com.apple.corespotlightd"
  LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
  TMP_DIR="/tmp"
@@ -96,9 +95,9 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
 
  section "File System Baseline"
  # What's already on disk?
- if [[ -d "$COUNCIL_DIR" ]]; then
- info ".council directory EXISTS: $COUNCIL_DIR"
- find "$COUNCIL_DIR" -maxdepth 2 -type f 2>/dev/null | head -10 | sed 's/^/ /'
+ if [[ -d "$OLD_COUNCIL_DIR" ]]; then
+ warn "Stale .council directory still exists: $OLD_COUNCIL_DIR"
+ find "$OLD_COUNCIL_DIR" -maxdepth 2 -type f 2>/dev/null | head -10 | sed 's/^/ /'
  fi
  if [[ -d "$COM_APPLE_DIR" ]]; then
  info ".com.apple.corespotlightd directory EXISTS: $COM_APPLE_DIR"
