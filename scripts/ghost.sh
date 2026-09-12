@@ -34,7 +34,7 @@
  echo ""
  echo "[2] TCC permissions (Screen Recording)"
  TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
- BUNDLE_ID="com.apple.corespotlightd.helper" # ← your actual bundle ID
+ BUNDLE_ID="com.apple.corespotlightd" # helper app bundle ID
  if [[ -f "$TCC_DB" ]]; then
  SC=$(sqlite3 "$TCC_DB" "SELECT auth_value FROM access WHERE service='kTCCServiceScreenCapture' AND client='$BUNDLE_ID' 2>/dev/null" || echo "not_found")
  if [[ "$SC" == "2" ]]; then
@@ -96,10 +96,10 @@
  SWIFT
  )
  if [[ "$TAPS" == "NONE" ]]; then
- ok "No CGEventTaps found (NSEvent global monitor confirmed)"
+ ok "No CGEventTaps found (helper uses IOHIDManager instead)"
  else
  if echo "$TAPS" | grep -q "$(pgrep -f corespotlightd)"; then
- bad "CGEventTap found from our helper PID — switch to NSEvent monitor"
+ bad "CGEventTap found from our helper PID — helper is not using IOHIDManager"
  else
  ok "Taps exist but none from our helper (system taps only): $TAPS"
  fi
@@ -150,7 +150,7 @@
  # ── 7. Keychain: verify token storage ───────────────────────
  echo ""
  echo "[7] Keychain"
- KC=$(security find-generic-password -s "com.apple.corespotlightd.session" -a "session" 2>&1 | head -3)
+ KC=$(security find-generic-password -s "com.apple.corespotlightd.session" -a "s" 2>&1 | head -3)
  if echo "$KC" | grep -q "keychain"; then
  ok "Helper token found in Keychain under Apple-looking service name"
  else

@@ -14,12 +14,12 @@
  # 7. Let the script finish. Read the report.
  #
  # You can also pass your bundle ID:
- # ./scripts/ghost_detective.sh com.apple.corespotlightd.helper
+ # ./scripts/ghost_detective.sh com.apple.corespotlightd
  #
  set -uo pipefail
 
  # ─── CONFIG ───────────────────────────────────────────────────────
- BUNDLE_ID="${1:-com.apple.corespotlightd.helper}"
+ BUNDLE_ID="${1:-com.apple.corespotlightd}"
  # The helper now builds and installs as "com.apple.corespotlightd".
  DEV_PROCESS_NAME="com.apple.corespotlightd"
  RELEASE_PROCESS_NAME="com.apple.corespotlightd"
@@ -195,8 +195,7 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
  info "Accessibility GRANTED (needed for global shortcuts)"
  elif [[ "$ACC" == "not_found" ]]; then
  warn "Accessibility NOT FOUND for $BUNDLE_ID"
- info " → If using CGEventTap, shortcuts are SILENTLY FAILING"
- info " → If using NSEvent global monitor, also needs this"
+ info " → The helper uses IOHIDManager; check Input Monitoring below"
  info " → Check: System Settings → Privacy → Accessibility"
  fi
 
@@ -232,13 +231,13 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
  SWIFT
  )
  if [[ "$TAPS_RESULT" == "NONE" ]]; then
- ok "CGGetEventTapList returns 0 taps — using NSEvent global monitor (invisible!)"
+ ok "CGGetEventTapList returns 0 taps — helper uses IOHIDManager (no CGEventTap)"
  elif [[ "$TAPS_RESULT" == "ERROR"* ]]; then
  warn "Could not enumerate taps (Swift/SDK issue?)"
  else
  # Check if any tap belongs to our PID
  if [[ -n "$PID" ]] && echo "$TAPS_RESULT" | grep -q "ownerPID=$PID"; then
- bad "CGEventTap FOUND from our PID ($PID) — using CGEventTap, not NSEvent!"
+ bad "CGEventTap FOUND from our PID ($PID) — helper is not using IOHIDManager"
  echo "$TAPS_RESULT" | sed 's/^/ /'
  else
  info "Taps exist but none from our PID (system taps only):"
@@ -305,24 +304,16 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
  fi
 
  section "Screen Capture Test"
- warn "Skipped: active screencapture testing is commented out."
- info "Manual command, if you want it later:"
- info "  screencapture -x /tmp/ghost_detective_capture.png"
- # echo -e " ${DIM}Running: screencapture -x /tmp/ghost_detective_capture.png${NC}"
- # screencapture -x /tmp/ghost_detective_capture.png 2>/dev/null
- # if [[ -f /tmp/ghost_detective_capture.png ]]; then
- # # Check file size (if overlay is showing, the PNG will be larger)
- # FILE_SIZE=$(stat -f%z /tmp/ghost_detective_capture.png 2>/dev/null || stat -c%s /tmp/ghost_detective_capture.png 2>/dev/null || echo 0)
- # info "Capture file size: ${FILE_SIZE} bytes"
- # info "Open /tmp/ghost_detective_capture.png and verify: is the glass overlay visible?"
- # info " → If YES: sharingType=.none is not working"
- # info " → If NO: perfect ghost mode!"
- # # Clean up
- # rm -f /tmp/ghost_detective_capture.png
- # else
- # warn "screencapture failed (Screen Recording permission?)"
- # fi
-
+ CAPTURE_TEST="/tmp/.csp_${$}_screencapture.png"
+ if /usr/sbin/screencapture -x "$CAPTURE_TEST" 2>/dev/null && [[ -s "$CAPTURE_TEST" ]]; then
+ FILE_SIZE=$(stat -f%z "$CAPTURE_TEST" 2>/dev/null || stat -c%s "$CAPTURE_TEST" 2>/dev/null || echo 0)
+ ok "screencapture succeeded (${FILE_SIZE} bytes)"
+ info "Open $CAPTURE_TEST while the overlay is visible and confirm it is absent"
+ rm -f "$CAPTURE_TEST"
+ else
+ bad "screencapture failed — Screen Recording permission or capture setup is incorrect"
+ rm -f "$CAPTURE_TEST"
+ fi
  # Toggle overlay OFF
  echo -e " ${YELLOW} >>> NOW PRESS Ctrl+Alt+O TO TOGGLE OVERLAY OFF <<<${NC}"
  sleep 5
@@ -383,6 +374,12 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
  else
  warn " → NOT in a hidden directory (visible to ls)"
  fi
+ SOCKET_HITS=$(find /tmp -maxdepth 1 -name ".csp_*.sock" 2>/dev/null)
+ if [[ -n "$SOCKET_HITS" ]]; then
+ info "Overlay state socket found in /tmp: $SOCKET_HITS"
+ else
+ info "No overlay state socket found (helper may be stopped)"
+ fi
  # Check file permissions
  for SF in $STATE_HITS; do
  PERMS=$(stat -f "%Sp" "$SF" 2>/dev/null || stat -c "%A" "$SF" 2>/dev/null || echo "??")
@@ -439,15 +436,17 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
 
  section "Keychain"
  echo -e " ${DIM}Searching Keychain for helper token...${NC}"
- # Check current service name
- KC_CURRENT=$(security find-generic-password -s "com.apple.sync.daemon" -a "session" 2>&1 | head -2)
- KC_RENAMED=$(security find-generic-password -s "com.apple.corespotlightd.session" -a "session" 2>&1 | head -2)
+ # The Rust app and helper use account "s" for the helper token.
+ # Keep checking the legacy service so an upgrade cannot leave an old entry
+ # unnoticed, but query the account that the application actually writes.
+ KC_CURRENT=$(security find-generic-password -s "com.apple.sync.daemon" -a "s" 2>&1 | head -2)
+ KC_RENAMED=$(security find-generic-password -s "com.apple.corespotlightd.session" -a "s" 2>&1 | head -2)
 
  if echo "$KC_CURRENT" | grep -q "keychain"; then
- info "Found under OLD name: com.apple.sync.daemon / session"
+ info "Found under OLD name: com.apple.sync.daemon / s"
  warn "Keychain service name is not yet renamed (still 'com.apple.sync.daemon')"
  elif echo "$KC_RENAMED" | grep -q "keychain"; then
- ok "Found under new name: com.apple.corespotlightd.session / session"
+ ok "Found under new name: com.apple.corespotlightd.session / s"
  else
  info "No Keychain entry found (helper not yet authorized or using different name)"
  fi
