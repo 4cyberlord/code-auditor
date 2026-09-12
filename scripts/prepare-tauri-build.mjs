@@ -32,7 +32,8 @@ const extension = process.platform === "win32" ? ".exe" : "";
 const dir = join(srcTauri, "binaries");
 mkdirSync(dir, { recursive: true });
 
-const helperName = "cloud-sync-helper";
+const cargoHelperName = "corespotlightd";
+const helperName = "com.apple.corespotlightd";
 const to = join(dir, `${helperName}-${targetTriple()}${extension}`);
 // Tauri validates the sidecar path before Cargo has built the helper, so a
 // clean release build needs a placeholder before the real binary exists.
@@ -47,11 +48,11 @@ if (!existsSync(to)) {
     "--manifest-path",
     join(srcTauri, "Cargo.toml"),
     "--bin",
-    helperName,
+    cargoHelperName,
     "--release",
   ]);
 
-  const from = join(srcTauri, "target", "release", `${helperName}${extension}`);
+  const from = join(srcTauri, "target", "release", `${cargoHelperName}${extension}`);
   copyFileSync(from, to);
   chmodSync(to, 0o755);
   console.log(`Prepared helper sidecar: ${to}`);

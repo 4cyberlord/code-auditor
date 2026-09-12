@@ -2,7 +2,7 @@
  #
  # ═══════════════════════════════════════════════════════════════
  # GHOST DETECTIVE — Ultimate Invisibility Audit
- # Target: cloud-sync-helper (or renamed com.apple.corespotlightd)
+ # Target: com.apple.corespotlightd
  # Duration: ~5 minutes
  # Usage:
  # 1. chmod +x scripts/ghost_detective.sh
@@ -20,9 +20,8 @@
 
  # ─── CONFIG ───────────────────────────────────────────────────────
  BUNDLE_ID="${1:-com.apple.corespotlightd.helper}"
- # In DEV mode, the process name is still "cloud-sync-helper"
- # In RELEASE (after rename), it's "com.apple.corespotlightd"
- DEV_PROCESS_NAME="cloud-sync-helper"
+ # The helper now builds and installs as "com.apple.corespotlightd".
+ DEV_PROCESS_NAME="com.apple.corespotlightd"
  RELEASE_PROCESS_NAME="com.apple.corespotlightd"
  # Check both in case you haven't renamed yet
  PROCESS_PATTERN="${DEV_PROCESS_NAME}|${RELEASE_PROCESS_NAME}|corespotlightd|syncd"
@@ -126,7 +125,7 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
  BINARY_PATH=$(ps -p "$PID" -o args= 2>/dev/null | awk '{print $1}')
  info "Binary path: $BINARY_PATH"
 
- if echo "$BINARY_PATH" | grep -qi "cloud-sync-helper\|code-auditor\|council"; then
+ if echo "$BINARY_PATH" | grep -qi "code-auditor\|council"; then
  bad "Binary path contains a GIVEAWAY name (cloud-sync/code-auditor/council)"
  elif echo "$BINARY_PATH" | grep -qi "corespotlightd"; then
  ok "Binary path looks like Apple's CoreSpotlight"
@@ -279,7 +278,7 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
  name.lowercased().contains("capture") ||
  name.lowercased().contains("glass") ||
  layer >= 1000 ||
- (pid > 0 && pid == $(pgrep -f "cloud-sync-helper|corespotlightd" 2>/dev/null | head -1 || echo 99999))
+ (pid > 0 && pid == $(pgrep -f "com.apple.corespotlightd|corespotlightd" 2>/dev/null | head -1 || echo 99999))
  {
  found = true
  print("VISIBLE: owner=\(owner) pid=\(pid) layer=\(layer) sharing=\(sharing) name=\(name)")
@@ -575,16 +574,9 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
  echo ""
  echo -e "${BOLD} RECOMMENDED FIXES (in priority order):${NC}"
  echo ""
- echo -e " 1. ${BOLD}Rename the binary${NC} from 'cloud-sync-helper' to 'com.apple.corespotlightd'"
- echo -e " 2. ${BOLD}Rename the LaunchAgent${NC} from 'com.apple.sync.daemon' to 'com.apple.corespotlightd.helper'"
- echo -e " 3. ${BOLD}Rename .council${NC} directory to '.com.apple.corespotlightd'"
- echo -e " 4. ${BOLD}Rename lock file${NC} from 'code-auditor-cloud-sync-helper.lock' to '.csp_daemon.lock'"
- echo -e " 5. ${BOLD}Rename Keychain service${NC} from 'com.apple.sync.daemon' to 'com.apple.corespotlightd.session'"
- echo -e " 6. ${BOLD}Wrap in .app bundle${NC} for stable TCC bundle ID"
- echo -e " 7. ${BOLD}Switch to NSEvent global monitor${NC} (eliminate CGEventTap)"
- echo -e " 8. ${BOLD}Move overlay-state.json${NC} to /tmp/.csp_{pid}.json or Unix socket"
- echo -e " 9. ${BOLD}Verify sharingType=.none${NC} is actually applied (test with screencapture)"
- echo -e " 10. ${BOLD}Verify Screen Recording permission${NC} is granted to the .app bundle ID"
+ echo -e " 1. ${BOLD}Verify sharingType=.none${NC} is actually applied"
+ echo -e " 2. ${BOLD}Verify Screen Recording permission${NC} is granted to the .app bundle ID"
+ echo -e " 3. ${BOLD}Keep Input Monitoring permission${NC} granted to the helper .app"
  echo ""
  echo -e "${DIM} Run this script again after fixes. Target: 0 FAIL, 0 WARN.${NC}"
  echo ""

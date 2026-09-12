@@ -37,7 +37,7 @@
     "category": "DeveloperTool",
     "shortDescription": "Multi-agent code, math and research solver",
     "externalBin": [
-      "binaries/cloud-sync-helper"
+      "binaries/com.apple.corespotlightd"
     ],
     "icon": [
       "icons/32x32.png",

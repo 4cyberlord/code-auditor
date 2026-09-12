@@ -67,7 +67,7 @@ fn bundled_helper_path() -> Result<String, String> {
 
     let current = std::env::current_exe()
         .map_err(|e| format!("Could not locate the running app executable: {e}"))?;
-    let sibling = current.with_file_name("cloud-sync-helper");
+    let sibling = current.with_file_name(HELPER_EXECUTABLE);
     Ok(sibling.to_string_lossy().to_string())
 }
 
