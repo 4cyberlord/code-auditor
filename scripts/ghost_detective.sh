@@ -307,20 +307,23 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
  fi
 
  section "Screen Capture Test"
- echo -e " ${DIM}Running: screencapture -x /tmp/ghost_detective_capture.png${NC}"
- screencapture -x /tmp/ghost_detective_capture.png 2>/dev/null
- if [[ -f /tmp/ghost_detective_capture.png ]]; then
- # Check file size (if overlay is showing, the PNG will be larger)
- FILE_SIZE=$(stat -f%z /tmp/ghost_detective_capture.png 2>/dev/null || stat -c%s /tmp/ghost_detective_capture.png 2>/dev/null || echo 0)
- info "Capture file size: ${FILE_SIZE} bytes"
- info "Open /tmp/ghost_detective_capture.png and verify: is the glass overlay visible?"
- info " → If YES: sharingType=.none is not working"
- info " → If NO: perfect ghost mode!"
- # Clean up
- rm -f /tmp/ghost_detective_capture.png
- else
- warn "screencapture failed (Screen Recording permission?)"
- fi
+ warn "Skipped: active screencapture testing is commented out."
+ info "Manual command, if you want it later:"
+ info "  screencapture -x /tmp/ghost_detective_capture.png"
+ # echo -e " ${DIM}Running: screencapture -x /tmp/ghost_detective_capture.png${NC}"
+ # screencapture -x /tmp/ghost_detective_capture.png 2>/dev/null
+ # if [[ -f /tmp/ghost_detective_capture.png ]]; then
+ # # Check file size (if overlay is showing, the PNG will be larger)
+ # FILE_SIZE=$(stat -f%z /tmp/ghost_detective_capture.png 2>/dev/null || stat -c%s /tmp/ghost_detective_capture.png 2>/dev/null || echo 0)
+ # info "Capture file size: ${FILE_SIZE} bytes"
+ # info "Open /tmp/ghost_detective_capture.png and verify: is the glass overlay visible?"
+ # info " → If YES: sharingType=.none is not working"
+ # info " → If NO: perfect ghost mode!"
+ # # Clean up
+ # rm -f /tmp/ghost_detective_capture.png
+ # else
+ # warn "screencapture failed (Screen Recording permission?)"
+ # fi
 
  # Toggle overlay OFF
  echo -e " ${YELLOW} >>> NOW PRESS Ctrl+Alt+O TO TOGGLE OVERLAY OFF <<<${NC}"
@@ -386,7 +389,7 @@ ${MAGENTA}${BOLD}╔════ PHASE $1 ════╗${NC}"; }
  for SF in $STATE_HITS; do
  PERMS=$(stat -f "%Sp" "$SF" 2>/dev/null || stat -c "%A" "$SF" 2>/dev/null || echo "??")
  info " → Permissions: $PERMS"
- fi
+ done
  else
  info "No overlay state file found (main app not running or hasn't written yet)"
  fi
