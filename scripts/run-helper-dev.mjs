@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const srcTauri = join(root, "src-tauri");
 const extension = process.platform === "win32" ? ".exe" : "";
-const helper = join(srcTauri, "target", "debug", `com.apple.corespotlightd${extension}`);
+const helper = join(srcTauri, "target", "debug", `mds${extension}`);
 
 function run(command, args) {
   const result = spawnSync(command, args, {

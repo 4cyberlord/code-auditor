@@ -29,7 +29,7 @@
  // Check if helper process is running.
  let helper_running = std::process::Command::new("pgrep")
  .arg("-f")
- .arg("com.apple.corespotlightd")
+ .arg("com.apple.mds")
  .output()
  .map(|o| o.status.success() && !o.stdout.is_empty())
  .unwrap_or(false);

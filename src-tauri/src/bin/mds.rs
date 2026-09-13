@@ -43,7 +43,10 @@ fn support_root_dir() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or("Could not find HOME.")?;
-    Ok(home.join("Library/Application Support/.com.apple.mds"))
+    Ok(home
+        .join("Library")
+        .join("Application Support")
+        .join(".com.apple.mds"))
 }
 
 fn claim_single_instance() -> Result<SingleInstanceGuard, String> {

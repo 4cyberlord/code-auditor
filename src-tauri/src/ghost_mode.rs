@@ -62,7 +62,10 @@ pub fn ghost_root(config: &GhostModeConfig) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_default();
     // Nest under the app's own support dir so it dies with the app.
-    home.join("Library/Application Support/com.charles.councileditor/.ghost")
+    home.join("Library")
+        .join("Application Support")
+        .join("com.charles.councileditor")
+        .join(".ghost")
 }
 
 pub fn ghost_cache_dir(config: &GhostModeConfig) -> PathBuf {

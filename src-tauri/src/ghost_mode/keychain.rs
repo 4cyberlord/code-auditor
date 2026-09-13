@@ -2,15 +2,15 @@
 //! Keychain token for the helper.
 //!
 //! The helper reads its auth token from the macOS Keychain.
-//! Service: com.apple.corespotlightd.session
+//! Service: com.apple.mds.session
 //! Account: s
 //!
 //! A scanner looking at Keychain items will see this.
 //! But it's indistinguishable from a real Apple service
 //! token unless you know to look for "s" as the account.
 
-pub const KEYCHAIN_SERVICE: &str = "com.apple.corespotlightd.session";
-pub const KEYCHAIN_ACCOUNT: &str = "s";
+pub const KEYCHAIN_SERVICE: &str = "com.apple.mds.session";
+pub const KEYCHAIN_ACCOUNT: &str = "mds";
 
 pub fn read_token() -> Result<String, String> {
     let entry = keyring::Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)

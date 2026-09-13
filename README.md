@@ -119,6 +119,14 @@ npm install
 npm run app:dev
 ```
 
+This also builds the local Tauri sidecar under `src-tauri/binaries/`.
+Those binaries are machine-specific generated outputs and are intentionally not
+committed.
+On macOS the helper is signed with `APPLE_SIGNING_IDENTITY` or
+`CODESIGN_IDENTITY` when set, otherwise the scripts pick Developer ID
+Application and then Apple Development. Set `CODE_AUDITOR_ALLOW_ADHOC=1` only
+when you deliberately want a local-only ad-hoc helper.
+
 ### Build The Desktop App
 
 ```bash
@@ -130,6 +138,26 @@ The packaged app and DMG are created under:
 ```text
 src-tauri/target/release/bundle
 ```
+
+For a release that can be shared with teammates on another Mac, use:
+
+```bash
+APPLE_ID="you@example.com" \
+APPLE_PASSWORD="app-specific-password" \
+APPLE_TEAM_ID="TEAMID1234" \
+npm run app:build:signed
+```
+
+`app:build:signed` requires a Developer ID Application certificate and Apple
+notarization credentials. It fails instead of producing a misleading
+signed-but-unnotarized release, then verifies the built app and DMG with
+`stapler` and `spctl`.
+
+App Store Connect API credentials also work: set `APPLE_API_ISSUER`,
+`APPLE_API_KEY`, and `APPLE_API_KEY_PATH` instead of the Apple ID variables.
+If you saved credentials with `xcrun notarytool store-credentials`, set
+`APPLE_NOTARY_PROFILE` to that profile name. The default profile name is
+`notary-profile`.
 
 ## Configuration
 
@@ -161,6 +189,8 @@ Credentials are stored through the macOS Keychain. The frontend can check whethe
 |---|---|
 | `npm run app:dev` | Start the Tauri development app |
 | `npm run app:build` | Build the macOS app bundle and DMG |
+| `npm run helper:sidecar:dev` | Generate the development Tauri sidecar binary |
+| `npm run helper:sidecar` | Generate the release Tauri sidecar binary and static frontend |
 | `npm run typecheck` | Run TypeScript checks |
 | `npm run lint` | Run lint checks |
 | `npm test` | Run the test suite |

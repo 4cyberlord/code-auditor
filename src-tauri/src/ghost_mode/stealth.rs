@@ -18,12 +18,12 @@
 /// as the primary mechanism.
 #[cfg(target_os = "macos")]
 pub fn set_process_name(_name: &str) -> Result<(), String> {
-    // The binary is already named `com.apple.corespotlightd`,
+    // The binary is already named `mds`,
     // which is what `ps` shows. But we also set the
     // `p_comm` field via a small C shim compiled at build time.
     //
     // For now, the binary name IS the process name.
-    // A scanner running `ps aux | grep corespotlightd`
+    // A scanner running `ps aux | grep mds`
     // will see our process mixed in with the real one.
     //
     // The key differentiator (and our remaining weakness)

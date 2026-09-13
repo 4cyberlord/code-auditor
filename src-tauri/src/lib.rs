@@ -78,7 +78,7 @@ pub fn trace(msg: &str) {
             let dir = std::path::Path::new(&home)
                 .join("Library")
                 .join("Application Support")
-                .join(".com.apple.corespotlightd")
+                .join(".com.apple.mds")
                 .join("logs");
             if std::fs::create_dir_all(&dir).is_ok() {
                 let path = dir.join(".state");

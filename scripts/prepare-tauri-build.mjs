@@ -3,9 +3,11 @@ import { copyFileSync, chmodSync, mkdirSync, existsSync, writeFileSync } from "n
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { signBinary } from "./lib/signing.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const srcTauri = join(root, "src-tauri");
+const args = process.argv.slice(2);
 
 function run(command, args, options = {}) {
   const res = spawnSync(command, args, {
@@ -19,24 +21,16 @@ function run(command, args, options = {}) {
   }
 }
 
-function signingIdentity() {
-  return process.env.APPLE_SIGNING_IDENTITY?.trim() || process.env.CODESIGN_IDENTITY?.trim() || "";
-}
-
-function signHelper(path) {
-  if (process.platform !== "darwin") return;
-  const identity = signingIdentity();
-  if (!identity) return;
-  run("codesign", ["--force", "--sign", identity, "--options", "runtime", path]);
-}
-
-function targetTriple() {
-  if (process.env.TAURI_ENV_TARGET_TRIPLE) return process.env.TAURI_ENV_TARGET_TRIPLE;
+function hostTargetTriple() {
   if (process.platform === "darwin" && process.arch === "arm64") return "aarch64-apple-darwin";
   if (process.platform === "darwin" && process.arch === "x64") return "x86_64-apple-darwin";
   if (process.platform === "win32" && process.arch === "x64") return "x86_64-pc-windows-msvc";
   if (process.platform === "linux" && process.arch === "x64") return "x86_64-unknown-linux-gnu";
   throw new Error(`Unsupported: ${process.platform}/${process.arch}`);
+}
+
+function targetTriple() {
+  return process.env.TAURI_ENV_TARGET_TRIPLE || process.env.CARGO_BUILD_TARGET || hostTargetTriple();
 }
 
 const extension = process.platform === "win32" ? ".exe" : "";
@@ -45,19 +39,37 @@ mkdirSync(dir, { recursive: true });
 
 const cargoHelperName = "mds";
 const helperName = "mds";
-const to = join(dir, `${helperName}-${targetTriple()}${extension}`);
+const explicitCargoTarget = process.env.TAURI_ENV_TARGET_TRIPLE || process.env.CARGO_BUILD_TARGET || "";
+const triple = targetTriple();
+const to = join(dir, `${helperName}-${triple}${extension}`);
+const profileIndex = args.indexOf("--profile");
+const profile = profileIndex >= 0 ? args[profileIndex + 1] : args.includes("--debug") ? "debug" : "release";
+const skipFrontend = args.includes("--skip-frontend") || args.includes("--no-frontend");
+
+if (!["debug", "release"].includes(profile)) {
+  throw new Error(`Unsupported profile: ${profile}`);
+}
 
 if (!existsSync(to)) {
   writeFileSync(to, "#!/bin/sh\nexit 70\n");
   chmodSync(to, 0o755);
 }
 
-run("cargo", ["build", "--manifest-path", join(srcTauri, "Cargo.toml"), "--bin", cargoHelperName, "--release"]);
+const cargoArgs = ["build", "--manifest-path", join(srcTauri, "Cargo.toml"), "--bin", cargoHelperName];
+if (profile === "release") cargoArgs.push("--release");
+if (explicitCargoTarget) cargoArgs.push("--target", triple);
+run("cargo", cargoArgs);
 
-const from = join(srcTauri, "target", "release", `${cargoHelperName}${extension}`);
+const from = explicitCargoTarget
+  ? join(srcTauri, "target", triple, profile, `${cargoHelperName}${extension}`)
+  : join(srcTauri, "target", profile, `${cargoHelperName}${extension}`);
+signBinary(from, { require: true });
 copyFileSync(from, to);
 chmodSync(to, 0o755);
-signHelper(to);
-console.log(`Prepared ghost sidecar: ${to}`);
+const signedAs = signBinary(to, { require: true });
+console.log(`Prepared ${profile} sidecar: ${to}`);
+if (signedAs) console.log(`Signed sidecar as: ${signedAs}`);
 
-run("npm", ["run", "build"]);
+if (!skipFrontend) {
+  run("npm", ["run", "build"]);
+}

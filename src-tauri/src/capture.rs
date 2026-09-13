@@ -8,7 +8,7 @@
 //! A file rather than the clipboard, deliberately: going through the pasteboard
 //! would clobber whatever the user had copied.
 //!
-//! The file is kept, in `~/Library/Application Support/.com.apple.corespotlightd/cache/captures`, rather than written to /tmp and
+//! The file is kept, in `~/Library/Application Support/.com.apple.mds/cache/captures`, rather than written to /tmp and
 //! deleted. A capture that exists only as a base64 string in a webview is
 //! invisible when something downstream fails -- you cannot tell "the grab never
 //! happened" from "the grab happened and the UI dropped it". On disk, you can.
@@ -416,7 +416,11 @@ pub fn save_reading(markdown: String, near: Option<String>) -> Result<String, St
 fn capture_dir() -> Result<std::path::PathBuf, String> {
     let home = std::env::var_os("HOME").ok_or("No HOME in the environment")?;
     let dir = std::path::Path::new(&home)
-        .join("Library/Application Support/.com.apple.corespotlightd/cache/captures");
+        .join("Library")
+        .join("Application Support")
+        .join(".com.apple.mds")
+        .join("cache")
+        .join("captures");
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
     Ok(dir)

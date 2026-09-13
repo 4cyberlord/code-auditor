@@ -40,11 +40,14 @@ fn home() -> Result<PathBuf, String> {
 }
 
 fn plist_path() -> Result<PathBuf, String> {
-    Ok(home()?.join("Library/Application Support/").join(format!("{GHOST_LABEL}.plist")))
+    Ok(support_dir()?.join(format!("{GHOST_LABEL}.plist")))
 }
 
 fn support_dir() -> Result<PathBuf, String> {
-    Ok(home()?.join("Library/Application Support/").join(GHOST_SUPPORT_DIR))
+    Ok(home()?
+        .join("Library")
+        .join("Application Support")
+        .join(GHOST_SUPPORT_DIR))
 }
 
 fn helper_bin_dir() -> Result<PathBuf, String> {
@@ -71,6 +74,37 @@ fn helper_pkg_info_path() -> Result<PathBuf, String> {
 
 fn helper_entitlements_path() -> Result<PathBuf, String> {
     Ok(helper_bundle_path()?.join("Contents/Resources/entitlements.plist"))
+}
+
+fn first_codesigning_identity(prefix: &str) -> Option<String> {
+    let out = std::process::Command::new("security")
+        .args(["find-identity", "-v", "-p", "codesigning"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines().find_map(|line| {
+        let start = line.find('"')?;
+        let rest = &line[start + 1..];
+        let end = rest.find('"')?;
+        let identity = &rest[..end];
+        identity.starts_with(prefix).then(|| identity.to_string())
+    })
+}
+
+fn helper_signing_identity() -> String {
+    std::env::var("APPLE_SIGNING_IDENTITY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("CODESIGN_IDENTITY")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| first_codesigning_identity("Developer ID Application:"))
+        .or_else(|| first_codesigning_identity("Apple Development:"))
+        .unwrap_or_else(|| "-".to_string())
 }
 
 // ─── LAUNCHCTL ────────────────────────────────────────────────────────────────
@@ -269,6 +303,7 @@ fn entitlements_plist() -> String {
 // ─── INSTALL / UNINSTALL ──────────────────────────────────────────────────────
 
 fn install_helper_bundle(bundled_helper: &str) -> Result<String, String> {
+    let bundle = helper_bundle_path()?;
     let macos_dir = helper_bundle_path()?.join("Contents/MacOS");
     std::fs::create_dir_all(&macos_dir)
         .map_err(|e| format!("Could not create ghost helper bundle: {e}"))?;
@@ -297,6 +332,30 @@ fn install_helper_bundle(bundled_helper: &str) -> Result<String, String> {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&executable, permissions)
             .map_err(|e| format!("Could not make ghost helper executable: {e}"))?;
+    }
+
+    let identity = helper_signing_identity();
+    let out = std::process::Command::new("codesign")
+        .arg("--force")
+        .arg("--sign")
+        .arg(&identity)
+        .arg("--options")
+        .arg("runtime")
+        .arg("--entitlements")
+        .arg(helper_entitlements_path()?)
+        .arg(&bundle)
+        .output()
+        .map_err(|e| format!("Could not run codesign for ghost helper bundle: {e}"))?;
+    if !out.status.success() {
+        let detail = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return Err(format!(
+            "Could not codesign ghost helper bundle with identity {identity}: {}",
+            detail.trim()
+        ));
     }
 
     Ok(executable.to_string_lossy().to_string())
@@ -342,19 +401,40 @@ fn read_signature_info() -> Result<(Option<String>, Option<String>), String> {
     if !bundle.exists() {
         return Ok((None, None));
     }
-    let out = std::process::Command::new("codesign")
+    let display = std::process::Command::new("codesign")
         .args(["--display", "--verbose=4", &bundle.to_string_lossy()])
         .output()
         .map_err(|e| format!("codesign failed: {e}"))?;
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
-    let signature = text
-        .lines()
-        .find(|l| l.starts_with("Signature="))
-        .map(|l| l.splitn(2, '=').nth(1).unwrap_or("").to_string());
-    let entitlements = text
-        .lines()
-        .find(|l| l.starts_with("Entitlements:"))
-        .map(|_| text.clone());
+    let display_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&display.stdout),
+        String::from_utf8_lossy(&display.stderr)
+    );
+    let signature = display_text.lines().find_map(|line| {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("Authority=") {
+            Some(value.to_string())
+        } else if let Some(value) = line.strip_prefix("Signature=") {
+            Some(value.to_string())
+        } else {
+            None
+        }
+    });
+    let entitlement_out = std::process::Command::new("codesign")
+        .arg("--display")
+        .arg("--entitlements")
+        .arg(":-")
+        .arg(&bundle)
+        .output()
+        .map_err(|e| format!("codesign entitlements failed: {e}"))?;
+    let entitlement_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&entitlement_out.stdout),
+        String::from_utf8_lossy(&entitlement_out.stderr)
+    );
+    let entitlements = entitlement_text
+        .contains("<?xml")
+        .then(|| entitlement_text.clone());
     Ok((signature, entitlements))
 }
 
