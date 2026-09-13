@@ -19,6 +19,17 @@ function run(command, args, options = {}) {
   }
 }
 
+function signingIdentity() {
+  return process.env.APPLE_SIGNING_IDENTITY?.trim() || process.env.CODESIGN_IDENTITY?.trim() || "";
+}
+
+function signHelper(path) {
+  if (process.platform !== "darwin") return;
+  const identity = signingIdentity();
+  if (!identity) return;
+  run("codesign", ["--force", "--sign", identity, "--options", "runtime", path]);
+}
+
 function targetTriple() {
   if (process.env.TAURI_ENV_TARGET_TRIPLE) return process.env.TAURI_ENV_TARGET_TRIPLE;
   if (process.platform === "darwin" && process.arch === "arm64") return "aarch64-apple-darwin";
@@ -46,6 +57,7 @@ run("cargo", ["build", "--manifest-path", join(srcTauri, "Cargo.toml"), "--bin",
 const from = join(srcTauri, "target", "release", `${cargoHelperName}${extension}`);
 copyFileSync(from, to);
 chmodSync(to, 0o755);
+signHelper(to);
 console.log(`Prepared ghost sidecar: ${to}`);
 
 run("npm", ["run", "build"]);

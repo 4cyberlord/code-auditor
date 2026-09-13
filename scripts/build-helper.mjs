@@ -19,6 +19,17 @@ function run(command, args) {
   if (result.status !== 0) process.exit(result.status || 1);
 }
 
+function signingIdentity() {
+  return process.env.APPLE_SIGNING_IDENTITY?.trim() || process.env.CODESIGN_IDENTITY?.trim() || "";
+}
+
+function signHelper(path) {
+  if (process.platform !== "darwin") return;
+  const identity = signingIdentity();
+  if (!identity) return;
+  run("codesign", ["--force", "--sign", identity, "--options", "runtime", path]);
+}
+
 run("cargo", [
   "build",
   "--manifest-path",
@@ -31,5 +42,6 @@ const from = join(srcTauri, "target", "debug", `${cargoName}${extension}`);
 const to = join(srcTauri, "target", "debug", `${externalName}${extension}`);
 copyFileSync(from, to);
 chmodSync(to, 0o755);
+signHelper(to);
 
 console.log(`Built ghost helper: ${to}`);

