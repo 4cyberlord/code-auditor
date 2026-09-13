@@ -232,8 +232,10 @@ fn entitlements_plist() -> String {
  </array>
  <key>com.apple.security.temporary-exception.files.home-relative-path</key>
  <array>
- <string>Library/{GHOST_SUPPORT_DIR}</string>
- </array>
+    <string>
+    Library/Application Support/{GHOST_SUPPORT_DIR}
+    </string> 
+</array>
  <key>com.apple.security.network.client</key>
  <true/>
  <key>com.apple.security.network.server</key>
