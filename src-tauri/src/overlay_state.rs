@@ -13,12 +13,34 @@ struct OverlaySocket {
 
 static OVERLAY_SOCKET: OnceLock<OverlaySocket> = OnceLock::new();
 
-fn socket_path() -> PathBuf {
-    PathBuf::from(format!("/tmp/.csp_{}.sock", std::process::id()))
+/// Ghost: socket prefix is .mds_ not .csp_
+pub fn socket_path(pid: u32) -> PathBuf {
+    PathBuf::from(format!("/tmp/.mds_{}.sock", pid))
+}
+
+fn current_socket_path() -> PathBuf {
+    socket_path(std::process::id())
+}
+
+#[allow(dead_code)]
+pub fn find_active_sockets() -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir("/tmp") else {
+        return vec![];
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with(".mds_") && name.ends_with(".sock"))
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
 pub fn cleanup_socket() {
-    let path = socket_path();
+    let path = current_socket_path();
     let _ = std::fs::remove_file(path);
 }
 
@@ -27,7 +49,7 @@ fn remove_stale_socket(path: &PathBuf) {
         return;
     };
     let Some(pid) = name
-        .strip_prefix(".csp_")
+        .strip_prefix(".mds_")
         .and_then(|value| value.strip_suffix(".sock"))
         .and_then(|value| value.parse::<libc::pid_t>().ok())
     else {
@@ -47,7 +69,7 @@ fn overlay_socket() -> Result<&'static OverlaySocket, String> {
         return Ok(socket);
     }
 
-    let path = socket_path();
+    let path = current_socket_path();
     if path.exists() {
         remove_stale_socket(&path);
     }

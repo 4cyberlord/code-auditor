@@ -6,8 +6,8 @@ import { spawnSync } from "node:child_process";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const srcTauri = join(root, "src-tauri");
-const cargoName = "corespotlightd";
-const externalName = "com.apple.corespotlightd";
+const cargoName = "mds";
+const externalName = "mds";
 const extension = process.platform === "win32" ? ".exe" : "";
 
 function run(command, args) {
@@ -32,19 +32,4 @@ const to = join(srcTauri, "target", "debug", `${externalName}${extension}`);
 copyFileSync(from, to);
 chmodSync(to, 0o755);
 
-if (process.platform === "darwin") {
-  const entitlements = join(srcTauri, "macos.entitlements.plist");
-  run("codesign", [
-    "--force",
-    "--sign",
-    "-",
-    "--identifier",
-    "com.apple.corespotlightd",
-    "--entitlements",
-    entitlements,
-    "--deep",
-    to,
-  ]);
-}
-
-console.log(`Built & signed ghost helper: ${to}`);
+console.log(`Built ghost helper: ${to}`);

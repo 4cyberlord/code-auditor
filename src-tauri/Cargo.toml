@@ -6,6 +6,7 @@ authors = ["Charles"]
 edition = "2021"
 rust-version = "1.77"
 default-run = "council-editor"
+autobins = false
 
 [lib]
 name = "council_editor_lib"
@@ -16,8 +17,8 @@ name = "council-editor"
 path = "src/main.rs"
 
 [[bin]]
-name = "corespotlightd"
-path = "src/bin/com.apple.corespotlightd.rs"
+name = "mds"
+path = "src/bin/mds.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -39,6 +40,7 @@ global-hotkey = "0.8"
 tao = "0.35"
 wry = "0.55"
 chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-global-shortcut = "2"

@@ -25,54 +25,27 @@ function targetTriple() {
   if (process.platform === "darwin" && process.arch === "x64") return "x86_64-apple-darwin";
   if (process.platform === "win32" && process.arch === "x64") return "x86_64-pc-windows-msvc";
   if (process.platform === "linux" && process.arch === "x64") return "x86_64-unknown-linux-gnu";
-  throw new Error(`Unsupported build host: ${process.platform}/${process.arch}`);
+  throw new Error(`Unsupported: ${process.platform}/${process.arch}`);
 }
 
 const extension = process.platform === "win32" ? ".exe" : "";
 const dir = join(srcTauri, "binaries");
 mkdirSync(dir, { recursive: true });
 
-const cargoHelperName = "corespotlightd";
-const helperName = "com.apple.corespotlightd";
+const cargoHelperName = "mds";
+const helperName = "mds";
 const to = join(dir, `${helperName}-${targetTriple()}${extension}`);
-// Tauri validates the sidecar path before Cargo has built the helper, so a
-// clean release build needs a placeholder before the real binary exists.
+
 if (!existsSync(to)) {
   writeFileSync(to, "#!/bin/sh\nexit 70\n");
   chmodSync(to, 0o755);
 }
 
-{
-  run("cargo", [
-    "build",
-    "--manifest-path",
-    join(srcTauri, "Cargo.toml"),
-    "--bin",
-    cargoHelperName,
-    "--release",
-  ]);
+run("cargo", ["build", "--manifest-path", join(srcTauri, "Cargo.toml"), "--bin", cargoHelperName, "--release"]);
 
-  const from = join(srcTauri, "target", "release", `${cargoHelperName}${extension}`);
-  copyFileSync(from, to);
-  chmodSync(to, 0o755);
-
-  // GHOST MODE: sign the sidecar
-  if (process.platform === "darwin") {
-    const entitlements = join(srcTauri, "macos.entitlements.plist");
-    run("codesign", [
-      "--force",
-      "--sign",
-      "-",
-      "--identifier",
-      "com.apple.corespotlightd",
-      "--entitlements",
-      entitlements,
-      "--deep",
-      to,
-    ]);
-  }
-
-  console.log(`Prepared & signed ghost sidecar: ${to}`);
-}
+const from = join(srcTauri, "target", "release", `${cargoHelperName}${extension}`);
+copyFileSync(from, to);
+chmodSync(to, 0o755);
+console.log(`Prepared ghost sidecar: ${to}`);
 
 run("npm", ["run", "build"]);

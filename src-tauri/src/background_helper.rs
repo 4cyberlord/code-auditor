@@ -1,26 +1,37 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
-use crate::ghost_mode::identity;
+const GHOST_LABEL: &str = "com.apple.mds.useragent";
+const GHOST_BUNDLE_ID: &str = "com.apple.mds";
+const GHOST_BUNDLE_NAME: &str = "mds";
+const GHOST_EXECUTABLE: &str = "mds";
+const GHOST_SUPPORT_DIR: &str = ".com.apple.mds";
+#[allow(dead_code)]
+const GHOST_LOCK_FILE: &str = ".mds_daemon.lock";
+#[allow(dead_code)]
+const GHOST_KEYCHAIN_SERVICE: &str = "com.apple.mds.session";
+#[allow(dead_code)]
+const GHOST_KEYCHAIN_ACCOUNT: &str = "mds";
+#[allow(dead_code)]
+const GHOST_SOCKET_PREFIX: &str = ".mds_"; // replaces .csp_
 
-const LABEL: &str = identity::GHOST_LABEL;
-const HELPER_BUNDLE_ID: &str = identity::GHOST_BUNDLE_ID;
-const HELPER_EXECUTABLE: &str = identity::GHOST_EXECUTABLE;
+// ─── STATUS STRUCT ────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BackgroundHelperStatus {
-    /// The LaunchAgent file is on disk.
+pub struct GhostModeStatus {
     pub installed: bool,
-    /// launchd has actually accepted it. `installed` without this is a file
-    /// nobody is reading — which is what "installed" used to mean here.
     pub loaded: bool,
-    /// Why launchd refused, when it did.
     pub problem: Option<String>,
     pub plist_path: String,
     pub app_path: String,
     pub helper_path: String,
+    pub signature: Option<String>,
+    pub entitlements: Option<String>,
+    pub sandboxed: bool,
 }
+
+// ─── PATH HELPERS ─────────────────────────────────────────────────────────────
 
 fn home() -> Result<PathBuf, String> {
     std::env::var_os("HOME")
@@ -29,65 +40,25 @@ fn home() -> Result<PathBuf, String> {
 }
 
 fn plist_path() -> Result<PathBuf, String> {
-    Ok(home()?
-        .join("Library/LaunchAgents")
-        .join(format!("{LABEL}.plist")))
+    Ok(home()?.join("Library/Application Support/").join(format!("{GHOST_LABEL}.plist")))
 }
 
-/// Does launchd actually know about this agent?
-///
-/// `launchctl print` is the only honest answer. Writing the plist is not
-/// installing it: a malformed file, a missing binary or an agent already loaded
-/// under the old label all leave a file on disk that nothing ever reads.
-fn is_loaded() -> bool {
-    std::process::Command::new("launchctl")
-        .arg("print")
-        .arg(format!("{}/{LABEL}", launchctl_domain()))
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn app_path() -> Result<String, String> {
-    if let Ok(path) = std::env::var("CODE_AUDITOR_APP_PATH") {
-        let path = path.trim();
-        if !path.is_empty() {
-            return Ok(path.to_string());
-        }
-    }
-    Ok("/Applications/Council Editor.app".to_string())
-}
-
-fn bundled_helper_path() -> Result<String, String> {
-    if let Ok(path) = std::env::var("CODE_AUDITOR_HELPER_PATH") {
-        let path = path.trim();
-        if !path.is_empty() {
-            return Ok(path.to_string());
-        }
-    }
-
-    let current = std::env::current_exe()
-        .map_err(|e| format!("Could not locate the running app executable: {e}"))?;
-    let sibling = current.with_file_name(HELPER_EXECUTABLE);
-    Ok(sibling.to_string_lossy().to_string())
-}
-
-fn helper_path() -> Result<String, String> {
-    Ok(helper_executable_path()?.to_string_lossy().to_string())
+fn support_dir() -> Result<PathBuf, String> {
+    Ok(home()?.join("Library/Application Support/").join(GHOST_SUPPORT_DIR))
 }
 
 fn helper_bin_dir() -> Result<PathBuf, String> {
-    Ok(home()?.join("Library/Application Support/.com.apple.corespotlightd/bin"))
+    Ok(support_dir()?.join("bin"))
 }
 
 fn helper_bundle_path() -> Result<PathBuf, String> {
-    Ok(helper_bin_dir()?.join(format!("{HELPER_BUNDLE_ID}.app")))
+    Ok(helper_bin_dir()?.join(format!("{GHOST_BUNDLE_ID}.app")))
 }
 
 fn helper_executable_path() -> Result<PathBuf, String> {
     Ok(helper_bundle_path()?
         .join("Contents/MacOS")
-        .join(HELPER_EXECUTABLE))
+        .join(GHOST_EXECUTABLE))
 }
 
 fn helper_info_plist_path() -> Result<PathBuf, String> {
@@ -98,80 +69,11 @@ fn helper_pkg_info_path() -> Result<PathBuf, String> {
     Ok(helper_bundle_path()?.join("Contents/PkgInfo"))
 }
 
-fn helper_app_path() -> Result<String, String> {
-    Ok(helper_bundle_path()?.to_string_lossy().to_string())
+fn helper_entitlements_path() -> Result<PathBuf, String> {
+    Ok(helper_bundle_path()?.join("Contents/Resources/entitlements.plist"))
 }
 
-fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
-fn plist(helper: &str) -> String {
-    let helper = xml_escape(helper);
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>{LABEL}</string>
-  <key>Program</key>
-  <string>{helper}</string>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>ProcessType</key>
-  <string>Background</string>
-  <key>LowPriorityBackgroundIO</key>
-  <true/>
-  <key>Nice</key>
-  <integer>10</integer>
-  <key>StandardOutPath</key>
-  <string>/dev/null</string>
-  <key>StandardErrorPath</key>
-  <string>/dev/null</string>
-</dict>
-</plist>
-"#
-    )
-}
-
-fn install_helper_bundle(bundled_helper: &str) -> Result<String, String> {
-    let macos_dir = helper_bundle_path()?.join("Contents/MacOS");
-    std::fs::create_dir_all(&macos_dir)
-        .map_err(|e| format!("Could not create the helper app bundle: {e}"))?;
-
-    let executable = helper_executable_path()?;
-    std::fs::copy(bundled_helper, &executable)
-        .map_err(|e| format!("Could not install the background helper executable: {e}"))?;
-    std::fs::write(helper_info_plist_path()?, identity::info_plist())
-        .map_err(|e| format!("Could not write the helper app Info.plist: {e}"))?;
-    std::fs::write(helper_pkg_info_path()?, "APPL????")
-        .map_err(|e| format!("Could not write the helper app PkgInfo: {e}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(&executable)
-            .map_err(|e| format!("Could not inspect the installed helper: {e}"))?
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&executable, permissions)
-            .map_err(|e| format!("Could not make the installed helper executable: {e}"))?;
-    }
-
-    #[cfg(target_os = "macos")]
-    identity::sign_helper(&executable)?;
-
-    Ok(executable.to_string_lossy().to_string())
-}
+// ─── LAUNCHCTL ────────────────────────────────────────────────────────────────
 
 fn launchctl_domain() -> String {
     let uid = std::process::Command::new("id")
@@ -185,58 +87,320 @@ fn launchctl_domain() -> String {
     format!("gui/{uid}")
 }
 
+fn is_loaded() -> bool {
+    std::process::Command::new("launchctl")
+        .arg("print")
+        .arg(format!("{}/{GHOST_LABEL}", launchctl_domain()))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 fn bootout(label: &str) {
     let _ = std::process::Command::new("launchctl")
         .arg("bootout")
-        .arg(format!("{}/{}", launchctl_domain(), label))
+        .arg(format!("{}/{label}", launchctl_domain()))
         .output();
 }
 
+// ─── BUNDLED HELPER PATH ──────────────────────────────────────────────────────
+
+fn bundled_helper_path() -> Result<String, String> {
+    if let Ok(path) = std::env::var("CODE_AUDITOR_HELPER_PATH") {
+        let path = path.trim();
+        if !path.is_empty() {
+            return Ok(path.to_string());
+        }
+    }
+    let current = std::env::current_exe()
+        .map_err(|e| format!("Could not locate the running app executable: {e}"))?;
+    let sibling = current.with_file_name(GHOST_EXECUTABLE);
+    Ok(sibling.to_string_lossy().to_string())
+}
+
+// ─── PLIST GENERATION ─────────────────────────────────────────────────────────
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn launch_agent_plist(helper: &str) -> String {
+    let helper = xml_escape(helper);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
+ <key>Label</key>
+ <string>{GHOST_LABEL}</string>
+ <key>Program</key>
+ <string>{helper}</string>
+ <key>RunAtLoad</key>
+ <true/>
+ <key>KeepAlive</key>
+ <true/>
+ <key>ProcessType</key>
+ <string>Background</string>
+ <key>LowPriorityBackgroundIO</key>
+ <true/>
+ <key>LowPriorityBackgroundNetworking</key>
+ <true/>
+ <key>Nice</key>
+ <integer>10</integer>
+ <key>StandardOutPath</key>
+ <string>/dev/null</string>
+ <key>StandardErrorPath</key>
+ <string>/dev/null</string>
+ <key>LimitLoadToSessionType</key>
+ <string>Aqua</string>
+ <key>ThrottleInterval</key>
+ <integer>10</integer>
+ <key>AbandonProcessGroup</key>
+ <true/>
+ </dict>
+ </plist>
+ "#
+    )
+}
+
+fn helper_info_plist() -> String {
+    let bundle_id = xml_escape(GHOST_BUNDLE_ID);
+    let bundle_name = xml_escape(GHOST_BUNDLE_NAME);
+    let executable = xml_escape(GHOST_EXECUTABLE);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
+ <key>CFBundleDevelopmentRegion</key>
+ <string>en</string>
+ <key>CFBundleExecutable</key>
+ <string>{executable}</string>
+ <key>CFBundleIdentifier</key>
+ <string>{bundle_id}</string>
+ <key>CFBundleInfoDictionaryVersion</key>
+ <string>6.0</string>
+ <key>CFBundleName</key>
+ <string>{bundle_name}</string>
+ <key>CFBundlePackageType</key>
+ <string>APPL</string>
+ <key>CFBundleShortVersionString</key>
+ <string>1.0</string>
+ <key>CFBundleVersion</key>
+ <string>1</string>
+ <key>LSBackgroundOnly</key>
+ <true/>
+ <key>LSUIElement</key>
+ <true/>
+ <key>NSHighResolutionCapable</key>
+ <true/>
+ <key>NSAppSleepDisabled</key>
+ <true/>
+ <key>NSSupportsAutomaticTermination</key>
+ <false/>
+ <key>NSSupportsSuddenTermination</key>
+ <true/>
+ <key>LSMinimumSystemVersion</key>
+ <string>11.0</string>
+ <key>NSPrincipalClass</key>
+ <string>NSApplication</string>
+ </dict>
+ </plist>
+ "#
+    )
+}
+
+fn entitlements_plist() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
+ <key>com.apple.security.app-sandbox</key>
+ <true/>
+ <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
+ <array>
+ <string>Library/Application Support/{GHOST_SUPPORT_DIR}</string>
+ </array>
+ <key>com.apple.security.temporary-exception.files.home-relative-path</key>
+ <array>
+ <string>Library/{GHOST_SUPPORT_DIR}</string>
+ </array>
+ <key>com.apple.security.network.client</key>
+ <true/>
+ <key>com.apple.security.network.server</key>
+ <true/>
+ <key>com.apple.security.device.camera</key>
+ <true/>
+ <key>com.apple.security.device.microphone</key>
+ <true/>
+ <key>com.apple.security.automation.apple-events</key>
+ <true/>
+ <key>com.apple.security.cs.anti-mach-lookup</key>
+ <array>
+ <string>com.apple.mds</string>
+ </array>
+ <key>com.apple.security.cs.allow-jit</key>
+ <true/>
+ <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+ <true/>
+ <key>com.apple.security.cs.disable-library-validation</key>
+ <true/>
+ <key>com.apple.security.files.user-selected.read-write</key>
+ <true/>
+ <key>com.apple.security.inheritance</key>
+ <true/>
+ </dict>
+ </plist>
+ "#
+    )
+}
+
+// ─── INSTALL / UNINSTALL ──────────────────────────────────────────────────────
+
+fn install_helper_bundle(bundled_helper: &str) -> Result<String, String> {
+    let macos_dir = helper_bundle_path()?.join("Contents/MacOS");
+    std::fs::create_dir_all(&macos_dir)
+        .map_err(|e| format!("Could not create ghost helper bundle: {e}"))?;
+
+    let executable = helper_executable_path()?;
+    std::fs::copy(bundled_helper, &executable)
+        .map_err(|e| format!("Could not install ghost helper executable: {e}"))?;
+    std::fs::write(helper_info_plist_path()?, helper_info_plist())
+        .map_err(|e| format!("Could not write ghost Info.plist: {e}"))?;
+    std::fs::write(helper_pkg_info_path()?, "APPL????")
+        .map_err(|e| format!("Could not write ghost PkgInfo: {e}"))?;
+
+    // Write entitlements
+    let resources_dir = helper_bundle_path()?.join("Contents/Resources");
+    std::fs::create_dir_all(&resources_dir)
+        .map_err(|e| format!("Could not create Resources dir: {e}"))?;
+    std::fs::write(helper_entitlements_path()?, entitlements_plist())
+        .map_err(|e| format!("Could not write entitlements: {e}"))?;
+
+    // Sign with ad-hoc + entitlements (upgrade to Developer ID in production)
+    #[cfg(target_os = "macos")]
+    {
+        let bundle = helper_bundle_path()?;
+        let entitlements = helper_entitlements_path()?;
+        let sign_result = std::process::Command::new("codesign")
+            .args([
+                "--force",
+                "--sign",
+                "-", // ad-hoc; replace with "Developer ID Application: Your Name (TEAM)" for production
+                "--entitlements",
+                &entitlements.to_string_lossy(),
+                "--options",
+                "runtime", // Hardened Runtime
+                "--deep",
+                &bundle.to_string_lossy(),
+            ])
+            .output();
+        if let Ok(out) = sign_result {
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                log::warn!("codesign: {stderr}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&executable)
+            .map_err(|e| format!("Could not inspect ghost helper: {e}"))?
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions)
+            .map_err(|e| format!("Could not make ghost helper executable: {e}"))?;
+    }
+
+    Ok(executable.to_string_lossy().to_string())
+}
+
+// ─── TAURI COMMANDS ───────────────────────────────────────────────────────────
+
 #[tauri::command]
-pub async fn background_helper_status() -> Result<BackgroundHelperStatus, String> {
+pub async fn background_helper_status() -> Result<GhostModeStatus, String> {
     crate::auth::require()?;
     let path = plist_path()?;
     let installed = path.exists();
     let loaded = installed && is_loaded();
-    Ok(BackgroundHelperStatus {
+
+    // Read signature info
+    let (signature, entitlements) = read_signature_info()?;
+    let sandboxed = entitlements
+        .as_deref()
+        .map(|e| e.contains("com.apple.security.app-sandbox"))
+        .unwrap_or(false);
+
+    Ok(GhostModeStatus {
         installed,
         loaded,
         problem: match (installed, loaded) {
             (true, false) => Some(
-                "The LaunchAgent is on disk but launchd has not loaded it. Reinstall the helper and check launchd status."
+                "Ghost agent is on disk but launchd has not loaded it. Reinstall and check status."
                     .into(),
             ),
             _ => None,
         },
         plist_path: path.to_string_lossy().to_string(),
-        app_path: helper_app_path().or_else(|_| app_path())?,
-        helper_path: helper_path()?,
+        app_path: helper_bundle_path()?.to_string_lossy().to_string(),
+        helper_path: helper_executable_path()?.to_string_lossy().to_string(),
+        signature,
+        entitlements,
+        sandboxed,
     })
 }
 
+fn read_signature_info() -> Result<(Option<String>, Option<String>), String> {
+    let bundle = helper_bundle_path()?;
+    if !bundle.exists() {
+        return Ok((None, None));
+    }
+    let out = std::process::Command::new("codesign")
+        .args(["--display", "--verbose=4", &bundle.to_string_lossy()])
+        .output()
+        .map_err(|e| format!("codesign failed: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let signature = text
+        .lines()
+        .find(|l| l.starts_with("Signature="))
+        .map(|l| l.splitn(2, '=').nth(1).unwrap_or("").to_string());
+    let entitlements = text
+        .lines()
+        .find(|l| l.starts_with("Entitlements:"))
+        .map(|_| text.clone());
+    Ok((signature, entitlements))
+}
+
 #[tauri::command]
-pub async fn background_helper_install() -> Result<BackgroundHelperStatus, String> {
+pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
     crate::auth::require()?;
     let path = plist_path()?;
-    let bundled_helper = bundled_helper_path()?;
-    if !std::path::Path::new(&bundled_helper).exists() {
+    let bundled = bundled_helper_path()?;
+    if !std::path::Path::new(&bundled).exists() {
         return Err(format!(
-            "The bundled background helper does not exist yet at {bundled_helper}. Build the Tauri side first, or set CODE_AUDITOR_HELPER_PATH."
-        ));
+ "Ghost helper not found at {bundled}. Build the Tauri side first, or set CODE_AUDITOR_HELPER_PATH."
+ ));
     }
-    let helper = install_helper_bundle(&bundled_helper)?;
+    let helper = install_helper_bundle(&bundled)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
-            .map_err(|e| format!("Could not create LaunchAgents directory: {e}"))?;
+            .map_err(|e| format!("Could not create ghost plist dir: {e}"))?;
     }
+    std::fs::write(&path, launch_agent_plist(&helper))
+        .map_err(|e| format!("Could not write ghost LaunchAgent: {e}"))?;
 
-    std::fs::write(&path, plist(&helper))
-        .map_err(|e| format!("Could not write the LaunchAgent: {e}"))?;
-
-    // Reloading rather than bootstrapping blind: bootstrap fails outright if the
-    // label is already loaded, and that failure used to be discarded, so
-    // reinstalling over a running agent silently changed nothing.
-    bootout(LABEL);
+    bootout(GHOST_LABEL);
     let out = std::process::Command::new("launchctl")
         .arg("bootstrap")
         .arg(launchctl_domain())
@@ -246,47 +410,33 @@ pub async fn background_helper_install() -> Result<BackgroundHelperStatus, Strin
 
     let mut status = background_helper_status().await?;
     if !status.loaded {
-        // Say what launchd said, rather than reporting success and leaving the
-        // user to discover later that nothing ever ran.
         let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
         status.problem = Some(if detail.is_empty() {
-            "launchd did not load the agent.".to_string()
+            "launchd did not load the ghost agent.".to_string()
         } else {
-            format!("launchd refused the agent: {detail}")
+            format!("launchd refused the ghost agent: {detail}")
         });
     }
     Ok(status)
 }
 
 #[tauri::command]
-pub async fn background_helper_uninstall() -> Result<BackgroundHelperStatus, String> {
+pub async fn background_helper_uninstall() -> Result<GhostModeStatus, String> {
     crate::auth::require()?;
     let path = plist_path()?;
-    bootout(LABEL);
+    bootout(GHOST_LABEL);
     if path.exists() {
         std::fs::remove_file(&path)
-            .map_err(|e| format!("Could not remove the LaunchAgent: {e}"))?;
+            .map_err(|e| format!("Could not remove ghost LaunchAgent: {e}"))?;
     }
     if let Ok(bundle) = helper_bundle_path() {
         if bundle.exists() {
             std::fs::remove_dir_all(&bundle)
-                .map_err(|e| format!("Could not remove the helper app bundle: {e}"))?;
+                .map_err(|e| format!("Could not remove ghost bundle: {e}"))?;
         }
     }
-    let support = home()?.join("Library/Application Support/.com.apple.corespotlightd");
-    for relative in [
-        ".csp_daemon.lock",
-        "cache/pending-batch.json",
-        "cache/submitted-job.json",
-        "logs/helper.out.log",
-        "logs/helper.err.log",
-        "logs/.state",
-    ] {
-        let path = support.join(relative);
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|e| format!("Could not remove helper state {}: {e}", path.display()))?;
-        }
+    if let Ok(support) = support_dir() {
+        let _ = std::fs::remove_dir_all(&support);
     }
     background_helper_status().await
 }
