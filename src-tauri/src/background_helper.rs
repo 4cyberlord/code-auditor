@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const GHOST_LABEL: &str = "com.apple.mds.useragent";
@@ -29,6 +29,21 @@ pub struct GhostModeStatus {
     pub signature: Option<String>,
     pub entitlements: Option<String>,
     pub sandboxed: bool,
+}
+
+#[derive(Default)]
+struct LaunchState {
+    loaded: bool,
+    running: bool,
+    state: Option<String>,
+    last_exit_code: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HelperRuntimeStatus {
+    hotkeys_available: Option<bool>,
+    problem: Option<String>,
 }
 
 // ─── PATH HELPERS ─────────────────────────────────────────────────────────────
@@ -76,6 +91,10 @@ fn helper_entitlements_path() -> Result<PathBuf, String> {
     Ok(helper_bundle_path()?.join("Contents/Resources/entitlements.plist"))
 }
 
+fn helper_status_path() -> Result<PathBuf, String> {
+    Ok(support_dir()?.join("cache/helper-status.json"))
+}
+
 fn first_codesigning_identity(prefix: &str) -> Option<String> {
     let out = std::process::Command::new("security")
         .args(["find-identity", "-v", "-p", "codesigning"])
@@ -121,13 +140,52 @@ fn launchctl_domain() -> String {
     format!("gui/{uid}")
 }
 
-fn is_loaded() -> bool {
-    std::process::Command::new("launchctl")
+fn launch_state() -> LaunchState {
+    let output = std::process::Command::new("launchctl")
         .arg("print")
         .arg(format!("{}/{GHOST_LABEL}", launchctl_domain()))
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .ok();
+
+    let Some(output) = output else {
+        return LaunchState::default();
+    };
+    if !output.status.success() {
+        return LaunchState::default();
+    }
+
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = text.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("state = ")
+            .map(|value| value.trim().to_string())
+    });
+    let last_exit_code = text.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("last exit code = ")
+            .map(|value| value.trim().to_string())
+    });
+
+    LaunchState {
+        loaded: true,
+        running: state.as_deref() == Some("running"),
+        state,
+        last_exit_code,
+    }
+}
+
+fn wait_for_launchd_running() {
+    for _ in 0..20 {
+        let launch = launch_state();
+        if launch.loaded && launch.running {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 fn bootout(label: &str) {
@@ -258,18 +316,6 @@ fn entitlements_plist() -> String {
  "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
  <plist version="1.0">
  <dict>
- <key>com.apple.security.app-sandbox</key>
- <true/>
- <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
- <array>
- <string>Library/Application Support/{GHOST_SUPPORT_DIR}</string>
- </array>
- <key>com.apple.security.temporary-exception.files.home-relative-path</key>
- <array>
-    <string>
-    Library/Application Support/{GHOST_SUPPORT_DIR}
-    </string> 
-</array>
  <key>com.apple.security.network.client</key>
  <true/>
  <key>com.apple.security.network.server</key>
@@ -277,6 +323,8 @@ fn entitlements_plist() -> String {
  <key>com.apple.security.device.camera</key>
  <true/>
  <key>com.apple.security.device.microphone</key>
+ <true/>
+ <key>com.apple.security.device.input</key>
  <true/>
  <key>com.apple.security.automation.apple-events</key>
  <true/>
@@ -291,8 +339,6 @@ fn entitlements_plist() -> String {
  <key>com.apple.security.cs.disable-library-validation</key>
  <true/>
  <key>com.apple.security.files.user-selected.read-write</key>
- <true/>
- <key>com.apple.security.inheritance</key>
  <true/>
  </dict>
  </plist>
@@ -368,7 +414,9 @@ pub async fn background_helper_status() -> Result<GhostModeStatus, String> {
     crate::auth::require()?;
     let path = plist_path()?;
     let installed = path.exists();
-    let loaded = installed && is_loaded();
+    let launch = launch_state();
+    let loaded = installed && launch.loaded && launch.running;
+    let runtime = read_helper_runtime_status();
 
     // Read signature info
     let (signature, entitlements) = read_signature_info()?;
@@ -380,13 +428,7 @@ pub async fn background_helper_status() -> Result<GhostModeStatus, String> {
     Ok(GhostModeStatus {
         installed,
         loaded,
-        problem: match (installed, loaded) {
-            (true, false) => Some(
-                "Ghost agent is on disk but launchd has not loaded it. Reinstall and check status."
-                    .into(),
-            ),
-            _ => None,
-        },
+        problem: helper_problem(installed, &launch, runtime.as_ref()),
         plist_path: path.to_string_lossy().to_string(),
         app_path: helper_bundle_path()?.to_string_lossy().to_string(),
         helper_path: helper_executable_path()?.to_string_lossy().to_string(),
@@ -394,6 +436,45 @@ pub async fn background_helper_status() -> Result<GhostModeStatus, String> {
         entitlements,
         sandboxed,
     })
+}
+
+fn helper_problem(
+    installed: bool,
+    launch: &LaunchState,
+    runtime: Option<&HelperRuntimeStatus>,
+) -> Option<String> {
+    if !installed {
+        return None;
+    }
+    if !launch.loaded {
+        return Some(
+            "Ghost agent is on disk but launchd has not loaded it. Reinstall and check status."
+                .into(),
+        );
+    }
+    if !launch.running {
+        let state = launch.state.as_deref().unwrap_or("unknown");
+        let exit = launch
+            .last_exit_code
+            .as_deref()
+            .map(|code| format!(", last exit code {code}"))
+            .unwrap_or_default();
+        return Some(format!(
+            "Ghost agent is registered with launchd but is not running (state {state}{exit}). Reinstall, then check Input Monitoring permission."
+        ));
+    }
+    if runtime.and_then(|status| status.hotkeys_available) == Some(false) {
+        return runtime
+            .and_then(|status| status.problem.clone())
+            .or_else(|| Some("Ghost agent is running, but hotkeys are unavailable. Grant Input Monitoring permission for the helper in macOS System Settings.".into()));
+    }
+    None
+}
+
+fn read_helper_runtime_status() -> Option<HelperRuntimeStatus> {
+    let path = helper_status_path().ok()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
 }
 
 fn read_signature_info() -> Result<(Option<String>, Option<String>), String> {
@@ -464,13 +545,24 @@ pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
         .output()
         .map_err(|e| format!("Could not run launchctl: {e}"))?;
 
+    wait_for_launchd_running();
     let mut status = background_helper_status().await?;
     if !status.loaded {
-        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        status.problem = Some(if detail.is_empty() {
+        let detail = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+        .trim()
+        .to_string();
+        status.problem = Some(if !out.status.success() && !detail.is_empty() {
+            format!("launchd refused the ghost agent: {detail}")
+        } else if !out.status.success() {
+            format!("launchd refused the ghost agent with exit status {}.", out.status)
+        } else if detail.is_empty() {
             "launchd did not load the ghost agent.".to_string()
         } else {
-            format!("launchd refused the ghost agent: {detail}")
+            format!("launchd accepted the agent but it was not running yet: {detail}")
         });
     }
     Ok(status)

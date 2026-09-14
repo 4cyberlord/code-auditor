@@ -114,7 +114,7 @@ if (hasProfile && !env.APPLE_NOTARY_PROFILE) env.APPLE_NOTARY_PROFILE = notaryPr
 
 requireTool("xcrun", ["-f", "notarytool"]);
 requireTool("xcrun", ["-f", "stapler"]);
-requireTool("spctl", ["--help"]);
+requireTool("spctl", ["--status"]);
 
 const res = spawnSync("npm", ["run", "app:build"], { stdio: "inherit", env, shell: false });
 if (res.status !== 0) process.exit(res.status ?? 1);

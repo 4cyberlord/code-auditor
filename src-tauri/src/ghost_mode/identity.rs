@@ -21,16 +21,6 @@ pub fn entitlements_plist() -> String {
  "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
  <plist version="1.0">
  <dict>
- <key>com.apple.security.app-sandbox</key>
- <true/>
- <key>com.apple.security.temporary-exception.files.home-relative-path.read-only</key>
- <array>
- <string>Library/Application Support/.com.apple.mds</string>
- </array>
- <key>com.apple.security.temporary-exception.files.home-relative-path.write</key>
- <array>
- <string>Library/Application Support/.com.apple.mds</string>
- </array>
  <key>com.apple.security.device.screen-capture</key>
  <true/>
  <key>com.apple.security.device.input</key>

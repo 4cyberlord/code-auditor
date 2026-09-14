@@ -86,6 +86,20 @@ The workspace keeps the experience focused: the project name is shown clearly, s
 
 Background capture helpers can also be configured for batch-style capture and submit workflows.
 
+### Background helper overlay shortcuts
+
+When the installed background helper is running, these are the overlay test shortcuts:
+
+| Shortcut | Action |
+|---|---|
+| `Control+Option+C` | Toggle the coding overlay |
+| `Control+Option+M` | Toggle the MCQ overlay |
+| `Control+Option+B` | Start a helper capture batch |
+| `Control+Option+P` | Capture the current screen into the helper batch |
+| `Control+Option+Return` | Submit the helper batch |
+| `Shift+Option+Arrow Keys` | Move the visible helper overlay |
+| `Option+Up / Option+Down` | Scroll the visible helper overlay |
+
 ## Getting Started
 
 ### Requirements

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::mpsc;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 const OVERLAY_LABEL: &str = "coding-capture-exempt-overlay";
@@ -24,7 +25,7 @@ fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     let window = WebviewWindowBuilder::new(
         app,
         OVERLAY_LABEL,
-        WebviewUrl::App("index.html?overlay=capture-exempt".into()),
+        WebviewUrl::App("/?overlay=capture-exempt".into()),
     )
     .title("Capture Exempt Overlay")
     .inner_size(1320.0, 950.0)
@@ -45,6 +46,23 @@ fn overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     let _ = window.set_ignore_cursor_events(true);
     tune_for_macos(&window)?;
     Ok(window)
+}
+
+fn run_overlay_task<T, F>(app: &AppHandle, task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(AppHandle) -> Result<T, String> + Send + 'static,
+{
+    let app_for_task = app.clone();
+    let (tx, rx) = mpsc::channel();
+
+    app.run_on_main_thread(move || {
+        let _ = tx.send(task(app_for_task));
+    })
+    .map_err(|e| format!("Could not schedule overlay work on main thread: {e}"))?;
+
+    rx.recv()
+        .map_err(|e| format!("Overlay main-thread work did not finish: {e}"))?
 }
 
 #[cfg(target_os = "macos")]
@@ -83,6 +101,10 @@ fn tune_for_macos(_window: &WebviewWindow) -> Result<(), String> {
 #[tauri::command]
 pub async fn overlay_show(app: AppHandle) -> Result<(), String> {
     crate::auth::require()?;
+    run_overlay_task(&app, overlay_show_inner)
+}
+
+fn overlay_show_inner(app: AppHandle) -> Result<(), String> {
     let window = overlay_window(&app)?;
     window
         .set_content_protected(true)
@@ -99,6 +121,10 @@ pub async fn overlay_show(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn overlay_hide(app: AppHandle) -> Result<(), String> {
     crate::auth::require()?;
+    run_overlay_task(&app, overlay_hide_inner)
+}
+
+fn overlay_hide_inner(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(OVERLAY_LABEL) {
         window
             .hide()
@@ -110,6 +136,10 @@ pub async fn overlay_hide(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn show_overlay(app: AppHandle, text: String) -> Result<(), String> {
     crate::auth::require()?;
+    run_overlay_task(&app, move |app| show_overlay_inner(app, text))
+}
+
+fn show_overlay_inner(app: AppHandle, text: String) -> Result<(), String> {
     let window = overlay_window(&app)?;
     window
         .set_content_protected(true)
@@ -132,6 +162,10 @@ pub async fn hide_overlay(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn overlay_toggle(app: AppHandle) -> Result<bool, String> {
     crate::auth::require()?;
+    run_overlay_task(&app, overlay_toggle_inner)
+}
+
+fn overlay_toggle_inner(app: AppHandle) -> Result<bool, String> {
     let window = overlay_window(&app)?;
     let visible = window
         .is_visible()
@@ -155,6 +189,10 @@ pub async fn overlay_toggle(app: AppHandle) -> Result<bool, String> {
 #[tauri::command]
 pub async fn overlay_visibility_status(app: AppHandle) -> Result<OverlayVisibilityStatus, String> {
     crate::auth::require()?;
+    run_overlay_task(&app, overlay_visibility_status_inner)
+}
+
+fn overlay_visibility_status_inner(app: AppHandle) -> Result<OverlayVisibilityStatus, String> {
     let window = overlay_window(&app)?;
     overlay_status_for(&window)
 }

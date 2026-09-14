@@ -81,8 +81,11 @@ function notarizationArgs() {
   return [];
 }
 
-function verifyGatekeeper(pathToAssess, type, label) {
-  const assess = run("spctl", ["--assess", "--type", type, "--verbose=4", pathToAssess]);
+function verifyGatekeeper(pathToAssess, type, label, context = "") {
+  const args = ["--assess", "--type", type, "--verbose=4"];
+  if (context) args.push("--context", context);
+  args.push(pathToAssess);
+  const assess = run("spctl", args);
   const assessOutput = `${assess.stdout || ""}${assess.stderr || ""}`;
   if (assess.status !== 0 || /Unnotarized Developer ID/i.test(assessOutput)) {
     fail(`Gatekeeper assessment failed for the ${label}.`, assessOutput);
@@ -112,7 +115,7 @@ function ensureNotarizedApp(appBundlePath) {
 
   requireTool("xcrun", ["-f", "notarytool"]);
   requireTool("xcrun", ["-f", "stapler"]);
-  requireTool("spctl", ["--help"]);
+  requireTool("spctl", ["--status"]);
 
   execFileSync("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appBundlePath], {
     stdio: "inherit",
@@ -148,14 +151,14 @@ function signAndNotarizeDmg(dmgPath) {
 
   requireTool("xcrun", ["-f", "notarytool"]);
   requireTool("xcrun", ["-f", "stapler"]);
-  requireTool("spctl", ["--help"]);
+  requireTool("spctl", ["--status"]);
 
   execFileSync("codesign", ["--force", "--sign", signingIdentity, dmgPath], { stdio: "inherit" });
   execFileSync("xcrun", ["notarytool", "submit", dmgPath, "--wait", ...notaryArgs], {
     stdio: "inherit",
   });
   stapleAndValidate(dmgPath, "DMG");
-  verifyGatekeeper(dmgPath, "open", "DMG");
+  verifyGatekeeper(dmgPath, "open", "DMG", "context:primary-signature");
 
   console.log("DMG signing and notarization verified.");
 }
