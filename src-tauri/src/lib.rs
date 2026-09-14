@@ -25,7 +25,7 @@ use ghost_mode::{app_binding, GhostModeConfig};
 use providers::RunRegistry;
 use std::sync::Arc;
 use tauri::{
-    menu::{Menu, MenuItem, PredefinedMenuItem},
+    menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::TrayIconBuilder,
     Emitter, Manager, WindowEvent,
 };
@@ -35,6 +35,8 @@ use tauri::{
 pub const EV_CAPTURE: &str = "shortcut://capture";
 pub const EV_CAPTURE_SCREEN: &str = "shortcut://capture-screen";
 pub const EV_SOLVE: &str = "shortcut://solve";
+pub const EV_SETTINGS: &str = "settings://open";
+pub const EV_WORKSPACE: &str = "workspace://select";
 
 /// The system-wide accelerators. Registered in Rust rather than from JavaScript:
 /// the webview remounts its effects in development and can be reloaded at any
@@ -120,10 +122,124 @@ fn parse_accel(spec: &str, fallback: &str) -> tauri_plugin_global_shortcut::Shor
 
 fn reveal(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.center();
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+fn center_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.center();
+    }
+}
+
+#[cfg(desktop)]
+fn install_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
+    let handle = app.handle();
+    let version = handle.package_info().version.to_string();
+    let about_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))?;
+    let about = AboutMetadata {
+        name: Some("Council Editor".into()),
+        version: Some(version.clone()),
+        short_version: Some(version),
+        copyright: Some("Copyright 2026 Council Editor".into()),
+        credits: Some(
+            "Code Auditor workspace\n\nMulti-agent code review, screenshot reading, implementation planning, and optional cloud background jobs."
+                .into(),
+        ),
+        icon: Some(about_icon),
+        ..Default::default()
+    };
+
+    let app_menu = Submenu::with_items(
+        handle,
+        "Council Editor",
+        true,
+        &[
+            &PredefinedMenuItem::about(handle, None, Some(about))?,
+            &MenuItem::with_id(handle, "settings", "Settings...", true, Some("CmdOrCtrl+,"))?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::services(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::hide(handle, None)?,
+            &PredefinedMenuItem::hide_others(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::quit(handle, None)?,
+        ],
+    )?;
+    let workspace_menu = Submenu::with_items(
+        handle,
+        "Workspace",
+        true,
+        &[
+            &MenuItem::with_id(handle, "workspace-council", "Council", true, Some("CmdOrCtrl+1"))?,
+            &MenuItem::with_id(handle, "workspace-coding", "Coding", true, Some("CmdOrCtrl+2"))?,
+            &MenuItem::with_id(handle, "workspace-knowledge", "Knowledge", true, Some("CmdOrCtrl+3"))?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::close_window(handle, None)?,
+        ],
+    )?;
+    let edit_menu = Submenu::with_items(
+        handle,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(handle, None)?,
+            &PredefinedMenuItem::redo(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::cut(handle, None)?,
+            &PredefinedMenuItem::copy(handle, None)?,
+            &PredefinedMenuItem::paste(handle, None)?,
+            &PredefinedMenuItem::select_all(handle, None)?,
+        ],
+    )?;
+    let view_menu = Submenu::with_items(
+        handle,
+        "View",
+        true,
+        &[&PredefinedMenuItem::fullscreen(handle, None)?],
+    )?;
+    let window_menu = Submenu::with_items(
+        handle,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(handle, None)?,
+            &PredefinedMenuItem::maximize(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::close_window(handle, None)?,
+        ],
+    )?;
+    let help_menu = Submenu::with_items(handle, "Help", true, &[])?;
+    let menu = Menu::with_items(
+        handle,
+        &[&app_menu, &workspace_menu, &edit_menu, &view_menu, &window_menu, &help_menu],
+    )?;
+    app.set_menu(menu)?;
+    handle.on_menu_event(|app, event| {
+        match event.id.as_ref() {
+            "settings" => {
+                reveal(app);
+                let _ = app.emit(EV_SETTINGS, ());
+            }
+            "workspace-council" => {
+                reveal(app);
+                let _ = app.emit(EV_WORKSPACE, "council");
+            }
+            "workspace-coding" => {
+                reveal(app);
+                let _ = app.emit(EV_WORKSPACE, "coding");
+            }
+            "workspace-knowledge" => {
+                reveal(app);
+                let _ = app.emit(EV_WORKSPACE, "knowledge");
+            }
+            _ => {}
+        }
+    });
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -274,6 +390,11 @@ pub fn run() {
             runner::runnable_languages,
         ])
         .setup(move |app| {
+            #[cfg(desktop)]
+            install_native_menu(app)?;
+
+            center_main_window(app.handle());
+
             let config = app.state::<Arc<GhostModeConfig>>().clone();
             let app_pid = std::process::id();
             if config.enabled {

@@ -74,7 +74,8 @@ export default function Page() {
 }
 
 function Workbench() {
-  const [workspace, setWorkspace] = useState<"council" | "coding" | "knowledge">("council");
+  type Workspace = "council" | "coding" | "knowledge";
+  const [workspace, setWorkspace] = useState<Workspace>("council");
   const agents = useStore((s) => s.agents);
   const hydrated = useStore((s) => s.hydrated);
   const hydrate = useStore((s) => s.hydrate);
@@ -105,6 +106,22 @@ function Workbench() {
   }, [hydrate]);
 
   useEffect(() => {
+    let unlistenSettings: (() => void) | undefined;
+    let unlistenWorkspace: (() => void) | undefined;
+    if (inTauri()) {
+      void listen("settings://open", () => setSettingsOpen(true)).then((off) => {
+        unlistenSettings = off;
+      });
+      void listen<string>("workspace://select", (event) => {
+        const next = event.payload;
+        if (next === "council" || next === "coding" || next === "knowledge") {
+          setWorkspace(next);
+        }
+      }).then((off) => {
+        unlistenWorkspace = off;
+      });
+    }
+
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === ",") {
         e.preventDefault();
@@ -117,7 +134,11 @@ function Workbench() {
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      unlistenSettings?.();
+      unlistenWorkspace?.();
+    };
   }, [setSettingsOpen]);
 
   return (
@@ -132,25 +153,11 @@ function Workbench() {
           </span>
         </span>
         <span className="spacer" data-tauri-drag-region />
-        <div className="segmented" aria-label="Workspace">
-          <button data-on={workspace === "council"} onClick={() => setWorkspace("council")}>
-            Council
-          </button>
-          <button data-on={workspace === "coding"} onClick={() => setWorkspace("coding")}>
-            Coding
-          </button>
-          <button data-on={workspace === "knowledge"} onClick={() => setWorkspace("knowledge")}>
-            Knowledge
-          </button>
-        </div>
         {hydrated && !inTauri() && (
           <span className="badge" data-tone="warn" title="Model calls only work inside the desktop shell.">
             browser preview
           </span>
         )}
-        <button className="btn ghost" onClick={() => setSettingsOpen(true)} title="Settings (⌘,)">
-          Settings
-        </button>
       </div>
 
       {/* The panes are showing a past run. Said plainly, because every control
