@@ -292,6 +292,8 @@ create table if not exists intelligence_records (
   target_memory_mb  integer,
   source_urls       text[]      not null default '{}',
   content_hash      text,
+  published_by      uuid,
+  published_at      timestamptz,
   updated_at        timestamptz not null default now()
 );
 

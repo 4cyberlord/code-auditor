@@ -747,6 +747,7 @@ export function reachableSeats<T>(
 
 export type CouncilPhase =
   | "idle"
+  | "contracting"
   | "solving"
   | "speccing"
   | "verifying"
@@ -758,6 +759,21 @@ export type CouncilPhase =
   | "done"
   | "error"
   | "cancelled";
+
+/**
+ * The parsed record of what the bench actually said, as fields.
+ *
+ * Kept beside the prose rather than instead of it: the synthesis is still the
+ * thing a person reads, and this is the thing a surface renders.
+ */
+export interface CouncilDossier {
+  synthesis: CouncilSynthesis;
+  judges: (JudgeReading & { model: string; emphasis: Emphasis; error?: string | null })[];
+  tally: RankingTally[];
+  winnerSource: WinnerDecision["source"];
+  /** Set when the judges' scoreboard did not agree with the synthesis. */
+  disagreement: string;
+}
 
 /** The run's whole record: what happened, what was measured, what won. */
 export interface CouncilReport {
@@ -771,6 +787,15 @@ export interface CouncilReport {
   synthesis: string;
   /** The winning candidate's letter, when the synthesis names one. */
   winner: string;
+  /** The parsed dossier, when the run got as far as a synthesis. */
+  dossier?: CouncilDossier | null;
+  /** What the readers agreed the problem asks, before anybody answered it. */
+  contract?: ProblemContract | null;
+  contractAgreement?: ContractAgreement | null;
+  /** The dossier rendered for a reader: standing, evidence, dissent. */
+  presentation?: Presentation | null;
+  /** Orthogonal checks on the harness itself, when any were run. */
+  oracles?: OracleSignal[];
 }
 
 // --------------------------------------------------------------------- prompts
@@ -858,13 +883,19 @@ export function reviseUserPrompt(args: {
   docket: string;
   received: string;
   execution: string;
+  knowledge?: string;
 }): string {
   const parts = [
     "The problem:\n" + (args.question || "(see the candidates' restatements)"),
+    // The library, in the one round that never had it. Revision is where a
+    // solver rewrites its algorithm after being told what is wrong with it —
+    // the round most likely to need the technique note, and the only round the
+    // knowledge pack was not reaching.
+    args.knowledge?.trim() ? "Local Knowledge/RAG guidance:\n" + args.knowledge.trim() : "",
     `Your earlier answer was Candidate ${args.letter}:\n${args.ownRaw}`,
     "The full field:\n\n" + args.docket,
     "What the council said about yours:\n" + (args.received || "(no stanza addressed to you)"),
-  ];
+  ].filter(Boolean);
   if (args.execution) {
     parts.push("Measured execution results (authoritative):\n" + args.execution);
   }
@@ -996,6 +1027,264 @@ export function councilFollowupUserPrompt(args: {
     .join("\n\n---\n\n");
 }
 
+// -------------------------------------------------- the problem contract
+
+/**
+ * What the problem actually asks, agreed before anybody answers it.
+ *
+ * Solvers each restate the question in their own words, and every later stage
+ * inherits whichever restatement it happened to read: the harness tests the
+ * spec writer's reading, the reviewers grade against their own, and a
+ * disagreement about what the problem *is* surfaces as a disagreement about who
+ * is correct. That is expensive to unpick and impossible to see from the
+ * outside.
+ *
+ * So the reading happens once, up front, in fields — the same idea as a task
+ * contract in HumanEval+ or SWE-bench — and is injected verbatim into every
+ * prompt afterwards. Two readers rather than one because a single misreading
+ * is otherwise promoted to ground truth, and a contract nobody can contradict
+ * is worse than no contract at all.
+ */
+export interface ProblemContract {
+  kind: string;
+  languages: string[];
+  signature: string;
+  inputs: string;
+  outputs: string;
+  constraints: string;
+  examples: string;
+  edgeCases: string;
+  complexity: string;
+  /** What the reader could not determine from the problem as given. */
+  unknowns: string;
+  raw: string;
+  wellFormed: boolean;
+}
+
+const CONTRACT_BLOCK = /<<<CONTRACT\s*([\s\S]*?)\s*CONTRACT>>>/i;
+
+const CONTRACT_LABELS: [string, string[]][] = [
+  ["kind", ["KIND"]],
+  ["languages", ["LANGUAGES", "LANGUAGE"]],
+  ["signature", ["SIGNATURE", "SIGNATURES"]],
+  ["inputs", ["INPUTS", "INPUT"]],
+  ["outputs", ["OUTPUTS", "OUTPUT"]],
+  ["constraints", ["CONSTRAINTS"]],
+  ["examples", ["EXAMPLES", "EXAMPLE"]],
+  ["edgeCases", ["EDGE CASES", "EDGES"]],
+  ["complexity", ["COMPLEXITY"]],
+  ["unknowns", ["UNKNOWNS", "UNKNOWN"]],
+];
+
+const EMPTY_CONTRACT: ProblemContract = {
+  kind: "",
+  languages: [],
+  signature: "",
+  inputs: "",
+  outputs: "",
+  constraints: "",
+  examples: "",
+  edgeCases: "",
+  complexity: "",
+  unknowns: "",
+  raw: "",
+  wellFormed: false,
+};
+
+export function parseProblemContract(text: string): ProblemContract {
+  const match = (text || "").match(CONTRACT_BLOCK);
+  const body = match ? match[1] : text || "";
+  const { fields, matched } = readLabels(body, CONTRACT_LABELS);
+  if (!matched) return { ...EMPTY_CONTRACT, raw: (text || "").trim().slice(0, 2000) };
+  return {
+    kind: fields.kind.split("\n")[0].trim().toLowerCase(),
+    languages: fields.languages
+      .split("\n")[0]
+      .split(/[,/]/)
+      .map((x) => normalizeCodeLanguage(x))
+      .filter(Boolean),
+    signature: fields.signature,
+    inputs: fields.inputs,
+    outputs: fields.outputs,
+    constraints: fields.constraints,
+    examples: fields.examples,
+    edgeCases: fields.edgeCases,
+    complexity: fields.complexity,
+    unknowns: fields.unknowns,
+    raw: (match ? match[0] : text || "").trim(),
+    wellFormed: true,
+  };
+}
+
+const flatten = (v: string) => v.replace(/\s+/g, " ").trim().toLowerCase();
+
+/** Where two independent readings of the same problem parted company. */
+export interface ContractAgreement {
+  agree: boolean;
+  /** One line per field that differs, in the words both readers used. */
+  differences: string[];
+}
+
+/**
+ * Two readings compared on the fields a wrong answer would turn on.
+ *
+ * Prose fields are compared loosely — whitespace and case folded — because two
+ * readers writing the same constraint in different words agree, and treating
+ * that as a conflict would mark every run disputed and teach everyone to ignore
+ * the flag. Only the fields that change what a correct program does are
+ * compared at all: two readers listing different edge cases have both read the
+ * problem correctly and are simply being thorough in different directions.
+ */
+export function compareProblemContracts(a: ProblemContract, b: ProblemContract): ContractAgreement {
+  const differences: string[] = [];
+  const check = (label: string, x: string, y: string) => {
+    if (!x.trim() || !y.trim()) return;
+    if (flatten(x) !== flatten(y)) differences.push(`${label}: reader 1 says "${x.trim()}"; reader 2 says "${y.trim()}"`);
+  };
+  check("SIGNATURE", a.signature, b.signature);
+  check("INPUTS", a.inputs, b.inputs);
+  check("OUTPUTS", a.outputs, b.outputs);
+  check("CONSTRAINTS", a.constraints, b.constraints);
+  if (a.kind && b.kind && a.kind !== b.kind) differences.push(`KIND: "${a.kind}" against "${b.kind}"`);
+  return { agree: differences.length === 0, differences };
+}
+
+/**
+ * One contract from two readings.
+ *
+ * The first well-formed reading is the base; the second fills in only what the
+ * first left blank. A field the two disagree on is never merged or averaged —
+ * the disagreement is carried into `unknowns`, where every later prompt reads
+ * it, because a contract that hides its own uncertainty is how a misreading
+ * becomes ground truth.
+ */
+export function mergeProblemContracts(
+  readings: ProblemContract[]
+): { contract: ProblemContract | null; agreement: ContractAgreement } {
+  const good = readings.filter((r) => r?.wellFormed);
+  if (!good.length) return { contract: null, agreement: { agree: false, differences: [] } };
+  const [base, second] = good;
+  if (!second) return { contract: base, agreement: { agree: true, differences: [] } };
+
+  const agreement = compareProblemContracts(base, second);
+  const pick = (x: string, y: string) => (x.trim() ? x : y);
+  const merged: ProblemContract = {
+    kind: base.kind || second.kind,
+    languages: Array.from(new Set([...base.languages, ...second.languages])),
+    signature: pick(base.signature, second.signature),
+    inputs: pick(base.inputs, second.inputs),
+    outputs: pick(base.outputs, second.outputs),
+    constraints: pick(base.constraints, second.constraints),
+    examples: pick(base.examples, second.examples),
+    edgeCases: [base.edgeCases, second.edgeCases].filter((x) => x.trim()).join("\n"),
+    complexity: pick(base.complexity, second.complexity),
+    unknowns: [
+      base.unknowns,
+      second.unknowns,
+      ...agreement.differences.map((d) => `The two readers disagreed — ${d}`),
+    ]
+      .filter((x) => x.trim())
+      .join("\n"),
+    raw: base.raw,
+    wellFormed: true,
+  };
+  return { contract: merged, agreement };
+}
+
+export function contractSystemPrompt(): string {
+  return [
+    "You read a problem statement and write down what it asks, as fields. You do not solve it.",
+    "Nothing you write may be inferred from a solution you have in mind: if the statement does",
+    "not say it, it goes under UNKNOWNS rather than being filled in with what is usual.",
+    "",
+    "Output one block, exactly once, and no commentary:",
+    "",
+    "<<<CONTRACT",
+    "KIND: code | mcq | math | research",
+    "LANGUAGES: <languages the answer must be written in, or 'any'>",
+    "SIGNATURE: <the exact function or class signature required, or 'none given'>",
+    "INPUTS: <each parameter, its type and meaning>",
+    "OUTPUTS: <what is returned or printed, and in what form>",
+    "CONSTRAINTS: <bounds on sizes, values, time and memory, exactly as stated>",
+    "EXAMPLES: <the worked examples from the statement, input -> output>",
+    "EDGE CASES: <cases the statement implies: empty, one element, duplicates, overflow>",
+    "COMPLEXITY: <the complexity the statement demands or implies, or 'not stated'>",
+    "UNKNOWNS: <anything the statement leaves genuinely undetermined>",
+    "CONTRACT>>>",
+  ].join("\n");
+}
+
+export function contractUserPrompt(args: { question: string; reading?: string }): string {
+  return [
+    "The problem, as given:\n" + (args.question || "(the problem is in the attached image)"),
+    args.reading?.trim() ? "A transcription of the screen:\n" + args.reading.trim() : "",
+    "Write the contract.",
+  ]
+    .filter(Boolean)
+    .join("\n\n---\n\n");
+}
+
+/**
+ * The contract as it appears in every later prompt.
+ *
+ * Stated as ground truth, with one deliberate exception: the fields the readers
+ * disagreed on are named as disputed rather than asserted. A solver told
+ * confidently that the signature is one thing when it may be another writes the
+ * wrong program with no way of noticing.
+ */
+/**
+ * The contract as a retrieval query.
+ *
+ * The knowledge library matches text against text, which is why the cloud
+ * worker could not consult it until the solvers had written something: a
+ * screenshot is not a query. The contract is — it describes the problem, in
+ * words, before anyone has attempted it, which is both earlier and less biased
+ * than retrieving against one model's attempt.
+ */
+export function contractQuery(contract: ProblemContract | null): string {
+  if (!contract?.wellFormed) return "";
+  return [
+    contract.signature,
+    contract.inputs,
+    contract.outputs,
+    contract.constraints,
+    contract.examples,
+    contract.edgeCases,
+    contract.complexity,
+    contract.languages.join(" "),
+  ]
+    .map((x) => (x || "").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function contractBlock(contract: ProblemContract | null): string {
+  if (!contract?.wellFormed) return "";
+  const rows: [string, string][] = [
+    ["KIND", contract.kind],
+    ["LANGUAGES", contract.languages.join(", ")],
+    ["SIGNATURE", contract.signature],
+    ["INPUTS", contract.inputs],
+    ["OUTPUTS", contract.outputs],
+    ["CONSTRAINTS", contract.constraints],
+    ["EXAMPLES", contract.examples],
+    ["EDGE CASES", contract.edgeCases],
+    ["COMPLEXITY", contract.complexity],
+    ["UNDETERMINED", contract.unknowns],
+  ];
+  const body = rows
+    .filter(([, value]) => value && value.trim())
+    .map(([label, value]) => `${label}: ${value.trim()}`)
+    .join("\n");
+  if (!body) return "";
+  return [
+    "PROBLEM CONTRACT (read independently before anyone answered; treat as the problem's own words):",
+    body,
+    "Anything under UNDETERMINED is genuinely unsettled — say which reading you assumed rather than",
+    "picking one silently.",
+  ].join("\n");
+}
+
 // -------------------------------------------------------------- the spec pass
 
 export function testSpecSystemPrompt(): string {
@@ -1073,6 +1362,529 @@ export function executionDigest(
     }
   }
   return lines.join("\n");
+}
+
+// -------------------------------------------------- the structured dossier
+
+/**
+ * Reading the labelled sections back out of a synthesis or a judge report.
+ *
+ * Same reasoning as `parseVerdict` in verdict.ts: the models answer in flat
+ * `LABEL: text` lines because that survives a language model far better than
+ * JSON, and the cost of that choice is a parser here rather than a schema
+ * there. Two rules earn their keep:
+ *
+ * 1. Only known labels split the text. A model writing "Note: ..." mid-answer
+ *    must not silently truncate the section it is in.
+ * 2. Nothing inside a fenced code block is ever a label. Shipped code says
+ *    `# Complexity: O(n)` all the time, and a parser that treats that as a new
+ *    section cuts the answer in half exactly where a user would paste it.
+ */
+function readLabels(
+  text: string,
+  labels: [string, string[]][]
+): { fields: Record<string, string>; preamble: string; matched: boolean } {
+  const fields: Record<string, string> = {};
+  const buffer: Record<string, string[]> = {};
+  const preamble: string[] = [];
+  let current = "";
+  let fenced = false;
+  let matched = false;
+
+  for (const raw of text.split("\n")) {
+    if (/^\s*```/.test(raw)) {
+      fenced = !fenced;
+      if (current) buffer[current].push(raw);
+      else preamble.push(raw);
+      continue;
+    }
+    const bare = fenced ? "" : raw.replace(/\*\*/g, "").replace(/^\s*[-*]\s+/, "").replace(/^\s*#+\s*/, "");
+    const m = fenced ? null : /^\s*([A-Za-z][A-Za-z ]{2,20}?)\s*:\s*(.*)$/.exec(bare);
+    let hit = "";
+    if (m) {
+      const label = m[1].trim().toUpperCase();
+      for (const [key, names] of labels) {
+        if (names.includes(label)) {
+          hit = key;
+          break;
+        }
+      }
+    }
+    if (hit) {
+      matched = true;
+      current = hit;
+      buffer[current] = buffer[current] ?? [];
+      if (m![2].trim()) buffer[current].push(m![2].trim());
+      continue;
+    }
+    if (current) buffer[current].push(raw);
+    else if (raw.trim()) preamble.push(raw);
+  }
+
+  for (const [key] of labels) fields[key] = (buffer[key] ?? []).join("\n").trim();
+  return { fields, preamble: preamble.join("\n").trim(), matched };
+}
+
+/** Letters named in a line, in the order they were named. `A > C > B` → A,C,B. */
+function lettersInOrder(line: string): string[] {
+  const out: string[] = [];
+  for (const m of (line || "").matchAll(/\b([A-Z])\b/g)) {
+    if (!LETTERS.includes(m[1])) continue;
+    if (!out.includes(m[1])) out.push(m[1]);
+  }
+  return out;
+}
+
+/** The first fenced block in a body, with whatever language the fence named. */
+function firstFence(body: string): { code: string; language: string } {
+  const m = /```([A-Za-z0-9+#._-]*)\s*\n([\s\S]*?)```/.exec(body || "");
+  if (!m) return { code: "", language: "" };
+  return { code: m[2].trim(), language: normalizeCodeLanguage(m[1] || "") };
+}
+
+/** The synthesis, as fields rather than prose. */
+export interface CouncilSynthesis {
+  verdict: string;
+  /** The letter the synthesis named, or "" for NONE / unparsable. */
+  winner: string;
+  rejected: string;
+  evidence: string;
+  approach: string;
+  finalAnswer: string;
+  /** The first fenced block of FINAL ANSWER — what a user would paste. */
+  code: string;
+  language: string;
+  preamble: string;
+  /** False when not one labelled section was found. */
+  wellFormed: boolean;
+}
+
+const SYNTHESIS_LABELS: [string, string[]][] = [
+  ["verdict", ["VERDICT"]],
+  ["winner", ["WINNER"]],
+  ["rejected", ["REJECTED"]],
+  ["evidence", ["EVIDENCE"]],
+  ["approach", ["APPROACH"]],
+  ["finalAnswer", ["FINAL ANSWER", "FINAL"]],
+];
+
+/**
+ * The synthesis is the one artefact every downstream surface reads, and until
+ * now only its `WINNER:` line was ever read by code — everything else was
+ * scraped out of markdown by whoever was rendering it, or not shown at all.
+ * Parsing it once, here, is what lets the panel and the helper overlay show
+ * *why* an answer is trusted without either of them re-reading prose.
+ */
+export function parseCouncilSynthesis(text: string): CouncilSynthesis {
+  const { fields, preamble, matched } = readLabels(text || "", SYNTHESIS_LABELS);
+  const winnerRaw = fields.winner || "";
+  const winnerMatch = /^\s*([A-Z])\b/.exec(winnerRaw.replace(/^\**/, ""));
+  const winner =
+    winnerMatch && !/^\s*NONE\b/i.test(winnerRaw) && LETTERS.includes(winnerMatch[1]) ? winnerMatch[1] : "";
+  const fence = firstFence(fields.finalAnswer);
+  return {
+    verdict: fields.verdict,
+    winner,
+    rejected: fields.rejected,
+    evidence: fields.evidence,
+    approach: fields.approach,
+    finalAnswer: fields.finalAnswer,
+    code: fence.code,
+    language: fence.language,
+    preamble,
+    wellFormed: matched,
+  };
+}
+
+/** One judge's report, as fields. */
+export interface JudgeReading {
+  verdict: string;
+  /** Letters best-first, as the judge ordered them. */
+  ranking: string[];
+  /** Letters the judge said it verified correct itself. */
+  correct: string[];
+  why: string;
+  defects: string;
+  best: string;
+  preamble: string;
+  wellFormed: boolean;
+}
+
+const JUDGE_LABELS: [string, string[]][] = [
+  ["verdict", ["VERDICT"]],
+  ["ranking", ["RANKING", "RANK"]],
+  ["correct", ["CORRECT"]],
+  ["why", ["WHY"]],
+  ["defects", ["DEFECTS"]],
+  ["best", ["BEST ANSWER", "BEST"]],
+];
+
+export function parseJudgeReport(text: string): JudgeReading {
+  const { fields, preamble, matched } = readLabels(text || "", JUDGE_LABELS);
+  return {
+    verdict: fields.verdict,
+    ranking: lettersInOrder(fields.ranking.split("\n")[0] || ""),
+    correct: lettersInOrder(fields.correct.split("\n")[0] || ""),
+    why: fields.why,
+    defects: fields.defects,
+    best: fields.best,
+    preamble,
+    wellFormed: matched,
+  };
+}
+
+// ------------------------------------------------ the deterministic winner
+
+/** One candidate's standing on the judges' scoreboard. */
+export interface RankingTally {
+  letter: string;
+  /** Borda points: a first place among n candidates is worth n, a last is 1. */
+  points: number;
+  firsts: number;
+  /** How many judges said they verified this one correct themselves. */
+  correctVotes: number;
+  gate: "pass" | "fail" | "untested";
+}
+
+/**
+ * The judges' rankings, counted rather than read.
+ *
+ * Borda rather than "who got the most firsts": with three judges and four
+ * candidates, a candidate ranked second by everyone is a better answer than one
+ * ranked first by a single judge and last by the other two, and plurality
+ * cannot see the difference. Judges who ranked only part of the field still
+ * count — an unranked candidate simply scores nothing from that judge, which is
+ * what leaving it out means.
+ */
+export function aggregateJudgeRankings(
+  reports: JudgeReading[],
+  letters: string[],
+  runs: Record<string, CandidateRun> = {}
+): RankingTally[] {
+  const size = Math.max(letters.length, 1);
+  const tally = new Map<string, RankingTally>();
+  for (const letter of letters) {
+    tally.set(letter, { letter, points: 0, firsts: 0, correctVotes: 0, gate: gateFor(runs[letter]) });
+  }
+  for (const report of reports) {
+    report.ranking.forEach((letter, index) => {
+      const row = tally.get(letter);
+      if (!row) return;
+      row.points += Math.max(size - index, 1);
+      if (index === 0) row.firsts += 1;
+    });
+    for (const letter of report.correct) {
+      const row = tally.get(letter);
+      if (row) row.correctVotes += 1;
+    }
+  }
+  return [...tally.values()].sort(
+    (a, b) =>
+      b.points - a.points ||
+      b.firsts - a.firsts ||
+      b.correctVotes - a.correctVotes ||
+      a.letter.localeCompare(b.letter)
+  );
+}
+
+/** What the deterministic layer decided, and on whose evidence. */
+export interface WinnerDecision {
+  winner: string;
+  /** Where the surviving winner came from. */
+  source: "synthesis" | "judges" | "none";
+  /** Set when the gate rejected the synthesis' pick. */
+  overruledReason: string;
+  /** Set when the judges' scoreboard did not agree with the synthesis. */
+  disagreement: string;
+  tally: RankingTally[];
+}
+
+/**
+ * Winner selection, moved out of the synthesis and into code.
+ *
+ * The synthesis used to do two jobs at once: score the field and narrate the
+ * result. Only one of those needs a language model. Scoring is counting, and a
+ * model that counts in prose can be argued with — by itself, mid-paragraph, as
+ * the first real run showed when it reinterpreted a failed execution until the
+ * gate appeared not to apply.
+ *
+ * So the order here is: the gate first (execution beats everything), then the
+ * judges' counted scoreboard, and the synthesis last, as the narrator. A
+ * synthesis pick that clears the gate normally stands — it read the same
+ * evidence and it wrote the answer text. It is displaced only when the judges
+ * put a *gate-passing* candidate strictly above it, which is the one case where
+ * the prose and the arithmetic genuinely disagree, and the disagreement is
+ * recorded either way so a reader can see it happened.
+ */
+export function decideWinner(args: {
+  claimed: string;
+  judges: JudgeReading[];
+  runs: Record<string, CandidateRun>;
+  letters: string[];
+}): WinnerDecision {
+  const tally = aggregateJudgeRankings(args.judges, args.letters, args.runs);
+  const ruling = enforceWinnerGate(args.claimed, args.runs);
+  const executed = Object.values(args.runs).some((r) => r?.ran);
+  const eligible = tally.filter((row) => (executed ? row.gate === "pass" : true) && row.points > 0);
+  const leader = eligible[0];
+
+  if (ruling.winner) {
+    const claimedRow = tally.find((row) => row.letter === ruling.winner);
+    if (leader && leader.letter !== ruling.winner && leader.points > (claimedRow?.points ?? 0)) {
+      return {
+        winner: leader.letter,
+        source: "judges",
+        overruledReason: ruling.overruledReason,
+        disagreement:
+          `The synthesis shipped Candidate ${ruling.winner}, but the judges ranked Candidate ${leader.letter} ` +
+          `higher (${leader.points} points to ${claimedRow?.points ?? 0}) and its run passed. The counted ` +
+          `scoreboard decides the winner; read the synthesis for the reasoning, not for the result.`,
+        tally,
+      };
+    }
+    return { winner: ruling.winner, source: "synthesis", overruledReason: "", disagreement: "", tally };
+  }
+
+  // The synthesis named nobody the gate would accept. A gate-passing candidate
+  // the judges ranked is still a better answer than silence, and saying so is
+  // the difference between "we found nothing" and "we found something and threw
+  // it away because one model wrote the wrong letter on the envelope".
+  if (leader) {
+    return {
+      winner: leader.letter,
+      source: "judges",
+      overruledReason: ruling.overruledReason,
+      disagreement: args.claimed
+        ? `Candidate ${args.claimed} did not survive the gate, so the judges' highest-ranked passing ` +
+          `candidate, ${leader.letter}, is recorded as the winner instead.`
+        : `The synthesis named no winner. Candidate ${leader.letter} passed its run and the judges ranked ` +
+          `it highest, so it is recorded as the winner.`,
+      tally,
+    };
+  }
+
+  return { winner: "", source: "none", overruledReason: ruling.overruledReason, disagreement: "", tally };
+}
+
+// ------------------------------------------------------------- oracles
+
+/**
+ * A deliberately broken version of a candidate's code.
+ *
+ * The generated harness is one model's opinion about what correct means, and a
+ * suite that passes everything it is given proves nothing at all — which is the
+ * failure mode the whole gate is blind to, because a gate can only reject what
+ * its evidence rejects. The cheapest way to find out whether a suite
+ * discriminates is to hand it something that is definitely wrong and see if it
+ * notices.
+ *
+ * The mutation is textual and language-agnostic on purpose: the point is not to
+ * model the program, it is to break it. Comparisons flip, arithmetic flips, and
+ * failing that a returned value is replaced with a constant. Any of those makes
+ * a correct program incorrect for almost every input a real test battery uses.
+ */
+export interface Mutation {
+  applied: boolean;
+  /** What was changed, in one line, for the evidence log. */
+  description: string;
+  code: string;
+}
+
+const MUTATIONS: [RegExp, string, string][] = [
+  [/(?<![<>=!])<=(?!=)/, ">=", "flipped the first <= to >="],
+  [/(?<![<>=!])>=(?!=)/, "<=", "flipped the first >= to <="],
+  [/(?<![<>=!+-])<(?![=<])/, ">", "flipped the first < to >"],
+  [/(?<![<>=!+-])>(?![=>])/, "<", "flipped the first > to <"],
+  [/(?<![=!<>+\-*/%])==(?!=)/, "!=", "flipped the first == to !="],
+  [/\s\+\s/, " - ", "turned the first addition into a subtraction"],
+];
+
+export function mutateCode(code: string): Mutation {
+  const body = code || "";
+  if (!body.trim()) return { applied: false, description: "", code: body };
+  for (const [pattern, replacement, description] of MUTATIONS) {
+    if (pattern.test(body)) {
+      return { applied: true, description, code: body.replace(pattern, replacement) };
+    }
+  }
+  return { applied: false, description: "nothing mechanical left to break", code: body };
+}
+
+/** One orthogonal signal about the harness itself, not about a candidate. */
+export interface OracleSignal {
+  kind: "mutation";
+  /** The candidate the mutant was made from. */
+  letter: string;
+  ran: boolean;
+  /** True when the harness passed a program that was deliberately broken. */
+  survived: boolean;
+  description: string;
+  note: string;
+}
+
+/** The oracle findings, as evidence lines beside the execution digest. */
+export function oracleDigest(signals: OracleSignal[]): string {
+  const lines = signals
+    .filter((s) => s.ran)
+    .map((s) =>
+      s.survived
+        ? `Mutation check on Candidate ${s.letter}: the harness PASSED a program that had been deliberately broken (${s.description}).`
+        : `Mutation check on Candidate ${s.letter}: the harness correctly rejected a deliberately broken version (${s.description}).`
+    );
+  return lines.join("\n");
+}
+
+/**
+ * Whether the oracles think the harness is worth believing.
+ *
+ * Deliberately does not touch the gate. A suite that passes a broken program is
+ * not evidence that any candidate is wrong, and promoting or demoting anyone on
+ * this signal would be inventing a result. It goes in front of the judges, in
+ * words, where a human can see it — the same treatment `harnessIsSuspect` gets
+ * and for the same reason.
+ */
+export function oracleSuspicion(signals: OracleSignal[]): string {
+  const survived = signals.filter((s) => s.ran && s.survived);
+  if (!survived.length) return "";
+  const letters = survived.map((s) => s.letter).join(", ");
+  return (
+    `The generated harness passed a deliberately broken version of Candidate(s) ${letters} ` +
+    `(${survived[0].description}). A suite that accepts a program known to be wrong has not ` +
+    `verified the ones it accepted either: treat every PASS on this harness as unproven, and ` +
+    `say which specific case should have caught the break.`
+  );
+}
+
+// ---------------------------------------------------------- presentation
+
+/** One candidate's line on the evidence table. */
+export interface EvidenceRow {
+  letter: string;
+  model: string;
+  gate: "pass" | "fail" | "untested";
+  passed: number;
+  failed: number;
+  /** Whether this row describes the revision rather than the first answer. */
+  revised: boolean;
+  runtime: string;
+  durationMs: number;
+  elapsedMs: number | null;
+  peakMemoryKb: number | null;
+  note: string;
+  /** Borda points from the judges, when the dossier was parsed. */
+  judgePoints: number;
+}
+
+/**
+ * Everything a surface needs to explain the answer, without another model call.
+ *
+ * The overlay's thought-process panes were decorative because nothing produced
+ * the thoughts in a form they could render: the reasoning existed only inside a
+ * synthesis paragraph, and the helper's answer was "here is some code" with no
+ * account of why anyone should trust it. This is that account, as fields.
+ */
+export interface Presentation {
+  standing: AnswerStanding["standing"];
+  standingReason: string;
+  winner: string;
+  /** Which authority produced the winner: the synthesis, or the judges' tally. */
+  winnerSource: WinnerDecision["source"];
+  /** "Candidate B — z-ai/glm-5.3". Naming the model is safe after the gate. */
+  provenance: string;
+  approach: string;
+  complexity: string;
+  evidence: EvidenceRow[];
+  /** Where the bench did not agree, in one line each. */
+  dissent: string[];
+  /** What was rejected and why, as the synthesis put it. */
+  rejected: string[];
+  /** Non-empty when independent candidates failed identically. */
+  harnessSuspect: string;
+  /** Where the two problem readings parted company, if they did. */
+  contractDisputes: string[];
+  /** The code a user would paste, and what it is written in. */
+  code: string;
+  language: string;
+}
+
+const bullets = (body: string): string[] =>
+  (body || "")
+    .split("\n")
+    .map((line) => line.replace(/^\s*[-*]\s*/, "").trim())
+    .filter(Boolean);
+
+export function buildPresentation(report: CouncilReport): Presentation {
+  // A revised candidate is represented by its revision everywhere: that is the
+  // thing that was judged, and showing round one's numbers beside a revised
+  // answer would be evidence for a program nobody shipped.
+  const runFor = (c: Candidate) => (c.revised ? report.revisedRuns?.[c.letter] : undefined) ?? report.runs?.[c.letter];
+  const gateRuns: Record<string, CandidateRun> = {};
+  for (const c of report.candidates) {
+    const run = runFor(c);
+    if (run) gateRuns[c.letter] = run;
+  }
+  const standing = answerStanding(report.winner, gateRuns);
+  const points = new Map((report.dossier?.tally ?? []).map((row) => [row.letter, row.points]));
+
+  const evidence: EvidenceRow[] = report.candidates.map((c) => {
+    const run = runFor(c);
+    return {
+      letter: c.letter,
+      model: c.model,
+      gate: gateFor(run),
+      passed: run?.passed ?? 0,
+      failed: run?.failed ?? 0,
+      revised: Boolean(c.revised && report.revisedRuns?.[c.letter]),
+      runtime: run?.runtime ?? "",
+      durationMs: run?.durationMs ?? 0,
+      elapsedMs: run?.remote?.remoteElapsedMs ?? run?.remoteElapsedMs ?? null,
+      peakMemoryKb: run?.remote?.peakMemoryKb ?? run?.peakMemoryKb ?? null,
+      note: run?.note ?? "",
+      judgePoints: points.get(c.letter) ?? 0,
+    };
+  });
+
+  // Dissent is the part a review committee publishes and a consensus machine
+  // hides: a judge who ranked the losing candidate first was not wrong to, and
+  // a reader who can see that disagreement can weigh it.
+  const dissent: string[] = [];
+  if (report.dossier?.disagreement) dissent.push(report.dossier.disagreement);
+  for (const judge of report.dossier?.judges ?? []) {
+    const top = judge.ranking[0];
+    if (!top || !report.winner || top === report.winner) continue;
+    const gate = gateFor(gateRuns[top]);
+    dissent.push(
+      `${judge.model} (${judge.emphasis}) ranked Candidate ${top} first; ` +
+        (gate === "pass"
+          ? `Candidate ${report.winner} was selected instead.`
+          : `the execution gate ${gate === "fail" ? "rejected" : "could not verify"} Candidate ${top}.`)
+    );
+  }
+
+  const winnerCandidate = report.candidates.find((c) => c.letter === report.winner);
+  const winnerFinal = winnerCandidate?.revised ?? winnerCandidate?.final ?? null;
+  const synth = report.dossier?.synthesis;
+  return {
+    standing: standing.standing,
+    standingReason: standing.reason,
+    winner: report.winner,
+    winnerSource: report.dossier?.winnerSource ?? (report.winner ? "synthesis" : "none"),
+    provenance: winnerCandidate ? `Candidate ${winnerCandidate.letter} — ${winnerCandidate.model}` : "",
+    approach: synth?.approach || "",
+    complexity: report.contract?.complexity || winnerFinal?.complexity || "",
+    evidence,
+    dissent,
+    rejected: bullets(synth?.rejected || ""),
+    harnessSuspect: [harnessIsSuspect(gateRuns), oracleSuspicion(report.oracles ?? [])]
+      .filter(Boolean)
+      .join("\n\n"),
+    contractDisputes: report.contractAgreement?.differences ?? [],
+    // The synthesis assembles the shipped answer, so its code is preferred; the
+    // winning candidate's own code is the fallback when the synthesis wrote
+    // prose around a candidate rather than restating it.
+    code: synth?.code || winnerFinal?.code || "",
+    language: synth?.language || (winnerFinal ? candidateLanguage(winnerFinal) : ""),
+  };
 }
 
 /** The complete report, as it is written to history and shown in the panel. */

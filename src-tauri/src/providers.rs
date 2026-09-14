@@ -378,7 +378,7 @@ pub async fn run_local_qwen(req: LocalQwenRequest) -> Result<String, String> {
             "qwen returned tool calls, but this caller expected a final text response.".into(),
         );
     }
-    Err("qwen returned an empty response.".into())
+    Err("Qwen returned an empty response.".into())
 }
 
 #[tauri::command]

@@ -129,6 +129,15 @@ export default function ReadingPanel() {
   const low = agreement.conflicts.filter((c) => c.severity === "low");
   const doubts = agreement.merged.ambiguities;
 
+  // What the one-line summary no longer says out loud. The warning is still
+  // true and still worth reading — once, by someone who has just noticed the
+  // "unchecked" badge, rather than on every run in three lines of the strip.
+  const hint = !agreement.agree
+    ? "Open the reading document: it holds both versions of every field the readers disagreed on."
+    : crossChecked
+      ? "Two readers produced the same text, so a misread character would have shown up here as a conflict."
+      : "Nothing cross-checked this reading. A misread character in it reaches every agent as fact.";
+
   const detail =
     high.length > 0
       ? `${high.length} ${high.length === 1 ? "conflict" : "conflicts"}`
@@ -158,7 +167,9 @@ export default function ReadingPanel() {
         <span className="chip" title="How far the merged reading trusts itself">
           {Math.round(agreement.merged.confidence * 100)}%
         </span>
-        <span className="reading-line">{agreement.summary}</span>
+        <span className="reading-line" title={hint}>
+          {agreement.summary}
+        </span>
         {/* Where the document went. Worth a chip rather than a hidden detail:
             when a model answers the wrong question, this file is how you tell
             whether the reader or the reasoner got it wrong, and you cannot check
@@ -208,7 +219,7 @@ export default function ReadingPanel() {
               seconds what a model can only flag. */}
           {doubts.length > 0 && (
             <>
-              <div className="section-label">Uncertain in the image</div>
+              <div className="section-label">Uncertain in the Image</div>
               <ul className="reading-doubts">
                 {doubts.map((a, i) => (
                   <li key={i}>{a}</li>
@@ -217,7 +228,7 @@ export default function ReadingPanel() {
             </>
           )}
 
-          <div className="section-label">What the agents were given</div>
+          <div className="section-label">What the Agents Were Given</div>
           <pre className="reading-full">{context || "(the reading rendered to nothing)"}</pre>
         </div>
       )}

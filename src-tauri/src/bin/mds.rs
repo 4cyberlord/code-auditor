@@ -1,10 +1,13 @@
 // src-tauri/src/bin/mds.rs
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(target_os = "macos")]
 use std::os::fd::AsRawFd;
 use std::{
     fs::{self, File, OpenOptions},
+    io::Read,
+    os::unix::net::UnixStream,
     path::PathBuf,
     process::Command,
     time::{Duration, Instant},
@@ -21,15 +24,14 @@ use tao::{
 use uuid::Uuid;
 use wry::{WebView, WebViewBuilder};
 
-#[allow(dead_code)]
 const SERVICE: &str = "com.apple.mds.session";
-#[allow(dead_code)]
 const HELPER_TOKEN: &str = "mds";
+const SETTINGS_KEY: &str = "app.v1";
+const BUCKET: &str = "screenshots";
 const MAX_IMAGES: usize = 10;
 const OVERLAY_WIDTH: f64 = 1320.0;
 const OVERLAY_HEIGHT: f64 = 950.0;
 const INSTANCE_LOCK: &str = ".mds_daemon.lock";
-#[allow(dead_code)]
 const HELPER_USER_AGENT: &str =
  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
 
@@ -323,12 +325,101 @@ mod mac_shortcuts {
     }
 }
 
+async fn space_api_calls() {
+    let delay_ms = 300 + rand::random::<u64>() % 500;
+    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PendingImage {
+    position: usize,
+    local_path: String,
+    file_name: String,
+    bytes: i64,
+    mime: String,
+    captured_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PendingBatch {
+    id: String,
+    status: String,
+    started_at: String,
+    #[serde(default)]
+    images: Vec<PendingImage>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SubmittedJob {
+    id: String,
+    mode: String,
+    #[serde(default)]
+    mcq_model: Option<String>,
+    status: String,
+    #[serde(default)]
+    progress_phase: String,
+    submitted_at: String,
+    #[serde(default)]
+    previews: Vec<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    report: Option<Value>,
+    #[serde(default)]
+    events: Vec<Value>,
+}
+
+async fn api(op: &str, args: Value) -> Result<Value, String> {
+    let token = read_keychain(HELPER_TOKEN).map_err(|_| {
+        "The background worker is not authorised. Authorise it in the main application.".to_string()
+    })?;
+
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent(HELPER_USER_AGENT)
+        .build()
+        .map_err(|e| e.to_string())?
+        .post(council_editor_lib::deployment::api_url())
+        .header("apikey", council_editor_lib::deployment::publishable_key())
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({ "op": op, "args": args }))
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach the server API: {e}"))?;
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let parsed: Value = serde_json::from_str(&body).map_err(|_| {
+        format!(
+            "The server API answered {} with something that was not JSON.",
+            status.as_u16()
+        )
+    })?;
+
+    if !status.is_success() || parsed["ok"] == Value::Bool(false) {
+        if status.as_u16() == 401 {
+            return Err("The background authorisation has expired. Authorise it again.".into());
+        }
+        return Err(parsed["error"]
+            .as_str()
+            .unwrap_or("The server API refused that.")
+            .to_string());
+    }
+
+    Ok(parsed["data"].clone())
+}
+
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 fn main() {
     if let Err(e) = run() {
         if !e.contains("Another ghost instance is already running") {
-            write_helper_status(false, Some(&format!("startup failed: {e}")));
+            write_helper_status(false, Some(&format!("Startup failed: {e}")));
         }
         eprintln!("ghost helper startup failed: {e}");
         std::process::exit(1);
@@ -351,7 +442,7 @@ fn run() -> Result<(), String> {
         Ok(()) => write_helper_status(true, None),
         Err(error) => {
             let message = format!(
-                "hotkeys unavailable: {error}. Grant Input Monitoring permission for the helper in macOS System Settings, then reinstall or restart the helper."
+                "Hotkeys are unavailable: {error}. Grant Input Monitoring permission for the helper in macOS System Settings, then reinstall or restart the helper."
             );
             eprintln!("{message}");
             write_helper_status(false, Some(&message));
@@ -416,7 +507,10 @@ fn run() -> Result<(), String> {
                 let _ = update_overlay(&webview, &active_view);
             }
             if mac_shortcuts::take_start_batch() {
-                let _ = start_batch();
+                if let Err(e) = start_batch() {
+                    eprintln!("start batch failed: {e}");
+                }
+                let _ = update_overlay(&webview, &active_view);
             }
             if mac_shortcuts::take_capture() {
                 let restore = overlay_visible;
@@ -435,12 +529,15 @@ fn run() -> Result<(), String> {
                 let _ = show_overlay(&overlay, overlay_visible);
                 if let Err(e) = result {
                     eprintln!("capture failed: {e}");
-                } else {
-                    let _ = update_overlay(&webview, &active_view);
                 }
+                let _ = update_overlay(&webview, &active_view);
             }
             if mac_shortcuts::take_submit() {
-                let _ = rt.block_on(submit_batch(&active_view));
+                if let Err(e) = rt.block_on(submit_batch(&active_view)) {
+                    eprintln!("submit failed: {e}");
+                    let _ = update_pending_error(&e);
+                }
+                let _ = update_overlay(&webview, &active_view);
             }
             if overlay_visible && mac_shortcuts::take_move_left() {
                 overlay_position.x -= 80.0;
@@ -570,102 +667,403 @@ fn show_overlay(window: &Window, visible: bool) -> Result<(), String> {
     Ok(())
 }
 
-// ─── CAPTURE / SUBMIT (abbreviated — same logic as before) ───────────────────
+// ─── CAPTURE / SUBMIT ────────────────────────────────────────────────────────
+
+fn now() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn cache_dir() -> Result<PathBuf, String> {
+    Ok(support_root_dir()?.join("cache"))
+}
+
+fn log_dir() -> Result<PathBuf, String> {
+    Ok(support_root_dir()?.join("logs"))
+}
+
+fn pending_path() -> Result<PathBuf, String> {
+    Ok(cache_dir()?.join("pending-batch.json"))
+}
+
+fn submitted_job_path() -> Result<PathBuf, String> {
+    Ok(cache_dir()?.join("submitted-job.json"))
+}
+
+fn captures_dir(batch_id: &str) -> Result<PathBuf, String> {
+    Ok(cache_dir()?.join("captures").join(batch_id))
+}
+
+fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    fs::write(path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn log(message: &str) {
+    let stamped = format!("{} {message}\n", now());
+    if let Ok(dir) = log_dir() {
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join(".state");
+        let existing = fs::read_to_string(&path).unwrap_or_default();
+        let lines: Vec<&str> = existing.lines().chain(stamped.lines()).collect();
+        let start = lines.len().saturating_sub(80);
+        let bounded = format!("{}\n", lines[start..].join("\n"));
+        let _ = write_private(&path, bounded);
+    }
+}
+
+fn save_pending(batch: &PendingBatch) -> Result<(), String> {
+    let path = pending_path()?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)
+            .map_err(|e| format!("Could not create helper state directory: {e}"))?;
+    }
+    let json = serde_json::to_string_pretty(batch).map_err(|e| e.to_string())?;
+    write_private(&path, json).map_err(|e| format!("Could not save helper batch: {e}"))
+}
+
+fn read_pending() -> Result<Option<PendingBatch>, String> {
+    let path = pending_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(path).map_err(|e| format!("Could not read helper batch: {e}"))?;
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|e| format!("Could not parse helper batch: {e}"))
+}
+
+fn save_submitted_job(job: &SubmittedJob) -> Result<(), String> {
+    let path = submitted_job_path()?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)
+            .map_err(|e| format!("Could not create helper state directory: {e}"))?;
+    }
+    let json = serde_json::to_string_pretty(job).map_err(|e| e.to_string())?;
+    write_private(&path, json).map_err(|e| format!("Could not save submitted job: {e}"))
+}
+
+fn read_submitted_job() -> Result<Option<SubmittedJob>, String> {
+    let path = submitted_job_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(path).map_err(|e| format!("Could not read submitted job: {e}"))?;
+    serde_json::from_str(&raw)
+        .map(Some)
+        .map_err(|e| format!("Could not parse submitted job: {e}"))
+}
+
+fn clear_submitted_job() -> Result<(), String> {
+    let path = submitted_job_path()?;
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| format!("Could not clear submitted job: {e}"))?;
+    }
+    Ok(())
+}
+
+fn update_pending_error(message: &str) -> Result<(), String> {
+    if let Some(mut batch) = read_pending()? {
+        batch.error = Some(message.to_string());
+        save_pending(&batch)?;
+    }
+    Ok(())
+}
 
 fn start_batch() -> Result<(), String> {
     let id = format!("batch-{}", Uuid::new_v4());
-    let dir = support_root_dir()?.join("cache/captures").join(&id);
-    fs::create_dir_all(&dir).map_err(|e| format!("Could not create capture dir: {e}"))?;
-    let batch = serde_json::json!({
-    "id": id,
-    "status": "collecting",
-    "startedAt": chrono::Utc::now().to_rfc3339(),
-    "images": []
-    });
-    let path = support_root_dir()?.join("cache/pending-batch.json");
-    fs::write(
-        &path,
-        serde_json::to_string_pretty(&batch).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    clear_submitted_job()?;
+    let batch = PendingBatch {
+        id: id.clone(),
+        status: "collecting".to_string(),
+        started_at: now(),
+        images: vec![],
+        error: None,
+    };
+    fs::create_dir_all(captures_dir(&id)?)
+        .map_err(|e| format!("Could not create capture directory: {e}"))?;
+    save_pending(&batch)?;
+    log(&format!("started {id}"));
     Ok(())
 }
 
 fn capture_screen() -> Result<(), String> {
-    let pending_path = support_root_dir()?.join("cache/pending-batch.json");
-    let raw = fs::read_to_string(&pending_path).map_err(|e| e.to_string())?;
-    let mut batch: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-
-    let images = batch["images"].as_array().ok_or("bad batch")?.clone();
-    if images.len() >= MAX_IMAGES {
-        return Err(format!("Batch full ({MAX_IMAGES})."));
+    let mut batch = read_pending()?.ok_or("Start a helper batch before capturing.".to_string())?;
+    if batch.images.len() >= MAX_IMAGES {
+        batch.status = "ready".to_string();
+        batch.error = Some(format!("A helper batch can hold {MAX_IMAGES} screenshots."));
+        save_pending(&batch)?;
+        return Err(format!("A helper batch can hold {MAX_IMAGES} screenshots."));
     }
 
-    let batch_id = batch["id"].as_str().unwrap_or("unknown");
-    let dir = support_root_dir()?.join("cache/captures").join(batch_id);
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
-    let fname = format!(
-        "{}-{}.png",
-        images.len(),
+    let dir = captures_dir(&batch.id)?;
+    fs::create_dir_all(&dir).map_err(|e| format!("Could not create capture directory: {e}"))?;
+    let position = batch.images.len();
+    let file_name = format!(
+        "{position}-{}.png",
         chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
     );
-    let path = dir.join(&fname);
+    let path = dir.join(&file_name);
 
     let out = Command::new("/usr/sbin/screencapture")
         .arg("-x")
         .arg(&path)
         .output()
-        .map_err(|e| format!("screencapture launch failed: {e}"))?;
+        .map_err(|e| format!("Screen capture could not be started: {e}"))?;
     if !out.status.success() {
+        let _ = fs::remove_file(&path);
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "screencapture failed. Check Screen Recording permission.".into()
+        let msg = if stderr.is_empty() {
+            "Screen capture failed. Check Screen Recording permission.".into()
         } else {
-            format!("screencapture: {stderr}")
-        });
+            format!("Screen capture failed: {stderr}")
+        };
+        batch.error = Some(msg.clone());
+        save_pending(&batch)?;
+        return Err(msg);
     }
 
-    let bytes = fs::metadata(&path).map_err(|e| e.to_string())?.len() as i64;
-    batch["images"]
-        .as_array_mut()
-        .unwrap()
-        .push(serde_json::json!({
-        "position": images.len(),
-        "localPath": path.to_string_lossy().to_string(),
-        "fileName": fname,
-        "bytes": bytes,
-        "mime": "image/png",
-        "capturedAt": chrono::Utc::now().to_rfc3339()
-        }));
-    batch["status"] = Value::String("ready".to_string());
-    fs::write(
-        &pending_path,
-        serde_json::to_string_pretty(&batch).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    let bytes = fs::metadata(&path)
+        .map_err(|e| format!("Could not inspect captured screenshot: {e}"))?
+        .len() as i64;
+    if bytes <= 0 {
+        batch.error = Some("Captured screenshot was empty.".to_string());
+        save_pending(&batch)?;
+        return Err("Captured screenshot was empty.".to_string());
+    }
+    batch.images.push(PendingImage {
+        position,
+        local_path: path.to_string_lossy().to_string(),
+        file_name,
+        bytes,
+        mime: "image/png".to_string(),
+        captured_at: now(),
+    });
+    batch.status = "ready".to_string();
+    batch.error = None;
+    save_pending(&batch)?;
+    log(&format!("captured image {} for {}", position + 1, batch.id));
     Ok(())
 }
 
-async fn submit_batch(_active_view: &str) -> Result<(), String> {
-    // Read pending, upload via API, mark submitted
-    let pending_path = support_root_dir()?.join("cache/pending-batch.json");
-    if !pending_path.exists() {
-        return Err("No pending batch to submit.".into());
+async fn submit_batch(active_view: &str) -> Result<(), String> {
+    let batch = read_pending()?.ok_or("No helper batch is waiting to submit.".to_string())?;
+    if batch.images.is_empty() {
+        return Err("The helper batch has no screenshots.".to_string());
     }
-    // ... (upload logic same as before)
+    let user_settings = api("settings.load", serde_json::json!({ "key": SETTINGS_KEY }))
+        .await
+        .unwrap_or_else(|e| {
+            log(&format!("Settings could not be loaded: {e}"));
+            Value::Null
+        });
+    let user_settings = sanitize_settings(if user_settings.is_null() {
+        Value::Object(Default::default())
+    } else {
+        user_settings
+    });
+    space_api_calls().await;
+
+    let session_title = format!(
+        "Background capture batch {}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
+    );
+    let session = api(
+        "sessions.create",
+        serde_json::json!({ "title": session_title }),
+    )
+    .await?;
+    space_api_calls().await;
+    let session_id = session["id"]
+        .as_str()
+        .ok_or("The server did not return a session id.")?
+        .to_string();
+
+    let owner = api("auth.whoami", serde_json::json!({})).await?;
+    space_api_calls().await;
+    let owner_id = owner["userId"]
+        .as_str()
+        .ok_or("The server did not say who the helper is.")?
+        .to_string();
+
+    let mode = if active_view == "mcq" {
+        "mcq".to_string()
+    } else {
+        job_mode_for_settings(&user_settings)
+    };
+    let mcq_model = if mode == "mcq" {
+        user_settings
+            .get("mcqModel")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string)
+    } else {
+        None
+    };
+    let mut images = vec![];
+    let mut previews = vec![];
+    for image in &batch.images {
+        let bytes = fs::read(&image.local_path)
+            .map_err(|e| format!("Could not read {}: {e}", image.file_name))?;
+        previews.push(format!(
+            "data:{};base64,{}",
+            if image.mime.is_empty() {
+                "image/png"
+            } else {
+                &image.mime
+            },
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        ));
+        let path = format!("{owner_id}/{session_id}/{}", safe_segment(&image.file_name));
+        let signed = api(
+            "storage.uploadUrl",
+            serde_json::json!({ "path": path, "bucket": BUCKET }),
+        )
+        .await?;
+        space_api_calls().await;
+        let url = signed["url"]
+            .as_str()
+            .ok_or("The server did not return an upload URL.")?;
+
+        let resp = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .user_agent(HELPER_USER_AGENT)
+            .build()
+            .map_err(|e| e.to_string())?
+            .put(url)
+            .header(
+                "Content-Type",
+                if image.mime.is_empty() {
+                    "image/png"
+                } else {
+                    &image.mime
+                },
+            )
+            .body(bytes.clone())
+            .send()
+            .await
+            .map_err(|e| format!("Could not upload {}: {e}", image.file_name))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "Could not upload {}: the storage service answered {}.",
+                image.file_name,
+                resp.status().as_u16()
+            ));
+        }
+
+        images.push(serde_json::json!({
+            "storageBucket": BUCKET,
+            "storagePath": path,
+            "fileName": image.file_name,
+            "bytes": bytes.len() as i64,
+            "mime": image.mime,
+            "width": Value::Null,
+            "height": Value::Null,
+        }));
+    }
+
+    let job = api(
+        "jobs.create",
+        serde_json::json!({
+            "sessionId": session_id,
+            "mode": mode,
+            "settingsSnapshot": user_settings,
+            "images": images,
+        }),
+    )
+    .await?;
+    let job_id = job["id"].as_str().unwrap_or_default().to_string();
+    save_submitted_job(&SubmittedJob {
+        id: job_id.clone(),
+        mode,
+        mcq_model,
+        status: "queued".to_string(),
+        progress_phase: "queued".to_string(),
+        submitted_at: now(),
+        previews,
+        error: None,
+        report: None,
+        events: vec![],
+    })?;
+
+    for image in &batch.images {
+        let _ = fs::remove_file(&image.local_path);
+    }
+    let _ = fs::remove_file(pending_path()?);
+    log(&format!("submitted {} as job {job_id}", batch.id));
     Ok(())
 }
 
 async fn refresh_job() -> Result<(), String> {
-    // Poll server for job status (same as before)
-    Ok(())
+    let Some(mut tracked) = read_submitted_job()? else {
+        return Ok(());
+    };
+    if matches!(
+        tracked.status.as_str(),
+        "completed" | "failed" | "needs_attention" | "cancelled"
+    ) && tracked.report.is_some()
+    {
+        return Ok(());
+    }
+
+    let jobs = api("jobs.list", serde_json::json!({ "status": "all" })).await?;
+    if let Some(job) = jobs.as_array().and_then(|items| {
+        items
+            .iter()
+            .find(|job| job["id"].as_str() == Some(tracked.id.as_str()))
+    }) {
+        tracked.status = job["status"]
+            .as_str()
+            .unwrap_or(&tracked.status)
+            .to_string();
+        tracked.progress_phase = job["progressPhase"]
+            .as_str()
+            .unwrap_or(&tracked.progress_phase)
+            .to_string();
+        tracked.error = job["error"].as_str().map(|s| s.to_string());
+    }
+    space_api_calls().await;
+
+    if let Ok(events) = api("jobs.events", serde_json::json!({ "jobId": tracked.id })).await {
+        tracked.events = events.as_array().cloned().unwrap_or_default();
+    }
+    space_api_calls().await;
+
+    if let Ok(report) = api("reports.get", serde_json::json!({ "jobId": tracked.id })).await {
+        if !report.is_null() {
+            tracked.report = Some(report);
+            tracked.status = "completed".to_string();
+            tracked.progress_phase = "completed".to_string();
+        }
+    }
+    save_submitted_job(&tracked)
 }
 
 fn update_overlay(webview: &WebView, active_view: &str) -> Result<(), String> {
-    let sources = read_pending_images().unwrap_or_default();
+    let sources: Vec<String> = if let Some(batch) = read_pending()? {
+        batch
+            .images
+            .iter()
+            .filter_map(|image| fs::read(&image.local_path).ok())
+            .map(|bytes| {
+                format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )
+            })
+            .collect()
+    } else {
+        read_submitted_job()?
+            .map(|job| job.previews)
+            .unwrap_or_default()
+    };
     let payload = serde_json::to_string(&sources).map_err(|e| e.to_string())?;
-    let state = overlay_state(active_view);
+    let state = read_overlay_state(active_view);
     webview
         .evaluate_script(&format!(
             "window.updatePreviews({payload});window.updateOverlayState({state});"
@@ -673,49 +1071,647 @@ fn update_overlay(webview: &WebView, active_view: &str) -> Result<(), String> {
         .map_err(|e| format!("Could not update ghost overlay: {e}"))
 }
 
-fn read_pending_images() -> Result<Vec<String>, String> {
-    let pending_path = support_root_dir()?.join("cache/pending-batch.json");
-    if !pending_path.exists() {
-        return Ok(vec![]);
+fn read_overlay_state(active_view: &str) -> String {
+    let fallback =
+        r#"{"runId":null,"updatedAt":"","phase":"idle","agents":[],"solution":null,"tests":[]}"#;
+
+    if let Ok(Some(job)) = read_submitted_job() {
+        let is_mcq = job.mode == "mcq" || mcq_from_submitted(&job).is_some();
+        if active_view == "mcq" && is_mcq {
+            return serde_json::to_string(&submitted_overlay_state(&job))
+                .unwrap_or_else(|_| fallback.to_string());
+        }
+        if active_view != "mcq" && !is_mcq {
+            return serde_json::to_string(&coding_overlay_state(&job))
+                .unwrap_or_else(|_| fallback.to_string());
+        }
+        // Job mode and overlay view disagree: still prefer the job so the
+        // helper never falls back to a hollow idle shell mid-run.
+        if is_mcq {
+            return serde_json::to_string(&submitted_overlay_state(&job))
+                .unwrap_or_else(|_| fallback.to_string());
+        }
+        return serde_json::to_string(&coding_overlay_state(&job))
+            .unwrap_or_else(|_| fallback.to_string());
     }
-    let raw = fs::read_to_string(&pending_path).map_err(|e| e.to_string())?;
-    let batch: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-    Ok(batch["images"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|image| image.get("localPath").and_then(Value::as_str))
-        .filter_map(|path| fs::read(path).ok())
-        .map(|bytes| {
-            format!(
-                "data:image/png;base64,{}",
-                base64::engine::general_purpose::STANDARD.encode(bytes)
-            )
-        })
-        .collect())
+
+    if active_view == "mcq" {
+        if let Ok(Some(batch)) = read_pending() {
+            if batch.error.is_some() || !batch.images.is_empty() {
+                return serde_json::to_string(&mcq_pending_state(&batch))
+                    .unwrap_or_else(|_| fallback.to_string());
+            }
+        }
+        return serde_json::to_string(&mcq_placeholder_state())
+            .unwrap_or_else(|_| fallback.to_string());
+    }
+
+    if let Ok(Some(batch)) = read_pending() {
+        if batch.error.is_some() || !batch.images.is_empty() {
+            return serde_json::to_string(&coding_pending_state(&batch))
+                .unwrap_or_else(|_| fallback.to_string());
+        }
+    }
+
+    if let Some(socket_state) = read_coding_socket_state() {
+        return socket_state;
+    }
+
+    fallback.to_string()
 }
 
-fn overlay_state(active_view: &str) -> String {
-    if active_view == "mcq" {
-        return serde_json::json!({
-            "kind": "mcq",
-            "phase": "idle",
-            "status": "idle",
-            "progress": "MCQ overlay ready. Start a batch, capture screenshots, then submit.",
-            "history": [],
-            "mcq": {
-                "question": "",
-                "options": [],
-                "answer": { "label": "", "text": "" },
-                "reason": "MCQ overlay ready. Start a batch, capture screenshots, then submit.",
-                "whyNot": [],
-                "knowledgeUsed": false,
-                "model": "none",
-            },
+fn read_coding_socket_state() -> Option<String> {
+    let entries = fs::read_dir("/tmp").ok()?;
+    let mut sockets: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.starts_with(".mds_") && name.ends_with(".sock"))
+                .unwrap_or(false)
         })
-        .to_string();
+        .collect();
+    sockets.sort_by_key(|path| {
+        fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    });
+    sockets.reverse();
+
+    for path in sockets {
+        let Ok(stream) = UnixStream::connect(&path) else {
+            continue;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+        let mut buf = Vec::with_capacity(65_536);
+        if stream.take(65_536).read_to_end(&mut buf).is_ok() {
+            if let Ok(text) = String::from_utf8(buf) {
+                if serde_json::from_str::<Value>(&text).is_ok() {
+                    return Some(text);
+                }
+            }
+        }
     }
-    r#"{"phase":"idle","agents":[],"solution":null,"tests":[]}"#.to_string()
+    None
+}
+
+fn mcq_placeholder_state() -> Value {
+    serde_json::json!({
+        "kind": "mcq",
+        "phase": "idle",
+        "status": "idle",
+        "progress": "MCQ overlay ready. Start a batch, capture screenshots, then submit.",
+        "error": Value::Null,
+        "history": [],
+        "mcq": {
+            "question": "",
+            "options": [],
+            "answer": { "label": "", "text": "" },
+            "reason": "MCQ overlay ready. Start a batch, capture screenshots, then submit.",
+            "whyNot": [],
+            "knowledgeUsed": false,
+            "model": "none",
+        },
+    })
+}
+
+fn mcq_pending_state(batch: &PendingBatch) -> Value {
+    let progress = if let Some(error) = batch.error.as_deref() {
+        error.to_string()
+    } else if batch.images.is_empty() {
+        "MCQ batch started. Capture screenshots, then submit.".to_string()
+    } else {
+        format!(
+            "MCQ batch ready with {} screenshot{}. Press ⌃⌥ ↵ to submit.",
+            batch.images.len(),
+            if batch.images.len() == 1 { "" } else { "s" }
+        )
+    };
+    serde_json::json!({
+        "kind": "mcq",
+        "phase": if batch.error.is_some() { "error" } else { "collecting" },
+        "status": batch.status,
+        "progress": progress,
+        "error": batch.error,
+        "history": [],
+        "mcq": {
+            "question": "",
+            "options": [],
+            "answer": { "label": "", "text": "" },
+            "reason": progress,
+            "whyNot": [],
+            "knowledgeUsed": false,
+            "model": "none",
+        },
+    })
+}
+
+fn coding_pending_state(batch: &PendingBatch) -> Value {
+    let waiting = if let Some(error) = batch.error.as_deref() {
+        error.to_string()
+    } else if batch.images.is_empty() {
+        "Batch started. Capture screenshots, then submit.".to_string()
+    } else {
+        format!(
+            "Batch ready with {} screenshot{}. Press ⌃⌥ ↵ to submit.",
+            batch.images.len(),
+            if batch.images.len() == 1 { "" } else { "s" }
+        )
+    };
+    serde_json::json!({
+        "runId": batch.id,
+        "updatedAt": now(),
+        "phase": if batch.error.is_some() { "error" } else { "running" },
+        "agents": [],
+        "solution": {
+            "title": "solution",
+            "language": "",
+            "code": waiting,
+            "source": "helper",
+            "status": "candidate",
+        },
+        "tests": [],
+    })
+}
+
+fn coding_overlay_state(job: &SubmittedJob) -> Value {
+    let progress = job_progress_message(job);
+    let Some(report) = job.report.as_ref() else {
+        let phase = match job.status.as_str() {
+            "failed" | "needs_attention" | "cancelled" => "error",
+            "completed" => "done",
+            _ => "running",
+        };
+        return serde_json::json!({
+            "runId": job.id,
+            "updatedAt": now(),
+            "phase": phase,
+            "agents": coding_agents_from_events(job),
+            "solution": {
+                "title": "solution",
+                "language": "",
+                "code": if job.error.as_deref().unwrap_or("").is_empty() {
+                    progress
+                } else {
+                    job.error.clone().unwrap_or(progress)
+                },
+                "source": "helper",
+                "status": "candidate",
+            },
+            "tests": [],
+        });
+    };
+
+    let body = report.get("report").unwrap_or(report);
+    let candidates = body
+        .get("candidates")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let winner = body
+        .get("winner")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let agents: Vec<Value> = candidates
+        .iter()
+        .take(5)
+        .map(|candidate| {
+            let letter = candidate
+                .get("letter")
+                .and_then(Value::as_str)
+                .unwrap_or("?");
+            let model = candidate
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let error = candidate
+                .get("error")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let has_code = candidate
+                .pointer("/final/code")
+                .and_then(Value::as_str)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            let status = if error.is_some() {
+                "error"
+            } else if !winner.is_empty() && letter.eq_ignore_ascii_case(&winner) {
+                "done"
+            } else if has_code {
+                "done"
+            } else {
+                "pending"
+            };
+            serde_json::json!({
+                "id": letter,
+                "label": letter,
+                "model": model,
+                "status": status,
+                "error": error,
+            })
+        })
+        .collect();
+
+    let solution = coding_solution_from_report(body, &winner, &candidates)
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "title": "solution",
+                "language": "",
+                "code": if progress.is_empty() {
+                    "Council finished, but no code was returned.".to_string()
+                } else {
+                    progress
+                },
+                "source": "helper",
+                "status": "candidate",
+            })
+        });
+
+    let tests = coding_tests_from_report(body);
+
+    serde_json::json!({
+        "runId": job.id,
+        "updatedAt": now(),
+        "phase": if job.error.is_some() { "error" } else { "done" },
+        "agents": agents,
+        "solution": solution,
+        "tests": tests,
+        // Standing, approach, per-candidate evidence and the bench's dissent,
+        // already computed on the report. The thought-process panes had nothing
+        // to render because nothing was sending them anything.
+        "presentation": body.get("presentation").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn job_progress_message(job: &SubmittedJob) -> String {
+    if let Some(error) = job.error.as_deref().filter(|s| !s.is_empty()) {
+        return error.to_string();
+    }
+    if let Some(message) = job
+        .events
+        .last()
+        .and_then(|event| event.get("message"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        return message.to_string();
+    }
+    if job.progress_phase.is_empty() {
+        "Waiting for the worker.".to_string()
+    } else {
+        job.progress_phase.clone()
+    }
+}
+
+fn coding_agents_from_events(job: &SubmittedJob) -> Vec<Value> {
+    let label = if job.progress_phase.is_empty() {
+        "worker"
+    } else {
+        job.progress_phase.as_str()
+    };
+    let status = match job.status.as_str() {
+        "failed" | "needs_attention" | "cancelled" => "error",
+        "completed" => "done",
+        "queued" => "pending",
+        _ => "running",
+    };
+    vec![serde_json::json!({
+        "id": "worker",
+        "label": label,
+        "model": job.mode,
+        "status": status,
+        "error": job.error,
+    })]
+}
+
+fn coding_solution_from_report(
+    body: &Value,
+    winner: &str,
+    candidates: &[Value],
+) -> Option<Value> {
+    // What the council shipped, when it shipped something. The presentation
+    // carries the synthesis' assembled answer — reviewed, revised, executed and
+    // gated — which is a better thing to put in front of a user than whichever
+    // candidate happens to sit first in the array.
+    if let Some(code) = body
+        .pointer("/presentation/code")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
+    {
+        let language = body
+            .pointer("/presentation/language")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let source = body
+            .pointer("/presentation/provenance")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("council")
+            .to_string();
+        let standing = body
+            .pointer("/presentation/standing")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let title = if language.is_empty() {
+            "solution".to_string()
+        } else {
+            format!("solution.{language}")
+        };
+        let status = if standing == "verified" { "reviewed" } else { "candidate" };
+        return Some(serde_json::json!({
+            "title": title,
+            "language": language,
+            "code": code,
+            "source": source,
+            "status": status,
+        }));
+    }
+
+    let pick = if !winner.is_empty() {
+        candidates.iter().find(|candidate| {
+            candidate
+                .get("letter")
+                .and_then(Value::as_str)
+                .map(|letter| letter.eq_ignore_ascii_case(winner))
+                .unwrap_or(false)
+        })
+    } else {
+        None
+    }
+    .or_else(|| {
+        candidates.iter().find(|candidate| {
+            candidate
+                .pointer("/final/code")
+                .and_then(Value::as_str)
+                .map(|code| !code.trim().is_empty())
+                .unwrap_or(false)
+        })
+    })?;
+
+    let code = pick
+        .pointer("/final/code")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|code| !code.is_empty())
+        .or_else(|| {
+            pick.get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+        })?;
+    let language = pick
+        .pointer("/final/language")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let letter = pick
+        .get("letter")
+        .and_then(Value::as_str)
+        .unwrap_or("solution");
+    let model = pick.get("model").and_then(Value::as_str).unwrap_or("");
+    let title = if language.is_empty() {
+        format!("solution.{letter}")
+    } else {
+        format!("solution.{language}")
+    };
+    let source = if model.is_empty() {
+        letter.to_string()
+    } else {
+        format!("{letter} · {model}")
+    };
+    Some(serde_json::json!({
+        "title": title,
+        "language": language,
+        "code": code,
+        "source": source,
+        "status": if winner.is_empty() { "candidate" } else { "reviewed" },
+    }))
+}
+
+fn coding_tests_from_report(body: &Value) -> Vec<Value> {
+    // One row per candidate, carrying what its run did. The harness rows this
+    // falls back to say "From cloud report" five times, which is a pane that
+    // reports nothing at all.
+    if let Some(evidence) = body
+        .pointer("/presentation/evidence")
+        .and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+    {
+        return evidence
+            .iter()
+            .take(8)
+            .map(|row| {
+                let letter = row.get("letter").and_then(Value::as_str).unwrap_or("?");
+                let gate = row.get("gate").and_then(Value::as_str).unwrap_or("untested");
+                let passed = row.get("passed").and_then(Value::as_i64).unwrap_or(0);
+                let failed = row.get("failed").and_then(Value::as_i64).unwrap_or(0);
+                let revised = row.get("revised").and_then(Value::as_bool).unwrap_or(false);
+                let note = row.get("note").and_then(Value::as_str).unwrap_or("");
+                let runtime = row.get("runtime").and_then(Value::as_str).unwrap_or("");
+                let name = if revised {
+                    format!("Candidate {letter} (revised)")
+                } else {
+                    format!("Candidate {letter}")
+                };
+                let actual = if gate == "untested" {
+                    if note.is_empty() {
+                        "not executed".to_string()
+                    } else {
+                        note.to_string()
+                    }
+                } else if runtime.is_empty() {
+                    format!("{passed} passed, {failed} failed")
+                } else {
+                    format!("{passed} passed, {failed} failed · {runtime}")
+                };
+                let expected = if gate == "untested" {
+                    "not executed".to_string()
+                } else {
+                    format!("{} case(s)", passed + failed)
+                };
+                let status = match gate {
+                    "pass" => "passed",
+                    "fail" => "failed",
+                    _ => "pending",
+                };
+                serde_json::json!({
+                    "name": name,
+                    "input": row.get("model").and_then(Value::as_str).unwrap_or(""),
+                    "expected": expected,
+                    "actual": actual,
+                    "status": status,
+                })
+            })
+            .collect();
+    }
+
+    let Some(suites) = body.get("suites").and_then(Value::as_array) else {
+        return vec![];
+    };
+    suites
+        .iter()
+        .take(5)
+        .enumerate()
+        .map(|(index, suite)| {
+            let language = suite
+                .get("language")
+                .and_then(Value::as_str)
+                .unwrap_or("suite");
+            serde_json::json!({
+                "name": format!("Harness {}", index + 1),
+                "input": language,
+                "expected": "PASS lines",
+                "actual": "From cloud report",
+                "status": "pending",
+            })
+        })
+        .collect()
+}
+
+fn submitted_overlay_state(job: &SubmittedJob) -> Value {
+    let mut mcq = mcq_from_submitted(job);
+    if let Some(body) = mcq.as_mut() {
+        if body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
+            body["model"] = job
+                .mcq_model
+                .as_deref()
+                .filter(|model| !model.trim().is_empty())
+                .map(Value::from)
+                .unwrap_or_else(|| Value::from("none"));
+        }
+    }
+    let progress = job
+        .events
+        .last()
+        .and_then(|event| event.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            if job.progress_phase.is_empty() {
+                "Waiting for the worker."
+            } else {
+                &job.progress_phase
+            }
+        });
+    serde_json::json!({
+        "kind": "mcq",
+        "phase": job.progress_phase,
+        "status": job.status,
+        "progress": progress,
+        "error": job.error,
+        "history": mcq_history(job),
+        "mcq": mcq.unwrap_or_else(|| serde_json::json!({
+            "question": "",
+            "options": [],
+            "answer": { "label": "", "text": "" },
+            "reason": progress,
+            "whyNot": [],
+            "knowledgeUsed": false,
+            "model": job.mcq_model.as_deref().unwrap_or("none"),
+        })),
+    })
+}
+
+fn mcq_history(job: &SubmittedJob) -> Vec<Value> {
+    job.events
+        .iter()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|event| {
+            serde_json::json!({
+                "level": event.get("level").and_then(Value::as_str).unwrap_or("info"),
+                "phase": event.get("phase").and_then(Value::as_str).unwrap_or("worker"),
+                "message": event.get("message").and_then(Value::as_str).unwrap_or(""),
+                "createdAt": event.get("createdAt").and_then(Value::as_str).unwrap_or(""),
+            })
+        })
+        .collect()
+}
+
+fn mcq_from_submitted(job: &SubmittedJob) -> Option<Value> {
+    let report = job.report.as_ref()?;
+    let body = report.get("report").unwrap_or(report);
+    if body.get("kind").and_then(Value::as_str) == Some("mcq") {
+        return Some(body.clone());
+    }
+    None
+}
+
+fn job_mode_for_settings(settings: &Value) -> String {
+    match settings
+        .get("overlayMode")
+        .and_then(Value::as_str)
+        .unwrap_or("auto")
+    {
+        "mcq" => "mcq".to_string(),
+        _ => "council".to_string(),
+    }
+}
+
+fn read_keychain(account: &str) -> Result<String, String> {
+    let entry = keyring::Entry::new(SERVICE, account).map_err(|e| e.to_string())?;
+    match entry.get_password() {
+        Ok(value) if !value.trim().is_empty() => Ok(value.trim().to_string()),
+        Ok(_) | Err(keyring::Error::NoEntry) => {
+            Err(format!("No Keychain value saved for {account}."))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn sanitize_settings(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter(|(key, _)| !is_secret_key(key))
+                .map(|(key, value)| (key, sanitize_settings(value)))
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.into_iter().map(sanitize_settings).collect()),
+        other => other,
+    }
+}
+
+fn is_secret_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    ["api", "secret", "token", "key", "password", "credential"]
+        .iter()
+        .any(|needle| key.contains(needle))
+}
+
+fn safe_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+    }
+    while out.contains("..") {
+        out = out.replace("..", ".");
+    }
+    let out = out.trim_matches(['-', '.']);
+    if out.is_empty() {
+        "item".to_string()
+    } else {
+        out.to_string()
+    }
 }
 
 fn overlay_html() -> &'static str {
@@ -804,4 +1800,112 @@ fn overlay_html() -> &'static str {
 			            function restoreCodingShell(){if(document.getElementById('agents'))return;document.getElementById('panel').innerHTML='<div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span id="solution-source">waiting</span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div>';window.updatePreviews(window.__lastPreviews||[]);}
 			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'reviewed':('candidate · '+(state.solution.source||''));renderCodeLines(code,state.solution.code,state.solution.language);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);}};
     </script></body></html>"#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coding_overlay_maps_winner_code_from_report() {
+        let job = SubmittedJob {
+            id: "job-1".into(),
+            mode: "council".into(),
+            mcq_model: None,
+            status: "completed".into(),
+            progress_phase: "completed".into(),
+            submitted_at: now(),
+            previews: vec![],
+            error: None,
+            report: Some(serde_json::json!({
+                "report": {
+                    "winner": "B",
+                    "candidates": [
+                        {
+                            "letter": "A",
+                            "model": "model-a",
+                            "final": { "kind": "code", "language": "py", "code": "print(1)" },
+                            "error": null
+                        },
+                        {
+                            "letter": "B",
+                            "model": "model-b",
+                            "final": { "kind": "code", "language": "py", "code": "def solve():\n    return 42" },
+                            "error": null
+                        }
+                    ],
+                    "suites": [{ "language": "python" }]
+                }
+            })),
+            events: vec![],
+        };
+        let state = coding_overlay_state(&job);
+        assert_eq!(state["phase"], "done");
+        assert_eq!(state["solution"]["status"], "reviewed");
+        assert!(state["solution"]["code"]
+            .as_str()
+            .unwrap_or("")
+            .contains("return 42"));
+        assert_eq!(state["agents"].as_array().map(|a| a.len()), Some(2));
+        assert_eq!(state["tests"].as_array().map(|a| a.len()), Some(1));
+    }
+
+    #[test]
+    fn coding_overlay_shows_progress_before_report() {
+        let job = SubmittedJob {
+            id: "job-2".into(),
+            mode: "council".into(),
+            mcq_model: None,
+            status: "running".into(),
+            progress_phase: "solving".into(),
+            submitted_at: now(),
+            previews: vec![],
+            error: None,
+            report: None,
+            events: vec![serde_json::json!({
+                "level": "info",
+                "phase": "solving",
+                "message": "Asking models for candidates."
+            })],
+        };
+        let state = coding_overlay_state(&job);
+        assert_eq!(state["phase"], "running");
+        assert!(state["solution"]["code"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Asking models"));
+    }
+
+    #[test]
+    fn mcq_overlay_keeps_progress_without_answer() {
+        let job = SubmittedJob {
+            id: "job-3".into(),
+            mode: "mcq".into(),
+            mcq_model: Some("anthropic/claude".into()),
+            status: "running".into(),
+            progress_phase: "answering".into(),
+            submitted_at: now(),
+            previews: vec![],
+            error: None,
+            report: None,
+            events: vec![],
+        };
+        let state = submitted_overlay_state(&job);
+        assert_eq!(state["kind"], "mcq");
+        assert_eq!(state["mcq"]["model"], "anthropic/claude");
+        assert_eq!(state["status"], "running");
+    }
+
+    #[test]
+    fn pending_batch_tolerates_missing_optional_fields() {
+        let raw = r#"{
+            "id": "batch-1",
+            "images": [],
+            "startedAt": "2026-09-14T04:59:27.929558+00:00",
+            "status": "collecting"
+        }"#;
+        let batch: PendingBatch = serde_json::from_str(raw).expect("parse pending batch");
+        assert!(batch.error.is_none());
+        assert!(batch.images.is_empty());
+    }
 }

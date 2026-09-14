@@ -188,7 +188,7 @@ export default function LoginScreen({
             void signIn();
           }}
         >
-          <h2>Unlock workbench</h2>
+          <h2>Unlock Workbench</h2>
           <p className="auth-sub">Enter your username and PIN.</p>
 
           <label className="auth-field">

@@ -8,6 +8,7 @@ pub mod deployment;
 mod exec;
 pub mod ghost_mode;
 mod helper_auth;
+mod knowledge;
 mod overlay;
 mod overlay_state;
 mod platform_base;
@@ -216,6 +217,11 @@ pub fn run() {
             providers::cancel_run,
             providers::list_gateway_models,
             providers::probe_models,
+            knowledge::knowledge_list,
+            knowledge::knowledge_save,
+            knowledge::knowledge_delete,
+            knowledge::knowledge_folder,
+            knowledge::knowledge_publish,
             capture::capture_selection,
             capture::capture_screen,
             capture::read_capture,

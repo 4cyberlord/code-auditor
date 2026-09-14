@@ -7,6 +7,7 @@ import BackgroundJobsPanel from "@/components/BackgroundJobsPanel";
 import ConsensusPanel from "@/components/ConsensusPanel";
 import SolutionCard from "@/components/SolutionCard";
 import CouncilPanel from "@/components/CouncilPanel";
+import KnowledgeWorkspace from "@/components/KnowledgeWorkspace";
 import CodingWorkspace from "@/components/CodingWorkspace";
 import BootScreen from "@/components/BootScreen";
 import HistoryPanel from "@/components/HistoryPanel";
@@ -73,7 +74,7 @@ export default function Page() {
 }
 
 function Workbench() {
-  const [workspace, setWorkspace] = useState<"council" | "coding">("council");
+  const [workspace, setWorkspace] = useState<"council" | "coding" | "knowledge">("council");
   const agents = useStore((s) => s.agents);
   const hydrated = useStore((s) => s.hydrated);
   const hydrate = useStore((s) => s.hydrate);
@@ -138,6 +139,9 @@ function Workbench() {
           <button data-on={workspace === "coding"} onClick={() => setWorkspace("coding")}>
             Coding
           </button>
+          <button data-on={workspace === "knowledge"} onClick={() => setWorkspace("knowledge")}>
+            Knowledge
+          </button>
         </div>
         {hydrated && !inTauri() && (
           <span className="badge" data-tone="warn" title="Model calls only work inside the desktop shell.">
@@ -165,7 +169,10 @@ function Workbench() {
         </div>
       )}
 
-      <ReadingPanel />
+      {/* The reading strip is about the screenshot the council is reasoning
+          from, so it belongs to that workspace rather than to the window. On
+          the Knowledge tab it was describing a run nobody had started. */}
+      {workspace === "council" && <ReadingPanel />}
 
       <div className="workspace-stage" data-workspace={workspace}>
         <div
@@ -227,6 +234,15 @@ function Workbench() {
           inert={workspace !== "coding"}
         >
           <CodingWorkspace />
+        </div>
+
+        <div
+          className="workspace-panel"
+          data-active={workspace === "knowledge"}
+          aria-hidden={workspace !== "knowledge"}
+          inert={workspace !== "knowledge"}
+        >
+          <KnowledgeWorkspace active={workspace === "knowledge"} />
         </div>
       </div>
 

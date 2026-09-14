@@ -177,7 +177,7 @@ export default function SessionSidebar() {
                   <button
                     className="btn tiny ghost"
                     onClick={() => void archive(s.id, status === "active")}
-                    title={status === "active" ? "Archive (reversible)" : "Restore to active"}
+                    title={status === "active" ? "Archive (reversible)" : "Restore to Active"}
                   >
                     {status === "active" ? "Archive" : "Restore"}
                   </button>

@@ -485,7 +485,7 @@ fn read_signature_info() -> Result<(Option<String>, Option<String>), String> {
     let display = std::process::Command::new("codesign")
         .args(["--display", "--verbose=4", &bundle.to_string_lossy()])
         .output()
-        .map_err(|e| format!("codesign failed: {e}"))?;
+        .map_err(|e| format!("Signing the helper failed: {e}"))?;
     let display_text = format!(
         "{}{}",
         String::from_utf8_lossy(&display.stdout),
@@ -507,7 +507,7 @@ fn read_signature_info() -> Result<(Option<String>, Option<String>), String> {
         .arg(":-")
         .arg(&bundle)
         .output()
-        .map_err(|e| format!("codesign entitlements failed: {e}"))?;
+        .map_err(|e| format!("Reading the helper's entitlements failed: {e}"))?;
     let entitlement_text = format!(
         "{}{}",
         String::from_utf8_lossy(&entitlement_out.stdout),
@@ -556,13 +556,13 @@ pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
         .trim()
         .to_string();
         status.problem = Some(if !out.status.success() && !detail.is_empty() {
-            format!("launchd refused the ghost agent: {detail}")
+            format!("The launchd service refused the background helper: {detail}")
         } else if !out.status.success() {
-            format!("launchd refused the ghost agent with exit status {}.", out.status)
+            format!("The launchd service refused the background helper with exit status {}.", out.status)
         } else if detail.is_empty() {
-            "launchd did not load the ghost agent.".to_string()
+            "The launchd service did not load the background helper.".to_string()
         } else {
-            format!("launchd accepted the agent but it was not running yet: {detail}")
+            format!("The launchd service accepted the helper, but it was not running yet: {detail}")
         });
     }
     Ok(status)

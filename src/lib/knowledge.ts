@@ -1158,9 +1158,21 @@ function scoreRecord(record: KnowledgeRecord, query: string[]): number {
   return score;
 }
 
-export function retrieveKnowledge(queryText: string, limit = 5): KnowledgeHit[] {
+/**
+ * Search the library.
+ *
+ * `records` defaults to the pack compiled into this bundle, which is what makes
+ * the library work with no network, no database and no configuration. Passing a
+ * set in is how the cloud worker searches the rows it loaded from Postgres
+ * instead: same scoring, same output, a different shelf.
+ */
+export function retrieveKnowledge(
+  queryText: string,
+  limit = 5,
+  records: KnowledgeRecord[] = RECORDS
+): KnowledgeHit[] {
   const query = tokens(queryText);
-  return RECORDS.map((record) => ({ record, score: scoreRecord(record, query) }))
+  return records.map((record) => ({ record, score: scoreRecord(record, query) }))
     .filter((hit) => hit.score > 0)
     .sort((a, b) => b.score - a.score || a.record.title.localeCompare(b.record.title))
     .slice(0, limit);
@@ -1195,8 +1207,12 @@ export function renderKnowledgePack(hits: KnowledgeHit[]): string {
   return out.join("\n");
 }
 
-export function knowledgePackFor(queryText: string, limit = 5): string {
-  return renderKnowledgePack(retrieveKnowledge(queryText, limit));
+export function knowledgePackFor(
+  queryText: string,
+  limit = 5,
+  records: KnowledgeRecord[] = RECORDS
+): string {
+  return renderKnowledgePack(retrieveKnowledge(queryText, limit, records));
 }
 
 export function allKnowledgeRecords(): KnowledgeRecord[] {

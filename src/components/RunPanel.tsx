@@ -81,10 +81,10 @@ export default function RunPanel({ language, code }: Props) {
     <div className="runbox">
       <div className="run-head">
         <button className="btn tiny" onClick={() => void go()} disabled={busy || !code.trim()}>
-          {busy ? "Running…" : result ? "Run again" : "Run"}
+          {busy ? "Running…" : result ? "Run Again" : "Run"}
         </button>
         <button className="btn tiny ghost" onClick={() => setShowStdin((v) => !v)}>
-          {showStdin ? "No input" : "Add input"}
+          {showStdin ? "No Input" : "Add Input"}
         </button>
         {verdict && (
           <span className="badge" data-tone={verdict.tone}>

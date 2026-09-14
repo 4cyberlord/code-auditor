@@ -92,6 +92,18 @@ drop trigger if exists intelligence_records_touch on intelligence_records;
 create trigger intelligence_records_touch before update on intelligence_records
   for each row execute function touch_updated_at();
 
+-- Phase 16: who published a knowledge record, and when.
+--
+-- The library is one shared shelf on purpose — the cloud worker loads it with
+-- no principal at all, so a per-owner library would leave a worker guessing
+-- whose to reason from. The cost of that is that two signed-in Macs can
+-- overwrite each other, and the answer is not ownership but attribution: every
+-- row says who last published it, and the publish operation reports what it
+-- replaced rather than replacing it quietly.
+alter table if exists intelligence_records
+  add column if not exists published_by uuid,
+  add column if not exists published_at timestamptz;
+
 -- Phase 11: background capture-to-council jobs. The desktop app can be closed
 -- while an approved helper uploads captures and a cloud worker claims queued
 -- work. The queue records progress and evidence; secrets stay in Keychain or

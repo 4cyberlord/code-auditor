@@ -97,7 +97,7 @@ export default function ConsensusPanel() {
         <span className="chev" aria-hidden="true">
           ▾
         </span>
-        <h2>Solution box</h2>
+        <h2>Solution Box</h2>
         <span className="spacer" />
         <span style={{ fontSize: 11, color: "var(--text-faint)" }}>{answeredLabel}</span>
       </div>
@@ -114,7 +114,7 @@ export default function ConsensusPanel() {
 
         {result.groups.length > 1 && (
           <>
-            <p className="section-label">Agreement groups</p>
+            <p className="section-label">Agreement Groups</p>
             {result.groups.map((g, i) => (
               <div className="group-row" key={`g${i}`}>
                 {g.map((id) => (
@@ -139,7 +139,7 @@ export default function ConsensusPanel() {
         {ids.length > 1 && (
           <>
             <p className="section-label" style={{ marginTop: 16 }}>
-              Who agreed with whom
+              Who Agreed with Whom
             </p>
 
             {/* This was a grid of pair scores to two decimal places, which is
@@ -160,7 +160,7 @@ export default function ConsensusPanel() {
             </ul>
 
             <details className="pair-detail">
-              <summary>Show the numbers</summary>
+              <summary>Show the Numbers</summary>
               <div style={{ overflowX: "auto" }}>
                 <table className="matrix">
                   <thead>
@@ -213,7 +213,7 @@ export default function ConsensusPanel() {
         {finished.length > 0 && (
           <details className="rail-details" open={answersOpen} onToggle={(e) => setAnswersOpen(e.currentTarget.open)}>
             <summary className="section-label" style={{ marginTop: 18 }}>
-              Submitted answers
+              Submitted Answers
             </summary>
             {finished.map((a) => (
               <div className="answer-card" key={a.id}>
@@ -253,7 +253,7 @@ export default function ConsensusPanel() {
         {!settings.councilEnabled && (
           <>
             <p className="section-label" style={{ marginTop: 18 }}>
-              Single-model adjudication
+              Single-Model Adjudication
             </p>
             <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
               <select
@@ -282,7 +282,7 @@ export default function ConsensusPanel() {
                     : "Send every FINAL block to one model and ask it to decide who is right"
                 }
               >
-                {judge.status === "running" ? "Judging..." : "Run judge"}
+                {judge.status === "running" ? "Judging..." : "Run Judge"}
               </button>
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
@@ -302,7 +302,7 @@ export default function ConsensusPanel() {
                           : "Automatically after every run"
                     }
                   >
-                    {v === "off" ? "Manually" : v === "prose" ? "When prose" : "Always"}
+                    {v === "off" ? "Manually" : v === "prose" ? "When Prose" : "Always"}
                   </button>
                 ))}
               </div>

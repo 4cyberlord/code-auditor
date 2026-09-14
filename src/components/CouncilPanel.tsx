@@ -2,11 +2,20 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Markdown from "./Markdown";
-import { candidateLanguage, councilMarkdown, executionDigest, gateFor } from "@/lib/council";
+import {
+  buildPresentation,
+  candidateLanguage,
+  councilMarkdown,
+  executionDigest,
+  gateFor,
+  type CouncilPhase,
+  type CouncilReport,
+} from "@/lib/council";
 import { useStore } from "@/lib/store";
 
 const PHASE_LABEL: Record<string, string> = {
   idle: "",
+  contracting: "Agreeing what the problem asks",
   solving: "Solving independently",
   speccing: "Writing the test harness",
   verifying: "Executing round 1",
@@ -19,6 +28,40 @@ const PHASE_LABEL: Record<string, string> = {
   error: "Stopped with an error",
   cancelled: "Cancelled",
 };
+
+/**
+ * The bench's pipeline, in the order a run walks it.
+ *
+ * The header used to say only which phase was current — "Writing the test
+ * harness..." — which tells you what is happening and nothing about where that
+ * is in a run that takes ten minutes. Nine segments say both: the label names
+ * the step, the rail says how much of the bench is behind it. It is also the
+ * only place the new contract and revision rounds are visible as work rather
+ * than as a delay.
+ */
+const STAGES: { phase: CouncilPhase; label: string }[] = [
+  { phase: "contracting", label: "Contract" },
+  { phase: "solving", label: "Solve" },
+  { phase: "speccing", label: "Harness" },
+  { phase: "verifying", label: "Run" },
+  { phase: "reviewing", label: "Review" },
+  { phase: "revising", label: "Revise" },
+  { phase: "reverifying", label: "Re-run" },
+  { phase: "judging", label: "Judge" },
+  { phase: "synthesizing", label: "Decide" },
+];
+
+const STANDING_LABEL = {
+  verified: "verified",
+  unverified: "unverified",
+  unexecuted: "not executed",
+} as const;
+
+const STANDING_TONE = {
+  verified: "good",
+  unverified: "bad",
+  unexecuted: "warn",
+} as const;
 
 type CouncilTab = "summary" | "decision" | "evidence" | "chat" | "reading";
 type ChatScope = "all" | "solvers" | "judges" | "selected";
@@ -70,20 +113,28 @@ export default function CouncilPanel() {
     }
   }, [chatModels, selectedModels.size]);
 
-  const report = useMemo(
-    () =>
-      councilMarkdown({
-        candidates: council.candidates,
-        suites: council.testSuites,
-        runs: council.runs,
-        revisedRuns: council.revisedRuns,
-        reviews: council.reviews,
-        judges: council.judges,
-        synthesis: council.synthesis,
-        winner: council.winner,
-      }),
+  // One record, two readers: the markdown the Evidence tab prints, and the
+  // presentation every tile below is filled from. Built once so the panel and
+  // the overlay can never describe the same run differently.
+  const record = useMemo<CouncilReport>(
+    () => ({
+      candidates: council.candidates,
+      suites: council.testSuites,
+      runs: council.runs,
+      revisedRuns: council.revisedRuns,
+      reviews: council.reviews,
+      judges: council.judges,
+      synthesis: council.synthesis,
+      winner: council.winner,
+      dossier: council.dossier,
+      contract: council.contract,
+      contractAgreement: council.contractAgreement,
+      oracles: council.oracles,
+    }),
     [council]
   );
+  const report = useMemo(() => councilMarkdown(record), [record]);
+  const presentation = useMemo(() => buildPresentation(record), [record]);
 
   const winner = council.candidates.find((c) => c.letter === council.winner);
   const winnerFinal = winner?.revised ?? winner?.final ?? null;
@@ -92,7 +143,11 @@ export default function CouncilPanel() {
       ? council.revisedRuns[winner.letter]
       : council.runs[winner.letter]
     : undefined;
-  const approach = extractLine(council.synthesis, "APPROACH") || winnerFinal?.answer || "Pending final synthesis.";
+  const settled = council.phase === "done";
+  const stageIndex = STAGES.findIndex((x) => x.phase === council.phase);
+  const stageDone = settled ? STAGES.length : stageIndex < 0 ? 0 : stageIndex;
+  const approach =
+    presentation.approach || extractLine(council.synthesis, "APPROACH") || winnerFinal?.answer || "Pending final synthesis.";
   const verdict = extractLine(council.synthesis, "VERDICT") || (council.winner ? `Ship Candidate ${council.winner}.` : "No final winner yet.");
   const rejected = extractLine(council.synthesis, "REJECTED");
   const selectedForSend =
@@ -117,14 +172,16 @@ export default function CouncilPanel() {
   return (
     <div className="council result-panel">
       <div className="council-head">
-        <span className="section-label" style={{ margin: 0 }}>
-          Council
-        </span>
+        <span className="council-mark">Council</span>
         <span className="council-phase" data-live={active}>
-          {PHASE_LABEL[council.phase]}
-          {active ? "..." : ""}
+          {PHASE_LABEL[council.phase] || (settled ? "Final judgement ready" : "Idle")}
+          {active ? "…" : ""}
         </span>
-        <span className="spacer" />
+        {active && stageIndex >= 0 && (
+          <span className="council-step" title={`${STAGES[stageIndex].label} — step ${stageIndex + 1} of ${STAGES.length}`}>
+            {stageIndex + 1}/{STAGES.length}
+          </span>
+        )}
         {active && (
           <button className="btn tiny ghost" onClick={() => void cancel()}>
             Stop
@@ -136,10 +193,26 @@ export default function CouncilPanel() {
             onClick={() => patch({ councilEnabled: false })}
             title="Back to the plain panel on the next run"
           >
-            Stand down
+            Stand Down
           </button>
         )}
       </div>
+
+      {/* Where the run is, across the whole width the rail actually has. Each
+          segment is one round of the bench; the live one breathes so a long
+          phase reads as working rather than stuck. */}
+      {council.phase !== "idle" && (
+        <div className="council-rail" role="progressbar" aria-valuemin={0} aria-valuemax={STAGES.length} aria-valuenow={stageDone}>
+          {STAGES.map((stage, i) => (
+            <span
+              key={stage.phase}
+              className="council-rail-seg"
+              data-state={i < stageDone ? "done" : i === stageIndex ? "live" : "todo"}
+              title={stage.label}
+            />
+          ))}
+        </div>
+      )}
 
       {council.slots.length > 0 && (
         <div className="council-seats">
@@ -156,11 +229,17 @@ export default function CouncilPanel() {
                       ? "warn"
                       : undefined
               }
+              data-kind={s.kind}
               title={`${s.kind} · ${s.model}${s.emphasis ? ` (${s.emphasis})` : ""}${s.error ? ` - ${s.error}` : ""}`}
             >
-              {s.kind}
-              {s.emphasis ? `/${s.emphasis.slice(0, 4)}` : ""} {s.model.split("/").pop()}
-              {s.status === "streaming" ? " ..." : ""}
+              {/* The model, not the round. Every chip in a round carried the
+                  same word — five seats all reading "solve" — which doubled the
+                  width of the row and told you what the phase line above had
+                  already said. The round is a coloured dot and a tooltip now,
+                  and the chips fit two to a line instead of one. */}
+              {s.model.split("/").pop()}
+              {s.emphasis ? `/${s.emphasis.slice(0, 4)}` : ""}
+              {s.status === "streaming" ? "…" : ""}
             </span>
           ))}
         </div>
@@ -179,9 +258,36 @@ export default function CouncilPanel() {
       <div className="council-view">
         {tab === "summary" && (
           <>
-            <div className="verdict compact" data-v={council.winner ? "unanimous" : "majority"}>
+            {/* The standing is the first thing on the card because it is the
+                first question: is there anything behind this answer. A verdict
+                sentence with no provenance beside it is how a rejected
+                candidate gets pasted into an editor. */}
+            <div className="council-verdict" data-standing={settled ? presentation.standing : "pending"}>
+              <div className="council-verdict-top">
+                <span
+                  className="badge"
+                  data-tone={settled ? STANDING_TONE[presentation.standing] : undefined}
+                  title={settled ? presentation.standingReason : "The bench is still sitting."}
+                >
+                  {settled ? STANDING_LABEL[presentation.standing] : "in progress"}
+                </span>
+                {settled && presentation.provenance && (
+                  <span className="council-prov" title={`Shipped from ${presentation.provenance}`}>
+                    {presentation.provenance}
+                  </span>
+                )}
+                {settled && presentation.winnerSource === "judges" && (
+                  <span className="badge" data-tone="warn" title={council.dossier?.disagreement || "The judges' count decided this, not the synthesis."}>
+                    judge count
+                  </span>
+                )}
+              </div>
               <h3>{verdict}</h3>
-              <p>{rejected || "Council evidence is grouped below so the final answer stays readable."}</p>
+              <p>
+                {settled
+                  ? presentation.standingReason
+                  : rejected || "Evidence lands here as each round finishes."}
+              </p>
             </div>
             <div className="insight-grid">
               <div>
@@ -189,8 +295,8 @@ export default function CouncilPanel() {
                 <strong>{approach}</strong>
               </div>
               <div>
-                <span>Runtime</span>
-                <strong>{winnerFinal?.complexity || winnerRun?.runtime || "Not stated"}</strong>
+                <span>Complexity</span>
+                <strong>{presentation.complexity || winnerFinal?.complexity || "Not stated"}</strong>
               </div>
               <div>
                 <span>Execution</span>
@@ -201,10 +307,17 @@ export default function CouncilPanel() {
                 </strong>
               </div>
               <div>
-                <span>Code style</span>
+                <span>Bench</span>
                 <strong>
-                  {winnerFinal?.claims?.[0] ||
-                    (winnerFinal?.kind === "code" ? `${candidateLanguage(winnerFinal)} implementation` : "See final judgement")}
+                  {council.dossier?.tally?.length
+                    ? council.dossier.tally
+                        .filter((t) => t.points > 0)
+                        .map((t) => `${t.letter} ${t.points}`)
+                        .join(" · ") || "No judge ranked the field"
+                    : winnerFinal?.claims?.[0] ||
+                      (winnerFinal?.kind === "code"
+                        ? `${candidateLanguage(winnerFinal)} implementation`
+                        : "See final judgement")}
                 </strong>
               </div>
             </div>
@@ -221,11 +334,37 @@ export default function CouncilPanel() {
                       title={c.model}
                     >
                       {c.letter} {g1}
-                      {g2 ? ` -> ${g2}` : ""}
+                      {g2 ? ` → ${g2}` : ""}
                     </span>
                   );
                 })}
               </div>
+            )}
+
+            {/* What the bench did not agree about. A council that only ever
+                publishes its conclusion is indistinguishable from one model
+                with a bigger bill; the disagreements are the part that shows
+                the work was real. */}
+            {(presentation.dissent.length > 0 ||
+              presentation.harnessSuspect ||
+              presentation.contractDisputes.length > 0) && (
+              <ul className="council-notes">
+                {presentation.contractDisputes.slice(0, 1).map((d) => (
+                  <li key="contract" data-kind="contract" title={d}>
+                    The readers disagreed about what the problem asks.
+                  </li>
+                ))}
+                {presentation.harnessSuspect && (
+                  <li data-kind="harness" title={presentation.harnessSuspect}>
+                    The generated harness is suspect — read the evidence before believing a failure.
+                  </li>
+                )}
+                {presentation.dissent.slice(0, 2).map((d) => (
+                  <li key={d} data-kind="dissent" title={d}>
+                    {d}
+                  </li>
+                ))}
+              </ul>
             )}
           </>
         )}
@@ -239,7 +378,7 @@ export default function CouncilPanel() {
         {tab === "evidence" && (
           <div className="evidence-stack">
             <details open>
-              <summary>Submitted answers</summary>
+              <summary>Submitted Answers</summary>
               {council.candidates.map((c) => {
                 const f = c.revised ?? c.final;
                 return (
@@ -255,14 +394,14 @@ export default function CouncilPanel() {
               })}
             </details>
             <details>
-              <summary>Execution results</summary>
+              <summary>Execution Results</summary>
               <pre>{executionDigest(council.candidates, council.runs) || "No execution results."}</pre>
               {Object.keys(council.revisedRuns).length > 0 && (
                 <pre>{executionDigest(council.candidates, council.revisedRuns, { revised: true })}</pre>
               )}
             </details>
             <details>
-              <summary>Judge reports</summary>
+              <summary>Judge Reports</summary>
               {council.judges.map((j, i) => (
                 <div className="answer-card compact" key={`${j.model}-${i}`}>
                   <div className="who">
@@ -274,7 +413,7 @@ export default function CouncilPanel() {
               ))}
             </details>
             <details>
-              <summary>Full record</summary>
+              <summary>Full Record</summary>
               <Markdown text={report} />
             </details>
           </div>
@@ -353,7 +492,7 @@ export default function CouncilPanel() {
               </div>
             </div>
             <details open>
-              <summary>What the agents were given</summary>
+              <summary>What the Agents Were Given</summary>
               <pre>{extraction.context || "The agents were given the original images and any typed note directly."}</pre>
             </details>
             {extraction.path && (

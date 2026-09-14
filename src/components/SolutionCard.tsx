@@ -104,7 +104,7 @@ export default function SolutionCard() {
               void rerun();
             }}
           >
-            {data ? "Review again" : "Review"}
+            {data ? "Review Again" : "Review"}
           </button>
         )}
       </div>
@@ -172,7 +172,7 @@ export default function SolutionCard() {
           </div>
 
           <div className="facet">
-            <h4>Code style</h4>
+            <h4>Code Style</h4>
             <dl>
               <dt>Readability</dt>
               <dd data-grade={data.style.readability}>{data.style.readability || "—"}</dd>

@@ -689,6 +689,13 @@ export default function CodingWorkspace() {
     settings.codingProjectName ||
     settings.codingProjectRoot.split(/[\\/]/).filter(Boolean).at(-1) ||
     "No project selected";
+  const freshComposer =
+    !busy &&
+    !chatTask &&
+    chatThreadEntries.length === 0 &&
+    pendingQuestion === null &&
+    queued.length === 0 &&
+    !error;
 
   return (
     <div className="coding-workspace">
@@ -721,7 +728,7 @@ export default function CodingWorkspace() {
           </button>
         </div>
 
-        <div className="coding-task-body">
+        <div className="coding-task-body" data-fresh={freshComposer}>
           {/* The conversation: the request on the right, the model's thinking
               and answers on the left, as it happens. Results stay out of here
               — they open in the Implementation plan section when asked for. */}
@@ -921,7 +928,7 @@ export default function CodingWorkspace() {
 
           {docPath && (
             <>
-              <div className="section-label">Plan document</div>
+              <div className="section-label">Plan Document</div>
               <div className="coding-root-readout">{docPath}</div>
             </>
           )}
@@ -985,10 +992,10 @@ export default function CodingWorkspace() {
                           {busyMode === "executing"
                             ? stopping
                               ? "Pausing…"
-                              : "Pause build"
+                              : "Pause Build"
                             : stopping
                               ? "Stopping…"
-                              : "Cancel run"}
+                              : "Cancel Run"}
                         </button>
                       ) : !resumable ? (
                         <>
@@ -1132,9 +1139,9 @@ export default function CodingWorkspace() {
           className="scrim"
           onMouseDown={(e) => e.target === e.currentTarget && setNamingOpen(false)}
         >
-          <div className="modal compact" role="dialog" aria-modal="true" aria-label="New conversation">
+          <div className="modal compact" role="dialog" aria-modal="true" aria-label="New Conversation">
             <header>
-              <h2>New conversation</h2>
+              <h2>New Conversation</h2>
               <span className="spacer" />
               <button className="btn ghost" onClick={() => setNamingOpen(false)}>
                 Cancel
@@ -1418,7 +1425,7 @@ function toolPayload(event: CodingToolEvent): ToolPayload | null {
   // Writes/creates: the whole file is new, so every line reads as an addition.
   if (["write", "write_to_file", "create_file"].includes(name)) {
     const content = str(a.content);
-    if (content) return { kind: "added", label: "Contents written", added: content };
+    if (content) return { kind: "added", label: "Contents Written", added: content };
   }
   // Reads, searches, commands: the payload is what came back.
   if (event.result.trim()) return { kind: "result", label: "Result", code: event.result };
@@ -1850,7 +1857,7 @@ function RunReconstruction({ run }: { run: CodingRun }) {
 
   return (
     <section className="coding-needs-detail">
-      <div className="section-label">No structured report</div>
+      <div className="section-label">No Structured Report</div>
       <p>
         This run didn&rsquo;t save a structured report, and no plan was found for it. Its todos and
         files are in the Build-details rail; its raw steps are below.
@@ -1858,7 +1865,7 @@ function RunReconstruction({ run }: { run: CodingRun }) {
 
       {inspected.length > 0 && (
         <>
-          <div className="section-label">Inspected (research)</div>
+          <div className="section-label">Inspected (Research)</div>
           <ul className="coding-needs-list">
             {inspected.map((e) => (
               <li key={e.id}>
@@ -1871,7 +1878,7 @@ function RunReconstruction({ run }: { run: CodingRun }) {
 
       {changed.length > 0 && (
         <>
-          <div className="section-label">Changes applied</div>
+          <div className="section-label">Changes Applied</div>
           <ul className="coding-needs-list">
             {changed.map((e) => (
               <li key={e.id} data-ok={e.status === "ok"}>
@@ -1894,14 +1901,14 @@ function NeedsDetail({ run }: { run: CodingRun }) {
 
   return (
     <section className="coding-needs-detail">
-      <div className="section-label">No plan yet</div>
+      <div className="section-label">No Plan Yet</div>
       <p>
         {summary ||
           "The model answered, but did not produce a plan naming the work and the files it touches."}
       </p>
       {asks.length > 0 && (
         <>
-          <div className="section-label">It still needs</div>
+          <div className="section-label">It Still Needs</div>
           <ul className="coding-needs-list">
             {asks.map((ask, i) => (
               <li key={i}>{ask}</li>

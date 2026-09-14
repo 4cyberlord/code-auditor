@@ -6,10 +6,12 @@
  * Keychain secrets or screenshots: jobs arrive through Supabase rows and Storage,
  * while provider, GitHub Actions, E2B and APNs secrets come from server-side env.
  *
- * v1 runs a compact Council: independent solver calls, benchmark generation and
- * execution, reviewer passes, judge passes and one synthesis pass. Revision
- * rounds are intentionally recorded as missing evidence until that server-side
- * layer is added.
+ * It runs the same Council the desktop app does: independent solver calls,
+ * benchmark generation and execution, reviewer passes, a revision round with a
+ * second execution of the revised field, judge passes and one synthesis pass.
+ * The revision round is not optional polish — a cloud job that skipped it
+ * shipped a measurably weaker answer than the same question asked in the app,
+ * and nothing in the report said so.
  */
 
 // Configuration lives in the database now. This import has a top-level await,
@@ -106,6 +108,7 @@ const [
   { titleFor, isPlaceholder },
   extraction,
   { knowledgePackFor },
+  knowledgeLibrary,
   mcq,
 ] = await Promise.all([
   import("../src/lib/prompts.ts"),
@@ -115,10 +118,28 @@ const [
   import("../src/lib/title.ts"),
   import("../src/lib/extraction.ts"),
   import("../src/lib/knowledge.ts"),
+  import("../src/lib/knowledgeLibrary.ts"),
   import("../src/lib/mcq.ts"),
 ]);
 
 const { detectMcq, parseMcqAnswer } = mcq;
+const { loadKnowledgeLibrary } = knowledgeLibrary;
+
+/**
+ * The library this job reasons from.
+ *
+ * Postgres is the shelf; the pack compiled into this build is the fallback. The
+ * rows are loaded once and reused for the life of the process — a query per
+ * lookup would be slower than the array it replaced, which is the version of
+ * this worth not building.
+ */
+async function libraryFor(settings) {
+  return loadKnowledgeLibrary({
+    preferBundle: settings.knowledgeLibrary === "bundle",
+    ttlMs: Number(process.env.CODE_AUDITOR_KNOWLEDGE_TTL_MS || 5 * 60_000),
+    fetchRows: (table) => rest(`${table}?select=*`),
+  });
+}
 
 const {
   EXTRACTION_SYSTEM,
@@ -129,6 +150,12 @@ const {
   singleReading,
   readingMarkdown,
   renderForReasoning,
+  chooseReaders,
+  VISION_PREFERENCE,
+  tieBreakSystemPrompt,
+  tieBreakUserPrompt,
+  parseTieBreak,
+  applyTieBreak,
 } = extraction;
 
 const {
@@ -157,8 +184,24 @@ const {
   rejectedReasoning,
   parseTestSuites,
   parseReviewSet,
+  parseCouncilSynthesis,
+  parseJudgeReport,
+  decideWinner,
+  buildPresentation,
+  mutateCode,
+  oracleDigest,
+  oracleSuspicion,
+  contractSystemPrompt,
+  contractUserPrompt,
+  contractQuery,
+  parseProblemContract,
+  mergeProblemContracts,
+  contractBlock,
   reviewSystemPrompt,
   reviewUserPrompt,
+  reviewsOf,
+  reviseSystemPrompt,
+  reviseUserPrompt,
   spliceSuite,
   synthesisSystemPrompt,
   synthesisUserPrompt,
@@ -910,67 +953,30 @@ async function runVerification(settings, suite, program) {
   return runLocalCode(suite.language, program, LOCAL_RUN_TIMEOUT_MS);
 }
 
-async function benchmarkCandidates(job, settings, baseUrl, models, judges, question, candidates, knowledge = "", bench) {
-  const codeCandidates = candidates.filter((c) => c.final?.kind === "code" && c.final.code?.trim());
-  if (codeCandidates.length < 2) {
-    await addEvent(
-      job.id,
-      "info",
-      "benchmark_skipped",
-      "Fewer than two runnable code candidates; MCQ, math, research and plain-answer jobs use Council reasoning validation instead of code execution."
-    );
-    return { suites: [], runs: {} };
-  }
-
-  await patchJob(job.id, { progress_phase: "speccing" });
-  await addEvent(job.id, "info", "speccing", "Generating language-specific benchmark harnesses.");
-  const languages = Array.from(new Set(codeCandidates.map((c) => candidateLanguage(c.final)).filter(Boolean)));
-  // A benched route would spend the whole timeout again on the one call the
-  // benchmark phase cannot proceed without.
-  const specModel = [settings.synthesisModel, judges[0]?.model, ...models.map((m) => m.id)].find(
-    (candidate) => candidate && !bench.has(candidate)
-  );
-  if (!specModel) {
-    await addEvent(job.id, "warn", "spec_failed", "Every model is benched, so no benchmark harness could be generated.");
-    return { suites: [], runs: {} };
-  }
-  let suites = [];
-  try {
-    const specText = await tokenRouterGenerate({
-      settings,
-      baseUrl,
-      model: specModel,
-      system: testSpecSystemPrompt(),
-      user: testSpecUserPrompt({
-        question,
-        docket: candidateDocket(candidates),
-        languages,
-        knowledge: knowledge || settings.knowledgeDigest || "",
-      }),
-      maxTokens: Number(settings.maxTokens || 4096),
-    });
-    suites = parseTestSuites(specText);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await bench.note(specModel, err, "speccing");
-    await addEvent(job.id, "warn", "spec_failed", `Benchmark spec generation failed: ${message}`);
-    return { suites: [], runs: {} };
-  }
-
-  if (!suites.length) {
-    await addEvent(job.id, "warn", "benchmark_skipped", "The benchmark spec did not contain any runnable harnesses.");
-    return { suites, runs: {} };
-  }
-
-  await patchJob(job.id, { progress_phase: "verifying" });
-  await addEvent(job.id, "info", "verifying", `Running ${codeCandidates.length} candidates through generated benchmarks.`);
+/**
+ * Run one field of candidates against the harnesses, once.
+ *
+ * Pulled out of `benchmarkCandidates` so the revision round executes through
+ * exactly the same code as round one. Two copies of this loop would be two
+ * places for the gate's evidence to be produced differently, which is the one
+ * kind of drift the whole design is built to prevent.
+ *
+ * `revised: true` reads `candidate.revised` instead of `candidate.final`, and
+ * skips any candidate that did not revise: an unrevised candidate has no second
+ * run, and inventing one from its original would double-count the same evidence.
+ */
+async function executeField(job, settings, suites, candidates, opts = {}) {
+  const revised = Boolean(opts.revised);
+  const tag = revised ? " (revised)" : "";
   const runs = {};
   for (const candidate of candidates) {
-    const lang = candidate.final?.kind === "code" ? candidateLanguage(candidate.final) : "";
+    if (revised && !candidate.revised) continue;
+    const final = revised ? (candidate.revised ?? null) : candidate.final;
+    const lang = final?.kind === "code" ? candidateLanguage(final) : "";
     const suite = suites.find((s) => s.language === lang);
-    const code = candidate.final?.code || "";
-    if (!candidate.final || candidate.final.kind !== "code" || !code.trim()) {
-      runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: candidate.final?.kind === "research" ? "research answer" : "no code", runtime: "" };
+    const code = final?.code || "";
+    if (!final || final.kind !== "code" || !code.trim()) {
+      runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: final?.kind === "research" ? "research answer" : "no code", runtime: "" };
       continue;
     }
     if (!suite) {
@@ -996,7 +1002,7 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
         // Unique per candidate, not per job: the run is found again by its
         // display title, and two candidates of one job in the same language
         // would otherwise produce two runs nobody can tell apart.
-        const correlationId = `${job.id}-${candidate.letter}`;
+        const correlationId = `${job.id}-${candidate.letter}${revised ? "-r" : ""}`;
         try {
           const gha = await runGithubBenchmark({
             repo: repoFor(),
@@ -1068,15 +1074,126 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
         stderr: diagnostic,
         remote,
       };
-      await addEvent(job.id, local.ok && localCases.failed === 0 ? "info" : "warn", "benchmark_done", `Candidate ${candidate.letter}: ${runs[candidate.letter].note || `${localCases.passed} case(s) passed`}.${diagnostic ? ` — ${diagnostic.split("\n")[0]}` : ""}`, runs[candidate.letter]);
+      await addEvent(job.id, local.ok && localCases.failed === 0 ? "info" : "warn", "benchmark_done", `Candidate ${candidate.letter}${tag}: ${runs[candidate.letter].note || `${localCases.passed} case(s) passed`}.${diagnostic ? ` — ${diagnostic.split("\n")[0]}` : ""}`, runs[candidate.letter]);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: message, runtime: "" };
-      await addEvent(job.id, "warn", "benchmark_failed", `Candidate ${candidate.letter} benchmark failed: ${message}`, runs[candidate.letter]);
+      await addEvent(job.id, "warn", "benchmark_failed", `Candidate ${candidate.letter}${tag} benchmark failed: ${message}`, runs[candidate.letter]);
     }
   }
 
-  return { suites, runs };
+  return runs;
+}
+
+/**
+ * Is the harness worth believing?
+ *
+ * One deliberately broken copy of a candidate that passed, run through the same
+ * suite. A harness that passes it has not verified anything it accepted, and
+ * until now nothing in the pipeline could notice that: the gate can only reject
+ * what its evidence rejects, and evidence that accepts everything rejects
+ * nothing.
+ *
+ * One execution, of code that already compiled, on a program the runner has
+ * already proven it can run. It buys a signal nothing else in the system can
+ * produce.
+ */
+async function runMutationOracle(job, settings, suites, candidates, runs) {
+  const passing = candidates.find((c) => gateFor(runs[c.letter]) === "pass" && c.final?.code?.trim());
+  if (!passing) return [];
+  const suite = suites.find((s) => s.language === candidateLanguage(passing.final));
+  if (!suite) return [];
+  const mutation = mutateCode(passing.final.code);
+  if (!mutation.applied) return [];
+  const program = spliceSuite(suite, mutation.code);
+  if (!program) return [];
+
+  try {
+    const local = await runVerification(settings, suite, program);
+    const cases = countCases(local.stdout);
+    const survived = local.ok && cases.failed === 0 && cases.passed > 0;
+    const signal = {
+      kind: "mutation",
+      letter: passing.letter,
+      ran: true,
+      survived,
+      description: mutation.description,
+      note: survived ? `${cases.passed} case(s) passed on a broken program` : `${cases.failed} case(s) caught the break`,
+    };
+    await addEvent(
+      job.id,
+      survived ? "warn" : "info",
+      survived ? "harness_undiscriminating" : "oracle_ok",
+      survived
+        ? `The harness passed a deliberately broken Candidate ${passing.letter} (${mutation.description}).`
+        : `The harness caught a deliberately broken Candidate ${passing.letter} (${mutation.description}).`,
+      signal
+    );
+    return [signal];
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await addEvent(job.id, "info", "oracle_skipped", `The mutation check could not run: ${message}`);
+    return [];
+  }
+}
+
+async function benchmarkCandidates(job, settings, baseUrl, models, judges, question, candidates, knowledge = "", bench) {
+  const codeCandidates = candidates.filter((c) => c.final?.kind === "code" && c.final.code?.trim());
+  if (codeCandidates.length < 2) {
+    await addEvent(
+      job.id,
+      "info",
+      "benchmark_skipped",
+      "Fewer than two runnable code candidates; MCQ, math, research and plain-answer jobs use Council reasoning validation instead of code execution."
+    );
+    return { suites: [], runs: {}, oracles: [] };
+  }
+
+  await patchJob(job.id, { progress_phase: "speccing" });
+  await addEvent(job.id, "info", "speccing", "Generating language-specific benchmark harnesses.");
+  const languages = Array.from(new Set(codeCandidates.map((c) => candidateLanguage(c.final)).filter(Boolean)));
+  // A benched route would spend the whole timeout again on the one call the
+  // benchmark phase cannot proceed without.
+  const specModel = [settings.synthesisModel, judges[0]?.model, ...models.map((m) => m.id)].find(
+    (candidate) => candidate && !bench.has(candidate)
+  );
+  if (!specModel) {
+    await addEvent(job.id, "warn", "spec_failed", "Every model is benched, so no benchmark harness could be generated.");
+    return { suites: [], runs: {}, oracles: [] };
+  }
+  let suites = [];
+  try {
+    const specText = await tokenRouterGenerate({
+      settings,
+      baseUrl,
+      model: specModel,
+      system: testSpecSystemPrompt(),
+      user: testSpecUserPrompt({
+        question,
+        docket: candidateDocket(candidates),
+        languages,
+        knowledge: knowledge || settings.knowledgeDigest || "",
+      }),
+      maxTokens: Number(settings.maxTokens || 4096),
+    });
+    suites = parseTestSuites(specText);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await bench.note(specModel, err, "speccing");
+    await addEvent(job.id, "warn", "spec_failed", `Benchmark spec generation failed: ${message}`);
+    return { suites: [], runs: {}, oracles: [] };
+  }
+
+  if (!suites.length) {
+    await addEvent(job.id, "warn", "benchmark_skipped", "The benchmark spec did not contain any runnable harnesses.");
+    return { suites, runs: {}, oracles: [] };
+  }
+
+  await patchJob(job.id, { progress_phase: "verifying" });
+  await addEvent(job.id, "info", "verifying", `Running ${codeCandidates.length} candidates through generated benchmarks.`);
+  const runs = await executeField(job, settings, suites, candidates);
+  const oracles = await runMutationOracle(job, settings, suites, candidates, runs);
+  return { suites, runs, oracles };
 }
 
 /**
@@ -1166,7 +1283,20 @@ function createBench(job) {
  */
 async function readScreenshots({ job, settings, baseUrl, models, images, imageRefs, bench }) {
   const manifest = imageManifest(imageRefs);
-  const readers = bench.keep(models, (m) => m.id).slice(0, Math.max(1, Number(process.env.CODE_AUDITOR_WORKER_READERS || 2)));
+  // Ranked, not arbitrary. Reading a screenshot of code or a diagram is its own
+  // skill, and the seat that happened to be first in the roster is not the one
+  // you want doing it. The third strongest is held back: it is asked only if
+  // the first two disagree, and asking one of the two whether it was wrong is
+  // not an answer.
+  const pool = bench.keep(models, (m) => m.id);
+  const { readers, tieBreaker } = chooseReaders(
+    pool,
+    (m) => m.id,
+    Array.isArray(settings.visionPreference) && settings.visionPreference.length
+      ? settings.visionPreference
+      : VISION_PREFERENCE,
+    Math.max(1, Number(process.env.CODE_AUDITOR_WORKER_READERS || 2))
+  );
   if (!readers.length) {
     await addEvent(job.id, "warn", "reading_none", "No model was available to read the screenshot.");
     return { extraction: null, context: "", markdown: "", readers: [], agreement: null };
@@ -1210,18 +1340,54 @@ async function readScreenshots({ job, settings, baseUrl, models, images, imageRe
     return { extraction: EMPTY_EXTRACTION, context: "", markdown: "", readers: [], agreement: null };
   }
 
-  const agreement =
+  let agreement =
     done.length > 1
       ? compareExtractions(done[0].extraction, done[1].extraction)
       : singleReading(done[0].extraction, `only ${done[0].model} answered`);
 
   const readerNames = done.map((d) => d.model);
+  let resolved = agreement;
   if (done.length > 1 && !agreement.agree) {
     await addEvent(job.id, "warn", "reading_conflict", `The readers disagree: ${agreement.summary}`, {
       readers: readerNames,
       conflicts: agreement.conflicts,
     });
+
+    // A third pair of eyes on the disputed fields only. Cheaper than it looks —
+    // one call, no solving — and it replaces the rule it used to fall back on,
+    // which was "whichever model claimed more confidence wins", a number a
+    // model writes about itself.
+    const disputed = agreement.conflicts.filter((c) => c.severity === "high");
+    if (tieBreaker && disputed.length) {
+      try {
+        const text = await tokenRouterGenerate({
+          settings,
+          baseUrl,
+          model: tieBreaker.id,
+          system: tieBreakSystemPrompt(),
+          user: tieBreakUserPrompt(disputed, manifest),
+          images,
+          maxTokens: Math.min(Number(settings.maxTokens || 4096), 1024),
+        });
+        const picks = parseTieBreak(text, disputed.map((c) => c.field));
+        resolved = applyTieBreak(done[0].extraction, done[1].extraction, agreement, picks, tieBreaker.id);
+        await addEvent(
+          job.id,
+          resolved.agree ? "info" : "warn",
+          "reading_tiebreak",
+          picks.length
+            ? `${tieBreaker.id} settled ${picks.map((p) => `${p.field}→${p.choice.toUpperCase()}`).join(", ")}.`
+            : `${tieBreaker.id} was asked to settle the reading but named no field.`,
+          { model: tieBreaker.id, picks, unresolved: !resolved.agree }
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        await bench.note(tieBreaker.id, err, "reading_tiebreak");
+        await addEvent(job.id, "warn", "reading_tiebreak_failed", `${tieBreaker.id} could not settle the reading: ${message}`);
+      }
+    }
   }
+  agreement = resolved;
 
   const merged = agreement.merged;
   const markdown = readingMarkdown(merged, {
@@ -1251,7 +1417,7 @@ async function readScreenshots({ job, settings, baseUrl, models, images, imageRe
  * otherwise the query is what the readers actually saw -- the summary of what is
  * being asked, anything they noted, and the transcribed code.
  */
-async function selectKnowledge(job, settings, { candidates = [], reading = null } = {}) {
+async function selectKnowledge(job, settings, { candidates = [], reading = null, contract = null } = {}) {
   const override = String(settings.knowledgeDigest || "").trim();
   if (override) {
     await addEvent(job.id, "info", "knowledge_selected", "Using the knowledge digest supplied with the job.", {
@@ -1261,11 +1427,15 @@ async function selectKnowledge(job, settings, { candidates = [], reading = null 
     return override;
   }
 
-  // The panel's own answers are the query. They are the first text in the
-  // pipeline written by something that understood the question — better
-  // retrieval material than a transcription of the pixels, and available
-  // without spending a call to produce it. A transcript, when one exists
-  // because nothing could see, is folded in as well.
+  // The contract first, when there is one. It describes the problem rather than
+  // one model's attempt at it, and it exists before anybody has attempted
+  // anything — which is what lets the library reach the first solve instead of
+  // arriving after the answers it was supposed to inform.
+  const fromContract = contractQuery(contract);
+  // Failing that, the panel's own answers: the first text in the pipeline
+  // written by something that understood the question, and available without
+  // spending a call to produce it. A transcript, when one exists because
+  // nothing could see, is folded in as well.
   const fromCandidates = candidates
     .map((c) => [c.final?.answer, c.final?.complexity, c.final?.code].filter((part) => part?.trim()).join("\n"))
     .filter(Boolean)
@@ -1274,20 +1444,35 @@ async function selectKnowledge(job, settings, { candidates = [], reading = null 
   const fromReading = e
     ? [e.problemSummary, (e.observations || []).join("\n"), e.code].filter((part) => part?.trim()).join("\n\n")
     : "";
-  const query = [fromCandidates, fromReading].filter(Boolean).join("\n\n");
+  const query = [fromContract, fromCandidates, fromReading].filter(Boolean).join("\n\n");
   if (!query.trim()) {
     await addEvent(job.id, "warn", "knowledge_skipped", "Nothing produced text to search the knowledge library with.");
     return "";
   }
 
   const limit = Math.max(1, Number(settings.knowledgeLimit || 5));
-  const pack = knowledgePackFor(query, limit);
+  const library = await libraryFor(settings);
+  const pack = knowledgePackFor(query, limit, library.records);
   await addEvent(
     job.id,
     pack.trim() ? "info" : "warn",
     "knowledge_selected",
-    pack.trim() ? `Selected ${limit} knowledge record(s) for this question.` : "The knowledge library returned nothing for this question.",
-    { source: "library", limit, bytes: Buffer.byteLength(pack, "utf8"), queryBytes: Buffer.byteLength(query, "utf8") }
+    pack.trim()
+      ? `Selected ${limit} knowledge record(s) for this question from the ${library.source}.`
+      : `The knowledge library returned nothing for this question (${library.records.length} record(s) searched).`,
+    {
+      source: "library",
+      from: fromContract ? "contract" : fromCandidates ? "answers" : "reading",
+      // Which shelf this run reasoned from. The app carries its own compiled
+      // copy, so without this a report cannot say whether two runs of the same
+      // question even had the same library in front of them.
+      library: library.source,
+      libraryNote: library.note,
+      records: library.records.length,
+      limit,
+      bytes: Buffer.byteLength(pack, "utf8"),
+      queryBytes: Buffer.byteLength(query, "utf8"),
+    }
   );
   return pack;
 }
@@ -1305,6 +1490,71 @@ async function selectKnowledge(job, settings, { candidates = [], reading = null 
  * and renaming someone's session out from under them is how an app stops being
  * trusted with their data.
  */
+/**
+ * What the problem asks, settled before anybody answers it.
+ *
+ * Two readers, not one: a single reading that is wrong is promoted to ground
+ * truth by every prompt downstream, and nothing afterwards can contradict it.
+ * Two readings can disagree, and a disagreement carried openly into the
+ * contract is worth more than a confident sentence nobody checked.
+ *
+ * Cheap by design — two calls, no solving, no images beyond the ones the
+ * solvers were going to be shown anyway — and skipped outright when the run has
+ * fewer than two reachable seats or the owner turned it off.
+ */
+async function readProblemContract({ job, settings, baseUrl, models, images, question, reading, bench }) {
+  if (settings.councilProblemContract === false) return { contract: null, agreement: null, readers: [] };
+  const seats = bench.keep(models, (m) => m.id).slice(0, 2);
+  if (!seats.length) return { contract: null, agreement: null, readers: [] };
+
+  await addEvent(job.id, "info", "problem_contract", `Reading the problem with ${seats.length} reader(s) before solving.`, {
+    models: seats.map((m) => m.id),
+  });
+  const readings = [];
+  await Promise.all(
+    seats.map(async (spec) => {
+      try {
+        const text = await tokenRouterGenerate({
+          settings,
+          baseUrl,
+          model: spec.id,
+          system: contractSystemPrompt(),
+          user: contractUserPrompt({ question, reading: reading?.markdown || reading?.context || "" }),
+          images,
+          maxTokens: Math.min(Number(settings.maxTokens || 4096), 2048),
+        });
+        const parsed = parseProblemContract(text);
+        if (parsed.wellFormed) readings.push(parsed);
+        else await addEvent(job.id, "warn", "problem_contract_unparsed", `${spec.id} answered but the contract did not parse.`, { model: spec.id });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        await bench.note(spec.id, err, "problem_contract");
+        await bench.noteBlind(spec.id, message, "problem_contract");
+        await addEvent(job.id, "warn", "problem_contract_failed", `${spec.id} could not read the problem: ${message}`, { model: spec.id });
+      }
+    })
+  );
+
+  const { contract, agreement } = mergeProblemContracts(readings);
+  if (!contract) {
+    // Not fatal. The council has always run without one; the contract makes the
+    // run better, and a run that proceeds without it is the old behaviour, not
+    // a broken one.
+    await addEvent(job.id, "warn", "problem_contract_none", "No reader produced a usable problem contract; solving from the problem as given.");
+    return { contract: null, agreement: null, readers: seats.map((m) => m.id) };
+  }
+  await addEvent(
+    job.id,
+    agreement?.agree === false ? "warn" : "info",
+    "problem_contract_done",
+    agreement?.agree === false
+      ? `The readers disagreed about the problem: ${agreement.differences[0]}`
+      : "The readers agreed on what the problem asks.",
+    { agree: agreement?.agree ?? null, differences: agreement?.differences ?? [], readers: seats.map((m) => m.id) }
+  );
+  return { contract, agreement, readers: seats.map((m) => m.id) };
+}
+
 async function nameSessionFromWork(job, reading, candidates) {
   if (!job.session_id) return;
   try {
@@ -1473,11 +1723,15 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
   });
   const readingText = [mcqReading.context, mcqReading.markdown].filter(Boolean).join("\n\n");
   const detection = detectMcq(readingText);
+  const mcqLibrary = await libraryFor(settings);
   const knowledge = knowledgePackFor(
     [detection.question, ...detection.options.map((o) => `${o.label}. ${o.text}`), readingText].filter(Boolean).join("\n"),
-    Math.max(1, Number(settings.knowledgeLimit || 5))
+    Math.max(1, Number(settings.knowledgeLimit || 5)),
+    mcqLibrary.records
   );
-  await addEvent(job.id, knowledge.trim() ? "info" : "warn", "knowledge_selected", knowledge.trim() ? "Checked local knowledge before MCQ solving." : "Local knowledge had no matching MCQ guidance.", {
+  await addEvent(job.id, knowledge.trim() ? "info" : "warn", "knowledge_selected", knowledge.trim() ? `Checked the ${mcqLibrary.source} knowledge library before MCQ solving.` : "The knowledge library had no matching MCQ guidance.", {
+    library: mcqLibrary.source,
+    records: mcqLibrary.records.length,
     bytes: Buffer.byteLength(knowledge || "", "utf8"),
     options: detection.options.length,
   });
@@ -1757,10 +2011,27 @@ export async function runCouncilJob(job) {
   // coding. That keeps MCQ a sibling of the existing overlay mechanism instead
   // of a separate manual-only path.
   const mustTranscribe = seeing.length === 0;
+  /**
+   * Where the solvers get the problem from.
+   *
+   *   "image"   — every seat that can see is shown the screenshot (the old way)
+   *   "reading" — nobody solves from pixels; the reconstruction is the problem
+   *   "auto"    — the reconstruction when two readers agreed on it, the picture
+   *               as well when they did not
+   *
+   * "auto" is the default because the two claims pull against each other and
+   * the evidence decides which wins. Reading a screenshot is a different skill
+   * from solving what is in it, and a reconstruction two strong readers agree on
+   * is usually a cleaner problem statement than a JPEG of an IDE — but a
+   * reconstruction they disputed is the one thing worse than pixels, so that is
+   * exactly when the picture travels too.
+   */
+  const solveFrom = String(settings.solveFrom || "auto");
   const wantsTranscript =
     settings.transcribeScreenshots === true ||
     mustTranscribe ||
-    settings.overlayMode === "auto";
+    settings.overlayMode === "auto" ||
+    solveFrom !== "image";
 
   // Readers are drawn from the whole reachable roster, not from the four solver
   // seats. This used to hand the picture to `available` — which, when the
@@ -1807,10 +2078,34 @@ export async function runCouncilJob(job) {
     return;
   }
 
-  // Who actually solves: the seeing models, or — only when none can see — the
-  // whole bench working from the transcription.
-  const solving = seeing.length ? seeing : available;
-  const solveImages = seeing.length ? images : [];
+  // Is the reconstruction worth solving from on its own?
+  //
+  // Only when two readers looked and did not disagree — or disagreed and a
+  // third settled it — and the reading is not hedging about its own confidence.
+  const readingTrusted =
+    Boolean(reading.extraction) &&
+    (reading.readers?.length ?? 0) >= 2 &&
+    reading.agreement?.agree !== false &&
+    Number(reading.extraction?.confidence ?? 0) >= Number(settings.readingConfidenceFloor ?? 0.7);
+
+  const showPicture =
+    solveFrom === "image" ? true : solveFrom === "reading" ? false : !readingTrusted;
+
+  // Who actually solves. When the picture stays behind, a seat that cannot see
+  // is no longer at a disadvantage, so the whole reachable bench solves rather
+  // than only the models with eyes — which is the other half of separating
+  // reconstruction from solving.
+  let solving = showPicture && seeing.length ? seeing : available;
+  const solveImages = showPicture && seeing.length ? images : [];
+  if (!showPicture) {
+    await addEvent(
+      job.id,
+      "info",
+      "solving_from_reading",
+      `The screenshot was reconstructed by ${(reading.readers || []).join(", ") || "the readers"}; the solvers work from that rather than the pixels.`,
+      { readers: reading.readers, confidence: reading.extraction?.confidence ?? null, solveFrom }
+    );
+  }
 
   await patchJob(job.id, { progress_phase: "solving" });
 
@@ -1827,7 +2122,61 @@ export async function runCouncilJob(job) {
   // text, and before anybody has answered there is no text — only a picture.
   // The library arrives the moment the panel produces words, which is also the
   // moment the system can tell this is a coding problem at all.
-  const question = userPrompt("", solveImages.length > 0, reading.context, imageRefs, "", policy);
+  const baseQuestion = userPrompt("", solveImages.length > 0, reading.context, imageRefs, "", policy);
+
+  // Everything downstream — solvers, the harness spec, reviews, revisions,
+  // judges, the synthesis — is handed this same string as "the problem". Folding
+  // the contract into it once is what makes it immutable ground truth for the
+  // whole run rather than a paragraph one stage happened to be given.
+  const contracting = await readProblemContract({
+    job,
+    settings,
+    baseUrl,
+    models: solving,
+    images: solveImages,
+    question: baseQuestion,
+    reading,
+    bench,
+  });
+  const contractText = contractBlock(contracting.contract);
+  const question = contractText ? `${baseQuestion}\n\n---\n\n${contractText}` : baseQuestion;
+
+  // The library, before the first attempt rather than after it.
+  //
+  // Retrieval matches text against text, and a screenshot is not text — which
+  // is why this used to wait until the solvers had written something and then
+  // hand the library to every round except the one that produced the answers.
+  // The contract is text about the problem, written before anybody attempted
+  // it, so the pack can reach round one now. Only for problems the readers
+  // called code: retrieving cp-algorithms and perf counters for a
+  // multiple-choice question is noise charged four times over.
+  let knowledge =
+    contracting.contract?.kind === "code"
+      ? await selectKnowledge(job, settings, { contract: contracting.contract, reading })
+      : "";
+  const solverPrompt = [
+    userPrompt("", solveImages.length > 0, reading.context, imageRefs, knowledge, policy),
+    contractText,
+  ]
+    .filter(Boolean)
+    .join("\n\n---\n\n");
+
+  // The contract pass is the cheapest call of the run, which makes it the right
+  // place to find out a route is dead. A model that timed out reading the
+  // problem is not asked to solve it: the solver list is rebuilt from the bench
+  // rather than fixed before anybody had been asked anything.
+  const stillLive = bench.keep(solving, (m) => m.id);
+  if (stillLive.length && stillLive.length < solving.length) {
+    const dropped = solving.filter((m) => bench.has(m.id)).map((m) => m.id);
+    await addEvent(
+      job.id,
+      "info",
+      "phase_skipped",
+      `${dropped.join(", ")} did not answer the contract pass, so the solve round does not ask again.`,
+      { models: dropped }
+    );
+    solving = stillLive;
+  }
 
   // Same rule as the desktop run: the answer comes back in the language the
   // question was posed in, unless the setting names one. The reading is where
@@ -1863,7 +2212,7 @@ export async function runCouncilJob(job) {
           baseUrl,
           model: spec.id,
           system: solverSystem,
-          user: question,
+          user: solverPrompt,
           images: solveImages,
           maxTokens: Number(settings.maxTokens || 4096),
         });
@@ -1939,7 +2288,13 @@ export async function runCouncilJob(job) {
   // benchmarking and optimisation collection — cp-algorithms, getrusage, perf
   // counters, criterion — and feeding it to a multiple-choice question would be
   // noise charged four times over.
-  const knowledge = isCoding ? await selectKnowledge(job, settings, { candidates: field, reading }) : "";
+  // Already selected from the contract in the usual case. This is the fallback
+  // for a run whose readers produced nothing usable — and for one the contract
+  // called something other than code while the answers say otherwise, which is
+  // the reading being wrong rather than the panel.
+  if (!knowledge && isCoding) {
+    knowledge = await selectKnowledge(job, settings, { candidates: field, reading });
+  }
 
   const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field, knowledge, bench);
   const docket = candidateDocket(field);
@@ -1960,7 +2315,8 @@ export async function runCouncilJob(job) {
     );
   }
 
-  const suspectHarness = harnessIsSuspect(benchmark.runs);
+  const oracles = benchmark.oracles || [];
+  const suspectHarness = [harnessIsSuspect(benchmark.runs), oracleSuspicion(oracles)].filter(Boolean).join("\n\n");
   if (suspectHarness) {
     await addEvent(job.id, "warn", "harness_suspect", suspectHarness, { runs: benchmark.runs });
   }
@@ -1968,7 +2324,11 @@ export async function runCouncilJob(job) {
     ? // The doubt travels with the evidence rather than beside it, so reviews,
       // judges and the synthesis all read it in the same breath as the scores
       // they would otherwise take at face value.
-      [executionDigest(field, benchmark.runs), suspectHarness && `NOTE ON THE HARNESS: ${suspectHarness}`]
+      [
+        executionDigest(field, benchmark.runs),
+        oracleDigest(oracles),
+        suspectHarness && `NOTE ON THE HARNESS: ${suspectHarness}`,
+      ]
         .filter(Boolean)
         .join("\n\n")
     : "No benchmark evidence is available for this cloud Council run.";
@@ -2011,6 +2371,101 @@ export async function runCouncilJob(job) {
     })
   );
 
+  // ------------------------------------------------------------ round 3: revise
+  //
+  // The desktop council revises after review and re-executes the revised field;
+  // the cloud worker used to stop after one solve pass and ship `revisedRuns: {}`.
+  // That was the largest parity gap in the product: the same question, asked
+  // through the helper instead of the app, got a measurably weaker answer for no
+  // reason a user could see.
+  //
+  // Reviews that parsed to nothing mean the council has nothing new to teach its
+  // solvers, and a revision round over zero critiques is N requests spent
+  // re-answering a question already answered.
+  let field3 = field;
+  let revisedRuns = {};
+  if (reviewSets.some((set) => set.reviews.length > 0)) {
+    await patchJob(job.id, { progress_phase: "revising" });
+    const revising = bench.keep(
+      field.filter((c) => c.final || c.text),
+      (c) => c.model
+    );
+    await bench.announce("revising", field.filter((c) => bench.has(c.model)).map((c) => c.model));
+    await addEvent(job.id, "info", "revising", `Asking ${revising.length} solver(s) to revise after review.`);
+    const revisions = new Map();
+    await Promise.all(
+      revising.map(async (candidate) => {
+        const received = reviewsOf(reviewSets, candidate.letter)
+          .map((r) => `- [${r.reviewer}] correct: ${r.correct}. ${r.problems}`)
+          .join("\n");
+        try {
+          const text = await tokenRouterGenerate({
+            settings,
+            baseUrl,
+            model: candidate.model,
+            system: reviseSystemPrompt(),
+            user: reviseUserPrompt({
+              question,
+              letter: candidate.letter,
+              ownRaw: candidate.final?.raw ?? candidate.text,
+              docket,
+              received,
+              execution,
+              knowledge,
+            }),
+            maxTokens: Number(settings.maxTokens || 4096),
+          });
+          // A malformed revision is not silently adopted. The original stays the
+          // candidate and the gate keeps judging the thing that actually ran.
+          const parsed = parseFinal(text);
+          if (parsed) revisions.set(candidate.letter, { final: parsed, text });
+          await addEvent(
+            job.id,
+            parsed ? "info" : "warn",
+            parsed ? "revision_done" : "revision_unparsed",
+            parsed
+              ? `${candidate.model} revised Candidate ${candidate.letter}.`
+              : `${candidate.model} answered but the revision of Candidate ${candidate.letter} did not parse; the original stands.`,
+            { model: candidate.model, letter: candidate.letter }
+          );
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          await bench.note(candidate.model, err, "revising");
+          await addEvent(job.id, "warn", "revision_failed", `${candidate.model} revision failed: ${message}`, {
+            model: candidate.model,
+            letter: candidate.letter,
+          });
+        }
+      })
+    );
+
+    field3 = field.map((c) => {
+      const rev = revisions.get(c.letter);
+      return rev ? { ...c, revised: rev.final, revisedText: rev.text } : c;
+    });
+
+    if (benchmark.suites.length && field3.some((c) => c.revised)) {
+      await patchJob(job.id, { progress_phase: "reverifying" });
+      await addEvent(job.id, "info", "reverifying", "Re-running the revised field against the same harnesses.");
+      revisedRuns = await executeField(job, settings, benchmark.suites, field3, { revised: true });
+    }
+  }
+
+  const revisedAny = field3.some((c) => c.revised);
+  // Both dockets and both digests from here on. The judge and synthesis prompts
+  // already speak of revisions; until now nothing was putting any in front of them.
+  const docketBoth = revisedAny
+    ? `${candidateDocket(field3)}\n\n=== REVISED ===\n\n${candidateDocket(field3, { revised: true })}`
+    : docket;
+  const executionBoth = [
+    execution,
+    revisedAny && Object.keys(revisedRuns).length
+      ? `=== REVISED RUNS ===\n${executionDigest(field3, revisedRuns, { revised: true })}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
   await patchJob(job.id, { progress_phase: "judging" });
 
   const judgeReports = [];
@@ -2028,9 +2483,9 @@ export async function runCouncilJob(job) {
           system: judgeSystemPrompt(judge.emphasis || "correctness"),
           user: judgeUserPrompt({
             question,
-            docket,
+            docket: docketBoth,
             reviews: reviewDigest(reviewSets),
-            execution,
+            execution: executionBoth,
             knowledge,
           }),
           maxTokens: Number(settings.maxTokens || 4096),
@@ -2068,9 +2523,9 @@ export async function runCouncilJob(job) {
       system: synthesisSystemPrompt(),
       user: synthesisUserPrompt({
         question,
-        docket,
+        docket: docketBoth,
         reviews: reviewDigest(reviewSets) || "(no reviews were collected)",
-        execution,
+        execution: executionBoth,
         judges: judgeDigest(judgeReports) || "(no judges were collected)",
         knowledge,
       }),
@@ -2120,30 +2575,67 @@ export async function runCouncilJob(job) {
   // the final answer on it. It never argued with the rule — it re-described the
   // evidence until the rule appeared not to apply. A model cannot re-describe
   // its way past this.
-  const claimed = winnerFromSynthesis(synthesis);
-  const ruling = enforceWinnerGate(claimed, benchmark.runs);
+  // The synthesis, as fields rather than prose. Everything downstream — the
+  // panel, the helper overlay, the dossier below — reads these instead of
+  // scraping markdown, so a model drifting from the report format degrades one
+  // parser rather than every surface at once.
+  const parsedSynthesis = parseCouncilSynthesis(synthesis);
+  const judgeReadings = judgeReports.map((j) => ({
+    model: j.model,
+    emphasis: j.emphasis,
+    error: j.error,
+    ...parseJudgeReport(j.text),
+  }));
+  const claimed = parsedSynthesis.winner || winnerFromSynthesis(synthesis);
+  // A revised candidate is judged on its revision. Gating the revision's winner
+  // against round one's run would reject a candidate for a defect it fixed —
+  // and, worse, could pass one whose fix broke something.
+  const gateRuns = {};
+  for (const c of field3) {
+    const run = c.revised ? revisedRuns[c.letter] : benchmark.runs[c.letter];
+    if (run) gateRuns[c.letter] = run;
+  }
+  const ruling = enforceWinnerGate(claimed, gateRuns);
+
+  // Scoring is counting, and counting does not need a language model. The gate
+  // decides what may win, the judges' Borda tally decides between what is left,
+  // and the synthesis narrates the result it no longer gets to choose.
+  const decision = decideWinner({
+    claimed,
+    judges: judgeReadings,
+    runs: gateRuns,
+    letters: field3.map((c) => c.letter),
+  });
+  if (decision.disagreement) {
+    await addEvent(job.id, "warn", "winner_aggregated", decision.disagreement, {
+      claimedWinner: claimed,
+      winner: decision.winner,
+      source: decision.source,
+      tally: decision.tally,
+    });
+  }
 
   // And the question the gate does not ask: is the text a person is about to
   // paste into an editor backed by anything that ran?
-  const standing = answerStanding(ruling.winner, benchmark.runs);
+  const standing = answerStanding(decision.winner, gateRuns);
   if (standing.standing === "unverified") {
     await addEvent(job.id, "warn", "answer_unverified", standing.reason, {
       claimedWinner: claimed,
-      gates: Object.fromEntries(Object.values(benchmark.runs).map((r) => [r.letter, gateFor(r)])),
+      gates: Object.fromEntries(Object.values(gateRuns).map((r) => [r.letter, gateFor(r)])),
     });
   }
   if (ruling.overruledReason) {
     await addEvent(job.id, "warn", "gate_overrule", ruling.overruledReason, {
       claimedWinner: claimed,
-      run: benchmark.runs[claimed] || null,
+      run: gateRuns[claimed] || null,
     });
   }
 
   const report = {
-    candidates: field,
+    candidates: field3,
     suites: benchmark.suites,
     runs: benchmark.runs,
-    revisedRuns: {},
+    revisedRuns,
     reviews: reviewSets,
     judges: judgeReports,
     // Stamped at the top, not appended at the bottom. A warning below a code
@@ -2156,23 +2648,40 @@ export async function runCouncilJob(job) {
           : "",
       synthesis,
       ruling.overruledReason ? `\n\n---\n\n**GATE OVERRULE.** ${ruling.overruledReason}` : "",
+      decision.disagreement ? `\n\n---\n\n**JUDGE AGGREGATE.** ${decision.disagreement}` : "",
     ]
       .filter(Boolean)
       .join("\n"),
     standing: standing.standing,
     standingReason: standing.reason,
+    // The dossier: what the report says, in fields a UI can render without
+    // reading a word of the prose above it.
+    parsed: {
+      synthesis: parsedSynthesis,
+      judges: judgeReadings,
+      tally: decision.tally,
+      winnerSource: decision.source,
+      disagreement: decision.disagreement,
+    },
     synthesisClaimedWinner: claimed,
     gateOverruleReason: ruling.overruledReason,
     harnessSuspect: suspectHarness,
+    oracles,
     reading: {
       readers: reading.readers,
       agree: reading.agreement?.agree ?? null,
       confidence: reading.extraction?.confidence ?? 0,
       markdown: reading.markdown,
     },
+    contract: contracting.contract,
+    contractAgreement: contracting.agreement,
+    contractReaders: contracting.readers,
     knowledgeBytes: Buffer.byteLength(knowledge || "", "utf8"),
-    winner: ruling.winner,
+    winner: decision.winner,
   };
+  // Built from the finished report rather than assembled alongside it, so the
+  // helper overlay and the app render the same fields from the same source.
+  report.presentation = buildPresentation(report);
   const markdown = await saveCouncilReport(job, report);
 
   await patchJob(job.id, {

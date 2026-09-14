@@ -648,6 +648,61 @@ export async function probeModels(
  * sitting directly in the capture directory, so a wrong value costs a duller
  * file name rather than a write where it should not be. Returns where it landed.
  */
+/** One markdown file in the knowledge folder. */
+export interface KnowledgeFile {
+  id: string;
+  /** The collection folder this record lives in. Empty for the top level. */
+  category: string;
+  markdown: string;
+  path: string;
+  updatedAt: number;
+}
+
+export async function knowledgeList(): Promise<KnowledgeFile[]> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  return invoke<KnowledgeFile[]>("knowledge_list");
+}
+
+export async function knowledgeSave(
+  id: string,
+  markdown: string,
+  category = "",
+  previousId?: string | null,
+  previousCategory = ""
+): Promise<KnowledgeFile> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  return invoke<KnowledgeFile>("knowledge_save", {
+    id,
+    markdown,
+    category,
+    previousId: previousId ?? null,
+    previousCategory,
+  });
+}
+
+export async function knowledgeDelete(id: string, category = ""): Promise<void> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  await invoke("knowledge_delete", { id, category });
+}
+
+export interface KnowledgePublishResult {
+  published: number;
+  sources: number;
+  /** Records that were someone else's and said something different. */
+  replaced: { id: string; title: string; by: string | null; at: string | null }[];
+}
+
+/** Push the parsed library to the database the cloud worker reads. */
+export async function knowledgePublish(records: unknown[]): Promise<KnowledgePublishResult> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  return invoke<KnowledgePublishResult>("knowledge_publish", { records });
+}
+
+export async function knowledgeFolder(): Promise<string> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  return invoke<string>("knowledge_folder");
+}
+
 export async function saveReading(markdown: string, near?: string | null): Promise<string> {
   if (!inTauri()) throw new Error(NOT_TAURI);
   return invoke<string>("save_reading", { markdown, near: near ?? null });

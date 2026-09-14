@@ -9,6 +9,17 @@ import {
   gateFor,
   parseReviewSet,
   parseTestSuites,
+  parseCouncilSynthesis,
+  parseJudgeReport,
+  parseProblemContract,
+  mergeProblemContracts,
+  contractBlock,
+  contractQuery,
+  reviseUserPrompt,
+  buildPresentation,
+  mutateCode,
+  oracleSuspicion,
+  oracleDigest,
   reviewsOf,
   spliceSuite,
   type Candidate,
@@ -202,6 +213,193 @@ console.log("\n9. defaults hold the shape the design specifies");
     "the requested judge roster is installed",
     COUNCIL_DEFAULT_JUDGES.map((j) => `${j.model}/${j.emphasis}`).join(",") ===
       "openai/gpt-5.6-sol/performance,anthropic/claude-opus-5/security"
+  );
+}
+
+console.log("\n8. the synthesis parses into fields, code included");
+{
+  const text = `Thinking about it first.
+
+VERDICT: A is the only verified answer
+WINNER: A
+REJECTED: B - failed two cases
+EVIDENCE: A passed 19/19 in 41ms
+APPROACH: one pass with a hash map
+FINAL ANSWER: Ship A, corrected for the empty case:
+
+\`\`\`python
+def solve(xs):
+    # Complexity: O(n) - a label-shaped line inside the code
+    return len(xs)
+\`\`\`
+`;
+  const parsed = parseCouncilSynthesis(text);
+  check("winner read", parsed.winner === "A", parsed.winner);
+  check("approach read", parsed.approach.includes("hash map"), parsed.approach);
+  check("evidence read", parsed.evidence.includes("19/19"), parsed.evidence);
+  check("rejected read", parsed.rejected.includes("failed two cases"), parsed.rejected);
+  check("preamble kept out of the fields", parsed.preamble.startsWith("Thinking"), parsed.preamble);
+  check("code lifted out of the final answer", parsed.code.includes("return len(xs)"), parsed.code);
+  check("language read from the fence", parsed.language === "python", parsed.language);
+  // The reason the parser tracks fences at all: a comment inside shipped code
+  // reads exactly like a section header, and cutting there truncates the answer.
+  check("a label inside the code did not split the answer", parsed.code.includes("Complexity: O(n)"), parsed.code);
+}
+
+console.log("\n9. WINNER: NONE is not a letter");
+{
+  const parsed = parseCouncilSynthesis("VERDICT: nothing survived\nWINNER: NONE (all gate-rejected)\nFINAL ANSWER: none");
+  check("no winner recorded", parsed.winner === "", parsed.winner);
+  check("but the report still parsed", parsed.wellFormed);
+}
+
+console.log("\n10. a judge report parses into a ranking");
+{
+  const judge = parseJudgeReport(
+    "VERDICT: B is strongest\n**RANKING:** B > A > C\nCORRECT: A, B\nWHY: B is O(n)\nDEFECTS: C overflows\nBEST ANSWER: ship B"
+  );
+  check("ranking in order", judge.ranking.join("") === "BAC", judge.ranking.join(""));
+  check("correct letters read", judge.correct.join("") === "AB", judge.correct.join(""));
+  check("bolded labels survive", judge.verdict.includes("B is strongest"), judge.verdict);
+  check("defects read", judge.defects.includes("overflows"), judge.defects);
+}
+
+console.log("\n11. two readings of a problem become one contract");
+{
+  const block = (sig: string, cons: string) => `<<<CONTRACT
+KIND: code
+LANGUAGES: python, javascript
+SIGNATURE: ${sig}
+INPUTS: xs, a list of ints
+OUTPUTS: the count
+CONSTRAINTS: ${cons}
+EXAMPLES: [] -> 0
+EDGE CASES: empty list
+COMPLEXITY: O(n) time
+UNKNOWNS: none
+CONTRACT>>>`;
+  const a = parseProblemContract(block("def solve(xs)", "0 <= len(xs) <= 1e5"));
+  const b = parseProblemContract(block("def solve(xs)", "0 <= len(xs) <= 1e5"));
+  check("the contract parsed", a.wellFormed && a.kind === "code", a.kind);
+  check("languages normalised", a.languages.join(",") === "python,javascript", a.languages.join(","));
+  const agreed = mergeProblemContracts([a, b]);
+  check("agreement is the quiet case", agreed.agreement.agree && agreed.contract?.signature === "def solve(xs)");
+
+  const c = parseProblemContract(block("def solve(xs, k)", "1 <= len(xs) <= 1e9"));
+  const disputed = mergeProblemContracts([a, c]);
+  check("a disagreement is not averaged away", disputed.agreement.agree === false);
+  check(
+    "and it is carried where every prompt reads it",
+    disputed.contract!.unknowns.includes("disagreed") &&
+      contractBlock(disputed.contract).includes("UNDETERMINED"),
+    disputed.contract!.unknowns
+  );
+  check("an unreadable contract is nothing, not a guess", mergeProblemContracts([parseProblemContract("no block here")]).contract === null);
+}
+
+console.log("\n12. a harness that passes a broken program is suspect");
+{
+  const mutated = mutateCode("def solve(xs):\n    if len(xs) < 2:\n        return 0\n    return len(xs)");
+  check("something was broken", mutated.applied && mutated.code.includes("> 2"), mutated.code);
+  const survived = [{ kind: "mutation" as const, letter: "A", ran: true, survived: true, description: mutated.description, note: "" }];
+  const caught = [{ kind: "mutation" as const, letter: "A", ran: true, survived: false, description: mutated.description, note: "" }];
+  check("survival raises doubt", oracleSuspicion(survived).includes("unproven"), oracleSuspicion(survived));
+  check("being caught raises none", oracleSuspicion(caught) === "", oracleSuspicion(caught));
+  check("either way it is written down", oracleDigest(caught).includes("correctly rejected"), oracleDigest(caught));
+  // A doubt about the measurement is not a verdict about the thing measured:
+  // nothing here promotes or demotes a candidate.
+  check("nothing about a candidate changed", !oracleSuspicion(survived).includes("winner"));
+}
+
+console.log("\n13. the presentation explains the answer without another model call");
+{
+  const field: Candidate[] = [
+    { ...cand("A", FINAL("count them", "def solve(xs): return len(xs)")), revised: FINAL("count them, fixed", "def solve(xs): return len(xs)") },
+    cand("B", FINAL("count them slowly", "def solve(xs): return sum(1 for _ in xs)")),
+  ];
+  const mkRun = (letter: string, over: Partial<CandidateRun>): CandidateRun => ({
+    letter,
+    ran: true,
+    ok: true,
+    passed: 19,
+    failed: 0,
+    durationMs: 41,
+    note: "",
+    runtime: "node 22",
+    ...over,
+  });
+  const presentation = buildPresentation({
+    candidates: field,
+    suites: [],
+    runs: { A: mkRun("A", { ok: false, passed: 17, failed: 2 }), B: mkRun("B", {}) },
+    revisedRuns: { A: mkRun("A", {}) },
+    reviews: [],
+    judges: [],
+    synthesis: "",
+    winner: "A",
+    dossier: {
+      synthesis: parseCouncilSynthesis("WINNER: A\nREJECTED: B - slower\nAPPROACH: one pass\nFINAL ANSWER: ship A"),
+      judges: [
+        { model: "j-1", emphasis: "correctness", ...parseJudgeReport("RANKING: A, B\nCORRECT: A") },
+        { model: "j-2", emphasis: "performance", ...parseJudgeReport("RANKING: B, A\nCORRECT: B") },
+      ],
+      tally: [],
+      winnerSource: "synthesis",
+      disagreement: "",
+    },
+  });
+  check("standing is verified", presentation.standing === "verified", presentation.standing);
+  // The revised run is the one that was judged; round one's failure belongs to a
+  // program nobody shipped.
+  check("A is shown by its revision", presentation.evidence[0].revised && presentation.evidence[0].gate === "pass", JSON.stringify(presentation.evidence[0]));
+  check("provenance names the model after the gate", presentation.provenance.includes("m-A"), presentation.provenance);
+  check("the dissenting judge is on the record", presentation.dissent.some((d) => d.includes("j-2")), JSON.stringify(presentation.dissent));
+  check("the rejection reason survives", presentation.rejected.join(" ").includes("slower"), JSON.stringify(presentation.rejected));
+  check("there is code to paste", presentation.code.includes("len(xs)"), presentation.code);
+}
+
+console.log("\n14. the contract is retrieval material, and revision finally gets the library");
+{
+  const contract = parseProblemContract(`<<<CONTRACT
+KIND: code
+LANGUAGES: python
+SIGNATURE: def median(a, b)
+INPUTS: two sorted arrays
+OUTPUTS: the median as a float
+CONSTRAINTS: 0 <= len(a) + len(b) <= 2000
+EXAMPLES: [1,3],[2] -> 2.0
+EDGE CASES: one array empty
+COMPLEXITY: O(log(m+n)) required
+UNKNOWNS: none
+CONTRACT>>>`);
+  const query = contractQuery(contract);
+  // What the library is searched with: the problem's own words, available
+  // before a single solver has written anything.
+  check("the query carries the shape of the problem", query.includes("def median(a, b)") && query.includes("O(log(m+n))"), query);
+  check("and not the block's own furniture", !query.includes("CONTRACT") && !query.includes("KIND"), query);
+  check("an unreadable contract searches for nothing", contractQuery(parseProblemContract("nothing here")) === "");
+
+  const revise = reviseUserPrompt({
+    question: "median of two sorted arrays",
+    letter: "A",
+    ownRaw: "<<<FINAL ... FINAL>>>",
+    docket: "### Candidate A",
+    received: "- [m-b] correct: no. off by one",
+    execution: "Candidate A: FAILED",
+    knowledge: "Binary search on the shorter array partitions both halves.",
+  });
+  check("the revising solver is handed the library", revise.includes("Local Knowledge/RAG"), revise.slice(0, 200));
+  check("and it still gets everything it had before", revise.includes("off by one") && revise.includes("Candidate A"));
+  check(
+    "no knowledge means no empty section",
+    !reviseUserPrompt({
+      question: "q",
+      letter: "A",
+      ownRaw: "raw",
+      docket: "d",
+      received: "r",
+      execution: "e",
+    }).includes("Local Knowledge/RAG")
   );
 }
 

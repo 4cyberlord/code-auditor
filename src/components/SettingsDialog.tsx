@@ -150,7 +150,7 @@ function StorageCard() {
           takes the 92px label column and the button takes the rest — which is
           exactly backwards, and is what this looked like before. */}
       <div className="row">
-        <label htmlFor="storage-key">Service key</label>
+        <label htmlFor="storage-key">Service Key</label>
         <div className="with-btn">
           <input
             id="storage-key"
@@ -272,7 +272,7 @@ function CodingSettingsCard() {
         <span className="name">Coding agent</span>
         <span className="vendor">Model, project, and run controls</span>
         <span className="badge" data-tone={selected?.available ? "good" : "warn"}>
-          {selected?.reason ?? "No supported model"}
+          {selected?.reason ?? "No Supported Model"}
         </span>
       </div>
 
@@ -284,7 +284,7 @@ function CodingSettingsCard() {
           value={selected?.id ?? ""}
           onChange={(e) => patch({ codingModel: e.target.value })}
         >
-          {!selected && <option value="">No supported model</option>}
+          {!selected && <option value="">No Supported Model</option>}
           {choices.map((choice) => (
             <option
               key={choice.key}
@@ -298,7 +298,7 @@ function CodingSettingsCard() {
       </div>
 
       <div className="row">
-        <label htmlFor="coding-project-name">Project name</label>
+        <label htmlFor="coding-project-name">Project Name</label>
         <input
           id="coding-project-name"
           className="field"
@@ -309,7 +309,7 @@ function CodingSettingsCard() {
       </div>
 
       <div className="row">
-        <label htmlFor="coding-project-root">Project folder</label>
+        <label htmlFor="coding-project-root">Project Folder</label>
         <div className="with-btn">
           <input
             id="coding-project-root"
@@ -326,7 +326,7 @@ function CodingSettingsCard() {
       </div>
 
       <div className="row">
-        <label htmlFor="coding-tokens">Run limits</label>
+        <label htmlFor="coding-tokens">Run Limits</label>
         <div className="settings-two-fields">
           <input
             id="coding-tokens"
@@ -622,7 +622,7 @@ function GatewayCard() {
       </div>
 
       <div className="row">
-        <label htmlFor="gw-key">API key</label>
+        <label htmlFor="gw-key">API Key</label>
         <div className="with-btn">
           <input
             id="gw-key"
@@ -680,7 +680,7 @@ function GatewayCard() {
               onClick={() => void refreshModels()}
               disabled={listing}
             >
-              {listing ? "Asking…" : "Refresh list"}
+              {listing ? "Asking…" : "Refresh List"}
             </button>
 
             {/* The liveness probe that used to sit here — one text request per
@@ -697,7 +697,7 @@ function GatewayCard() {
               disabled={probing}
               title="Sends one image to each seat in use, at the governor's pace. Listing cannot tell you this."
             >
-              {probing ? `${tested}/${modelsInUse.length}` : "Check which can read images"}
+              {probing ? `${tested}/${modelsInUse.length}` : "Check Which Can Read Images"}
             </button>
           </div>
 
@@ -939,7 +939,7 @@ function ProviderCard({ id }: { id: ProviderId }) {
       </div>
 
       <div className="row" data-dim={routed}>
-        <label htmlFor={`key-${id}`}>API key</label>
+        <label htmlFor={`key-${id}`}>API Key</label>
         <div className="with-btn">
           <input
             id={`key-${id}`}
@@ -1324,7 +1324,7 @@ function CouncilCard() {
               style={{ flex: 1 }}
               onClick={() => patch({ councilEnabled: v })}
             >
-              {v ? "Council" : "Panel only"}
+              {v ? "Council" : "Panel Only"}
             </button>
           ))}
         </div>
@@ -1336,7 +1336,7 @@ function CouncilCard() {
       </p>
 
       <div className="row">
-        <label htmlFor="council-include">Panel answers are candidates</label>
+        <label htmlFor="council-include">Panel Answers Are Candidates</label>
         <div className="segmented" style={{ flex: 1 }}>
           {([true, false] as const).map((v) => (
             <button
@@ -1350,14 +1350,14 @@ function CouncilCard() {
                   : "Only the roster below solves — the panes run their usual comparison"
               }
             >
-              {v ? "Included" : "Roster only"}
+              {v ? "Included" : "Roster Only"}
             </button>
           ))}
         </div>
       </div>
 
       <div className="row">
-        <label htmlFor="execution-provider">Program tests</label>
+        <label htmlFor="execution-provider">Program Tests</label>
         <div className="segmented" style={{ flex: 1 }}>
           {(["e2b", "local"] as const).map((v) => (
             <button
@@ -1366,7 +1366,7 @@ function CouncilCard() {
               style={{ flex: 1 }}
               onClick={() => patch({ executionProvider: v })}
             >
-              {v === "e2b" ? "E2B sandbox" : "Local"}
+              {v === "e2b" ? "E2B Sandbox" : "Local"}
             </button>
           ))}
         </div>
@@ -1375,7 +1375,7 @@ function CouncilCard() {
       {settings.executionProvider === "e2b" && (
         <>
           <div className="row">
-            <label htmlFor="e2b-timeout">E2B timeout</label>
+            <label htmlFor="e2b-timeout">E2B Timeout</label>
             <input
               id="e2b-timeout"
               className="field"
@@ -1398,7 +1398,7 @@ function CouncilCard() {
       )}
 
       <div className="row">
-        <label htmlFor="benchmark-backend">Remote benchmark</label>
+        <label htmlFor="benchmark-backend">Remote Benchmark</label>
         <div className="segmented" style={{ flex: 1 }}>
           {(["actions", "off"] as const).map((v) => (
             <button
@@ -1455,7 +1455,7 @@ function CouncilCard() {
             />
           </div>
           <div className="row">
-            <label htmlFor="github-timeout">Remote timeout</label>
+            <label htmlFor="github-timeout">Remote Timeout</label>
             <input
               id="github-timeout"
               className="field"
@@ -1547,7 +1547,7 @@ function CouncilCard() {
             <span>Roster health</span>
             <span className="spacer" />
             <button className="btn tiny ghost" onClick={() => void listModels()} disabled={listing}>
-              {listing ? "Asking…" : available ? "Refresh list" : "Load the list"}
+              {listing ? "Asking…" : available ? "Refresh List" : "Load the List"}
             </button>
             <button
               className="btn tiny"
@@ -1767,7 +1767,7 @@ function CaptureCard() {
           Force MCQ when you want the helper to treat the next batch as a multiple-choice question.
         </p>
         <div className="row">
-          <label htmlFor="mcq-model">MCQ model</label>
+          <label htmlFor="mcq-model">MCQ Model</label>
           <input
             id="mcq-model"
             className="field mono"
@@ -1789,7 +1789,7 @@ function CaptureCard() {
             value={mcqEndpoint}
             onChange={(e) => patch({ mcqEndpoint: e.target.value as never })}
           >
-            <option value="auto">Auto route</option>
+            <option value="auto">Auto Route</option>
             <option value="chat">Chat Completions</option>
             <option value="responses">Responses API</option>
           </select>
@@ -1819,7 +1819,7 @@ function CaptureCard() {
           <span className="name">Images per run</span>
         </div>
         <div className="row">
-          <label htmlFor="maximg">Keep at most</label>
+          <label htmlFor="maximg">Keep at Most</label>
           <input
             id="maximg"
             className="field mono"
@@ -1955,10 +1955,10 @@ export default function SettingsDialog() {
           {tab === "limits" && (
           <div className="provider-card">
             <div className="top">
-              <span className="name">Run limits</span>
+              <span className="name">Run Limits</span>
             </div>
             <div className="row">
-              <label htmlFor="maxtok">Max tokens</label>
+              <label htmlFor="maxtok">Max Tokens</label>
               <input
                 id="maxtok"
                 className="field mono"
@@ -1983,7 +1983,7 @@ export default function SettingsDialog() {
                 property of the plan, not of the API, so it cannot be discovered
                 — only told to us, or learned the hard way from a refusal. */}
             <div className="row" style={{ marginTop: 12 }}>
-              <label htmlFor="rate">Gateway requests per minute</label>
+              <label htmlFor="rate">Gateway Requests per Minute</label>
               <input
                 id="rate"
                 className="field mono"

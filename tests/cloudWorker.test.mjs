@@ -15,6 +15,11 @@ const check = (name, cond, extra = "") => {
   if (!cond) fail++;
 };
 
+const textOf = (call) =>
+  (Array.isArray(call?.messages?.[1]?.content)
+    ? call.messages[1].content.find((p) => p.type === "text")?.text
+    : call?.messages?.[1]?.content) || "";
+
 const events = [];
 const patches = [];
 const reports = [];
@@ -41,8 +46,21 @@ function modelReply(body) {
   return json({ choices: [{ message: { content: body } }] });
 }
 
+// Scenario 8: the knowledge library in the database, and the fallback when it
+// cannot be read.
+let LIBRARY_ROWS = null;
+let LIBRARY_DOWN = false;
+// Scenario 9: two readers that read the same screenshot differently.
+let READERS_DISAGREE = false;
+let TIE_BREAK_PICK = "B";
+
 globalThis.fetch = async (url, init = {}) => {
   const href = String(url);
+  if (href.includes("/rest/v1/intelligence_")) {
+    if (LIBRARY_DOWN) throw new Error("ECONNREFUSED");
+    if (href.includes("intelligence_sources")) return json([]);
+    return json(LIBRARY_ROWS ?? []);
+  }
   if (href.includes("/rest/v1/solve_job_events")) {
     const row = JSON.parse(init.body);
     events.push(row);
@@ -106,6 +124,15 @@ globalThis.fetch = async (url, init = {}) => {
       return json({ error: { message: "Unsupported parameter: 'reasoning_effort'" } }, { status: 400 });
     }
     const system = req.messages[0].content;
+    if (system.includes("Two models read the same screenshot and disagree")) {
+      if (TIE_BREAK_PICK === "neither") return modelReply("I cannot tell from this image.");
+      const shown = Array.isArray(req.messages[1].content)
+        ? req.messages[1].content.find((p) => p.type === "text")?.text || ""
+        : req.messages[1].content;
+      // Pick whichever side is not the misreading, whichever letter it landed on.
+      const aBlock = /A:\n([\s\S]*?)\n\nB:/.exec(shown)?.[1] || "";
+      return modelReply(`code: ${aBlock.includes("misread") ? "B" : "A"}`);
+    }
     if (system.includes("You are reading a screenshot and turning it into structured data")) {
       if (MCQ_READING) {
         return modelReply(
@@ -134,7 +161,10 @@ globalThis.fetch = async (url, init = {}) => {
           framework: "",
           fileName: "solve.js",
           filePath: "",
-          code: "export function solve(xs) { /* count them */ }",
+          code:
+            READERS_DISAGREE && req.model === "moonshotai/kimi-k3"
+              ? "export function solve(xs) { /* count them, misread */ }"
+              : "export function solve(xs) { /* count them */ }",
           errors: [],
           terminalCommands: [],
           terminalOutput: "",
@@ -166,6 +196,37 @@ globalThis.fetch = async (url, init = {}) => {
         knowledgeUsed: true,
         model: req.model,
       }));
+    }
+    if (system.includes("You read a problem statement and write down what it asks")) {
+      return modelReply(`<<<CONTRACT
+KIND: code
+LANGUAGES: javascript
+SIGNATURE: function solve(xs)
+INPUTS: xs, an array
+OUTPUTS: how many elements it was given
+CONSTRAINTS: 0 <= xs.length <= 100000
+EXAMPLES: [] -> 0
+EDGE CASES: empty array
+COMPLEXITY: O(n) time
+UNKNOWNS: none
+CONTRACT>>>`);
+    }
+    if (system.includes("senior engineer revising your own solution")) {
+      return modelReply(`Having read the reviews:
+
+<<<FINAL
+KIND: code
+LANGUAGE: javascript
+ANSWER: Same approach, guarded for the empty case.
+COMPLEXITY: O(n) time, O(1) space
+CONFIDENCE: 0.9
+CLAIMS:
+- The empty case is explicit now.
+CODE:
+\`\`\`javascript
+export function solve(xs) { return xs ? xs.length : 0; }
+\`\`\`
+FINAL>>>`);
     }
     if (system.includes("You write test harnesses for candidate solutions")) {
       return modelReply(`<<<TESTS
@@ -256,26 +317,89 @@ check("report has reviews", reports[0]?.report?.reviews?.length === 2, String(re
 check("report has judges", reports[0]?.report?.judges?.length === 1, String(reports[0]?.report?.judges?.length));
 check("report has benchmark suite", reports[0]?.report?.suites?.length === 1, String(reports[0]?.report?.suites?.length));
 check("report has passing local runs", reports[0]?.report?.runs?.A?.passed === 2 && reports[0]?.report?.runs?.B?.passed === 2, JSON.stringify(reports[0]?.report?.runs));
-check("downloaded image for model calls", modelCalls.some((c) => c.messages[1].content.some((p) => p.type === "image_url")));
+check("downloaded image for model calls", modelCalls.some((c) => Array.isArray(c.messages[1].content) && c.messages[1].content.some((p) => p.type === "image_url")));
 check("benchmark phase event recorded", events.some((e) => e.phase === "benchmark_done"));
 check("review phase event recorded", events.some((e) => e.phase === "review_done"));
 check("judge phase event recorded", events.some((e) => e.phase === "judge_done"));
 check("completion event recorded", events.some((e) => e.phase === "completed"));
 
-// --- the picture becomes text, and the text selects the knowledge -----------
-const solverCall = modelCalls.find(
-  (c) =>
-    Array.isArray(c.messages[1].content) &&
-    c.messages[1].content.some((p) => p.type === "image_url") &&
-    !c.messages[0].content.includes("You are reading a screenshot")
+// --- the revision round, which cloud jobs used to skip entirely --------------
+check("the solvers were asked to revise", events.some((e) => e.phase === "revision_done"));
+check(
+  "the revised field was executed",
+  Object.keys(reports[0]?.report?.revisedRuns || {}).length === 2,
+  JSON.stringify(reports[0]?.report?.revisedRuns)
 );
-const solverText = solverCall?.messages[1].content.find((p) => p.type === "text")?.text || "";
+check(
+  "the revision is what is on the report",
+  reports[0]?.report?.candidates?.[0]?.revised?.code?.includes("xs ? xs.length"),
+  String(reports[0]?.report?.candidates?.[0]?.revised?.code)
+);
+const judgeCall = modelCalls.find((c) => c.messages[0].content.includes("one judge on an engineering council"));
+check(
+  "the judges were shown both dockets",
+  textOf(judgeCall).includes("=== REVISED ==="),
+  textOf(judgeCall).slice(0, 200)
+);
 
-// The default is now: the models that can see solve from the picture. Nothing
-// is transcribed, and no model is handed a lossy copy to guess from.
-check("nothing was transcribed", !events.some((e) => e.phase === "reading_done"));
-check("the solver was shown the picture itself", Boolean(solverCall));
-check("no transcription reached the solver", !solverText.includes("READING OF THE SCREENSHOT"), solverText.slice(0, 120));
+// --- the problem contract, read before anybody answered ---------------------
+check("the readers agreed on the problem", events.some((e) => e.phase === "problem_contract_done"));
+const firstSolverText = textOf(modelCalls.find((c) => String(c.messages[0].content).includes("independent expert agents")));
+check(
+  "the contract reached the solvers",
+  firstSolverText.includes("PROBLEM CONTRACT") && firstSolverText.includes("function solve(xs)"),
+  firstSolverText.slice(-400)
+);
+check(
+  "and the same contract reached the judges",
+  textOf(judgeCall).includes("PROBLEM CONTRACT"),
+  textOf(judgeCall).slice(0, 200)
+);
+
+// --- the dossier: fields, not prose ----------------------------------------
+const parsed = reports[0]?.report?.parsed;
+check("the synthesis parsed", parsed?.synthesis?.winner === "A", JSON.stringify(parsed?.synthesis?.winner));
+check("the approach is a field now", parsed?.synthesis?.approach === "direct", String(parsed?.synthesis?.approach));
+check("the judge's ranking was counted", parsed?.tally?.[0]?.letter === "A", JSON.stringify(parsed?.tally));
+check("the winner came from the synthesis, uncontested", parsed?.winnerSource === "synthesis", String(parsed?.winnerSource));
+
+// --- the presentation the overlay renders ----------------------------------
+const presentation = reports[0]?.report?.presentation;
+check("standing is stamped on the report", presentation?.standing === "verified", String(presentation?.standing));
+check("there is one evidence row per candidate", presentation?.evidence?.length === 2, JSON.stringify(presentation?.evidence?.length));
+check(
+  "the evidence describes the revision that was judged",
+  presentation?.evidence?.[0]?.revised === true && presentation?.evidence?.[0]?.gate === "pass",
+  JSON.stringify(presentation?.evidence?.[0])
+);
+check("provenance names the model behind the winner", Boolean(presentation?.provenance?.includes("Candidate A")), String(presentation?.provenance));
+
+// --- reconstruction, then solving -------------------------------------------
+//
+// Reading a screenshot and solving what is in it are different skills, so two
+// ranked readers reconstruct the problem first and the solvers work from that.
+// The picture only travels on to the solvers when the readers disputed it.
+// A solver is the seat told it is one of several working the same problem.
+// Identifying it by that rather than by "not one of the other phases" means a
+// new phase cannot silently become "the solver" in this test.
+const isSolver = (c) => String(c.messages[0].content).includes("independent expert agents");
+const solverCall = modelCalls.find(isSolver);
+const contentOf = (call) =>
+  Array.isArray(call?.messages?.[1]?.content)
+    ? call.messages[1].content.find((p) => p.type === "text")?.text || ""
+    : call?.messages?.[1]?.content || "";
+const solverText = contentOf(solverCall);
+
+check("the screenshot was reconstructed first", events.some((e) => e.phase === "reading_done"));
+check("two readers looked at it", (events.find((e) => e.phase === "reading_done")?.payload?.readers || []).length === 2, JSON.stringify(events.find((e) => e.phase === "reading_done")?.payload));
+check("the readers were the ones shown the picture", modelCalls.some((c) => c.messages[0].content.includes("You are reading a screenshot") && c.messages[1].content.some?.((p) => p.type === "image_url")));
+check("the solvers work from the reconstruction", events.some((e) => e.phase === "solving_from_reading"));
+check("so the reading reached the solver", solverText.includes("READING OF THE SCREENSHOT"), solverText.slice(0, 160));
+check(
+  "and no picture went with it",
+  !(Array.isArray(solverCall?.messages?.[1]?.content) && solverCall.messages[1].content.some((p) => p.type === "image_url")),
+  JSON.stringify(solverCall?.messages?.[1]?.content?.map?.((p) => p.type))
+);
 check("the house rules reached the solver", solverText.includes("HOUSE RULES") && solverText.includes("C++"));
 check("the memory target is readable", solverText.includes("20 MB"), solverText.slice(0, 400));
 
@@ -284,15 +408,35 @@ check("the memory target is readable", solverText.includes("20 MB"), solverText.
 check("the solver was asked to reason", solverCall?.reasoning_effort === "high", String(solverCall?.reasoning_effort));
 check("so was the reviewer", modelCalls.every((c) => c.reasoning_effort === "high"), JSON.stringify(modelCalls.map((c) => c.reasoning_effort)));
 
-// The library arrives once the panel has produced words — which is also when
-// the system can tell this was a coding problem.
+// The library now arrives before the first attempt, retrieved against the
+// contract. It used to wait for the panel to produce words — which meant every
+// round except the one that wrote the answers got the guidance.
 check("it was recognised as a coding problem", events.some((e) => e.phase === "problem_kind" && e.payload?.coding === true));
-check("knowledge was selected after solving", events.some((e) => e.phase === "knowledge_selected"));
+check("knowledge was selected", events.some((e) => e.phase === "knowledge_selected"));
+check(
+  "and the contract was what searched for it",
+  events.find((e) => e.phase === "knowledge_selected")?.payload?.from === "contract",
+  JSON.stringify(events.find((e) => e.phase === "knowledge_selected")?.payload)
+);
+check(
+  "so the solvers had it on their first attempt",
+  firstSolverText.includes("LOCAL KNOWLEDGE / RAG"),
+  firstSolverText.slice(0, 200)
+);
+// Retrieval happens once, not once per round: the contract's pack is reused by
+// every later stage rather than re-searched from the answers.
+check(
+  "the library was searched once",
+  events.filter((e) => e.phase === "knowledge_selected").length === 1,
+  String(events.filter((e) => e.phase === "knowledge_selected").length)
+);
+const reviseCall = modelCalls.find((c) => c.messages[0].content.includes("senior engineer revising your own solution"));
+check(
+  "and the revising solver finally sees it too",
+  textOf(reviseCall).includes("Local Knowledge/RAG"),
+  textOf(reviseCall).slice(0, 200)
+);
 const reviewCall = modelCalls.find((c) => c.messages[0].content.includes("senior engineer on a review council"));
-const textOf = (call) =>
-  (Array.isArray(call?.messages?.[1]?.content)
-    ? call.messages[1].content.find((p) => p.type === "text")?.text
-    : call?.messages?.[1]?.content) || "";
 check(
   "the knowledge reached the reviewers",
   textOf(reviewCall).includes("Local Knowledge/RAG"),
@@ -588,6 +732,152 @@ check(
   modelCalls.length === 0,
   `${modelCalls.length} calls were spent before giving up`
 );
+
+// --- the knowledge library, from the database and from the bundle -----------
+console.log("\n8. the knowledge library has two shelves");
+const { resetKnowledgeCache } = await import("../src/lib/knowledgeLibrary.ts");
+
+LIBRARY_ROWS = [
+  {
+    id: "count-elements",
+    title: "Counting the elements of an array",
+    kind: "pattern",
+    summary: "Return the length rather than walking the array to count it.",
+    guidance: ["Prefer the language's own length property.", "Guard the empty case explicitly."],
+    tags: ["array", "count", "length", "javascript"],
+    source_urls: [],
+  },
+];
+resetKnowledgeCache();
+events.length = 0;
+patches.length = 0;
+reports.length = 0;
+modelCalls.length = 0;
+
+await runCouncilJob({
+  id: "job-8",
+  session_id: "session-1",
+  settings_snapshot: {
+    mode: "auto",
+    maxTokens: 2048,
+    gatewayBaseUrl: "https://api.tokenrouter.com/v1",
+    councilModels: [
+      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "moonshotai/kimi-k3", endpoint: "chat" },
+    ],
+    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+  },
+});
+
+const picked = events.find((e) => e.phase === "knowledge_selected");
+check("the database library was used", picked?.payload?.library === "database", JSON.stringify(picked?.payload));
+check("and only its records were searched", picked?.payload?.records === 1, String(picked?.payload?.records));
+const dbSolver = modelCalls.find((c) => String(c.messages[0].content).includes("independent expert agents"));
+const dbText = textOf(dbSolver);
+check("the row reached the solver", dbText.includes("Counting the elements of an array"), dbText.slice(-260));
+
+// A database that cannot be read costs the run its newest guidance, not the run.
+LIBRARY_DOWN = true;
+resetKnowledgeCache();
+events.length = 0;
+patches.length = 0;
+reports.length = 0;
+
+await runCouncilJob({
+  id: "job-9",
+  session_id: "session-1",
+  settings_snapshot: {
+    mode: "auto",
+    maxTokens: 2048,
+    gatewayBaseUrl: "https://api.tokenrouter.com/v1",
+    councilModels: [
+      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "moonshotai/kimi-k3", endpoint: "chat" },
+    ],
+    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+  },
+});
+
+const fellBack = events.find((e) => e.phase === "knowledge_selected");
+check("an unreachable library falls back to the bundle", fellBack?.payload?.library === "bundle", JSON.stringify(fellBack?.payload));
+check("the reason is on the record", String(fellBack?.payload?.libraryNote || "").includes("ECONNREFUSED"), String(fellBack?.payload?.libraryNote));
+check("and the job still completed", patches.some((p) => p.status === "completed"));
+LIBRARY_DOWN = false;
+LIBRARY_ROWS = null;
+
+// --- when the two readers disagree ------------------------------------------
+console.log("\n9. a disputed reading is settled by a third pair of eyes");
+READERS_DISAGREE = true;
+TIE_BREAK_PICK = "B";
+resetKnowledgeCache();
+events.length = 0;
+patches.length = 0;
+reports.length = 0;
+modelCalls.length = 0;
+
+await runCouncilJob({
+  id: "job-10",
+  session_id: "session-1",
+  settings_snapshot: {
+    mode: "auto",
+    maxTokens: 2048,
+    gatewayBaseUrl: "https://api.tokenrouter.com/v1",
+    councilModels: [
+      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "moonshotai/kimi-k3", endpoint: "chat" },
+      { id: "z-ai/glm-5.3", endpoint: "chat" },
+    ],
+    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+  },
+});
+
+check("the disagreement was noticed", events.some((e) => e.phase === "reading_conflict"));
+const tie = events.find((e) => e.phase === "reading_tiebreak");
+check("a third model was asked to settle it", Boolean(tie), JSON.stringify(events.map((e) => e.phase)));
+check("and it settled the disputed field", tie?.payload?.picks?.[0]?.field === "code", JSON.stringify(tie?.payload));
+check("the adjudicator was not one of the two readers", !(events.find((e) => e.phase === "reading_done")?.payload?.readers || []).includes(tie?.payload?.model), `${tie?.payload?.model} also read`);
+// The reading document still shows both sides — a settled conflict is still a
+// conflict on the record. What matters is which one the solvers were handed.
+const settledSolver = textOf(modelCalls.find((c) => String(c.messages[0].content).includes("independent expert agents")));
+check("the solvers got the reading the adjudicator chose", settledSolver.includes("count them") && !settledSolver.includes("misread"), settledSolver.slice(0, 300));
+check("and the conflict is still on the record", String(reports[0]?.report?.reading?.markdown || "").includes("misread"));
+check("the job still completed", patches.some((p) => p.status === "completed"));
+
+// A settled disagreement is still a disagreement: the picture travels with the
+// reconstruction when the readers could not be reconciled.
+TIE_BREAK_PICK = "neither";
+resetKnowledgeCache();
+events.length = 0;
+patches.length = 0;
+reports.length = 0;
+modelCalls.length = 0;
+
+await runCouncilJob({
+  id: "job-11",
+  session_id: "session-1",
+  settings_snapshot: {
+    mode: "auto",
+    maxTokens: 2048,
+    gatewayBaseUrl: "https://api.tokenrouter.com/v1",
+    councilModels: [
+      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "moonshotai/kimi-k3", endpoint: "chat" },
+      { id: "z-ai/glm-5.3", endpoint: "chat" },
+    ],
+    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+  },
+});
+
+const unsettledSolver = modelCalls.find((c) => String(c.messages[0].content).includes("independent expert agents"));
+check("an unsettled reading is not solved from alone", !events.some((e) => e.phase === "solving_from_reading"));
+check(
+  "so the picture goes to the solvers too",
+  Array.isArray(unsettledSolver?.messages?.[1]?.content) &&
+    unsettledSolver.messages[1].content.some((p) => p.type === "image_url"),
+  JSON.stringify(unsettledSolver?.messages?.[1]?.content?.map?.((p) => p.type))
+);
+READERS_DISAGREE = false;
+TIE_BREAK_PICK = "B";
 
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall cloud worker checks passed\n");
 process.exit(fail ? 1 : 0);

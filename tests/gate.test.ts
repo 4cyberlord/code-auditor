@@ -9,6 +9,9 @@ import {
   looksLikeCodingProblem,
   reachableSeats,
   answerStanding,
+  aggregateJudgeRankings,
+  decideWinner,
+  parseJudgeReport,
   rejectedImages,
   reasoningForModel,
   reasoningFields,
@@ -307,6 +310,90 @@ for (const complaint of [
 // images, and must not be marked blind for the rest of the run.
 for (const other of ["429 Too Many Requests", "model_not_found", "insufficient_user_quota", "", "request timed out"]) {
   assert.equal(rejectedImages(other), false, other);
+}
+
+// ------------------------------------------- the winner, counted not narrated
+
+const judge = (ranking: string, correct = "") =>
+  parseJudgeReport(`VERDICT: x\nRANKING: ${ranking}${correct ? `\nCORRECT: ${correct}` : ""}`);
+
+// Borda, not plurality: B is ranked second by everyone, A first by one judge and
+// last by the other two. Plurality cannot see the difference; a council that
+// ships on "most firsts" ships the candidate two thirds of the bench put last.
+{
+  const tally = aggregateJudgeRankings(
+    [judge("A, B, C"), judge("B, C, A"), judge("C, B, A")],
+    ["A", "B", "C"]
+  );
+  assert.equal(tally[0].letter, "B", "the consistently strong candidate wins the count");
+  assert.equal(tally.find((t) => t.letter === "A")!.firsts, 1);
+}
+
+// A synthesis pick that cleared the gate and leads the count is left alone.
+{
+  const runs = { A: run("A", { ok: true, passed: 12, failed: 0 }), B: run("B", { ok: true, passed: 12, failed: 0 }) };
+  const decision = decideWinner({ claimed: "A", judges: [judge("A, B")], runs, letters: ["A", "B"] });
+  assert.equal(decision.winner, "A");
+  assert.equal(decision.source, "synthesis");
+  assert.equal(decision.disagreement, "");
+}
+
+// The prose and the arithmetic disagree. Both candidates passed, so the gate has
+// nothing to say — and the count, which is not a matter of opinion, decides.
+{
+  const runs = { A: run("A", { ok: true, passed: 12, failed: 0 }), B: run("B", { ok: true, passed: 12, failed: 0 }) };
+  const decision = decideWinner({
+    claimed: "A",
+    judges: [judge("B, A"), judge("B, A")],
+    runs,
+    letters: ["A", "B"],
+  });
+  assert.equal(decision.winner, "B", "the counted scoreboard decides");
+  assert.equal(decision.source, "judges");
+  assert.match(decision.disagreement, /ranked Candidate B/);
+}
+
+// A judge's favourite that failed its run is not promoted by any number of
+// points. Execution first, always.
+{
+  const runs = { A: run("A", { ok: true, passed: 12, failed: 0 }), B: run("B", { passed: 3, failed: 9 }) };
+  const decision = decideWinner({
+    claimed: "A",
+    judges: [judge("B, A"), judge("B, A")],
+    runs,
+    letters: ["A", "B"],
+  });
+  assert.equal(decision.winner, "A", "a gate-rejected candidate cannot be voted in");
+}
+
+// The synthesis named a candidate the gate rejected. Rather than shipping
+// nothing, the highest-ranked candidate that *did* pass is recorded — and the
+// overrule still says what happened.
+{
+  const runs = { A: run("A", { passed: 0, failed: 0, note: "exit 1" }), B: run("B", { ok: true, passed: 9, failed: 0 }) };
+  const decision = decideWinner({ claimed: "A", judges: [judge("A, B")], runs, letters: ["A", "B"] });
+  assert.equal(decision.winner, "B");
+  assert.equal(decision.source, "judges");
+  assert.match(decision.overruledReason, /Execution outranks agreement/);
+  assert.match(decision.disagreement, /did not survive the gate/);
+}
+
+// Nothing ran at all — an MCQ, a maths answer. A gate with no evidence behind it
+// vetoes nothing, and the judges' count does not get to overrule a synthesis on
+// a question where nobody measured anything.
+{
+  const decision = decideWinner({ claimed: "A", judges: [judge("A, B")], runs: {}, letters: ["A", "B"] });
+  assert.equal(decision.winner, "A");
+  assert.equal(decision.source, "synthesis");
+}
+
+// Everything failed and nobody was ranked: there is no winner to find, and
+// inventing one would be the exact failure this whole layer exists to prevent.
+{
+  const runs = { A: run("A", { passed: 1, failed: 4 }), B: run("B", { passed: 2, failed: 3 }) };
+  const decision = decideWinner({ claimed: "A", judges: [], runs, letters: ["A", "B"] });
+  assert.equal(decision.winner, "");
+  assert.equal(decision.source, "none");
 }
 
 console.log("gate.test.ts: all assertions passed");

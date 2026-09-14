@@ -60,6 +60,22 @@ function ok<T>(res: { data: T; error: any }, what: string): T {
   return res.data;
 }
 
+// PostgREST can see an older database schema for a while after an API deploy.
+// Publishing the library should still work there; only the newer attribution
+// warning has to degrade.
+// deno-lint-ignore no-explicit-any
+function missingColumns(err: any, names: string[]): boolean {
+  const text = [
+    err?.code,
+    err?.message,
+    err?.details,
+    err?.hint,
+  ].filter(Boolean).join(" ");
+  if (!text) return false;
+  const soundsLikeMissingColumn = /(column|schema cache|not find|does not exist|42703|PGRST204)/i.test(text);
+  return soundsLikeMissingColumn && names.some((name) => text.includes(name));
+}
+
 // ------------------------------------------------------------------- shapes
 //
 // The desktop already had these shapes: `RunSummary`, `StoredResponse` and
@@ -764,6 +780,145 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
   // --------------------------------------------------------- configuration
 
   /** Every config value, secret contents withheld. */
+  /**
+   * Publish the knowledge library the desktop has on disk.
+   *
+   * The library is markdown files on someone's Mac, and the cloud worker reads
+   * `intelligence_records`. This is the bridge between the two, and it is a
+   * deliberate act rather than a background sync: what a person is still
+   * writing should not reach a running job until they say so.
+   *
+   * Upserts only. Nothing is deleted, because the database is shared with
+   * whatever else has been added to it and a laptop's folder is not the whole
+   * truth about the library.
+   */
+  "knowledge.publish": async ({ admin, principal }, args) => {
+    const records = Array.isArray(args.records) ? args.records : [];
+    if (!records.length) throw new HttpError(400, "There is nothing to publish.");
+    if (records.length > 500) throw new HttpError(400, "That is more records than this operation accepts.");
+
+    const KINDS = new Set(["pattern", "problem", "runtime", "resource"]);
+    const rows: Record<string, unknown>[] = [];
+    const sources = new Map<string, Record<string, unknown>>();
+
+    for (const raw of records) {
+      const record = (raw ?? {}) as Record<string, unknown>;
+      const id = str(record.id, "id");
+      if (!/^[a-z0-9_-]+$/.test(id)) throw new HttpError(400, `"${id}" is not a usable record id.`);
+      const kind = String(record.kind ?? "");
+      if (!KINDS.has(kind)) throw new HttpError(400, `"${kind}" is not a record kind.`);
+      const guidance = Array.isArray(record.guidance)
+        ? record.guidance.filter((g: unknown) => typeof g === "string" && g.trim()).map((g: string) => g.trim())
+        : [];
+      // The same rule the app applies before it offers to publish: guidance is
+      // the part that reaches a model, and a record without it is a draft.
+      if (!guidance.length) throw new HttpError(400, `"${id}" has no guidance, so it is not ready to publish.`);
+
+      const tags = Array.isArray(record.tags)
+        ? record.tags.filter((t: unknown) => typeof t === "string" && t.trim()).map((t: string) => t.trim().toLowerCase())
+        : [];
+      const recordSources = Array.isArray(record.sources) ? record.sources : [];
+      const urls: string[] = [];
+      for (const rawSource of recordSources) {
+        const source = (rawSource ?? {}) as Record<string, unknown>;
+        const url = typeof source.url === "string" ? source.url.trim() : "";
+        if (!/^https?:\/\//.test(url)) continue;
+        urls.push(url);
+        if (!sources.has(url)) {
+          sources.set(url, {
+            id: url.replace(/^https?:\/\//, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase().slice(0, 80),
+            title: typeof source.title === "string" && source.title.trim() ? source.title.trim() : url,
+            url,
+            trust: typeof source.trust === "string" && ["official", "academic", "reference", "community"].includes(source.trust)
+              ? source.trust
+              : "reference",
+            note: typeof source.note === "string" ? source.note : "",
+            tags: [],
+          });
+        }
+      }
+
+      rows.push({
+        id,
+        title: str(record.title, "title"),
+        kind,
+        summary: typeof record.summary === "string" ? record.summary : "",
+        guidance,
+        tags,
+        complexity: typeof record.complexity === "string" && record.complexity.trim() ? record.complexity.trim() : null,
+        target_runtime_ms: typeof record.targetRuntimeMs === "number" ? record.targetRuntimeMs : null,
+        target_memory_mb: typeof record.targetMemoryMb === "number" ? record.targetMemoryMb : null,
+        source_urls: urls,
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    // What is already there, before it is replaced.
+    //
+    // The shelf is shared, so a publish from one Mac can land on a record
+    // another one wrote. Ownership is the wrong fix — the worker reads this
+    // library with no principal and would have to guess whose to use — so the
+    // fix is that an overwrite is attributable and reported instead of silent.
+    const ids = rows.map((r) => r.id as string);
+    let canAttributePublishes = true;
+    let existingResult = await admin
+      .from("intelligence_records")
+      .select("id, title, guidance, summary, published_by, updated_at")
+      .in("id", ids);
+    if (existingResult.error && missingColumns(existingResult.error, ["published_by"])) {
+      canAttributePublishes = false;
+      existingResult = await admin
+        .from("intelligence_records")
+        .select("id, title, guidance, summary, updated_at")
+        .in("id", ids);
+    }
+    const existing = (ok(
+      existingResult,
+      "read the current library"
+      // deno-lint-ignore no-explicit-any
+    ) ?? []) as any[];
+
+    const before = new Map(existing.map((row) => [row.id, row]));
+    const replaced: { id: string; title: string; by: string | null; at: string | null }[] = [];
+    for (const row of rows) {
+      const was = before.get(row.id as string);
+      if (!was) continue;
+      const changed =
+        JSON.stringify(was.guidance ?? []) !== JSON.stringify(row.guidance) ||
+        String(was.summary ?? "") !== String(row.summary ?? "") ||
+        String(was.title ?? "") !== String(row.title ?? "");
+      // Republishing a record unchanged is not an overwrite worth reporting;
+      // replacing someone's different text is.
+      if (!changed) continue;
+      if (canAttributePublishes && was.published_by && was.published_by !== principal.userId) {
+        replaced.push({ id: was.id, title: was.title ?? was.id, by: was.published_by, at: was.updated_at ?? null });
+      }
+    }
+
+    const stamped = rows.map((row) => ({
+      ...row,
+      published_by: principal.userId,
+      published_at: new Date().toISOString(),
+    }));
+
+    if (sources.size) {
+      ok(
+        await admin.from("intelligence_sources").upsert([...sources.values()], { onConflict: "url" }),
+        "save the sources"
+      );
+    }
+    let saveResult = await admin
+      .from("intelligence_records")
+      .upsert(canAttributePublishes ? stamped : rows, { onConflict: "id" });
+    if (saveResult.error && missingColumns(saveResult.error, ["published_by", "published_at"])) {
+      canAttributePublishes = false;
+      saveResult = await admin.from("intelligence_records").upsert(rows, { onConflict: "id" });
+    }
+    ok(saveResult, "save the knowledge records");
+
+    return { published: rows.length, sources: sources.size, replaced };
+  },
+
   "config.list": async ({ admin, principal }) => {
     const rows = ok(
       await admin

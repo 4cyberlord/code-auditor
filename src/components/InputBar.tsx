@@ -348,7 +348,7 @@ export default function InputBar() {
           </div>
 
           <button className="btn ghost" onClick={reset} disabled={running}>
-            Clear results
+            Clear Results
           </button>
 
           {running ? (

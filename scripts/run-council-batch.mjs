@@ -4,6 +4,7 @@
  *
  *   node scripts/run-council-batch.mjs bench-problems/lc4.png bench-problems/lc42.png
  *   node scripts/run-council-batch.mjs --all
+ *   node scripts/run-council-batch.mjs --all --no-assert   # evidence only, never fails
  *
  * Every step is the production path, not a simulation: the image is uploaded to
  * Supabase Storage exactly as a capture is, a `solve_jobs` row is queued exactly
@@ -22,6 +23,15 @@
  * Problems run strictly one after another, never in parallel: the whole point
  * is to see each one's behaviour on its own, and the gateway's rate limit would
  * turn concurrency into a wall of 429s that says nothing about the models.
+ *
+ * Each problem is then put through the acceptance checks in
+ * `scripts/lib/acceptance.mjs`, printed as it finishes and written into the
+ * report, and a failed check fails the process. "Completed" only ever meant the
+ * pipeline did not crash; it never said the revision round ran, or that the
+ * contract reached anybody, or that the winner on the report is one the
+ * execution evidence actually supports. Those are the claims worth breaking a
+ * run over, so they break it. `--no-assert` keeps the evidence and drops the
+ * exit code, for when you are deliberately running a half-configured setup.
  */
 
 // Configuration lives in the database now. This import has a top-level await,
@@ -31,6 +41,7 @@ import "./lib/config.mjs";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { verify } from "./lib/acceptance.mjs";
 
 const ROOT = process.cwd();
 const BUCKET = "screenshots";
@@ -284,7 +295,7 @@ const files = args.includes("--all")
   : args.filter((a) => !a.startsWith("--"));
 
 if (!files.length) {
-  console.error("Usage: node scripts/run-council-batch.mjs --all | <image.png> [more.png ...]");
+  console.error("Usage: node scripts/run-council-batch.mjs [--no-assert] --all | <image.png> [more.png ...]");
   process.exit(2);
 }
 for (const f of files) {
@@ -315,6 +326,15 @@ for (const [i, file] of files.entries()) {
     console.log(`  ${r("failed")} — ${message}`);
     results.push({ label: path.basename(file, ".png"), file, error: message });
   }
+  // Checked as each problem lands, not at the end: a batch of four takes the
+  // better part of an hour, and the answer to "is the revision round running"
+  // should not wait for the last one.
+  const res = results[results.length - 1];
+  res.checks = verify(res);
+  for (const c of res.checks) {
+    const mark = c.status === "pass" ? g("pass") : c.status === "fail" ? r("FAIL") : dim("skip");
+    console.log(`    ${mark}  ${c.name}${c.detail ? dim(` — ${c.detail}`) : ""}`);
+  }
 }
 
 // ------------------------------------------------------------------ report
@@ -341,6 +361,12 @@ for (const res of results) {
     `- winner: ${res.report?.winner || "(none)"}`,
     ""
   );
+  md.push("### Acceptance checks", "");
+  md.push("| check | result | detail |", "| --- | --- | --- |");
+  for (const c of res.checks ?? []) {
+    md.push(`| ${c.name} | ${c.status === "pass" ? "✅ pass" : c.status === "fail" ? "❌ fail" : "— skip"} | ${c.detail.replace(/\|/g, "\\|")} |`);
+  }
+  md.push("");
   const warned = res.events.filter((e) => e.level === "warn" || e.level === "error");
   if (warned.length) {
     md.push("### Warnings and errors", "");
@@ -354,9 +380,29 @@ writeFileSync(mdPath, md.join("\n"));
 console.log(`\n${b("Wrote")}`);
 console.log(`  ${mdPath}`);
 console.log(`  ${jsonPath}`);
+const failures = results.flatMap((res) =>
+  (res.checks ?? []).filter((c) => c.status === "fail").map((c) => `${res.label}: ${c.name} — ${c.detail}`)
+);
+const skipped = results.flatMap((res) => (res.checks ?? []).filter((c) => c.status === "skip"));
+
 console.log(
   results.every((x) => x.job?.status === "completed")
-    ? g("\nAll problems completed.\n")
-    : r("\nSome problems did not complete — see the report.\n")
+    ? g("\nAll problems completed.")
+    : r("\nSome problems did not complete — see the report.")
 );
-process.exit(results.every((x) => x.job?.status === "completed") ? 0 : 1);
+console.log(
+  failures.length
+    ? r(`${failures.length} acceptance check(s) failed:`)
+    : g(`Every acceptance check passed${skipped.length ? dim(` (${skipped.length} skipped)`) : ""}.`)
+);
+for (const line of failures) console.log(r(`  ${line}`));
+console.log("");
+
+// The exit code is the point of the checks: a mechanism that stopped firing
+// should break a run, not sit quietly in a report nobody re-reads. `--no-assert`
+// is for the case where you are deliberately running against a half-configured
+// setup and only want the evidence.
+const assertChecks = !args.includes("--no-assert");
+process.exit(
+  results.every((x) => x.job?.status === "completed") && (!assertChecks || !failures.length) ? 0 : 1
+);

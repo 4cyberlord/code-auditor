@@ -101,7 +101,7 @@ Use "" or [] for anything not present. Do not invent a file name, a URL or a
 framework that is not visible. "confidence" is how much you trust your own
 transcription, not how solvable the problem looks.`.trim();
 
-export function extractionUserPrompt(note: string, manifest = ""): string {
+export function extractionUserPrompt(note: string, manifest = "", ocrHint = ""): string {
   const parts = [
     manifest
       ? "Read the attached images and return one JSON object describing them together."
@@ -113,6 +113,17 @@ export function extractionUserPrompt(note: string, manifest = ""): string {
   // that made them one problem.
   if (manifest) parts.push(manifest);
   if (note.trim()) parts.push(`The person added this context: ${note.trim()}`);
+  // On-device OCR, offered as a second opinion on the characters and nothing
+  // more. Apple Vision is very good at turning pixels into text and cannot see
+  // a diagram, an axis or an indentation level at all, so it helps exactly
+  // where transcription is hard and must never be treated as the reading: the
+  // picture is what you are answering about.
+  if (ocrHint.trim()) {
+    parts.push(
+      "An on-device OCR pass produced the text below. Use it to settle characters you are unsure of — l against 1, O against 0 — and ignore it wherever it disagrees with what you can see. It cannot see layout, diagrams or colour.\n\n" +
+        ocrHint.trim()
+    );
+  }
   return parts.join("\n\n");
 }
 
@@ -408,16 +419,17 @@ export function compareExtractions(a: Extraction, b: Extraction): ExtractionAgre
 
   const high = conflicts.filter((c) => c.severity === "high");
   const agree = high.length === 0;
+  // Written to fit one line in the strip that shows it. The strip is a pointer
+  // to the evidence, not the evidence: anything that needs a second sentence
+  // belongs in the reading document, which is one click away and holds both
+  // versions side by side.
   const summary = agree
     ? conflicts.length === 0
       ? "Both readings match."
-      : `Both agree on the substance; ${conflicts.length} minor ${
+      : `Both agree; ${conflicts.length} minor ${
           conflicts.length === 1 ? "difference" : "differences"
         } in metadata.`
-    : `The two readings disagree on ${high
-        .map((c) => c.field)
-        .join(", ")}. Both versions are in the reading document — open it and see which is right, ` +
-      `or add a Cloud Vision key so one transcription is used instead of two guesses at it.`;
+    : `Readings disagree on ${high.map((c) => c.field).join(", ")} — both are in the reading document.`;
 
   return { conflicts, merged, agree, summary };
 }
@@ -430,15 +442,178 @@ export function compareExtractions(a: Extraction, b: Extraction): ExtractionAgre
  * nothing checked it has to travel with it, because the whole reason extraction
  * is trustworthy at all is that two models agreed.
  */
+/**
+ * Which models should look at the picture, in order.
+ *
+ * Reading a screenshot of code, a chart or a diagram is a different skill from
+ * solving the problem in it, and the models are not equally good at it. This is
+ * the running order — strongest visual reader first — and it is data rather
+ * than a hardcoded choice so a roster change is a list edit.
+ *
+ * Apple Vision is deliberately absent. It is the fastest, cheapest transcriber
+ * available and it cannot see a graph, an indentation level or a UI at all, so
+ * it belongs beside these as a hint (`extractionUserPrompt`), never as the
+ * system's eyes.
+ */
+export const VISION_PREFERENCE: string[] = [
+  "openai/gpt-5.6-sol",
+  "anthropic/claude-opus-5",
+  "openai/gpt-5.3-codex",
+  "google/gemini-3.7-flash",
+  "x-ai/grok-4.6",
+];
+
+export interface ReaderChoice<T> {
+  /** The two that read independently. */
+  readers: T[];
+  /** The third, asked only when the two disagree. Null when there is no third. */
+  tieBreaker: T | null;
+}
+
+/**
+ * Two readers and an adjudicator, chosen by preference and then by whatever is
+ * left.
+ *
+ * The tie-breaker is deliberately a *different* model from both readers: asking
+ * one of the two which of the two was right is asking it whether it was wrong.
+ */
+export function chooseReaders<T>(
+  candidates: T[],
+  idOf: (item: T) => string,
+  preference: string[] = VISION_PREFERENCE,
+  count = 2
+): ReaderChoice<T> {
+  const rank = (item: T) => {
+    const i = preference.indexOf(idOf(item));
+    return i === -1 ? preference.length : i;
+  };
+  const ordered = [...candidates].sort((a, b) => rank(a) - rank(b));
+  return { readers: ordered.slice(0, count), tieBreaker: ordered[count] ?? null };
+}
+
+/** How a disputed field was settled. */
+export interface TieBreak {
+  field: string;
+  choice: "a" | "b";
+}
+
+export function tieBreakSystemPrompt(): string {
+  return [
+    "Two models read the same screenshot and disagree. You are looking at the same picture, and your",
+    "only job is to say which of them read it correctly, field by field. You are not solving anything.",
+    "",
+    "For each field you are given, answer with the letter of the reading that matches the image. Where",
+    "both are wrong, pick the closer one — a later stage will still be told there was a conflict.",
+    "",
+    "Answer with one line per field and nothing else:",
+    "FIELD: A",
+    "FIELD: B",
+  ].join("\n");
+}
+
+export function tieBreakUserPrompt(conflicts: ExtractionConflict[], manifest = ""): string {
+  const parts = [manifest, "The disputed fields:"].filter(Boolean);
+  for (const c of conflicts) {
+    parts.push(
+      `### ${c.field}\nA:\n${(c.a || "(nothing)").slice(0, 4000)}\n\nB:\n${(c.b || "(nothing)").slice(0, 4000)}`
+    );
+  }
+  parts.push("Which reading matches the screenshot, for each field?");
+  return parts.join("\n\n");
+}
+
+export function parseTieBreak(text: string, fields: string[]): TieBreak[] {
+  const out: TieBreak[] = [];
+  for (const field of fields) {
+    const m = new RegExp(`^\\s*${field}\\s*:\\s*\\**\\s*([AB])\\b`, "im").exec(text || "");
+    if (m) out.push({ field, choice: m[1].toUpperCase() === "A" ? "a" : "b" });
+  }
+  return out;
+}
+
+/**
+ * The reading that survives adjudication.
+ *
+ * Only the disputed fields move: everything the two readers agreed on is
+ * already in the merged reading, and re-deriving it from the adjudicator's
+ * answer would let a third model quietly rewrite text nobody disputed.
+ *
+ * The result is still reported as having had a conflict. A settled disagreement
+ * is not the same as never having one, and a run where two strong readers saw
+ * different code is worth knowing about even when a third broke the tie.
+ */
+export function applyTieBreak(
+  a: Extraction,
+  b: Extraction,
+  agreement: ExtractionAgreement,
+  picks: TieBreak[],
+  by: string
+): ExtractionAgreement {
+  if (!picks.length) return agreement;
+  const merged: Extraction = { ...agreement.merged };
+  const settled: string[] = [];
+  for (const pick of picks) {
+    const source = pick.choice === "a" ? a : b;
+    switch (pick.field) {
+      case "code":
+        merged.code = source.code;
+        break;
+      case "problemSummary":
+        merged.problemSummary = source.problemSummary;
+        break;
+      case "errors":
+        merged.errors = source.errors;
+        break;
+      case "terminalOutput":
+        merged.terminalOutput = source.terminalOutput;
+        break;
+      case "language":
+        merged.language = source.language;
+        break;
+      case "framework":
+        merged.framework = source.framework;
+        break;
+      case "fileName":
+        merged.fileName = source.fileName;
+        break;
+      case "url":
+        merged.url = source.url;
+        break;
+      case "kind":
+        merged.kind = source.kind;
+        break;
+      default:
+        continue;
+    }
+    settled.push(`${pick.field} → ${pick.choice.toUpperCase()}`);
+  }
+  if (!settled.length) return agreement;
+
+  const high = agreement.conflicts.filter((c) => c.severity === "high").map((c) => c.field);
+  const unresolved = high.filter((field) => !picks.some((p) => p.field === field));
+  return {
+    ...agreement,
+    merged,
+    // Resolved is not the same as never disputed, and an unresolved field means
+    // the doubt still stands.
+    agree: unresolved.length === 0,
+    summary:
+      `The readers disagreed on ${high.join(", ") || "metadata"}; ${by} looked and settled ${settled.join(", ")}.` +
+      (unresolved.length ? ` Still unsettled: ${unresolved.join(", ")}.` : ""),
+  };
+}
+
 export function singleReading(e: Extraction, why = ""): ExtractionAgreement {
   return {
     conflicts: [],
     merged: e,
     agree: true,
-    summary:
-      "Only one model read the screenshot, so nothing cross-checked it" +
-      (why ? ` (${why}). ` : ". ") +
-      "A misread character here would reach every agent as fact.",
+    // Short on purpose. The warning that used to follow — that a misread
+    // character reaches every agent as fact — is true, and it was also three
+    // lines of the same sentence on every single run, which is how a warning
+    // becomes wallpaper. It lives in the strip's tooltip now, where it is read
+    // by someone who has already noticed the unchecked badge.
+    summary: "One reader only — nothing cross-checked it" + (why ? ` (${why}).` : "."),
   };
 }
 

@@ -40,6 +40,10 @@ import {
   compareExtractions,
   readingMarkdown,
   singleReading,
+  tieBreakSystemPrompt,
+  tieBreakUserPrompt,
+  parseTieBreak,
+  applyTieBreak,
   extractionFromOcr,
   ocrIsUsable,
   ocrUserPrompt,
@@ -57,7 +61,8 @@ import { detectZone, isUsableZone, formatWhen } from "./when.ts";
 import { titleFor, placeholderTitle, isPlaceholder } from "./title.ts";
 import { resolveAnswerLanguage } from "./answerLanguage.ts";
 import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from "./probeFit.ts";
-import { knowledgePackFor } from "./knowledge.ts";
+import { allKnowledgeRecords, knowledgePackFor, type KnowledgeRecord } from "./knowledge.ts";
+import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
 import { buildOverlayState } from "./overlayState.ts";
 import {
   COUNCIL_DEFAULT_JUDGES,
@@ -73,11 +78,25 @@ import {
   harnessIsSuspect,
   executionDigest,
   countCases,
+  gateFor,
   judgeSystemPrompt,
   judgeUserPrompt,
   letterFor,
   parseReviewSet,
   parseTestSuites,
+  parseCouncilSynthesis,
+  parseJudgeReport,
+  decideWinner,
+  buildPresentation,
+  mutateCode,
+  oracleDigest,
+  oracleSuspicion,
+  contractSystemPrompt,
+  contractUserPrompt,
+  contractBlock,
+  contractQuery,
+  parseProblemContract,
+  mergeProblemContracts,
   reviewSystemPrompt,
   reviewUserPrompt,
   reviseSystemPrompt,
@@ -91,7 +110,11 @@ import {
   type Candidate,
   type CandidateRun,
   type CouncilPhase,
+  type ContractAgreement,
+  type CouncilDossier,
   type CouncilReport,
+  type OracleSignal,
+  type ProblemContract,
   type JudgeReport,
   type JudgeSeat,
   type CouncilModelSpec,
@@ -152,7 +175,7 @@ export interface DeltaBatchEntry {
  */
 export interface CouncilSlot {
   id: string;
-  kind: "solve" | "review" | "revise" | "judge";
+  kind: "contract" | "solve" | "review" | "revise" | "judge";
   /** The model answering. Judges carry their emphasis along for the UI. */
   model: string;
   emphasis?: string;
@@ -172,6 +195,48 @@ export interface CouncilChatMessage {
   createdAt: number;
 }
 
+/** One record as the Knowledge workspace holds it: the file, and what it parses to. */
+export interface KnowledgeEntry {
+  /** The file stem, which is the record id. */
+  id: string;
+  /** The collection it sits in — a folder on disk, a heading in the sidebar. */
+  category: string;
+  markdown: string;
+  path: string;
+  updatedAt: number;
+  record: KnowledgeRecord;
+  problems: string[];
+  /**
+   * Where this record came from.
+   *
+   * "file" is yours, on disk, editable. "built-in" is the pack compiled into
+   * this build: shown because a library that hides what it already knows looks
+   * empty and is not, and written to disk the moment you edit one.
+   */
+  source: "file" | "built-in";
+}
+
+export interface KnowledgeState {
+  entries: KnowledgeEntry[];
+  /** Null until the folder has been read once. */
+  folder: string | null;
+  loading: boolean;
+  saving: boolean;
+  error: string | null;
+  /** Which record is open. "" means the draft is a new one. */
+  selectedId: string;
+  /** The editor's text. The file on disk is only what it was at last save. */
+  draft: string;
+  dirty: boolean;
+  /** Set briefly after a save so the UI can say so without a toast. */
+  savedAt: number | null;
+  /** Publishing to the database the cloud worker reads. */
+  syncing: boolean;
+  syncedAt: number | null;
+  /** What the last publish did, in one line. */
+  syncNote: string;
+}
+
 export interface CouncilState {
   phase: CouncilPhase;
   runId: string | null;
@@ -188,10 +253,32 @@ export interface CouncilState {
   judges: JudgeReport[];
   synthesis: string;
   winner: string;
+  /** The parsed dossier: the bench's own words, as fields a panel can render. */
+  dossier: CouncilDossier | null;
+  /** What the readers agreed the problem asks, before anybody answered it. */
+  contract: ProblemContract | null;
+  contractAgreement: ContractAgreement | null;
+  /** Orthogonal checks on the harness itself. */
+  oracles: OracleSignal[];
   error: string | null;
   chat: CouncilChatMessage[];
   chatSending: boolean;
 }
+
+const IDLE_KNOWLEDGE: KnowledgeState = {
+  entries: [],
+  folder: null,
+  loading: false,
+  saving: false,
+  error: null,
+  selectedId: "",
+  draft: "",
+  dirty: false,
+  savedAt: null,
+  syncing: false,
+  syncedAt: null,
+  syncNote: "",
+};
 
 const IDLE_COUNCIL: CouncilState = {
   phase: "idle",
@@ -207,6 +294,10 @@ const IDLE_COUNCIL: CouncilState = {
   judges: [],
   synthesis: "",
   winner: "",
+  dossier: null,
+  contract: null,
+  contractAgreement: null,
+  oracles: [],
   error: null,
   chat: [],
   chatSending: false,
@@ -214,6 +305,7 @@ const IDLE_COUNCIL: CouncilState = {
 
 /** Phases in which a council is mid-flight, for guards that park persistence. */
 const COUNCIL_ACTIVE: CouncilPhase[] = [
+  "contracting",
   "solving",
   "speccing",
   "verifying",
@@ -481,6 +573,29 @@ interface Settings {
   /** Whether the panel's answers are also candidates in the council it feeds. */
   councilIncludePanel: boolean;
   /**
+   * Who reads the screenshot.
+   *
+   *   "models" — two vision models look at the picture, with Apple Vision's
+   *              text offered to them as a hint about characters
+   *   "ocr"    — Apple Vision transcribes and a model structures that text,
+   *              with nothing ever looking at the picture
+   *
+   * "models" by default. The two halves of reading are not equally served by
+   * OCR: it turns pixels into characters better than a reasoning model does,
+   * and it cannot see an indentation level, an axis, a diagram or a highlighted
+   * line at all. On a screenshot of code or a chart, that second half is most
+   * of the problem.
+   */
+  visionReaders: "models" | "ocr";
+  /**
+   * Whether two models read the problem into a contract before anyone solves it.
+   *
+   * On by default and worth its two calls: every later stage is handed the same
+   * reading of the question, instead of each inheriting whichever restatement it
+   * happened to be given.
+   */
+  councilProblemContract: boolean;
+  /**
    * The language solutions come back in.
    *
    * Empty means "whatever the question was written in", which is the default:
@@ -625,6 +740,16 @@ interface State {
   judge: JudgeState;
   /** The council's progress and records. Idle unless the last run was one. */
   council: CouncilState;
+  /** The knowledge library, as files in a folder you can open yourself. */
+  knowledge: KnowledgeState;
+  loadKnowledge: () => Promise<void>;
+  importBundledKnowledge: () => Promise<void>;
+  syncKnowledge: () => Promise<void>;
+  selectKnowledge: (id: string) => void;
+  newKnowledge: () => void;
+  editKnowledge: (markdown: string) => void;
+  saveKnowledge: () => Promise<void>;
+  deleteKnowledge: (id: string) => Promise<void>;
   hydrated: boolean;
   /** Surfaced when a global shortcut or a screen capture could not be used. */
   shortcutError: string | null;
@@ -740,6 +865,8 @@ interface State {
    * itself failed.
    */
   runOcrReading: (key: string) => Promise<ExtractionAgreement | null>;
+  /** Apple Vision's text, for the models to check characters against. Never the reading itself. */
+  ocrHintFor: (key: string) => Promise<string>;
 
   start: () => Promise<void>;
   cancel: () => Promise<void>;
@@ -819,6 +946,12 @@ function publishOverlayState(s: State): void {
         language: s.review.language,
       },
       testSuites: s.council.testSuites,
+      // Only a finished council has anything to present. Sending a half-built
+      // one would put an "unverified" stamp on an answer that is still being
+      // verified, which reads as a verdict rather than a progress state.
+      presentation:
+        s.council.phase === "done" ? buildPresentation(councilReportFrom(s.council)) : null,
+      runs: s.council.runs,
     })
   );
 }
@@ -870,6 +1003,8 @@ const defaultSettings = (): Settings => ({
   councilJudges: COUNCIL_DEFAULT_JUDGES,
   synthesisModel: "openai/gpt-5.6-sol",
   councilIncludePanel: true,
+  councilProblemContract: true,
+  visionReaders: "models",
   outputLanguage: "",
   executionProvider: "e2b",
   e2bTimeoutMs: 120_000,
@@ -1016,6 +1151,9 @@ function normalizeSettings(s: Settings): Settings {
     councilEnabled: typeof s.councilEnabled === "boolean" ? s.councilEnabled : base.councilEnabled,
     councilIncludePanel:
       typeof s.councilIncludePanel === "boolean" ? s.councilIncludePanel : base.councilIncludePanel,
+    councilProblemContract:
+      typeof s.councilProblemContract === "boolean" ? s.councilProblemContract : base.councilProblemContract,
+    visionReaders: s.visionReaders === "ocr" ? "ocr" : base.visionReaders,
     councilModels: normalizeCouncilModels(s.councilModels, base.councilModels),
     councilJudges: normalizeCouncilJudges(s.councilJudges, base.councilJudges),
     synthesisModel:
@@ -1429,6 +1567,7 @@ export const useStore = create<State>((set, get) => ({
   probeError: null,
   judge: { status: "idle", provider: "anthropic", text: "", error: null },
   council: IDLE_COUNCIL,
+  knowledge: IDLE_KNOWLEDGE,
   hydrated: false,
   shortcutError: null,
   sessions: [],
@@ -1927,6 +2066,29 @@ export const useStore = create<State>((set, get) => ({
     }
   },
 
+  ocrHintFor: async (key) => {
+    // Free, local, and about a millisecond of wall clock against a model call
+    // that takes seconds — so it is worth having even when it is only used to
+    // settle an l against a 1. A failure here is not a failure of the reading:
+    // the models are looking at the picture either way.
+    const { images } = get();
+    if (!images.length || !bridge.inTauri()) return "";
+    try {
+      const pages = await bridge.ocrImages(images.map((i) => ({ mime: i.mime, data: i.base64 })));
+      if (readingKey(get().images) !== key) return "";
+      if (!pages.length) return "";
+      return pages
+        .map((p, i) => {
+          const head = pages.length > 1 ? `--- OCR OF SCREENSHOT ${i + 1} ---` : "--- OCR TRANSCRIPTION ---";
+          const unsure = p.unsure?.length ? `\n--- THE ENGINE WAS UNSURE OF THESE ---\n${p.unsure.map((u) => `- ${u}`).join("\n")}` : "";
+          return `${head}\n${p.text.trim() || "(nothing legible)"}${unsure}`;
+        })
+        .join("\n\n");
+    } catch {
+      return "";
+    }
+  },
+
   runOcrReading: async (key) => {
     const { settings, images, note, keys, gatewayKey } = get();
     set({ extraction: { ...IDLE_EXTRACTION, status: "running", for: key } });
@@ -2019,8 +2181,8 @@ export const useStore = create<State>((set, get) => ({
     const agreement = singleReading(
       merged,
       readerLabel === TRANSCRIBER_LABEL
-        ? "transcribed on-device with Apple Vision; nothing has interpreted it"
-        : "transcribed on-device with Apple Vision and structured from that text"
+        ? "Apple Vision, raw text"
+        : "Apple Vision, structured"
     );
 
     const markdown = readingMarkdown(merged, {
@@ -2075,17 +2237,25 @@ export const useStore = create<State>((set, get) => ({
     if (have.status === "done" && have.for === key) return have.agreement;
     if (have.status === "running" && have.for === key) return null;
 
-    // On-device first, always.
+    // On-device first, but no longer on-device *only*.
     //
     // The two halves of "read this screenshot" are not the same job. Turning
     // pixels into characters is transcription, and Apple Vision does it better
-    // than a reasoning model, for free, offline, and without any quota at all
-    // -- it is the same engine behind Live Text. Deciding what the screen *is*
-    // -- the language, the error, the question -- is comprehension, which the
-    // engine cannot do at all. Splitting them means the expensive call stops
-    // being an image call, and most of the time is not made.
-    const done = await get().runOcrReading(key);
-    if (done) return done;
+    // than a reasoning model, for free, offline and with no quota — it is the
+    // engine behind Live Text. Deciding what the screen *is* — which line is
+    // highlighted, what the diagram shows, where the indentation puts a block,
+    // what the axis says — is comprehension, and the engine cannot do any of it.
+    //
+    // Letting OCR stand alone was fine for a stack trace and wrong for
+    // everything this app is actually pointed at. So the transcription is kept
+    // and handed to the models as a hint about characters, and the models look
+    // at the picture themselves. `visionReaders: "ocr"` restores the old path
+    // for anyone who wants the cheap one.
+    if (settings.visionReaders === "ocr") {
+      const done = await get().runOcrReading(key);
+      if (done) return done;
+    }
+    const ocrHint = await get().ocrHintFor(key);
 
     const routes = settings.extractors
       .map((p) => [p, routeFor(p, settings, keys, gatewayKey)] as const)
@@ -2121,7 +2291,7 @@ export const useStore = create<State>((set, get) => ({
             provider: route.provider,
             model: route.model,
             systemPrompt: EXTRACTION_SYSTEM,
-            userText: extractionUserPrompt(note, imageManifest(images)),
+            userText: extractionUserPrompt(note, imageManifest(images), ocrHint),
             images: payload,
             maxTokens: settings.maxTokens,
             temperature: 0,
@@ -2158,15 +2328,58 @@ export const useStore = create<State>((set, get) => ({
       return null;
     }
 
-    const agreement =
+    let agreement =
       readings.length >= 2
         ? compareExtractions(readings[0].extraction, readings[1].extraction)
         : singleReading(
             readings[0].extraction,
             failures.length
               ? `${agentSpec(failures[0].provider).label} ${failures[0].why}`
-              : "only one extractor is configured"
+              : "one extractor configured"
           );
+
+    // Two strong readers disagreeing about what is on the screen is the one
+    // failure this whole pipeline cannot recover from later: everything
+    // downstream is answering about text, and if the text is wrong the answer
+    // is wrong no matter how good the bench is. The old rule picked whichever
+    // reading claimed the higher confidence — a number a model writes about
+    // itself. A third model that can see the picture is a better arbiter than
+    // that, and it is asked about the disputed fields only.
+    const disputed = agreement.conflicts.filter((c) => c.severity === "high");
+    if (readings.length >= 2 && !agreement.agree && disputed.length) {
+      const arbiter = settings.councilModels
+        .map((m) => m.id)
+        .find((id) => !readings.some((r) => routeFor(r.provider, settings, keys, gatewayKey)?.model === id));
+      if (arbiter && (settings.useGateway ? gatewayKey : false)) {
+        try {
+          const text = await bridge.runOnce({
+            runId: `tiebreak-${Date.now().toString(36)}`,
+            agentId: "extract-tiebreak",
+            attemptId: newAttemptId(),
+            provider: GATEWAY.id,
+            model: arbiter,
+            systemPrompt: tieBreakSystemPrompt(),
+            userText: tieBreakUserPrompt(disputed, imageManifest(images)),
+            images: payload,
+            maxTokens: Math.min(settings.maxTokens, 1024),
+            temperature: 0,
+            baseUrl: settings.gatewayBaseUrl || GATEWAY.defaultBaseUrl,
+            endpoint: endpointForModel(settings, arbiter),
+          });
+          agreement = applyTieBreak(
+            readings[0].extraction,
+            readings[1].extraction,
+            agreement,
+            parseTieBreak(text, disputed.map((c) => c.field)),
+            arbiter
+          );
+        } catch {
+          // An arbiter that could not be reached leaves the conflict standing,
+          // which is the honest outcome and the one the panel already knows how
+          // to show.
+        }
+      }
+    }
 
     // A newer paste while the readers were working retires this one. Without
     // this the slower of two reads wins by finishing last, and the panel is
@@ -2837,6 +3050,245 @@ export const useStore = create<State>((set, get) => ({
    * when the council is enabled the single judge stays out of its way rather
    * than spending a request grading a field the bench is about to re-grade.
    */
+  // ----------------------------------------------------------- knowledge
+  //
+  // The library is a folder of markdown files. Reading and writing are local
+  // and immediate; publishing to the database the cloud worker reads is a
+  // separate step, so a half-written thought never reaches a running job.
+
+  loadKnowledge: async () => {
+    if (!bridge.inTauri()) return;
+    set((st) => ({ knowledge: { ...st.knowledge, loading: true, error: null } }));
+    try {
+      const [files, folder] = await Promise.all([bridge.knowledgeList(), bridge.knowledgeFolder()]);
+      const entries: KnowledgeEntry[] = files.map((f) => {
+        const parsed = markdownToRecord(f.markdown);
+        return {
+          ...f,
+          // The front matter wins over the folder when they disagree: someone
+          // who typed `collection: AWS` said what they meant, and the next save
+          // moves the file to match.
+          category: parsed.category || f.category,
+          record: parsed.record,
+          problems: parsed.problems,
+          source: "file" as const,
+        };
+      });
+
+      // Everything this build already knows, shown beside what you have
+      // written. Before this the tab opened on an empty list and a button, which
+      // reads as "there is no library" next to a council that was demonstrably
+      // using one.
+      const onDisk = new Set(entries.map((e) => e.id));
+      for (const record of allKnowledgeRecords()) {
+        if (onDisk.has(record.id)) continue;
+        entries.push({
+          id: record.id,
+          category: "Built-in",
+          markdown: recordToMarkdown(record),
+          path: "",
+          updatedAt: 0,
+          record,
+          problems: [],
+          source: "built-in",
+        });
+      }
+      set((st) => {
+        // A draft in progress outlives a reload: re-reading the folder must
+        // never be the thing that loses what someone was typing.
+        const keepDraft = st.knowledge.dirty;
+        const selected = st.knowledge.selectedId || entries[0]?.id || "";
+        const current = entries.find((e) => e.id === selected);
+        return {
+          knowledge: {
+            ...st.knowledge,
+            entries,
+            folder,
+            loading: false,
+            error: null,
+            selectedId: selected,
+            draft: keepDraft ? st.knowledge.draft : current?.markdown ?? st.knowledge.draft,
+          },
+        };
+      });
+    } catch (err) {
+      set((st) => ({ knowledge: { ...st.knowledge, loading: false, error: cleanError(String(err)) } }));
+    }
+  },
+
+  importBundledKnowledge: async () => {
+    if (!bridge.inTauri()) return;
+    set((st) => ({ knowledge: { ...st.knowledge, saving: true, error: null } }));
+    try {
+      // The pack compiled into this build, written out as files you can edit.
+      // An empty folder is a worse starting point than 37 real records: it
+      // gives nothing to copy the shape from.
+      for (const record of allKnowledgeRecords()) {
+        await bridge.knowledgeSave(record.id, recordToMarkdown(record, "Built-in"), "Built-in", null, "");
+      }
+      set((st) => ({ knowledge: { ...st.knowledge, saving: false } }));
+      await get().loadKnowledge();
+    } catch (err) {
+      set((st) => ({ knowledge: { ...st.knowledge, saving: false, error: cleanError(String(err)) } }));
+    }
+  },
+
+  syncKnowledge: async () => {
+    if (!bridge.inTauri()) return;
+    const st = get();
+    // Only what is ready. A record with no guidance is a draft, and the whole
+    // point of a button rather than a background sync is that drafts stay on
+    // this machine until they are finished.
+    const ready = st.knowledge.entries
+      .map((e) => e.record)
+      .filter((r) => r.id && r.title && r.guidance.length > 0);
+    const held = st.knowledge.entries.length - ready.length;
+    if (!ready.length) {
+      set((s2) => ({
+        knowledge: {
+          ...s2.knowledge,
+          error: "Nothing here is ready to publish — every record needs a title and at least one guidance line.",
+        },
+      }));
+      return;
+    }
+    set((s2) => ({ knowledge: { ...s2.knowledge, syncing: true, error: null, syncNote: "" } }));
+    try {
+      const result = await bridge.knowledgePublish(ready);
+      set((s2) => ({
+        knowledge: {
+          ...s2.knowledge,
+          syncing: false,
+          syncedAt: Date.now(),
+          syncNote:
+            `Published ${result.published} record(s) to the cloud worker` +
+            (held ? `, holding ${held} unfinished here` : "") +
+            // Not a failure, and not silent either: the shelf is shared, and
+            // replacing text another machine published is worth seeing.
+            (result.replaced?.length
+              ? `. Replaced ${result.replaced.length} record(s) another machine had published: ${result.replaced
+                  .map((r) => r.title)
+                  .slice(0, 3)
+                  .join(", ")}.`
+              : "."),
+        },
+      }));
+    } catch (err) {
+      set((s2) => ({
+        knowledge: { ...s2.knowledge, syncing: false, error: cleanError(String(err)), syncNote: "" },
+      }));
+    }
+  },
+
+  selectKnowledge: (id) => {
+    const st = get();
+    const entry = st.knowledge.entries.find((e) => e.id === id);
+    set({
+      knowledge: {
+        ...st.knowledge,
+        selectedId: id,
+        draft: entry?.markdown ?? blankDocument(),
+        dirty: false,
+        error: null,
+        savedAt: null,
+      },
+    });
+  },
+
+  newKnowledge: () => {
+    set((st) => ({
+      knowledge: { ...st.knowledge, selectedId: "", draft: blankDocument(), dirty: false, error: null, savedAt: null },
+    }));
+  },
+
+  editKnowledge: (markdown) => {
+    set((st) => ({ knowledge: { ...st.knowledge, draft: markdown, dirty: true, savedAt: null } }));
+  },
+
+  saveKnowledge: async () => {
+    const st = get();
+    const { draft, selectedId } = st.knowledge;
+    const parsed = markdownToRecord(draft);
+    // The id is the file name, so it has to exist before anything is written.
+    // Everything else the parser complains about is shown beside the editor and
+    // saved anyway: a record you are still writing is still worth keeping.
+    const id = parsed.record.id || slugify(parsed.record.title);
+    if (!id) {
+      set((s2) => ({
+        knowledge: { ...s2.knowledge, error: "Give the record a title or an id before saving." },
+      }));
+      return;
+    }
+    set((s2) => ({ knowledge: { ...s2.knowledge, saving: true, error: null } }));
+    try {
+      const previous = st.knowledge.entries.find((e) => e.id === selectedId);
+      const saved = await bridge.knowledgeSave(
+        id,
+        draft,
+        parsed.category,
+        selectedId || null,
+        // A built-in record has no file to move, so nothing is removed when the
+        // first edit of one lands on disk.
+        previous?.source === "file" ? previous.category : ""
+      );
+      const entry: KnowledgeEntry = {
+        ...saved,
+        category: parsed.category || saved.category,
+        record: parsed.record,
+        problems: parsed.problems,
+        source: "file",
+      };
+      set((s2) => {
+        const rest = s2.knowledge.entries.filter((e) => e.id !== entry.id && e.id !== selectedId);
+        return {
+          knowledge: {
+            ...s2.knowledge,
+            entries: [entry, ...rest].sort((a, b) => b.updatedAt - a.updatedAt),
+            selectedId: entry.id,
+            saving: false,
+            dirty: false,
+            savedAt: Date.now(),
+            error: null,
+          },
+        };
+      });
+    } catch (err) {
+      set((s2) => ({ knowledge: { ...s2.knowledge, saving: false, error: cleanError(String(err)) } }));
+    }
+  },
+
+  deleteKnowledge: async (id) => {
+    const entry = get().knowledge.entries.find((e) => e.id === id);
+    if (entry?.source === "built-in") {
+      // There is no file to remove, and pretending otherwise would suggest the
+      // built-in library can be edited away. It cannot; it ships with the app.
+      set((st) => ({
+        knowledge: { ...st.knowledge, error: "That record is built into this build, so there is no file to delete." },
+      }));
+      return;
+    }
+    try {
+      await bridge.knowledgeDelete(id, entry?.category ?? "");
+    } catch (err) {
+      set((st) => ({ knowledge: { ...st.knowledge, error: cleanError(String(err)) } }));
+      return;
+    }
+    set((st) => {
+      const entries = st.knowledge.entries.filter((e) => e.id !== id);
+      const next = entries[0];
+      return {
+        knowledge: {
+          ...st.knowledge,
+          entries,
+          selectedId: next?.id ?? "",
+          draft: next?.markdown ?? blankDocument(),
+          dirty: false,
+          error: null,
+        },
+      };
+    });
+  },
+
   maybeStartCouncil: () => {
     const s = get();
     if (s.running) return;
@@ -3247,9 +3699,58 @@ async function executeField(
   }
 }
 
+/**
+ * Is the harness worth believing?
+ *
+ * One deliberately broken copy of a candidate that passed, through the same
+ * suite. A harness that passes it has not verified anything it accepted — and
+ * nothing else in the pipeline can notice that, because the gate can only
+ * reject what its evidence rejects, and evidence that accepts everything
+ * rejects nothing.
+ *
+ * The result never moves a candidate. It is a sentence the judges read before
+ * they read the scores, which is the same treatment `harnessIsSuspect` gets and
+ * for the same reason: a doubt about the measurement is not a verdict about the
+ * thing measured.
+ */
+async function runMutationOracle(
+  get: GetStore,
+  set: SetStore,
+  field: Candidate[],
+  suites: TestSuite[]
+): Promise<void> {
+  const runs = get().council.runs;
+  const passing = field.find((c) => gateFor(runs[c.letter]) === "pass" && c.final?.code?.trim());
+  if (!passing?.final) return;
+  const suite = suites.find((x) => x.language === candidateLanguage(passing.final!));
+  if (!suite) return;
+  const mutation = mutateCode(passing.final.code ?? "");
+  if (!mutation.applied) return;
+  const program = spliceSuite(suite, mutation.code);
+  if (!program) return;
+
+  try {
+    const r = await bridge.runCode({ language: suite.language, code: program, timeoutMs: 20000 });
+    const { passed, failed } = countCases(r.stdout);
+    const survived = r.ok && failed === 0 && passed > 0;
+    const signal: OracleSignal = {
+      kind: "mutation",
+      letter: passing.letter,
+      ran: true,
+      survived,
+      description: mutation.description,
+      note: survived ? `${passed} case(s) passed on a broken program` : `${failed} case(s) caught the break`,
+    };
+    set((st) => ({ council: { ...st.council, oracles: [...st.council.oracles, signal] } }));
+  } catch {
+    // A mutation that could not be run is not evidence of anything. The council
+    // proceeds exactly as it did before this check existed.
+  }
+}
+
 /** Assembles the persisted/rendered report from live council state. */
 function councilReportFrom(c: CouncilState): CouncilReport {
-  return {
+  const report: CouncilReport = {
     candidates: c.candidates,
     suites: c.testSuites,
     runs: c.runs,
@@ -3258,10 +3759,19 @@ function councilReportFrom(c: CouncilState): CouncilReport {
     judges: c.judges,
     synthesis: c.synthesis,
     winner: c.winner,
+    dossier: c.dossier,
+    contract: c.contract,
+    contractAgreement: c.contractAgreement,
+    oracles: c.oracles,
   };
+  return { ...report, presentation: buildPresentation(report) };
 }
 
 async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
+  // Read the knowledge folder once per session, here rather than at launch: a
+  // library nobody has opened should not cost a disk read on every start, and a
+  // council that is about to search it is exactly when it is worth reading.
+  if (!get().knowledge.folder && bridge.inTauri()) await get().loadKnowledge();
   const s0 = get();
   const settings = s0.settings;
   const runId = `council-${Date.now().toString(36)}`;
@@ -3280,6 +3790,72 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     ? settings.councilModels.filter((m) => !paneModels.has(m.id))
     : settings.councilModels;
 
+  // ------------------------------------------------------ the problem contract
+  //
+  // Read before anybody answers, by two models, and injected into every prompt
+  // from here down. Without it each stage inherits whichever restatement of the
+  // question it happened to be given: the harness tests the spec writer's
+  // reading of the problem, the reviewers grade against their own, and a
+  // disagreement about what was *asked* arrives disguised as a disagreement
+  // about who is right.
+  const contractSeats = (settings.councilModels ?? []).slice(0, 2);
+  let contract: ProblemContract | null = null;
+  let contractAgreement: ContractAgreement | null = null;
+  if (contractSeats.length && settings.councilProblemContract !== false) {
+    set((st) => ({ council: { ...st.council, phase: "contracting" as const } }));
+    const contractSlots: CouncilSlot[] = contractSeats.map((entry, i) => ({
+      id: `council-contract:${i}`,
+      kind: "contract",
+      model: entry.id,
+      status: "idle",
+      text: "",
+      error: null,
+      attemptId: null,
+      elapsedMs: null,
+    }));
+    set((st) => ({ council: { ...st.council, slots: contractSlots } }));
+    await Promise.all(
+      contractSlots.map((slot, i) =>
+        wait(i * COUNCIL_STEP_MS).then(() => {
+          if (!councilAlive(get().council, runId)) return null;
+          return runCouncilSlot(
+            get,
+            set,
+            slot,
+            {
+              model: slot.model,
+              endpoint: endpointForModel(settings, slot.model),
+              systemPrompt: contractSystemPrompt(),
+              userText: contractUserPrompt({ question: s0.note, reading: s0.extraction.context }),
+              images: s0.images.map((i) => ({ mime: i.mime, data: i.base64 })),
+              maxTokens: Math.min(settings.maxTokens, 2048),
+              temperature: 0,
+            },
+            settings
+          );
+        })
+      )
+    );
+    if (!councilAlive(get().council, runId)) {
+      set({ running: false });
+      void get().persistRun();
+      return;
+    }
+    const readings = get()
+      .council.slots.filter((x) => x.kind === "contract" && x.status === "done")
+      .map((x) => parseProblemContract(x.text));
+    const merged = mergeProblemContracts(readings);
+    contract = merged.contract;
+    contractAgreement = merged.agreement;
+    set((st) => ({ council: { ...st.council, contract, contractAgreement } }));
+  }
+  const contractText = contractBlock(contract);
+  // One string, handed to every later stage as "the problem". A contract that
+  // only some prompts saw would be worse than none: the stages that read it and
+  // the stages that did not would be answering different questions.
+  const problem = contractText ? `${s0.note}\n\n---\n\n${contractText}` : s0.note;
+
+  set((st) => ({ council: { ...st.council, phase: "solving" as const } }));
   const seats = Math.max(0, COUNCIL_SIZE.solversMax - paneAnswers.length);
   const solveSlots: CouncilSlot[] = extras.slice(0, seats).map((entry, i) => ({
     id: `council-solve:${i}`,
@@ -3294,7 +3870,22 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   set((st) => ({ council: { ...st.council, slots: solveSlots } }));
 
   const extractionCtx = s0.extraction.context;
-  const knowledge = knowledgePackFor(`${s0.note}\n\n${extractionCtx}`, 5);
+  // The contract is part of the query, not just part of the prompt. It is the
+  // one description of the problem that exists before anybody has attempted it,
+  // so retrieving against it finds the technique the problem needs rather than
+  // the technique the first answer happened to use.
+  // The library this run searches: the pack compiled into the build, with the
+  // records in your knowledge folder laid over it by id. Something you wrote
+  // this morning is in front of the solvers this afternoon, with no deploy and
+  // no sync — the cloud worker is the leg that waits for a publish.
+  const localRecords = get().knowledge.entries.map((e) => e.record);
+  const library = new Map(allKnowledgeRecords().map((r) => [r.id, r]));
+  for (const record of localRecords) if (record.id) library.set(record.id, record);
+  const knowledge = knowledgePackFor(
+    [s0.note, extractionCtx, contractQuery(contract)].filter((x) => x && x.trim()).join("\n\n"),
+    5,
+    [...library.values()]
+  );
   const sys = systemPrompt(
     settings.mode,
     resolveAnswerLanguage(settings.outputLanguage, get().extraction.agreement?.merged.language ?? "")
@@ -3314,7 +3905,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
             endpoint: endpointForModel(settings, entry.id),
             systemPrompt: sys,
             userText: userPrompt(
-              s0.note,
+              problem,
               allImages.length > 0,
               extractionCtx,
               s0.images,
@@ -3395,7 +3986,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
         provider: GATEWAY.id,
         model: specModel,
         systemPrompt: testSpecSystemPrompt(),
-        userText: testSpecUserPrompt({ question: s0.note, docket: candidateDocket(field), languages, knowledge }),
+        userText: testSpecUserPrompt({ question: problem, docket: candidateDocket(field), languages, knowledge }),
         images: [],
         maxTokens: settings.maxTokens,
         temperature: 0,
@@ -3417,6 +4008,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   if (suites.length) {
     set((st) => ({ council: { ...st.council, phase: "verifying" } }));
     await executeField(get, set, runId, field, suites, "runs");
+    await runMutationOracle(get, set, field, suites);
   }
   if (!councilAlive(get().council, runId)) {
     set({ running: false });
@@ -3426,7 +4018,9 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
 
   // ---------------------------------------------------------- round 2: review
   set((st) => ({ council: { ...st.council, phase: "reviewing" } }));
-  const exec1 = executionDigest(field, get().council.runs);
+  const exec1 = [executionDigest(field, get().council.runs), oracleDigest(get().council.oracles)]
+    .filter(Boolean)
+    .join("\n\n");
   const docket1 = candidateDocket(field);
   const reviewSlots: CouncilSlot[] = field.map((c) => ({
     id: `council-review:${c.letter}`,
@@ -3451,7 +4045,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
             model: slot.model,
             endpoint: endpointForModel(settings, slot.model),
             systemPrompt: reviewSystemPrompt(),
-            userText: reviewUserPrompt({ question: s0.note, docket: docket1, execution: exec1, knowledge }),
+            userText: reviewUserPrompt({ question: problem, docket: docket1, execution: exec1, knowledge }),
             images: [],
             maxTokens: settings.maxTokens,
             temperature: 0,
@@ -3501,12 +4095,13 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
               endpoint: endpointForModel(settings, slot.model),
               systemPrompt: reviseSystemPrompt(),
               userText: reviseUserPrompt({
-                question: s0.note,
+                question: problem,
                 letter: c.letter,
                 ownRaw: c.final?.raw ?? c.text,
                 docket: docket1,
                 received,
                 execution: exec1,
+                knowledge,
               }),
               images: [],
               maxTokens: settings.maxTokens,
@@ -3545,12 +4140,18 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   const docketBoth =
     candidateDocket(fieldNow) +
     (fieldNow.some((c) => c.revised) ? "\n\n=== REVISED ===\n\n" + candidateDocket(fieldNow, { revised: true }) : "");
-  const suspectHarness = harnessIsSuspect(get().council.runs);
+  const suspectHarness = [
+    harnessIsSuspect(get().council.runs),
+    oracleSuspicion(get().council.oracles),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
   const execBoth = [
     executionDigest(fieldNow, get().council.runs),
     fieldNow.some((c) => c.revised)
       ? "=== REVISED RUNS ===\n" + executionDigest(fieldNow, get().council.revisedRuns, { revised: true })
       : "",
+    oracleDigest(get().council.oracles),
     // Independent solutions do not usually fail in the same place. When they do,
     // the judges should hear that before they read the scores, not after.
     suspectHarness ? `NOTE ON THE HARNESS: ${suspectHarness}` : "",
@@ -3587,7 +4188,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
             model: seat.model,
             endpoint: endpointForModel(settings, seat.model),
             systemPrompt: judgeSystemPrompt(seat.emphasis),
-            userText: judgeUserPrompt({ question: s0.note, docket: docketBoth, reviews: reviewsDigest, execution: execBoth, knowledge }),
+            userText: judgeUserPrompt({ question: problem, docket: docketBoth, reviews: reviewsDigest, execution: execBoth, knowledge }),
             images: [],
             maxTokens: settings.maxTokens,
             temperature: 0,
@@ -3621,7 +4222,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       model: synthModel,
       systemPrompt: synthesisSystemPrompt(),
       userText: synthesisUserPrompt({
-        question: s0.note,
+        question: problem,
         docket: docketBoth,
         reviews: reviewsDigest,
         execution: execBoth,
@@ -3646,21 +4247,47 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // could execute is unverified, and unverified is not correct — while a run
   // where *nothing* executed, an MCQ or a maths answer, still passes through,
   // because a gate with no evidence behind it must not veto anything.
-  const winMatch = synthesis.match(/^\s*WINNER\s*:\s*([A-Z])/im);
-  const claimedWinner = winMatch ? winMatch[1].toUpperCase() : "";
+  const parsedSynthesis = parseCouncilSynthesis(synthesis);
+  const judgeReadings = judges.map((j) => ({
+    model: j.model,
+    emphasis: j.emphasis,
+    error: j.error,
+    ...parseJudgeReport(j.text),
+  }));
+  const claimedWinner = parsedSynthesis.winner;
   const gateRuns: Record<string, CandidateRun> = {};
   for (const c of fieldNow) {
     const run = c.revised ? get().council.revisedRuns[c.letter] : get().council.runs[c.letter];
     if (run) gateRuns[c.letter] = run;
   }
   const ruling = enforceWinnerGate(claimedWinner, gateRuns);
-  const winner = ruling.winner;
+  // The same deterministic layer the cloud worker runs: the gate decides what
+  // may win, the judges' counted scoreboard decides between what is left, and
+  // the synthesis narrates a result it no longer gets to choose. Both paths
+  // call one function so the app and the helper cannot drift on the winner.
+  const decision = decideWinner({
+    claimed: claimedWinner,
+    judges: judgeReadings,
+    runs: gateRuns,
+    letters: fieldNow.map((c) => c.letter),
+  });
+  const winner = decision.winner;
   if (ruling.overruledReason) {
     synthesis = `${synthesis}\n\n---\n\n**GATE OVERRULE.** ${ruling.overruledReason}`;
   }
+  if (decision.disagreement) {
+    synthesis = `${synthesis}\n\n---\n\n**JUDGE AGGREGATE.** ${decision.disagreement}`;
+  }
+  const dossier: CouncilDossier = {
+    synthesis: parsedSynthesis,
+    judges: judgeReadings,
+    tally: decision.tally,
+    winnerSource: decision.source,
+    disagreement: decision.disagreement,
+  };
 
   set((st) => ({
-    council: { ...st.council, phase: error ? "error" : "done", synthesis, winner, error },
+    council: { ...st.council, phase: error ? "error" : "done", synthesis, winner, dossier, error },
     running: false,
   }));
   void get().persistRun();

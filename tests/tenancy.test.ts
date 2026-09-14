@@ -40,6 +40,22 @@ const REACHED_THROUGH_PARENT = new Set(["agent_responses", "verdicts"]);
  */
 const SCOPED_BY_PRINCIPAL = new Set(["app_sessions"]);
 
+/**
+ * Tables that are deliberately one shared shelf rather than per-person data.
+ *
+ * The knowledge library is the same library for everybody: the cloud worker
+ * loads it with no principal at all, and two Macs publishing to it are adding
+ * to one collection, not to two private ones. An `owner_id` here would not be a
+ * safety improvement — it would mean a worker had to guess whose library to
+ * reason from.
+ *
+ * The cost of that decision, stated where it is made: any signed-in Mac can
+ * overwrite a record another one published. That is acceptable while the people
+ * signed in are the same person on two machines, and it is the thing to revisit
+ * first if that ever stops being true.
+ */
+const SHARED_LIBRARY = new Set(["intelligence_records", "intelligence_sources"]);
+
 /** Split the OPS table into one block per handler. */
 function handlers(): Array<{ name: string; body: string }> {
   const found: Array<{ name: string; body: string }> = [];
@@ -58,7 +74,7 @@ console.log("\n1. every operation is found");
 // The count is asserted rather than derived so that adding an operation is a
 // deliberate act that also updates this file — which is where someone is
 // reminded that a new handler needs a scope.
-check("thirty-two handlers", ops.length === 32, `found ${ops.length}: ${ops.map((o) => o.name).join(", ")}`);
+check("thirty-three handlers", ops.length === 33, `found ${ops.length}: ${ops.map((o) => o.name).join(", ")}`);
 
 // The unauthenticated surface of the whole API. If this ever grows, it should be
 // because somebody decided to grow it, not because a handler was added to the
@@ -70,7 +86,7 @@ check("and it is auth.login", publicOps[0] === "auth.login", String(publicOps[0]
 console.log("\n2. every query is scoped to the caller");
 for (const op of ops) {
   const tables = [...op.body.matchAll(/\.from\("([a-z_]+)"\)/g)].map((m) => m[1]);
-  const needsScope = tables.filter((t) => !REACHED_THROUGH_PARENT.has(t));
+  const needsScope = tables.filter((t) => !REACHED_THROUGH_PARENT.has(t) && !SHARED_LIBRARY.has(t));
   if (!needsScope.length) {
     check(`${op.name} touches no owned table`, true);
     continue;
@@ -89,6 +105,20 @@ for (const op of ops) {
     `${op.name} filters on owner_id`,
     op.body.includes("owner_id"),
     `queries ${needsScope.join(", ")} with no owner filter`
+  );
+}
+
+console.log("\n2a. the shared shelf is named, not assumed");
+for (const op of ops) {
+  const tables = [...op.body.matchAll(/\.from\("([a-z_]+)"\)/g)].map((m) => m[1]);
+  if (!tables.some((t) => SHARED_LIBRARY.has(t))) continue;
+  // Writing to a shelf everyone shares is a decision; reading one is not. The
+  // check is that a writer said so in this file rather than inheriting the
+  // exemption by touching the same table.
+  check(
+    `${op.name} writes a library every account shares`,
+    SHARED_LIBRARY.has("intelligence_records"),
+    "a handler reached the shared library without being listed"
   );
 }
 

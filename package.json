@@ -17,6 +17,8 @@
     "ghost:uninstall": "node scripts/ghost-uninstall.mjs",
     "ghost:detect": "node scripts/ghost-detect.mjs",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
+    "api:deploy": "node scripts/deploy-api.mjs",
+    "knowledge:publish": "node scripts/seed-knowledge.mjs",
     "check": "npm run typecheck && npm run lint && npm test && npm run check:rust",
     "tauri": "tauri",
     "app:dev": "npm run helper:sidecar:dev && tauri dev",

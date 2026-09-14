@@ -2,7 +2,7 @@ import { agentSpec, type AgentId } from "./models.ts";
 import type { AgentStatus } from "./store.ts";
 import type { AgentFinal } from "./parse.ts";
 import type { SolutionReview } from "./review.ts";
-import type { TestSuite } from "./council.ts";
+import type { CandidateRun, Presentation, TestSuite } from "./council.ts";
 
 export type OverlayPhase = "idle" | "running" | "reviewing" | "done" | "error";
 
@@ -38,6 +38,14 @@ export interface OverlayState {
   agents: OverlayAgentState[];
   solution: OverlaySolutionState | null;
   tests: OverlayTestState[];
+  /**
+   * Why the answer above is trustworthy, in fields.
+   *
+   * The overlay's thought-process panes were empty because nothing was sending
+   * anything to put in them. This is that: standing, approach, the per-candidate
+   * evidence and the bench's dissent, already computed on the report.
+   */
+  presentation?: Presentation | null;
 }
 
 export interface OverlayAgentInput {
@@ -62,6 +70,10 @@ export interface BuildOverlayStateInput {
     language: string;
   };
   testSuites?: TestSuite[];
+  /** The finished council's presentation, when a council produced one. */
+  presentation?: Presentation | null;
+  /** Round-1 runs, so the harness rows can show what actually happened. */
+  runs?: Record<string, CandidateRun>;
   now?: Date;
 }
 
@@ -107,7 +119,28 @@ function candidateSolution(input: BuildOverlayStateInput): OverlaySolutionState 
   };
 }
 
-function overlayTests(suites: TestSuite[] = []): OverlayTestState[] {
+/**
+ * The harness rows.
+ *
+ * With a presentation in hand these become one row per candidate carrying what
+ * its run actually did, which is the difference between a test pane that
+ * reports evidence and one that says "Not run in overlay" five times. Without
+ * one — a panel run, or a council that never executed anything — the old
+ * per-suite placeholder is still the honest answer.
+ */
+function overlayTests(suites: TestSuite[] = [], presentation?: Presentation | null): OverlayTestState[] {
+  if (presentation?.evidence?.length) {
+    return presentation.evidence.slice(0, 8).map((row) => ({
+      name: `Candidate ${row.letter}${row.revised ? " (revised)" : ""}`,
+      input: row.model,
+      expected: row.gate === "untested" ? "not executed" : `${row.passed + row.failed} case(s)`,
+      actual:
+        row.gate === "untested"
+          ? row.note || "no run"
+          : `${row.passed} passed, ${row.failed} failed${row.runtime ? ` · ${row.runtime}` : ""}`,
+      status: row.gate === "pass" ? "passed" : row.gate === "fail" ? "failed" : "pending",
+    }));
+  }
   return suites.slice(0, 5).map((suite, index) => ({
     name: `Harness ${index + 1}`,
     input: suite.language,
@@ -117,8 +150,27 @@ function overlayTests(suites: TestSuite[] = []): OverlayTestState[] {
   }));
 }
 
+/**
+ * The council's own shipped answer, which outranks anything the panel holds.
+ *
+ * A council that ran to a verified winner has the better code by construction —
+ * it was reviewed, revised, executed and gated — and the overlay was still
+ * showing whichever pane happened to answer first.
+ */
+function councilSolution(input: BuildOverlayStateInput): OverlaySolutionState | null {
+  const p = input.presentation;
+  if (!p?.code?.trim()) return null;
+  return {
+    title: `solution${p.language ? `.${p.language}` : ""}`,
+    language: p.language || "",
+    code: p.code.trim(),
+    source: p.provenance || "council",
+    status: "reviewed",
+  };
+}
+
 export function buildOverlayState(input: BuildOverlayStateInput): OverlayState {
-  const solution = reviewedSolution(input) ?? candidateSolution(input);
+  const solution = councilSolution(input) ?? reviewedSolution(input) ?? candidateSolution(input);
   const agents = input.agents
     .filter((a) => a.enabled)
     .map((a) => {
@@ -139,6 +191,7 @@ export function buildOverlayState(input: BuildOverlayStateInput): OverlayState {
     phase: overlayPhase(input, solution),
     agents,
     solution,
-    tests: overlayTests(input.testSuites),
+    tests: overlayTests(input.testSuites, input.presentation),
+    presentation: input.presentation ?? null,
   };
 }

@@ -5,6 +5,11 @@ import {
   parseExtraction,
   compareExtractions,
   renderForReasoning,
+  chooseReaders,
+  VISION_PREFERENCE,
+  parseTieBreak,
+  applyTieBreak,
+  tieBreakUserPrompt,
   EMPTY_EXTRACTION,
   type Extraction,
 } from "../src/lib/extraction.ts";
@@ -270,6 +275,37 @@ console.log("\nN. transcription is still compared exactly");
     { ...base, errors: [{ message: "NameError: name 'gs'", file: "", line: 0 }] }
   );
   check("a misread identifier in an error is not", !errReal.agree);
+}
+
+
+console.log("\n— ranked readers and the arbiter —");
+{
+  const seats = [{ id: "z-ai/glm-5.3" }, { id: "openai/gpt-5.6-sol" }, { id: "google/gemini-3.7-flash" }, { id: "anthropic/claude-opus-5" }];
+  const { readers, tieBreaker } = chooseReaders(seats, (m) => m.id);
+  check("the strongest visual readers go first", readers.map((r) => r.id).join(",") === "openai/gpt-5.6-sol,anthropic/claude-opus-5", readers.map((r) => r.id).join(","));
+  // Asking one of the two whether it was wrong is not an answer, so the third
+  // is held back deliberately.
+  check("and the arbiter is neither of them", tieBreaker?.id === "google/gemini-3.7-flash", String(tieBreaker?.id));
+  check("an unranked seat still gets used", chooseReaders([{ id: "some/new-model" }], (m) => m.id).readers.length === 1);
+  check("the preference is data, not a hardcoded pair", VISION_PREFERENCE.length >= 3 && VISION_PREFERENCE[0] === "openai/gpt-5.6-sol");
+}
+
+console.log("\n— the arbiter settles the disputed fields only —");
+{
+  const a = { ...EMPTY_EXTRACTION, kind: "code" as const, code: "let n = l1", problemSummary: "add two numbers", language: "rust", confidence: 0.9 };
+  const b = { ...EMPTY_EXTRACTION, kind: "code" as const, code: "let n = 11", problemSummary: "add two numbers", language: "rust", confidence: 0.4 };
+  const agreement = compareExtractions(a, b);
+  check("the misread character is a conflict", agreement.conflicts.some((c) => c.field === "code" && c.severity === "high"));
+  // The old rule would have taken A here for claiming 0.9 against 0.4. A model
+  // that looked at the picture says otherwise.
+  const settled = applyTieBreak(a, b, agreement, parseTieBreak("code: B", ["code"]), "google/gemini-3.7-flash");
+  check("confidence no longer decides it", settled.merged.code === "let n = 11", settled.merged.code);
+  check("the run still knows there was a conflict", settled.conflicts.length > 0 && settled.summary.includes("settled"), settled.summary);
+  check("and it reads as agreed once nothing high is left", settled.agree);
+
+  const unsettled = applyTieBreak(a, b, agreement, [], "google/gemini-3.7-flash");
+  check("an arbiter that named nothing changes nothing", unsettled.merged.code === agreement.merged.code && !unsettled.agree);
+  check("the prompt shows both readings", tieBreakUserPrompt(agreement.conflicts).includes("let n = l1"));
 }
 
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall extraction checks passed\n");

@@ -300,7 +300,7 @@ export default function BackgroundJobsPanel() {
               </p>
               {workerTickUrl.trim() ? (
                 <button className="btn tiny" disabled={poking} onClick={() => void poke()}>
-                  {poking ? "Asking…" : "Ask the worker to take one"}
+                  {poking ? "Asking…" : "Ask the Worker to Take One"}
                 </button>
               ) : (
                 <p className="hint">
