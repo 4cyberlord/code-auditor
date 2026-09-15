@@ -26,7 +26,11 @@ export async function fingerprint(token: string): Promise<string> {
 }
 
 export class HttpError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly meta: Record<string, unknown> = {}
+  ) {
     super(message);
   }
 }
@@ -108,6 +112,57 @@ export interface SignedIn {
   expiresAt: string;
 }
 
+interface VerifyRow {
+  user_id?: string | null;
+  matched_username?: string | null;
+  outcome?: string | null;
+  locked_until?: string | null;
+  attempts_remaining?: number | null;
+}
+
+function authRefusalMeta(row: VerifyRow | null): Record<string, unknown> {
+  const meta: Record<string, unknown> = {};
+  if (row?.locked_until) meta.lockedUntil = row.locked_until;
+  if (typeof row?.attempts_remaining === "number") {
+    meta.attemptsRemaining = row.attempts_remaining;
+  }
+  return meta;
+}
+
+// deno-lint-ignore no-explicit-any
+export async function verifyPin(admin: any, username: string, pin: unknown): Promise<VerifyRow> {
+  const digits = String(pin ?? "").trim();
+  if (!/^[0-9]{4}$/.test(digits)) {
+    throw new HttpError(401, "That username and PIN do not match.");
+  }
+
+  const { data, error } = await admin.rpc("auth_verify_pin", {
+    p_username: username,
+    p_pin: digits,
+    p_pepper: pepper(),
+  });
+  if (error) {
+    console.error("auth_verify_pin:", error.message ?? error);
+    throw new HttpError(500, "Could not check that sign-in.");
+  }
+
+  const row = (Array.isArray(data) ? data[0] : data) as VerifyRow | null;
+  const outcome = row?.outcome ?? "no";
+  if (outcome === "locked") {
+    throw new HttpError(423, "Too many wrong PINs. Try again later.", authRefusalMeta(row));
+  }
+  if (outcome === "needs_reset") {
+    throw new HttpError(
+      409,
+      "This account's PIN predates server sign-in. Set it again from the desktop app."
+    );
+  }
+  if (outcome !== "ok" || !row?.user_id) {
+    throw new HttpError(401, "That username and PIN do not match.", authRefusalMeta(row));
+  }
+  return row;
+}
+
 /**
  * Check a username and PIN, and mint a session.
  *
@@ -125,32 +180,7 @@ export async function signIn(admin: any, username: string, pin: string): Promise
     throw new HttpError(401, "That username and PIN do not match.");
   }
 
-  const { data, error } = await admin.rpc("auth_verify_pin", {
-    p_username: name,
-    p_pin: digits,
-    p_pepper: pepper(),
-  });
-  if (error) {
-    console.error("auth_verify_pin:", error.message ?? error);
-    throw new HttpError(500, "Could not check that sign-in.");
-  }
-
-  const row = Array.isArray(data) ? data[0] : data;
-  const outcome = row?.outcome ?? "no";
-
-  if (outcome === "locked") {
-    throw new HttpError(423, "Too many wrong PINs. Try again later.");
-  }
-  if (outcome === "needs_reset") {
-    throw new HttpError(
-      409,
-      "This account's PIN predates server sign-in. Set it again from the desktop app."
-    );
-  }
-  if (outcome !== "ok" || !row?.user_id) {
-    throw new HttpError(401, "That username and PIN do not match.");
-  }
-
+  const row = await verifyPin(admin, name, digits);
   // The token is random; only its SHA-256 is stored, so this table is not a way
   // in on its own. Same scheme the desktop already used — what changed is that
   // the server mints it rather than the client.

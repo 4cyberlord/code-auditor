@@ -281,7 +281,7 @@ pub async fn auth_login(
             user_id: String,
         }
 
-        let attempt: Result<SignedIn, String> = crate::server_api::call_public(
+        let attempt: Result<SignedIn, crate::server_api::ApiError> = crate::server_api::call_public_detailed(
             db.inner(),
             "auth.login",
             serde_json::json!({ "username": username.trim(), "pin": pin.clone() }),
@@ -300,7 +300,18 @@ pub async fn auth_login(
             // So fall through to the local check, which can verify that hash,
             // and mint a session from it. The person signs in as normal and
             // Settings offers the PIN change that completes the move.
-            Err(e) => return Err(e),
+            Err(e) if e.locked_until.is_some() || e.attempts_remaining.is_some() => {
+                return Ok(AuthStatus {
+                    db_configured: true,
+                    claimed: true,
+                    username: Some(username.trim().to_string()),
+                    authenticated: false,
+                    locked_until: e.locked_until,
+                    attempts_remaining: e.attempts_remaining,
+                    problem: Some(e.message),
+                });
+            }
+            Err(e) => return Err(e.message),
         };
 
         let user_id = Uuid::parse_str(&signed.user_id)
@@ -321,6 +332,26 @@ pub async fn auth_login(
         return Ok(status_for(&db).await);
     }
 
+    Err("The server API is not configured for this build.".into())
+}
+
+#[tauri::command]
+pub async fn auth_reauthenticate(db: tauri::State<'_, Db>, pin: String) -> Result<(), String> {
+    if current().is_none() {
+        return Err(LOCKED.into());
+    }
+    if pin.len() != 4 || !pin.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("The PIN has to be exactly 4 digits.".into());
+    }
+    if crate::server_api::available(db.inner()).await {
+        let _: serde_json::Value = crate::server_api::call(
+            db.inner(),
+            "auth.reauthenticate",
+            serde_json::json!({ "pin": pin }),
+        )
+        .await?;
+        return Ok(());
+    }
     Err("The server API is not configured for this build.".into())
 }
 

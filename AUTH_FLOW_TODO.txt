@@ -1,0 +1,20 @@
+Authentication flow hardening
+============================
+
+Touch ID is deliberately out of scope for now. Keep the flow PIN-first, local,
+and predictable before adding any biometric path.
+
+Done in this pass:
+- Auto-lock the workbench after inactivity.
+- Auto-lock after the machine sleeps or the app resumes from a long idle gap.
+- Keep active executions safe by not idle-locking in the middle of a running job.
+- Tighten the unlock form so empty usernames and incomplete PINs never hit the
+  server.
+- Show clearer retry and lockout state from the server, including attempts left
+  immediately after a failed unlock.
+- Require a fresh unlock before changing sensitive settings such as provider
+  keys, cloud publishing credentials, or account PIN changes.
+
+Still to do:
+- Add a session screen later for "sign out here" and "sign out everywhere" once
+  persisted multi-device sessions exist.

@@ -716,8 +716,16 @@ update settings set owner_id = '00000000-0000-0000-0000-000000000000'
 
 create extension if not exists pgcrypto;
 
+drop function if exists auth_verify_pin(text, text, text);
+
 create or replace function auth_verify_pin(p_username text, p_pin text, p_pepper text)
-returns table (user_id uuid, matched_username text, outcome text)
+returns table (
+  user_id uuid,
+  matched_username text,
+  outcome text,
+  locked_until timestamptz,
+  attempts_remaining integer
+)
 language plpgsql
 security definer
 set search_path = public, extensions
@@ -726,7 +734,7 @@ declare
   u record;
   attempts integer;
 begin
-  select id, username, pin_hash, failed_attempts, locked_until
+  select app_users.id, app_users.username, app_users.pin_hash, app_users.failed_attempts, app_users.locked_until
     into u
     from app_users
    where lower(username) = lower(trim(p_username));
@@ -734,12 +742,12 @@ begin
   -- Deliberately the same shape as a wrong PIN to the caller above: telling an
   -- unauthenticated client that a username exists is telling it what to guess.
   if not found then
-    return query select null::uuid, null::text, 'no';
+    return query select null::uuid, null::text, 'no', null::timestamptz, null::integer;
     return;
   end if;
 
   if u.locked_until is not null and u.locked_until > now() then
-    return query select u.id, u.username, 'locked';
+    return query select u.id, u.username, 'locked', u.locked_until, 0;
     return;
   end if;
 
@@ -747,7 +755,7 @@ begin
   -- PIN: this account simply predates server-side checking and needs its PIN
   -- set once more.
   if left(u.pin_hash, 2) <> '$2' then
-    return query select u.id, u.username, 'needs_reset';
+    return query select u.id, u.username, 'needs_reset', null::timestamptz, null::integer;
     return;
   end if;
 
@@ -755,7 +763,7 @@ begin
     update app_users
        set failed_attempts = 0, locked_until = null, last_login_at = now()
      where id = u.id;
-    return query select u.id, u.username, 'ok';
+    return query select u.id, u.username, 'ok', null::timestamptz, 5;
     return;
   end if;
 
@@ -774,7 +782,19 @@ begin
          end
    where id = u.id;
 
-  return query select u.id, u.username, 'no';
+  return query
+    select u.id,
+           u.username,
+           'no',
+           case
+             when attempts <= 4 then null::timestamptz
+             when attempts = 5 then now() + interval '1 minute'
+             when attempts = 6 then now() + interval '5 minutes'
+             when attempts = 7 then now() + interval '15 minutes'
+             when attempts = 8 then now() + interval '1 hour'
+             else now() + interval '24 hours'
+           end,
+           greatest(0, 5 - attempts);
 end;
 $$;
 

@@ -27,6 +27,10 @@ import { inTauri } from "@/lib/bridge";
 import { gateFor, useAuth } from "@/lib/auth";
 import { devLog } from "@/lib/devLog";
 
+const IDLE_AUTO_LOCK_MS = 15 * 60 * 1000;
+const RESUME_GAP_AUTO_LOCK_MS = 2 * 60 * 1000;
+const AUTO_LOCK_POLL_MS = 15 * 1000;
+
 /**
  * The gate, and nothing else.
  *
@@ -81,6 +85,7 @@ function Workbench() {
   const hydrate = useStore((s) => s.hydrate);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const running = useStore((s) => s.running);
+  const signOut = useAuth((s) => s.signOut);
   const sessionsOpen = useStore((s) => s.settings.railPanel === "sessions");
   const historyOpen = useStore((s) => s.settings.railPanel === "history");
 
@@ -99,6 +104,49 @@ function Workbench() {
   useAgentEvents();
   useGlobalShortcuts();
   useWindowChrome();
+
+  useEffect(() => {
+    if (!inTauri()) return;
+
+    let lastActivity = Date.now();
+    let lastTick = Date.now();
+    let locking = false;
+
+    const markActive = () => {
+      lastActivity = Date.now();
+    };
+
+    const lockIfSafe = () => {
+      if (locking || useStore.getState().running) return;
+      locking = true;
+      void signOut().finally(() => {
+        locking = false;
+      });
+    };
+
+    const checkLock = () => {
+      const now = Date.now();
+      const sleptOrPaused = now - lastTick > RESUME_GAP_AUTO_LOCK_MS;
+      lastTick = now;
+
+      if (sleptOrPaused || now - lastActivity >= IDLE_AUTO_LOCK_MS) {
+        lockIfSafe();
+      }
+    };
+
+    const events = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
+    for (const eventName of events) {
+      window.addEventListener(eventName, markActive, { passive: true });
+    }
+    const timer = window.setInterval(checkLock, AUTO_LOCK_POLL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+      for (const eventName of events) {
+        window.removeEventListener(eventName, markActive);
+      }
+    };
+  }, [signOut]);
 
   useEffect(() => {
     devLog("workbench", "hydrate started");

@@ -41,8 +41,11 @@ const CORS_HEADERS: Record<string, string> = {
 
 const JSON_HEADERS = { "content-type": "application/json", ...CORS_HEADERS };
 
-function fail(status: number, error: string): Response {
-  return new Response(JSON.stringify({ ok: false, error }), { status, headers: JSON_HEADERS });
+function fail(status: number, error: string, meta: Record<string, unknown> = {}): Response {
+  return new Response(JSON.stringify({ ok: false, error, ...meta }), {
+    status,
+    headers: JSON_HEADERS,
+  });
 }
 
 export default {
@@ -81,7 +84,7 @@ export default {
       const data = await handler({ admin: ctx.supabaseAdmin, principal }, args);
       return new Response(JSON.stringify({ ok: true, data }), { headers: JSON_HEADERS });
     } catch (err) {
-      if (err instanceof HttpError) return fail(err.status, err.message);
+      if (err instanceof HttpError) return fail(err.status, err.message, err.meta);
       // The detail goes to the function log, not to the caller: a database
       // error message can name columns and constraints, and a client has no
       // use for either.

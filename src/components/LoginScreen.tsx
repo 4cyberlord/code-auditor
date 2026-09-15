@@ -83,7 +83,12 @@ export default function LoginScreen({
    */
   const signIn = useCallback(async (candidate?: string) => {
     const entered = candidate ?? pin;
+    const user = username.trim();
     setError(null);
+    if (!user) {
+      setError("Enter your username.");
+      return;
+    }
     // Shape is checked here so an obviously-wrong PIN never costs one of the five
     // tries. Rust checks it again; this only saves the attempt.
     if (entered.length !== PIN_LENGTH) {
@@ -97,7 +102,13 @@ export default function LoginScreen({
       // of the process, so quitting signs you out. The old "keep me signed in"
       // checkbox stored a thirty-day token on this Mac, which is exactly the
       // thing that made a copy of the laptop a copy of the account.
-      onChanged(await authLogin(username.trim(), entered, false));
+      const next = await authLogin(user, entered, false);
+      onChanged(next);
+      if (!next.authenticated) {
+        setError(next.problem ?? "That username and PIN do not match.");
+        setPin("");
+        pinField.current?.focus();
+      }
     } catch (err) {
       setError(reason(err));
       setPin("");
@@ -116,11 +127,13 @@ export default function LoginScreen({
   const onPin = (raw: string) => {
     const next = sanitizePin(raw);
     setPin(next);
-    if (next.length === PIN_LENGTH && !busy && !locked) {
+    if (username.trim() && next.length === PIN_LENGTH && !busy && !locked) {
       // Hand the digits over rather than waiting for state to catch up.
       queueMicrotask(() => void signIn(next));
     }
   };
+
+  const canSubmit = username.trim().length > 0 && pin.length === PIN_LENGTH && !busy && !locked;
 
   const message = locked
     ? { tone: "bad", text: `Too many wrong PINs. Try again in ${humanSeconds(left)}.` }
@@ -184,7 +197,7 @@ export default function LoginScreen({
           className="auth-form"
           onSubmit={(e) => {
             e.preventDefault();
-            if (busy || locked) return;
+            if (!canSubmit) return;
             void signIn();
           }}
         >
@@ -237,7 +250,7 @@ export default function LoginScreen({
             </p>
           )}
 
-          <button className="btn primary auth-go" type="submit" disabled={busy || locked}>
+          <button className="btn primary auth-go" type="submit" disabled={!canSubmit}>
             {busy ? "Working…" : "Unlock"}
           </button>
 

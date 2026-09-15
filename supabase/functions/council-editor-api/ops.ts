@@ -12,7 +12,7 @@
  * starts living in one server-side place that checks who is asking first.
  */
 
-import { fingerprint, HttpError, signIn, type Principal } from "./auth.ts";
+import { fingerprint, HttpError, signIn, verifyPin, type Principal } from "./auth.ts";
 
 // deno-lint-ignore no-explicit-any
 type Admin = any;
@@ -280,6 +280,12 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
       throw new HttpError(500, "Could not sign out.");
     }
     return { signedOut: true };
+  },
+
+  /** Prove the person at the keyboard still knows the account PIN. */
+  "auth.reauthenticate": async ({ admin, principal }, args) => {
+    await verifyPin(admin, principal.username, args.pin);
+    return { verified: true };
   },
 
   /**

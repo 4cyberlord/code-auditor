@@ -52,6 +52,19 @@ use crate::deployment;
 /// in this long has failed, and falling back beats a spinner that never resolves.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Clone)]
+pub struct ApiError {
+    pub message: String,
+    pub locked_until: Option<String>,
+    pub attempts_remaining: Option<i32>,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 #[derive(Clone)]
 struct Endpoint {
     url: String,
@@ -98,7 +111,7 @@ pub async fn available(_db: &Db) -> bool {
 pub async fn call<T: DeserializeOwned>(db: &Db, op: &str, args: Value) -> Result<T, String> {
     let token = crate::auth::session_token()?
         .ok_or("This Mac is not signed in, so it cannot reach the server API.")?;
-    send(db, op, args, Some(token)).await
+    send(db, op, args, Some(token)).await.map_err(|e| e.message)
 }
 
 /// The one operation that runs before anyone is signed in.
@@ -107,7 +120,11 @@ pub async fn call<T: DeserializeOwned>(db: &Db, op: &str, args: Value) -> Result
 /// Separate from [`call`] rather than an `Option` parameter, because "which
 /// requests go out unauthenticated" is a question worth being able to answer by
 /// searching for one function name.
-pub async fn call_public<T: DeserializeOwned>(db: &Db, op: &str, args: Value) -> Result<T, String> {
+pub async fn call_public_detailed<T: DeserializeOwned>(
+    db: &Db,
+    op: &str,
+    args: Value,
+) -> Result<T, ApiError> {
     send(db, op, args, None).await
 }
 
@@ -116,15 +133,23 @@ async fn send<T: DeserializeOwned>(
     op: &str,
     args: Value,
     token: Option<String>,
-) -> Result<T, String> {
+) -> Result<T, ApiError> {
     let _ = db;
-    let endpoint = built_in().ok_or("The server API is not built into this app.")?;
+    let endpoint = built_in().ok_or_else(|| ApiError {
+        message: "The server API is not built into this app.".into(),
+        locked_until: None,
+        attempts_remaining: None,
+    })?;
 
     let mut request = reqwest::Client::builder()
         .timeout(TIMEOUT)
         .user_agent(crate::deployment::USER_AGENT)
         .build()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| ApiError {
+            message: e.to_string(),
+            locked_until: None,
+            attempts_remaining: None,
+        })?
         .post(endpoint.url.trim_end_matches('/'))
         .header("apikey", &endpoint.key)
         .json(&serde_json::json!({ "op": op, "args": args }));
@@ -135,17 +160,25 @@ async fn send<T: DeserializeOwned>(
     let response = request
         .send()
         .await
-        .map_err(|e| format!("Could not reach the server API: {e}"))?;
+        .map_err(|e| ApiError {
+            message: format!("Could not reach the server API: {e}"),
+            locked_until: None,
+            attempts_remaining: None,
+        })?;
 
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
 
     let parsed: Value = serde_json::from_str(&body).map_err(|_| {
-        format!(
+        ApiError {
+            message: format!(
             "The server API answered {} with something that was not JSON — \
              something in front of it may have replied instead.",
             status.as_u16()
-        )
+            ),
+            locked_until: None,
+            attempts_remaining: None,
+        }
     })?;
 
     // Indexed rather than fetched by name: `tests/sql.test.ts` scans every Rust
@@ -153,13 +186,25 @@ async fn send<T: DeserializeOwned>(
     // guard worth keeping sharp. A JSON field read is not a row read and should
     // not be spelled like one — including in a comment, as this line found out.
     if !status.is_success() || parsed["ok"] == Value::Bool(false) {
-        return Err(parsed["error"]
+        return Err(ApiError {
+            message: parsed["error"]
             .as_str()
             .unwrap_or("The server API refused that.")
-            .to_string());
+            .to_string(),
+            locked_until: parsed["lockedUntil"].as_str().map(ToString::to_string),
+            attempts_remaining: parsed["attemptsRemaining"]
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok()),
+        });
     }
 
     serde_json::from_value(parsed["data"].clone()).map_err(|e| {
-        format!("The server answered \"{op}\" in a shape this version does not understand: {e}")
+        ApiError {
+            message: format!(
+                "The server answered \"{op}\" in a shape this version does not understand: {e}"
+            ),
+            locked_until: None,
+            attempts_remaining: None,
+        }
     })
 }

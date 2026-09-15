@@ -319,6 +319,7 @@ pub fn run() {
             auth::auth_login,
             auth::auth_logout,
             auth::auth_change_pin,
+            auth::auth_reauthenticate,
             secrets::set_api_key,
             secrets::delete_api_key,
             secrets::has_api_key,

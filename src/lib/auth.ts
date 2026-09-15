@@ -128,6 +128,10 @@ export async function authChangePin(
   await invoke("auth_change_pin", { currentPin, nextPin, confirm });
 }
 
+export async function authReauthenticate(pin: string): Promise<void> {
+  await invoke("auth_reauthenticate", { pin });
+}
+
 export {
   PIN_LENGTH,
   sanitizePin,
