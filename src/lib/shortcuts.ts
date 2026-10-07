@@ -69,9 +69,10 @@ async function captureIntoApp(kind: CaptureKind) {
       // Named after the file on disk, so what is on screen and what is in
       // ~/Library/Application Support/.com.apple.mds/cache/captures can be matched up by eye.
       const name = capture.path.split("/").pop() || "capture.png";
-      // The staging path travels with the asset so the file can be deleted the
-      // moment its bytes have a row in the project behind them.
-      const pieces = await assetsFromBlob(blob, name);
+      // A left/right shortcut already names the exact visual unit to send. Do
+      // not tile it again: the two halves must remain two complete attachments.
+      // The normal whole-screen shortcut keeps the legibility-preserving tiles.
+      const pieces = await assetsFromBlob(blob, name, { tile: kind !== "left" && kind !== "right" });
       assets.push(...pieces.map((a) => ({ ...a, localPath: capture.path })));
     }
     store.addImages(assets);

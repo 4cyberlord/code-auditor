@@ -105,9 +105,15 @@ const ACCEPTED = ["image/png", "image/jpeg", "image/webp", "image/gif"];
  */
 export async function assetsFromBlob(
   file: File | Blob,
-  fallbackName = "pasted-image"
+  fallbackName = "pasted-image",
+  options: { tile?: boolean } = {}
 ): Promise<ImageAsset[]> {
   const name = file instanceof File ? file.name : fallbackName;
+  // The left/right capture shortcuts already divide the display into the two
+  // pictures the user asked for. Keeping each half intact is more useful than
+  // dividing it a second time, and means pressing both shortcuts produces two
+  // attachments rather than four tiles.
+  if (options.tile === false) return [await fileToAsset(file, name)];
   if (file.type && !ACCEPTED.includes(file.type)) {
     throw new Error(
       `${file.type} is not a format the vision models accept. Use PNG, JPEG, WebP or GIF.`
