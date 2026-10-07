@@ -1435,6 +1435,35 @@ export interface Route {
   viaGateway: boolean;
 }
 
+/**
+ * Wiro's gateway currently has no Moonshot/Kimi route. Keep this narrow and
+ * explicit: a model is not rejected merely because it is absent from Wiro's
+ * public listing, since team access is decided when it runs.
+ */
+const WIRO_UNAVAILABLE_MODELS = new Set(["moonshotai/kimi-k3"]);
+
+function isPermanentGatewayFailure(error: string | null | undefined): boolean {
+  const message = (error ?? "").toLowerCase();
+  return (
+    message.includes("model id is not available") ||
+    message.includes("requested model was not found") ||
+    message.includes("tool-not-accessible") ||
+    message.includes("model catalog returned an invalid response")
+  );
+}
+
+function unavailableWiroGatewayModel(model: string, s: Settings): boolean {
+  if (s.gatewayId !== "wiro") return false;
+  if (WIRO_UNAVAILABLE_MODELS.has(model)) return true;
+  const probe = s.probes[model];
+  return !!probe && !probe.ok && isPermanentGatewayFailure(probe.error);
+}
+
+function unavailableWiroModel(provider: AgentId, s: Settings): string | null {
+  const model = s.routerModels[provider as ProviderId] || PROVIDERS[provider as ProviderId]?.defaultRouterModel;
+  return model && unavailableWiroGatewayModel(model, s) ? model : null;
+}
+
 export function routeFor(
   provider: AgentId,
   s: Settings,
@@ -1455,6 +1484,7 @@ export function routeFor(
   }
 
   if (s.useGateway && gatewayKey) {
+    if (unavailableWiroModel(provider, s)) return null;
     return {
       provider: s.gatewayId,
       model: s.routerModels[provider as ProviderId] || PROVIDERS[provider as ProviderId].defaultRouterModel,
@@ -2508,10 +2538,13 @@ export const useStore = create<State>((set, get) => ({
           return { ...freshAgent(a.provider, modelLabelFor(a.provider, settings), false) };
         }
         if (!route) {
+          const unavailable = unavailableWiroModel(a.provider, settings);
           return {
             ...freshAgent(a.provider, modelLabelFor(a.provider, settings), true),
             status: "error" as const,
-            error: spec.routerOnly
+            error: unavailable
+              ? `${unavailable} is unavailable through Wiro, so it was not called. Choose another Wiro model for this pane, or use that provider's direct key.`
+              : spec.routerOnly
               ? `${spec.label} is only reachable through ${GATEWAY.label}. Add a ${GATEWAY.label} key, or switch this pane off.`
               : `No route to ${spec.vendor}. Add a ${GATEWAY.label} key to reach every model with one credential, or a ${spec.vendor} key to reach just this one.`,
           };
@@ -2777,6 +2810,20 @@ export const useStore = create<State>((set, get) => ({
     const slot = s0.council.slots.find((x) => x.attemptId === e.attemptId);
     if (slot) {
       if (isStaleCouncil(s0, slot, e.attemptId)) return;
+      if (s0.settings.gatewayId === "wiro" && isPermanentGatewayFailure(e.message)) {
+        const probes = {
+          ...s0.settings.probes,
+          [slot.model]: {
+            ok: false,
+            ms: 0,
+            error: cleanError(e.message),
+            at: Date.now(),
+            vision: s0.settings.probes[slot.model]?.vision ?? null,
+            visionNote: s0.settings.probes[slot.model]?.visionNote ?? null,
+          },
+        };
+        get().patchSettings({ probes });
+      }
       set((s) => ({
         council: {
           ...s.council,
@@ -2790,6 +2837,25 @@ export const useStore = create<State>((set, get) => ({
       return;
     }
     if (isStale(s0, e)) return;
+    const failed = s0.agents.find((a) => a.id === e.agentId && a.attemptId === e.attemptId);
+    if (
+      failed?.viaGateway &&
+      s0.settings.gatewayId === "wiro" &&
+      isPermanentGatewayFailure(e.message)
+    ) {
+      const probes = {
+        ...s0.settings.probes,
+        [failed.model]: {
+          ok: false,
+          ms: 0,
+          error: cleanError(e.message),
+          at: Date.now(),
+          vision: s0.settings.probes[failed.model]?.vision ?? null,
+          visionNote: s0.settings.probes[failed.model]?.visionNote ?? null,
+        },
+      };
+      get().patchSettings({ probes });
+    }
     set((s) => {
       const agents = s.agents.map((a) =>
         a.id === e.agentId
@@ -3568,10 +3634,12 @@ function councilAlive(c: CouncilState, runId: string): boolean {
  * accepts both spellings, so this is only trimming: the gateway namespaces by
  * vendor on its catalogue pages but serves the bare id identically.
  */
-function gatewayRoute(model: string, s: Settings): { provider: TransportId; model: string; baseUrl: string } {
+function gatewayRoute(model: string, s: Settings): { provider: TransportId; model: string; baseUrl: string } | null {
+  const id = model.trim();
+  if (unavailableWiroGatewayModel(id, s)) return null;
   return {
     provider: s.gatewayId,
-    model: model.trim(),
+    model: id,
     baseUrl: s.gatewayBaseUrl || gatewayPreset(s.gatewayId).defaultBaseUrl,
   };
 }
@@ -3587,6 +3655,20 @@ function runCouncilSlot(
   const attemptId = newAttemptId();
   const runId = get().council.runId ?? `council-${Date.now().toString(36)}`;
   const route = gatewayRoute(slot.model, s);
+  if (!route) {
+    const blocked: CouncilSlot = {
+      ...slot,
+      status: "error",
+      text: "",
+      error: `${slot.model} is unavailable through Wiro, so it was not called.`,
+      attemptId,
+      elapsedMs: null,
+    };
+    set((st) => ({
+      council: { ...st.council, slots: st.council.slots.map((x) => (x.id === blocked.id ? blocked : x)) },
+    }));
+    return Promise.resolve(blocked);
+  }
   const live: CouncilSlot = { ...slot, status: "queued", text: "", error: null, attemptId, elapsedMs: null };
 
   set((st) => ({
