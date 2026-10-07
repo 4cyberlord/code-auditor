@@ -98,11 +98,9 @@ export default function LoginScreen({
 
     setBusy(true);
     try {
-      // Nothing is remembered: the session token lives in memory for the life
-      // of the process, so quitting signs you out. The old "keep me signed in"
-      // checkbox stored a thirty-day token on this Mac, which is exactly the
-      // thing that made a copy of the laptop a copy of the account.
-      const next = await authLogin(user, entered, false);
+      // The desktop session is stored in the system Keychain, so reopening the
+      // app restores it without requiring this PIN again.
+      const next = await authLogin(user, entered, true);
       onChanged(next);
       if (!next.authenticated) {
         setError(next.problem ?? "That username and PIN do not match.");

@@ -27,8 +27,10 @@ import { inTauri } from "@/lib/bridge";
 import { gateFor, useAuth } from "@/lib/auth";
 import { devLog } from "@/lib/devLog";
 
-const IDLE_AUTO_LOCK_MS = 15 * 60 * 1000;
-const RESUME_GAP_AUTO_LOCK_MS = 2 * 60 * 1000;
+// The desktop session is stored in the system Keychain for thirty days. Do not
+// discard it after a short idle or sleep; doing so defeats saved sign-in and
+// makes the app ask for the PIN again while the session is still valid.
+const IDLE_AUTO_LOCK_MS = 30 * 24 * 60 * 60 * 1000;
 const AUTO_LOCK_POLL_MS = 15 * 1000;
 
 /**
@@ -109,7 +111,6 @@ function Workbench() {
     if (!inTauri()) return;
 
     let lastActivity = Date.now();
-    let lastTick = Date.now();
     let locking = false;
 
     const markActive = () => {
@@ -126,10 +127,7 @@ function Workbench() {
 
     const checkLock = () => {
       const now = Date.now();
-      const sleptOrPaused = now - lastTick > RESUME_GAP_AUTO_LOCK_MS;
-      lastTick = now;
-
-      if (sleptOrPaused || now - lastActivity >= IDLE_AUTO_LOCK_MS) {
+      if (now - lastActivity >= IDLE_AUTO_LOCK_MS) {
         lockIfSafe();
       }
     };

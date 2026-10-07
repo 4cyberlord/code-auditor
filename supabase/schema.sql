@@ -325,8 +325,8 @@ create table if not exists app_users (
 create unique index if not exists app_users_username_idx
   on app_users (lower(username));
 
--- "Remember this Mac for 30 days": the SHA-256 of a token whose plaintext lives
--- in the Keychain, so this table on its own is not a way in.
+-- A desktop session lasts 30 days. Its plaintext token lives in the system
+-- Keychain, so this table on its own is not a way in.
 create table if not exists app_sessions (
   id           uuid        primary key default gen_random_uuid(),
   user_id      uuid        not null references app_users (id) on delete cascade,

@@ -101,9 +101,9 @@ function pepper(): string {
   return value;
 }
 
-/** How long a session lasts. The desktop signs in each launch, so this is a
- *  working day rather than a "remember me". */
-const SESSION_HOURS = 12;
+/** A session belongs to this desktop and its token is stored in the system
+ * Keychain, so reopening the app does not require another PIN. */
+const SESSION_HOURS = 24 * 30;
 
 export interface SignedIn {
   token: string;
@@ -157,7 +157,9 @@ export async function verifyPin(admin: any, username: string, pin: unknown): Pro
       "This account's PIN predates server sign-in. Set it again from the desktop app."
     );
   }
-  if (outcome !== "ok" || !row?.user_id) {
+  const userId = row?.user_id;
+  const matchedUsername = row?.matched_username;
+  if (outcome !== "ok" || !userId || !matchedUsername) {
     throw new HttpError(401, "That username and PIN do not match.", authRefusalMeta(row));
   }
   return row;
@@ -198,5 +200,10 @@ export async function signIn(admin: any, username: string, pin: string): Promise
     throw new HttpError(500, "Could not start that session.");
   }
 
-  return { token: raw, username: row.matched_username, userId: row.user_id, expiresAt };
+  return {
+    token: raw,
+    username: row.matched_username!,
+    userId: row.user_id!,
+    expiresAt,
+  };
 }

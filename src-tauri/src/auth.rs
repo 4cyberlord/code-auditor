@@ -15,11 +15,10 @@
 //!     client doing the guessing must not be the thing counting the guesses,
 //!     and while the count sat in Postgres but the comparison sat here, it was.
 //!
-//!   * **Nothing is stored on this Mac at all.** No Keychain entry, no pepper,
-//!     no remembered token, no connection string. The session token lives in
-//!     memory for the life of the process, so quitting signs you out and a copy
-//!     of the disk is not a copy of the account. That is why there is no "keep
-//!     me signed in": there is nowhere to keep it.
+//!   * **A session is saved in the system Keychain.** The random bearer token
+//!     is available only to this user's macOS login, never to the webview or a
+//!     normal file backup. It lets the app restore a signed-in session without
+//!     asking for the PIN after every launch.
 //!
 //!   * **Every refusal reads the same.** Wrong PIN, unknown username and
 //!     malformed input come back word for word identical, because a different
@@ -31,6 +30,7 @@
 //! at that point the session is theirs. Pretending otherwise would be the only
 //! real mistake available here.
 
+use keyring::Entry;
 use serde::Serialize;
 use std::sync::{OnceLock, RwLock};
 use uuid::Uuid;
@@ -98,16 +98,7 @@ fn sign_out() {
 
 // ------------------------------------------------------------------ keychain
 
-/// The session token for this run, held in memory only.
-///
-/// Nothing writes it to disk. Quitting the app forgets it, which is exactly what
-/// "type the PIN every launch" means — there is no file, no Keychain entry and
-/// no thirty-day window during which a copy of this machine is a copy of the
-/// account.
-///
-/// Not a `#[tauri::command]`, and deliberately: this token is what proves
-/// identity to the server, and the webview has never held it. Handing it across
-/// would make an XSS in a rendered model answer equivalent to a stolen sign-in.
+/// The token currently in use. It is never exposed to the webview.
 fn token_slot() -> &'static RwLock<Option<String>> {
     static TOKEN: OnceLock<RwLock<Option<String>>> = OnceLock::new();
     TOKEN.get_or_init(|| RwLock::new(None))
@@ -120,6 +111,39 @@ pub(crate) fn session_token() -> Result<Option<String>, String> {
 fn hold_token(token: Option<String>) {
     if let Ok(mut slot) = token_slot().write() {
         *slot = token;
+    }
+}
+
+const SESSION_SERVICE: &str = "com.council-editor.desktop-session";
+const SESSION_ACCOUNT: &str = "signed-in-user";
+
+fn saved_session() -> Result<Entry, String> {
+    Entry::new(SESSION_SERVICE, SESSION_ACCOUNT)
+        .map_err(|e| format!("Could not access the system Keychain: {e}"))
+}
+
+fn save_session_token(token: &str) -> Result<(), String> {
+    saved_session()?
+        .set_password(token)
+        .map_err(|e| format!("Could not save the sign-in session in the system Keychain: {e}"))
+}
+
+fn read_saved_session_token() -> Result<Option<String>, String> {
+    match saved_session()?.get_password() {
+        Ok(token) if !token.is_empty() => Ok(Some(token)),
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!(
+            "Could not read the saved sign-in session from the system Keychain: {e}"
+        )),
+    }
+}
+
+fn clear_saved_session_token() -> Result<(), String> {
+    match saved_session()?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(format!(
+            "Could not clear the saved sign-in session from the system Keychain: {e}"
+        )),
     }
 }
 
@@ -214,7 +238,46 @@ pub struct AuthStatus {
 
 #[tauri::command]
 pub async fn auth_status(db: tauri::State<'_, Db>) -> Result<AuthStatus, String> {
+    restore_saved_session(db.inner()).await;
     Ok(status_for(&db).await)
+}
+
+/// Rehydrate a saved desktop session before the login screen decides whether to
+/// render. Transport failures leave the saved token alone so an offline launch
+/// does not turn a temporary network problem into a new credential prompt.
+async fn restore_saved_session(db: &Db) {
+    if current().is_some() {
+        return;
+    }
+
+    let token = match read_saved_session_token() {
+        Ok(Some(token)) => token,
+        Ok(None) | Err(_) => return,
+    };
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WhoAmI {
+        username: String,
+        user_id: String,
+    }
+
+    hold_token(Some(token));
+    let restored: Result<WhoAmI, String> =
+        crate::server_api::call(db, "auth.whoami", serde_json::json!({})).await;
+
+    match restored.and_then(|who| {
+        Uuid::parse_str(&who.user_id)
+            .map(|user_id| (who.username, user_id))
+            .map_err(|_| {
+                "The server returned an account id this app does not understand.".to_string()
+            })
+    }) {
+        Ok((username, user_id)) => sign_in(Principal { user_id, username }),
+        Err(_) => {
+            hold_token(None);
+        }
+    }
 }
 
 /// The body of `auth_status`, taking a plain reference so that every command
@@ -281,12 +344,13 @@ pub async fn auth_login(
             user_id: String,
         }
 
-        let attempt: Result<SignedIn, crate::server_api::ApiError> = crate::server_api::call_public_detailed(
-            db.inner(),
-            "auth.login",
-            serde_json::json!({ "username": username.trim(), "pin": pin.clone() }),
-        )
-        .await;
+        let attempt: Result<SignedIn, crate::server_api::ApiError> =
+            crate::server_api::call_public_detailed(
+                db.inner(),
+                "auth.login",
+                serde_json::json!({ "username": username.trim(), "pin": pin.clone() }),
+            )
+            .await;
 
         let signed = match attempt {
             Ok(signed) => signed,
@@ -317,15 +381,18 @@ pub async fn auth_login(
         let user_id = Uuid::parse_str(&signed.user_id)
             .map_err(|_| "The server returned an account id this app does not understand.")?;
 
+        // The Keychain is scoped to the signed-in macOS account and is the
+        // durable copy of this otherwise opaque token. Keep it out of the
+        // webview; Rust retrieves it only when an authenticated command runs.
+        save_session_token(&signed.token)?;
         hold_token(Some(signed.token));
         sign_in(Principal {
             user_id,
             username: signed.username,
         });
 
-        // `remember_me` has nothing left to do: there is no store to remember
-        // into. The checkbox is gone from the login screen; the parameter stays
-        // so an older webview bundle does not fail to call this command.
+        // Kept for compatibility with existing webview bundles. Sessions are
+        // always saved because this desktop is the user's chosen device.
         let _ = remember_me;
 
         let _ = crate::secrets::load(db.inner()).await;
@@ -369,6 +436,7 @@ pub async fn auth_logout(db: tauri::State<'_, Db>) -> Result<AuthStatus, String>
 
     hold_token(None);
     sign_out();
+    let _ = clear_saved_session_token();
     // The keys were only ever in memory, and signing out is when that stops
     // being justified. A locked app holding a live TokenRouter key is a locked
     // app that can still spend money.
