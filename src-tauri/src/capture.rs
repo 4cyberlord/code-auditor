@@ -64,7 +64,7 @@ pub enum Mode {
     RightHalf(Rect),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Rect {
     x: i32,
     y: i32,
@@ -173,30 +173,20 @@ async fn capture_window_half(
     half: Half,
 ) -> Result<Option<Vec<Capture>>, String> {
     crate::auth::require()?;
-    let monitor = window
-        .current_monitor()
-        .map_err(|e| format!("Could not determine the Council Editor display: {e}"))?
-        .ok_or("Could not determine the display containing Council Editor.")?;
-    let size = monitor.size();
-    if size.width < 2 || size.height == 0 {
-        return Err("The current display is too small to split into left and right captures.".into());
-    }
-    let position = monitor.position();
-    let left_width = size.width / 2;
-    let rect = Rect {
-        x: if matches!(half, Half::Left) {
-            position.x
-        } else {
-            position.x + left_width as i32
-        },
-        y: position.y,
-        width: if matches!(half, Half::Left) {
-            left_width
-        } else {
-            size.width - left_width
-        },
-        height: size.height,
-    };
+    let display = display_rect_for_window(&window)?;
+    let rect = split_display_rect(display, half)?;
+    crate::trace(&format!(
+        "capture {} half from display x={}, y={}, width={}, height={} -> x={}, y={}, width={}, height={}",
+        if matches!(half, Half::Left) { "left" } else { "right" },
+        display.x,
+        display.y,
+        display.width,
+        display.height,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+    ));
     let mode = if matches!(half, Half::Left) {
         Mode::LeftHalf(rect)
     } else {
@@ -205,6 +195,111 @@ async fn capture_window_half(
     tauri::async_runtime::spawn_blocking(move || dispatch(mode))
         .await
         .map_err(|e| format!("Capture task failed: {e}"))?
+}
+
+/// Split one display frame into adjacent, whole-height left and right halves.
+/// The odd pixel belongs to the right side so both rectangles meet exactly.
+fn split_display_rect(display: Rect, half: Half) -> Result<Rect, String> {
+    if display.width < 2 || display.height == 0 {
+        return Err(
+            "The current display is too small to split into left and right captures.".into(),
+        );
+    }
+    let left_width = display.width / 2;
+    Ok(match half {
+        Half::Left => Rect {
+            x: display.x,
+            y: display.y,
+            width: left_width,
+            height: display.height,
+        },
+        Half::Right => Rect {
+            x: display.x + left_width as i32,
+            y: display.y,
+            width: display.width - left_width,
+            height: display.height,
+        },
+    })
+}
+
+/// `screencapture -R` takes the Core Graphics global display coordinate space.
+/// Tauri exposes scaled physical monitor dimensions, which on Retina displays
+/// can be too large for that command and make a half-screen crop become a full
+/// screen. Match the window's monitor to the same Core Graphics display and use
+/// its unscaled bounds instead.
+#[cfg(target_os = "macos")]
+fn display_rect_for_window(window: &tauri::WebviewWindow) -> Result<Rect, String> {
+    use core_graphics::display::CGDisplay;
+
+    let monitor = window
+        .current_monitor()
+        .map_err(|e| format!("Could not determine the Council Editor display: {e}"))?
+        .ok_or("Could not determine the display containing Council Editor.")?;
+    let scale = monitor.scale_factor();
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err("The current display has an invalid scale factor.".into());
+    }
+    let position = monitor.position();
+    let expected_x = position.x as f64 / scale;
+    let expected_y = position.y as f64 / scale;
+    const EPSILON: f64 = 0.5;
+
+    let bounds = CGDisplay::active_displays()
+        .map_err(|e| format!("Could not enumerate macOS displays: {e:?}"))?
+        .into_iter()
+        .map(CGDisplay::new)
+        .map(|display| display.bounds())
+        .find(|bounds| {
+            (bounds.origin.x - expected_x).abs() < EPSILON
+                && (bounds.origin.y - expected_y).abs() < EPSILON
+        })
+        .ok_or("Could not match the Council Editor window to a macOS display.")?;
+
+    core_graphics_rect(
+        bounds.origin.x,
+        bounds.origin.y,
+        bounds.size.width,
+        bounds.size.height,
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn display_rect_for_window(window: &tauri::WebviewWindow) -> Result<Rect, String> {
+    let monitor = window
+        .current_monitor()
+        .map_err(|e| format!("Could not determine the Council Editor display: {e}"))?
+        .ok_or("Could not determine the display containing Council Editor.")?;
+    let position = monitor.position();
+    let size = monitor.size();
+    Ok(Rect {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn core_graphics_rect(x: f64, y: f64, width: f64, height: f64) -> Result<Rect, String> {
+    let left = x.round();
+    let top = y.round();
+    let right = (x + width).round();
+    let bottom = (y + height).round();
+    if !left.is_finite()
+        || !top.is_finite()
+        || !right.is_finite()
+        || !bottom.is_finite()
+        || right <= left
+        || bottom <= top
+    {
+        return Err("macOS returned invalid bounds for the Council Editor display.".into());
+    }
+    Ok(Rect {
+        x: left as i32,
+        y: top as i32,
+        width: (right - left) as u32,
+        height: (bottom - top) as u32,
+    })
 }
 
 /// Reads a capture back off disk.
@@ -601,7 +696,7 @@ fn capture_blocking(_mode: Mode) -> Result<Option<Vec<Capture>>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::base64;
+    use super::{base64, split_display_rect, Half, Rect};
 
     #[test]
     fn base64_matches_the_reference_vectors() {
@@ -622,5 +717,68 @@ mod tests {
         assert_eq!(encoded.len(), 344);
         assert!(encoded.starts_with("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g"));
         assert!(encoded.ends_with("+/w=="));
+    }
+
+    #[test]
+    fn standard_display_splits_into_full_height_halves() {
+        let display = Rect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        assert_eq!(
+            split_display_rect(display, Half::Left).unwrap(),
+            Rect {
+                x: 0,
+                y: 0,
+                width: 960,
+                height: 1080
+            }
+        );
+        assert_eq!(
+            split_display_rect(display, Half::Right).unwrap(),
+            Rect {
+                x: 960,
+                y: 0,
+                width: 960,
+                height: 1080
+            }
+        );
+    }
+
+    #[test]
+    fn retina_display_uses_its_native_capture_frame() {
+        // 1280 x 832 is the Core Graphics frame of a 2560 x 1664 Retina panel.
+        let display = Rect {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 832,
+        };
+        assert_eq!(split_display_rect(display, Half::Left).unwrap().width, 640);
+        let right = split_display_rect(display, Half::Right).unwrap();
+        assert_eq!(right.x, 640);
+        assert_eq!(right.width, 640);
+        assert_eq!(right.height, 832);
+    }
+
+    #[test]
+    fn odd_width_and_offset_display_has_no_gap_or_overlap() {
+        let display = Rect {
+            x: -1441,
+            y: 37,
+            width: 1441,
+            height: 900,
+        };
+        let left = split_display_rect(display, Half::Left).unwrap();
+        let right = split_display_rect(display, Half::Right).unwrap();
+        assert_eq!(left.x, -1441);
+        assert_eq!(left.y, 37);
+        assert_eq!(left.height, 900);
+        assert_eq!(right.y, 37);
+        assert_eq!(right.height, 900);
+        assert_eq!(left.x + left.width as i32, right.x);
+        assert_eq!(left.width + right.width, display.width);
     }
 }

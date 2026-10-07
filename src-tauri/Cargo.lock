@@ -603,6 +603,7 @@ version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "core-graphics",
  "futures-util",
  "global-hotkey",
  "keyring",

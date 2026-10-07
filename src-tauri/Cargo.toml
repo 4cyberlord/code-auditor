@@ -56,6 +56,7 @@ objc2-foundation = "0.3"
 objc2-core-foundation = "0.3"
 window-vibrancy = "0.6"
 base64 = "0.22"
+core-graphics = "0.25"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
