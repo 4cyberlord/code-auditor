@@ -172,7 +172,101 @@ export const GATEWAY = {
   accent: "#f2994a",
 } as const;
 
-export type GatewayId = typeof GATEWAY.id;
+// ------------------------------------------------------------------ Wiro gateway
+
+/**
+ * Wiro is a unified AI API platform with an OpenAI-compatible LLM endpoint.
+ *
+ * Base URL  : https://llm.wiro.ai/v1
+ * Auth      : Authorization: Bearer <api-key> for API-Key-Only projects, or
+ *             Authorization: Bearer <api-key>:<api-secret> for Signature-Based
+ *             projects on Wiro's Direct LLM Gateway.
+ * Model IDs : vendor-prefixed, but with a different namespace than TokenRouter.
+ *             TokenRouter uses  "anthropic/claude-opus-5"
+ *             Wiro uses         "claude/opus-5"
+ *             TokenRouter uses  "google/gemini-3.7-flash"
+ *             Wiro uses         "google/gemini-3.7-flash"  (same for Google)
+ *             TokenRouter uses  "openai/gpt-5.6-sol"
+ *             Wiro uses         "openai/gpt-5-6-sol"       (hyphens, not dots)
+ *
+ * Wiro has its own Keychain entry, so changing routers never overwrites a
+ * TokenRouter key. Both credentials remain available when switching back.
+ *
+ * Docs: https://wiro.ai/docs/completions-api
+ */
+export const WIRO_GATEWAY = {
+  /** Also the Keychain entry id. */
+  id: "wiro",
+  label: "Wiro",
+  vendor: "Wiro AI",
+  keyUrl: "https://wiro.ai/auth/signup",
+  keyHint: "sk-…",
+  defaultBaseUrl: "https://llm.wiro.ai/v1",
+  modelsUrl: "https://wiro.ai/models",
+  accent: "#6c47ff",
+  /**
+   * Wiro's model ids for each provider pane, verified against their docs
+   * (October 2026). All are free-text fields in Settings so any new model
+   * from Wiro's catalogue is a one-line edit, not a rebuild.
+   */
+  defaultRouterModels: {
+    openai: "openai/gpt-5-6-sol",
+    moonshot: "moonshotai/kimi-k3",
+    anthropic: "claude/opus-5",
+    gemini: "google/gemini-3.7-flash",
+  } as Record<ProviderId, string>,
+} as const;
+
+/**
+ * Every gateway the app knows about, in display order.
+ *
+ * Used by the Settings router selector to let users switch between gateways
+ * without typing a URL by hand. Adding a new gateway here is all that is
+ * required — the selector, the base-URL field and the router-model fields all
+ * drive off this list.
+ */
+export interface GatewayPreset {
+  id: GatewayId;
+  label: string;
+  vendor: string;
+  keyUrl: string;
+  keyHint: string;
+  defaultBaseUrl: string;
+  modelsUrl: string;
+  accent: string;
+  /** Default router model ids for the four provider panes. */
+  defaultRouterModels: Record<ProviderId, string>;
+}
+
+export const KNOWN_GATEWAYS: GatewayPreset[] = [
+  {
+    id: GATEWAY.id,
+    label: GATEWAY.label,
+    vendor: GATEWAY.vendor,
+    keyUrl: GATEWAY.keyUrl,
+    keyHint: GATEWAY.keyHint,
+    defaultBaseUrl: GATEWAY.defaultBaseUrl,
+    modelsUrl: GATEWAY.modelsUrl,
+    accent: GATEWAY.accent,
+    defaultRouterModels: {
+      openai: PROVIDERS.openai.defaultRouterModel,
+      moonshot: PROVIDERS.moonshot.defaultRouterModel,
+      anthropic: PROVIDERS.anthropic.defaultRouterModel,
+      gemini: PROVIDERS.gemini.defaultRouterModel,
+    },
+  },
+  {
+    id: WIRO_GATEWAY.id,
+    label: WIRO_GATEWAY.label,
+    vendor: WIRO_GATEWAY.vendor,
+    keyUrl: WIRO_GATEWAY.keyUrl,
+    keyHint: WIRO_GATEWAY.keyHint,
+    defaultBaseUrl: WIRO_GATEWAY.defaultBaseUrl,
+    modelsUrl: WIRO_GATEWAY.modelsUrl,
+    accent: WIRO_GATEWAY.accent,
+    defaultRouterModels: WIRO_GATEWAY.defaultRouterModels,
+  },
+];
 
 // ----------------------------------------------------------------- the panel
 
@@ -305,6 +399,12 @@ export function agentSpec(id: AgentId): AgentSpec {
  * travels over is either that vendor or the gateway. It doubles as the Keychain
  * entry id, because a credential belongs to whoever you are actually talking to.
  */
+export type GatewayId = typeof GATEWAY.id | typeof WIRO_GATEWAY.id;
+
+/** Finds the saved gateway preset, retaining TokenRouter for older settings. */
+export const gatewayPreset = (id: string | null | undefined): GatewayPreset =>
+  KNOWN_GATEWAYS.find((gateway) => gateway.id === id) ?? KNOWN_GATEWAYS[0];
+
 export type TransportId = ProviderId | GatewayId;
 
 /**

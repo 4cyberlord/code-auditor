@@ -4,6 +4,7 @@ import { create } from "zustand";
 import {
   ALL_AGENTS,
   GATEWAY,
+  gatewayPreset,
   STORAGE,
   PROVIDERS,
   PROVIDER_ORDER,
@@ -12,6 +13,7 @@ import {
   agentSpec,
   extraAgent,
   type AgentId,
+  type GatewayId,
   type ProviderId,
   type TransportId,
 } from "./models.ts";
@@ -541,6 +543,8 @@ interface Settings {
    * variable in it.
    */
   useGateway: boolean;
+  /** Which saved router supplies the credential and OpenAI-compatible wire. */
+  gatewayId: GatewayId;
   /** The gateway's endpoint. Editable for self-hosted or regional routers. */
   gatewayBaseUrl: string;
   /**
@@ -994,6 +998,7 @@ const defaultSettings = (): Settings => ({
   mcqModel: "anthropic/claude-fable-5",
   mcqEndpoint: "auto",
   useGateway: true,
+  gatewayId: GATEWAY.id,
   gatewayBaseUrl: GATEWAY.defaultBaseUrl,
   // On by default. The panel alone answers "did four models agree", which is a
   // weaker question than "does this run" — and runtime and memory only exist at
@@ -1144,6 +1149,13 @@ function normalizeSettings(s: Settings): Settings {
         : base.mcqModel,
     mcqEndpoint: normalizeMcqEndpoint(s.mcqEndpoint),
     useGateway: typeof s.useGateway === "boolean" ? s.useGateway : base.useGateway,
+    // Older settings predate distinct gateway credentials. Infer Wiro from its
+    // endpoint so an existing Wiro setup comes back as Wiro after upgrading.
+    gatewayId:
+      s.gatewayId === "wiro" ||
+      (typeof s.gatewayBaseUrl === "string" && s.gatewayBaseUrl.includes("llm.wiro.ai"))
+        ? "wiro"
+        : GATEWAY.id,
     gatewayBaseUrl:
       typeof s.gatewayBaseUrl === "string" && s.gatewayBaseUrl.trim()
         ? s.gatewayBaseUrl.trim()
@@ -1435,18 +1447,18 @@ export function routeFor(
   if (extra) {
     if (!(s.useGateway && gatewayKey)) return null;
     return {
-      provider: GATEWAY.id,
+      provider: s.gatewayId,
       model: extra.model,
-      baseUrl: s.gatewayBaseUrl || GATEWAY.defaultBaseUrl,
+      baseUrl: s.gatewayBaseUrl || gatewayPreset(s.gatewayId).defaultBaseUrl,
       viaGateway: true,
     };
   }
 
   if (s.useGateway && gatewayKey) {
     return {
-      provider: GATEWAY.id,
+      provider: s.gatewayId,
       model: s.routerModels[provider as ProviderId] || PROVIDERS[provider as ProviderId].defaultRouterModel,
-      baseUrl: s.gatewayBaseUrl || GATEWAY.defaultBaseUrl,
+      baseUrl: s.gatewayBaseUrl || gatewayPreset(s.gatewayId).defaultBaseUrl,
       viaGateway: true,
     };
   }
@@ -1609,7 +1621,7 @@ export const useStore = create<State>((set, get) => ({
   refreshKeys: async () => {
     const [entries, gatewayKey, storageKey] = await Promise.all([
       Promise.all(PROVIDER_ORDER.map(async (p) => [p, await bridge.hasApiKey(p)] as const)),
-      bridge.hasApiKey(GATEWAY.id),
+      bridge.hasApiKey(get().settings.gatewayId),
       bridge.hasApiKey(STORAGE.id),
     ]);
     const keys = Object.fromEntries(entries) as Record<ProviderId, boolean>;
@@ -2043,7 +2055,13 @@ export const useStore = create<State>((set, get) => ({
       const endpointByModel = Object.fromEntries(
         models.map((m) => [m, endpointForModel(settings, m)])
       );
-      const results = await bridge.probeModels(models, settings.gatewayBaseUrl, testVision, endpointByModel);
+      const results = await bridge.probeModels(
+        models,
+        settings.gatewayBaseUrl,
+        settings.gatewayId,
+        testVision,
+        endpointByModel
+      );
       const at = Date.now();
       const probes = { ...get().settings.probes };
       for (const r of results) {
@@ -2356,14 +2374,14 @@ export const useStore = create<State>((set, get) => ({
             runId: `tiebreak-${Date.now().toString(36)}`,
             agentId: "extract-tiebreak",
             attemptId: newAttemptId(),
-            provider: GATEWAY.id,
+            provider: settings.gatewayId,
             model: arbiter,
             systemPrompt: tieBreakSystemPrompt(),
             userText: tieBreakUserPrompt(disputed, imageManifest(images)),
             images: payload,
             maxTokens: Math.min(settings.maxTokens, 1024),
             temperature: 0,
-            baseUrl: settings.gatewayBaseUrl || GATEWAY.defaultBaseUrl,
+            baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
             endpoint: endpointForModel(settings, arbiter),
           });
           agreement = applyTieBreak(
@@ -3345,7 +3363,7 @@ export const useStore = create<State>((set, get) => ({
             runId: `council-chat-${Date.now().toString(36)}`,
             agentId: `council-chat:${model}`,
             attemptId: newAttemptId(),
-            provider: GATEWAY.id,
+            provider: s.settings.gatewayId,
             model,
             systemPrompt: councilFollowupSystemPrompt(),
             userText: councilFollowupUserPrompt({
@@ -3357,7 +3375,7 @@ export const useStore = create<State>((set, get) => ({
             images: [],
             maxTokens: s.settings.maxTokens,
             temperature: 0,
-            baseUrl: s.settings.gatewayBaseUrl || GATEWAY.defaultBaseUrl,
+            baseUrl: s.settings.gatewayBaseUrl || gatewayPreset(s.settings.gatewayId).defaultBaseUrl,
             endpoint: endpointForModel(s.settings, model),
           });
           return {
@@ -3552,9 +3570,9 @@ function councilAlive(c: CouncilState, runId: string): boolean {
  */
 function gatewayRoute(model: string, s: Settings): { provider: TransportId; model: string; baseUrl: string } {
   return {
-    provider: GATEWAY.id,
+    provider: s.gatewayId,
     model: model.trim(),
-    baseUrl: s.gatewayBaseUrl || GATEWAY.defaultBaseUrl,
+    baseUrl: s.gatewayBaseUrl || gatewayPreset(s.gatewayId).defaultBaseUrl,
   };
 }
 
@@ -3983,14 +4001,14 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
         runId,
         agentId: "council-spec",
         attemptId: newAttemptId(),
-        provider: GATEWAY.id,
+        provider: settings.gatewayId,
         model: specModel,
         systemPrompt: testSpecSystemPrompt(),
         userText: testSpecUserPrompt({ question: problem, docket: candidateDocket(field), languages, knowledge }),
         images: [],
         maxTokens: settings.maxTokens,
         temperature: 0,
-        baseUrl: settings.gatewayBaseUrl || GATEWAY.defaultBaseUrl,
+        baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
         endpoint: endpointForModel(settings, specModel),
       });
       suites = parseTestSuites(specText);
@@ -4218,7 +4236,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       runId,
       agentId: "council-synthesis",
       attemptId: newAttemptId(),
-      provider: GATEWAY.id,
+      provider: settings.gatewayId,
       model: synthModel,
       systemPrompt: synthesisSystemPrompt(),
       userText: synthesisUserPrompt({
@@ -4232,7 +4250,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       images: [],
       maxTokens: settings.maxTokens,
       temperature: 0,
-      baseUrl: settings.gatewayBaseUrl || GATEWAY.defaultBaseUrl,
+      baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
       endpoint: endpointForModel(settings, synthModel),
     });
   } catch (err) {

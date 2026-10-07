@@ -206,6 +206,13 @@ function Workbench() {
             browser preview
           </span>
         )}
+        <button
+          className="btn tiny ghost"
+          onClick={() => setSettingsOpen(true)}
+          title="Open Settings (⌘,)"
+        >
+          Settings
+        </button>
       </div>
 
       {/* The panes are showing a past run. Said plainly, because every control

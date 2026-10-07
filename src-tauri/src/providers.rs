@@ -206,7 +206,7 @@ pub struct LocalQwenResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodingModelStepRequest {
-    /// "openai" | "moonshot" | "tokenrouter"; direct Anthropic/Gemini tools are
+    /// "openai" | "moonshot" | "tokenrouter" | "wiro"; direct Anthropic/Gemini tools are
     /// intentionally not claimed here until their native tool wires are mapped.
     pub provider: String,
     pub model: String,
@@ -242,7 +242,7 @@ pub async fn run_coding_model_step(
 ) -> Result<LocalQwenResponse, String> {
     crate::auth::require()?;
     let provider = req.provider.trim();
-    if !matches!(provider, "openai" | "moonshot" | "tokenrouter") {
+    if !matches!(provider, "openai" | "moonshot" | "tokenrouter" | "wiro") {
         return Err(format!(
             "{provider} is not available for Coding yet. Choose a TokenRouter, OpenAI, or Moonshot chat model."
         ));
@@ -263,6 +263,7 @@ pub async fn run_coding_model_step(
         .unwrap_or_else(|| match provider {
             "openai" => "https://api.openai.com/v1".into(),
             "tokenrouter" => "https://api.tokenrouter.com/v1".into(),
+            "wiro" => "https://llm.wiro.ai/v1".into(),
             _ => "https://api.moonshot.ai/v1".into(),
         });
     let mut body = json!({
@@ -295,7 +296,7 @@ pub async fn run_coding_model_step(
                 .json(&body_c)
                 .timeout(ONCE_TIMEOUT)
         },
-        provider == GATEWAY,
+        is_gateway(provider),
     )
     .await
     .map_err(|e| format!("{provider}: {}", transport_detail(&e)))?;
@@ -682,7 +683,7 @@ pub async fn run_once(req: RunRequest) -> Result<String, String> {
         }
         rb
     };
-    let resp = send_governed(build, req.provider == GATEWAY)
+    let resp = send_governed(build, is_gateway(&req.provider))
         .await
         .map_err(|e| format!("{}: {}", req.provider, transport_detail(&e)))?;
     let status = resp.status();
@@ -723,7 +724,7 @@ async fn run_once_responses(req: &RunRequest) -> Result<String, String> {
             .json(&body)
             .timeout(ONCE_TIMEOUT)
     };
-    let resp = send_governed(build, req.provider == GATEWAY)
+    let resp = send_governed(build, is_gateway(&req.provider))
         .await
         .map_err(|e| format!("{}: {}", req.provider, transport_detail(&e)))?;
     let status = resp.status();
@@ -768,7 +769,7 @@ async fn execute(
 
     let resp = tokio::select! {
         _ = token.cancelled() => return Ok(None),
-        r = send_governed(build, req.provider == GATEWAY) => {
+        r = send_governed(build, is_gateway(&req.provider)) => {
             r.map_err(|e| format!("{}: {}", req.provider, transport_detail(&e)))?
         }
     };
@@ -922,7 +923,7 @@ async fn execute_responses(
 
     let resp = tokio::select! {
         _ = token.cancelled() => return Ok(None),
-        r = send_governed(build, req.provider == GATEWAY) => {
+        r = send_governed(build, is_gateway(&req.provider)) => {
             r.map_err(|e| format!("{}: {}", req.provider, transport_detail(&e)))?
         }
     };
@@ -1062,6 +1063,7 @@ pub async fn probe_models(
     app: AppHandle,
     models: Vec<String>,
     base_url: Option<String>,
+    gateway_id: Option<String>,
     // Also send each model a tiny picture and see whether it can describe it.
     test_vision: Option<bool>,
     // Which wire each model speaks, if it is not the chat wire. A missing
@@ -1070,10 +1072,17 @@ pub async fn probe_models(
 ) -> Result<Vec<ProbeResult>, String> {
     let want_vision = test_vision.unwrap_or(false);
     let endpoint_by_model = endpoint_by_model.unwrap_or_default();
-    let key = secrets::read_api_key("tokenrouter")?;
+    let gateway_id = gateway_id.unwrap_or_else(|| "tokenrouter".into());
+    if !is_gateway(&gateway_id) {
+        return Err("Unknown gateway.".into());
+    }
+    let key = secrets::read_api_key(&gateway_id)?;
     let base = base_url
         .filter(|b| !b.trim().is_empty())
-        .unwrap_or_else(|| "https://api.tokenrouter.com/v1".into());
+        .unwrap_or_else(|| match gateway_id.as_str() {
+            "wiro" => "https://llm.wiro.ai/v1".into(),
+            _ => "https://api.tokenrouter.com/v1".into(),
+        });
     let url = format!("{}/chat/completions", base.trim_end_matches('/'));
     let responses_url = format!("{}/responses", base.trim_end_matches('/'));
     let client = http_client()?;
@@ -1357,11 +1366,21 @@ async fn probe_vision(
 /// to that is the only authoritative list -- it reflects this key, this account
 /// and today.
 #[tauri::command]
-pub async fn list_gateway_models(base_url: Option<String>) -> Result<Vec<String>, String> {
-    let key = secrets::read_api_key("tokenrouter")?;
+pub async fn list_gateway_models(
+    base_url: Option<String>,
+    gateway_id: Option<String>,
+) -> Result<Vec<String>, String> {
+    let gateway_id = gateway_id.unwrap_or_else(|| "tokenrouter".into());
+    if !is_gateway(&gateway_id) {
+        return Err("Unknown gateway.".into());
+    }
+    let key = secrets::read_api_key(&gateway_id)?;
     let base = base_url
         .filter(|b| !b.trim().is_empty())
-        .unwrap_or_else(|| "https://api.tokenrouter.com/v1".into());
+        .unwrap_or_else(|| match gateway_id.as_str() {
+            "wiro" => "https://llm.wiro.ai/v1".into(),
+            _ => "https://api.tokenrouter.com/v1".into(),
+        });
     let url = format!("{}/models", base.trim_end_matches('/'));
 
     // The listing call also goes through the budget: before this it went out
@@ -1496,7 +1515,9 @@ const RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The transport whose budget this is. Direct vendor calls have their own,
 /// far larger, limits and must not be made to wait behind the gateway's.
-const GATEWAY: &str = "tokenrouter";
+fn is_gateway(provider: &str) -> bool {
+    matches!(provider, "tokenrouter" | "wiro")
+}
 
 struct Gate {
     /// When each still-counting request was admitted, oldest first.
@@ -1680,13 +1701,14 @@ fn build_request(
 ) -> Result<(String, Vec<(String, String)>, Value), String> {
     let key = secrets::read_api_key(&req.provider)?;
     match req.provider.as_str() {
-        "openai" | "moonshot" | "tokenrouter" => {
+        "openai" | "moonshot" | "tokenrouter" | "wiro" => {
             let base = req
                 .base_url
                 .clone()
                 .unwrap_or_else(|| match req.provider.as_str() {
                     "openai" => "https://api.openai.com/v1".into(),
                     "tokenrouter" => "https://api.tokenrouter.com/v1".into(),
+                    "wiro" => "https://llm.wiro.ai/v1".into(),
                     _ => "https://api.moonshot.ai/v1".into(),
                 });
             let mut content = vec![json!({ "type": "text", "text": req.user_text })];
@@ -1819,7 +1841,7 @@ fn gemini_text(v: &Value) -> String {
 
 fn extract_delta(provider: &str, v: &Value) -> String {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" => v["choices"][0]["delta"]["content"]
+        "openai" | "moonshot" | "tokenrouter" | "wiro" => v["choices"][0]["delta"]["content"]
             .as_str()
             .unwrap_or_default()
             .to_string(),
@@ -1839,7 +1861,7 @@ fn extract_delta(provider: &str, v: &Value) -> String {
 
 fn extract_whole(provider: &str, v: &Value) -> String {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" => v["choices"][0]["message"]["content"]
+        "openai" | "moonshot" | "tokenrouter" | "wiro" => v["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or_default()
             .to_string(),
@@ -1860,7 +1882,7 @@ fn extract_whole(provider: &str, v: &Value) -> String {
 
 fn extract_usage(provider: &str, v: &Value) -> Option<Usage> {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" => {
+        "openai" | "moonshot" | "tokenrouter" | "wiro" => {
             let u = &v["usage"];
             u.is_object()
                 .then(|| (u["prompt_tokens"].as_u64(), u["completion_tokens"].as_u64()))

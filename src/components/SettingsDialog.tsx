@@ -8,6 +8,8 @@ import {
   EXTRA_AGENTS,
   FREE_ROUTER_MODELS,
   GATEWAY,
+  KNOWN_GATEWAYS,
+  gatewayPreset,
   agentSpec,
   PROVIDERS,
   PROVIDER_ORDER,
@@ -279,7 +281,7 @@ interface CodingModelChoice {
 }
 
 function supportsCodingTools(route: Route | null): boolean {
-  return !!route && ["openai", "moonshot", "tokenrouter"].includes(route.provider);
+  return !!route && ["openai", "moonshot", "tokenrouter", "wiro"].includes(route.provider);
 }
 
 function projectNameFromPath(path: string): string {
@@ -515,12 +517,14 @@ function GatewayCard() {
   const judgeProvider = useStore((s) => s.settings.judgeProvider);
   const extractors = useStore((s) => s.settings.extractors);
   const on = useStore((s) => s.settings.useGateway);
+  const gatewayId = useStore((s) => s.settings.gatewayId);
   const baseUrl = useStore((s) => s.settings.gatewayBaseUrl);
   const routerModels = useStore((s) => s.settings.routerModels);
   const patch = useStore((s) => s.patchSettings);
   const refreshKeys = useStore((s) => s.refreshKeys);
 
   const [draft, setDraft] = useState("");
+  const [draftSecret, setDraftSecret] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
@@ -604,7 +608,7 @@ function GatewayCard() {
     setListing(true);
     setListError(null);
     try {
-      const ids = await bridge.listGatewayModels(baseUrl);
+      const ids = await bridge.listGatewayModels(baseUrl, gatewayId);
       setAvailable(ids);
       // Kept in settings, not just in this component's state: the Council reads
       // it before a run to skip seats this key cannot reach, and Settings is not
@@ -616,7 +620,7 @@ function GatewayCard() {
     } finally {
       setListing(false);
     }
-  }, [baseUrl, patch]);
+  }, [baseUrl, gatewayId, patch]);
 
   // This waited for a button press, on the reasoning that the listing call
   // spends one of the key's five requests a minute and a pane's tokens matter
@@ -642,15 +646,24 @@ function GatewayCard() {
     setBusy(true);
     setNote(null);
     try {
-      await bridge.setApiKey(GATEWAY.id, draft.trim());
+      // Wiro's Direct LLM Gateway receives Signature-Based credentials as one
+      // Bearer value, `API_KEY:API_SECRET`. Keeping its two dashboard values in
+      // separate inputs avoids asking someone to infer that transport detail;
+      // API-Key-Only Wiro projects simply leave the secret blank.
+      const credential =
+        gatewayId === "wiro" && draftSecret.trim()
+          ? `${draft.trim()}:${draftSecret.trim()}`
+          : draft.trim();
+      await bridge.setApiKey(gatewayId, credential);
       setDraft("");
+      setDraftSecret("");
       await refreshKeys();
       // A different key is a different catalogue. Dropping what we knew makes
       // the effect ask again, rather than leaving the previous key's list on
       // screen looking like an answer about this one.
       setAvailable(null);
       setListError(null);
-      setNote("Saved. Every pane now routes through " + GATEWAY.label + ".");
+      setNote(`Saved. Every pane now routes through ${gatewayPreset(gatewayId).label}.`);
     } catch (err) {
       setNote(String(err));
     } finally {
@@ -661,7 +674,7 @@ function GatewayCard() {
   const remove = async () => {
     setBusy(true);
     try {
-      await bridge.deleteApiKey(GATEWAY.id);
+      await bridge.deleteApiKey(gatewayId);
       await refreshKeys();
       setAvailable(null);
       setListError(null);
@@ -671,11 +684,13 @@ function GatewayCard() {
     }
   };
 
+  const currentGateway = gatewayPreset(gatewayId);
+
   return (
     <div className="provider-card" data-accent="gateway">
       <div className="top">
-        <span className="dot" style={{ background: GATEWAY.accent }} />
-        <span className="name">{GATEWAY.label}</span>
+        <span className="dot" style={{ background: currentGateway.accent }} />
+        <span className="name">{currentGateway.label} Gateway</span>
         <span className="vendor">one key, every model</span>
         {active ? (
           <span className="badge" data-tone="good">
@@ -694,9 +709,43 @@ function GatewayCard() {
         <button
           className="switch"
           data-on={on}
-          aria-label="Route through TokenRouter"
+          aria-label={`Route through ${currentGateway.label}`}
           onClick={() => patch({ useGateway: !on })}
         />
+      </div>
+
+      <div className="row">
+        <label htmlFor="gw-router">Router Provider</label>
+        <div className="with-btn" style={{ gap: 8 }}>
+          {KNOWN_GATEWAYS.map((gw) => {
+            const isSelected = gatewayId === gw.id;
+            return (
+              <button
+                key={gw.label}
+                type="button"
+                className={"btn" + (isSelected ? "" : " ghost")}
+                style={{
+                  fontWeight: isSelected ? 600 : 400,
+                  borderColor: isSelected ? gw.accent : undefined,
+                  background: isSelected ? `${gw.accent}15` : undefined,
+                  color: isSelected ? gw.accent : undefined,
+                }}
+                onClick={() => {
+                  patch({
+                    gatewayId: gw.id,
+                    gatewayBaseUrl: gw.defaultBaseUrl,
+                    routerModels: { ...gw.defaultRouterModels },
+                  });
+                  void refreshKeys();
+                  setAvailable(null);
+                  setListError(null);
+                }}
+              >
+                {gw.label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <div className="row">
@@ -708,7 +757,7 @@ function GatewayCard() {
             type="password"
             autoComplete="off"
             spellCheck={false}
-            placeholder={saved ? "••••••••  saved" : GATEWAY.keyHint}
+            placeholder={saved ? "••••••••  saved" : currentGateway.keyHint}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -726,6 +775,25 @@ function GatewayCard() {
         </div>
       </div>
 
+      {gatewayId === "wiro" && (
+        <div className="row">
+          <label htmlFor="gw-secret">API Secret</label>
+          <input
+            id="gw-secret"
+            className="field mono"
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="Required for Signature-Based projects"
+            value={draftSecret}
+            onChange={(e) => setDraftSecret(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void save();
+            }}
+          />
+        </div>
+      )}
+
       <div className="row">
         <label htmlFor="gw-base">Base URL</label>
         <input
@@ -733,7 +801,7 @@ function GatewayCard() {
           className="field mono"
           value={baseUrl}
           spellCheck={false}
-          placeholder={GATEWAY.defaultBaseUrl}
+          placeholder={currentGateway.defaultBaseUrl}
           onChange={(e) => patch({ gatewayBaseUrl: e.target.value })}
         />
       </div>
@@ -931,12 +999,20 @@ function GatewayCard() {
         <button
           className="link"
           onClick={() => {
-            void openUrl(GATEWAY.modelsUrl).catch(() => window.open(GATEWAY.modelsUrl, "_blank"));
+            void openUrl(currentGateway.modelsUrl).catch(() => window.open(currentGateway.modelsUrl, "_blank"));
           }}
         >
           Browse the model list
         </button>
       </p>
+
+      {gatewayId === "wiro" && (
+        <p className="hint">
+          For Wiro Signature-Based authentication, enter both values from the Wiro dashboard. The
+          app stores them together as the credential required by Wiro&apos;s Direct LLM Gateway. For an
+          API-Key-Only Wiro project, leave API Secret blank.
+        </p>
+      )}
     </div>
   );
 }
@@ -953,6 +1029,7 @@ function ProviderCard({ id }: { id: ProviderId }) {
   const patch = useStore((s) => s.patchSettings);
   const refreshKeys = useStore((s) => s.refreshKeys);
   const routed = useStore((s) => s.settings.useGateway && s.gatewayKey);
+  const gatewayLabel = useStore((s) => gatewayPreset(s.settings.gatewayId).label);
 
   const [draftKey, setDraftKey] = useState("");
   const [busy, setBusy] = useState(false);
@@ -995,8 +1072,8 @@ function ProviderCard({ id }: { id: ProviderId }) {
             a particular credential exists. With the gateway on, a missing vendor
             key is not a problem to fix. */}
         {routed ? (
-          <span className="badge" data-tone="good" title={`Routed through ${GATEWAY.label}`}>
-            via {GATEWAY.label}
+          <span className="badge" data-tone="good" title={`Routed through ${gatewayLabel}`}>
+            via {gatewayLabel}
           </span>
         ) : saved ? (
           <span className="badge" data-tone="good">
@@ -1077,7 +1154,7 @@ function ProviderCard({ id }: { id: ProviderId }) {
           note
         ) : routed ? (
           <>
-            This pane uses {GATEWAY.label}, so its key and model are inactive but preserved. Turn
+            This pane uses {gatewayLabel}, so its key and model are inactive but preserved. Turn
             the gateway off to restore this pane&apos;s own credential.
           </>
         ) : (
@@ -1211,7 +1288,7 @@ function ReadingCard() {
 }
 
 const TABS = [
-  { id: "models" as const, label: "Models" },
+  { id: "api" as const, label: "API" },
   { id: "council" as const, label: "Council" },
   { id: "appearance" as const, label: "Appearance" },
   { id: "reading" as const, label: "Reading" },
@@ -1310,7 +1387,7 @@ function CouncilCard() {
     setListing(true);
     setListError(null);
     try {
-      setAvailable(await bridge.listGatewayModels(settings.gatewayBaseUrl));
+      setAvailable(await bridge.listGatewayModels(settings.gatewayBaseUrl, settings.gatewayId));
     } catch (err) {
       setAvailable(null);
       setListError(String(err).replace(/^Error:\s*/, ""));
@@ -1948,7 +2025,7 @@ export default function SettingsDialog() {
   // Seven cards in one scrolling column meant the database setup was below the
   // fold and effectively invisible. Tabs are here so every group of settings is
   // one click from the top, not one scroll.
-  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("models");
+  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("api");
   const open = useStore((s) => s.settingsOpen);
   const setOpen = useStore((s) => s.setSettingsOpen);
   const maxTokens = useStore((s) => s.settings.maxTokens);
@@ -2001,18 +2078,18 @@ export default function SettingsDialog() {
         </div>
 
         <div className="content">
-          {tab === "models" && (
+          {tab === "api" && (
             <>
-              <CodingSettingsCard />
               <SensitiveSettingsGate
-                title="Unlock model credentials"
-                detail="Confirm your PIN before adding, removing, or changing provider keys."
+                title="Unlock API settings"
+                detail="Confirm your PIN before adding, removing, or changing API keys."
               >
                 <GatewayCard />
                 {PROVIDER_ORDER.map((p) => (
                   <ProviderCard key={p} id={p} />
                 ))}
               </SensitiveSettingsGate>
+              <CodingSettingsCard />
             </>
           )}
 

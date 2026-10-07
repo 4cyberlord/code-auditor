@@ -600,9 +600,12 @@ export async function runnableLanguages(): Promise<string[]> {
  * account happens outside this app, so a hard-coded list can only ever be a
  * guess about somebody else's billing page.
  */
-export async function listGatewayModels(baseUrl?: string | null): Promise<string[]> {
+export async function listGatewayModels(
+  baseUrl?: string | null,
+  gatewayId: Extract<TransportId, "tokenrouter" | "wiro"> = "tokenrouter"
+): Promise<string[]> {
   if (!inTauri()) throw new Error(NOT_TAURI);
-  return invoke<string[]>("list_gateway_models", { baseUrl: baseUrl ?? null });
+  return invoke<string[]>("list_gateway_models", { baseUrl: baseUrl ?? null, gatewayId });
 }
 
 export interface ProbeResult {
@@ -627,6 +630,7 @@ export interface ProbeResult {
 export async function probeModels(
   models: string[],
   baseUrl?: string | null,
+  gatewayId: Extract<TransportId, "tokenrouter" | "wiro"> = "tokenrouter",
   testVision = false,
   // Which wire each model speaks when it is not chat. Passed through to the
   // probe so it does not mark a Responses-API model broken for being one.
@@ -636,6 +640,7 @@ export async function probeModels(
   return invoke<ProbeResult[]>("probe_models", {
     models,
     baseUrl: baseUrl ?? null,
+    gatewayId,
     testVision,
     endpointByModel: endpointByModel ?? null,
   });
