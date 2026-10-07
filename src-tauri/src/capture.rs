@@ -60,22 +60,42 @@ pub struct Capture {
 pub enum Mode {
     Region,
     Screen,
+    LeftHalf(Rect),
+    RightHalf(Rect),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Rect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
 }
 
 impl Mode {
-    fn flags(self) -> &'static [&'static str] {
+    fn flags(self) -> Vec<String> {
         match self {
             // -i interactive crosshair, same as Cmd-Shift-4. -x no shutter sound.
-            Mode::Region => &["-i", "-x"],
+            Mode::Region => vec!["-i".into(), "-x".into()],
             // No -i: grab the main display immediately and silently.
-            Mode::Screen => &["-x"],
+            Mode::Screen => vec!["-x".into()],
+            Mode::LeftHalf(rect) | Mode::RightHalf(rect) => vec![
+                "-x".into(),
+                format!("-R{},{},{},{}", rect.x, rect.y, rect.width, rect.height),
+            ],
         }
     }
     fn label(self) -> &'static str {
         match self {
             Mode::Region => "capture_selection",
             Mode::Screen => "capture_screen",
+            Mode::LeftHalf(_) => "capture_left_half",
+            Mode::RightHalf(_) => "capture_right_half",
         }
+    }
+
+    fn is_interactive(self) -> bool {
+        matches!(self, Mode::Region)
     }
 }
 
@@ -122,6 +142,67 @@ pub async fn capture_selection() -> Result<Option<Vec<Capture>>, String> {
 pub async fn capture_screen() -> Result<Option<Vec<Capture>>, String> {
     crate::auth::require()?;
     tauri::async_runtime::spawn_blocking(|| dispatch(Mode::Screen))
+        .await
+        .map_err(|e| format!("Capture task failed: {e}"))?
+}
+
+/// Captures the left half of the display containing the Council Editor window.
+#[tauri::command]
+pub async fn capture_left_half(
+    window: tauri::WebviewWindow,
+) -> Result<Option<Vec<Capture>>, String> {
+    capture_window_half(window, Half::Left).await
+}
+
+/// Captures the right half of the display containing the Council Editor window.
+#[tauri::command]
+pub async fn capture_right_half(
+    window: tauri::WebviewWindow,
+) -> Result<Option<Vec<Capture>>, String> {
+    capture_window_half(window, Half::Right).await
+}
+
+#[derive(Clone, Copy)]
+enum Half {
+    Left,
+    Right,
+}
+
+async fn capture_window_half(
+    window: tauri::WebviewWindow,
+    half: Half,
+) -> Result<Option<Vec<Capture>>, String> {
+    crate::auth::require()?;
+    let monitor = window
+        .current_monitor()
+        .map_err(|e| format!("Could not determine the Council Editor display: {e}"))?
+        .ok_or("Could not determine the display containing Council Editor.")?;
+    let size = monitor.size();
+    if size.width < 2 || size.height == 0 {
+        return Err("The current display is too small to split into left and right captures.".into());
+    }
+    let position = monitor.position();
+    let left_width = size.width / 2;
+    let rect = Rect {
+        x: if matches!(half, Half::Left) {
+            position.x
+        } else {
+            position.x + left_width as i32
+        },
+        y: position.y,
+        width: if matches!(half, Half::Left) {
+            left_width
+        } else {
+            size.width - left_width
+        },
+        height: size.height,
+    };
+    let mode = if matches!(half, Half::Left) {
+        Mode::LeftHalf(rect)
+    } else {
+        Mode::RightHalf(rect)
+    };
+    tauri::async_runtime::spawn_blocking(move || dispatch(mode))
         .await
         .map_err(|e| format!("Capture task failed: {e}"))?
 }
@@ -453,7 +534,7 @@ fn capture_blocking(mode: Mode) -> Result<Option<Vec<Capture>>, String> {
         // cancel is what makes a broken hotkey look like a dead key. stderr is
         // the difference: a cancel is silent, a refusal explains itself.
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        if matches!(mode, Mode::Screen) && stderr.is_empty() {
+        if !mode.is_interactive() && stderr.is_empty() {
             // Nothing to cancel in this mode, so an empty-handed exit is a
             // refusal that simply did not explain itself.
             return Err(

@@ -385,6 +385,18 @@ export async function captureScreen(): Promise<Capture[] | null> {
   return invoke<Capture[] | null>("capture_screen");
 }
 
+/** Captures the left half of the display containing the Council Editor window. */
+export async function captureLeftHalf(): Promise<Capture[] | null> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  return invoke<Capture[] | null>("capture_left_half");
+}
+
+/** Captures the right half of the display containing the Council Editor window. */
+export async function captureRightHalf(): Promise<Capture[] | null> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  return invoke<Capture[] | null>("capture_right_half");
+}
+
 export async function showCaptureExemptOverlay(): Promise<void> {
   if (!inTauri()) throw new Error(NOT_TAURI);
   await invoke("overlay_show");

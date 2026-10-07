@@ -27,6 +27,9 @@ export const SHORTCUTS = {
   captureScreen: "Control+Alt+S",
   /** R for Region: drag a box. */
   capture: "Control+Alt+R",
+  /** L / R for the automatic halves of the display containing the app. */
+  captureLeft: "Control+Alt+Shift+L",
+  captureRight: "Control+Alt+Shift+R",
   /** A for Audit: hand it to the agents. */
   solve: "Control+Alt+A",
 } as const;
@@ -35,13 +38,24 @@ export const SHORTCUTS = {
 export const SHORTCUT_LABELS = {
   captureScreen: "⌃⌥S",
   capture: "⌃⌥R",
+  captureLeft: "⌃⌥⇧L",
+  captureRight: "⌃⌥⇧R",
   solve: "⌃⌥A",
 } as const;
 
-async function captureIntoApp(whole: boolean) {
+type CaptureKind = "region" | "screen" | "left" | "right";
+
+async function captureIntoApp(kind: CaptureKind) {
   const store = useStore.getState();
   try {
-    const captures = whole ? await bridge.captureScreen() : await bridge.captureSelection();
+    const captures =
+      kind === "screen"
+        ? await bridge.captureScreen()
+        : kind === "left"
+          ? await bridge.captureLeftHalf()
+          : kind === "right"
+            ? await bridge.captureRightHalf()
+            : await bridge.captureSelection();
     // Null means Escape during selection. Nothing to report.
     if (!captures || captures.length === 0) return;
 
@@ -92,8 +106,10 @@ export function useGlobalShortcuts() {
     // Both the hotkeys and the tray menu items emit these, so there is one code
     // path whichever way the user asked.
     void Promise.all([
-      listen("shortcut://capture", () => void captureIntoApp(false)),
-      listen("shortcut://capture-screen", () => void captureIntoApp(true)),
+      listen("shortcut://capture", () => void captureIntoApp("region")),
+      listen("shortcut://capture-screen", () => void captureIntoApp("screen")),
+      listen("shortcut://capture-left", () => void captureIntoApp("left")),
+      listen("shortcut://capture-right", () => void captureIntoApp("right")),
       listen("shortcut://solve", solveNow),
     ])
       .then((fns) => {

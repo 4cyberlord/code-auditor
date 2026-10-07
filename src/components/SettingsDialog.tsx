@@ -1786,6 +1786,8 @@ function CouncilCard() {
 const SHORTCUTS = [
   { keys: "\u2303\u2325S", what: "Capture the whole screen", env: "CODE_AUDITOR_SCREEN_KEY" },
   { keys: "\u2303\u2325R", what: "Capture a region", env: "CODE_AUDITOR_CAPTURE_KEY" },
+  { keys: "\u2303\u2325\u21e7L", what: "Capture the left half of this app's display", env: "CODE_AUDITOR_CAPTURE_LEFT_KEY" },
+  { keys: "\u2303\u2325\u21e7R", what: "Capture the right half of this app's display", env: "CODE_AUDITOR_CAPTURE_RIGHT_KEY" },
   { keys: "\u2303\u2325A", what: "Solve what is loaded", env: "CODE_AUDITOR_SOLVE_KEY" },
 ];
 

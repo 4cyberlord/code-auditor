@@ -31,9 +31,11 @@ use tauri::{
 };
 
 /// Emitted when a global shortcut or the tray menu asks for a capture or a run.
-/// Both entry points land on the same two events, so the frontend has one path.
+/// Both entry points land on the same events, so the frontend has one path.
 pub const EV_CAPTURE: &str = "shortcut://capture";
 pub const EV_CAPTURE_SCREEN: &str = "shortcut://capture-screen";
+pub const EV_CAPTURE_LEFT: &str = "shortcut://capture-left";
+pub const EV_CAPTURE_RIGHT: &str = "shortcut://capture-right";
 pub const EV_SOLVE: &str = "shortcut://solve";
 pub const EV_SETTINGS: &str = "settings://open";
 pub const EV_WORKSPACE: &str = "workspace://select";
@@ -60,6 +62,8 @@ pub const EV_WORKSPACE: &str = "workspace://select";
 ///   O = Overlay  toggle the capture-exempt glass panel
 pub const ACCEL_CAPTURE_SCREEN: &str = "Control+Alt+S";
 pub const ACCEL_CAPTURE: &str = "Control+Alt+R";
+pub const ACCEL_CAPTURE_LEFT: &str = "Control+Alt+Shift+L";
+pub const ACCEL_CAPTURE_RIGHT: &str = "Control+Alt+Shift+R";
 pub const ACCEL_SOLVE: &str = "Control+Alt+A";
 pub const ACCEL_OVERLAY: &str = "Control+Alt+O";
 
@@ -248,6 +252,8 @@ pub fn run() {
     // attached at construction time -- see the comment on the plugin below.
     let cap_accel = accel("CODE_AUDITOR_CAPTURE_KEY", ACCEL_CAPTURE);
     let screen_accel = accel("CODE_AUDITOR_SCREEN_KEY", ACCEL_CAPTURE_SCREEN);
+    let left_accel = accel("CODE_AUDITOR_CAPTURE_LEFT_KEY", ACCEL_CAPTURE_LEFT);
+    let right_accel = accel("CODE_AUDITOR_CAPTURE_RIGHT_KEY", ACCEL_CAPTURE_RIGHT);
     let solve_accel = accel("CODE_AUDITOR_SOLVE_KEY", ACCEL_SOLVE);
     let overlay_accel = accel("CODE_AUDITOR_OVERLAY_KEY", ACCEL_OVERLAY);
 
@@ -268,6 +274,8 @@ pub fn run() {
 
         let cap_key = parse_accel(&cap_accel, ACCEL_CAPTURE);
         let screen_key = parse_accel(&screen_accel, ACCEL_CAPTURE_SCREEN);
+        let left_key = parse_accel(&left_accel, ACCEL_CAPTURE_LEFT);
+        let right_key = parse_accel(&right_accel, ACCEL_CAPTURE_RIGHT);
         let solve_key = parse_accel(&solve_accel, ACCEL_SOLVE);
         let overlay_key = parse_accel(&overlay_accel, ACCEL_OVERLAY);
 
@@ -287,6 +295,10 @@ pub fn run() {
                         EV_CAPTURE
                     } else if *shortcut == screen_key {
                         EV_CAPTURE_SCREEN
+                    } else if *shortcut == left_key {
+                        EV_CAPTURE_LEFT
+                    } else if *shortcut == right_key {
+                        EV_CAPTURE_RIGHT
                     } else if *shortcut == solve_key {
                         EV_SOLVE
                     } else if *shortcut == overlay_key {
@@ -341,6 +353,8 @@ pub fn run() {
             knowledge::knowledge_publish,
             capture::capture_selection,
             capture::capture_screen,
+            capture::capture_left_half,
+            capture::capture_right_half,
             capture::read_capture,
             overlay::overlay_show,
             overlay::overlay_hide,
@@ -426,6 +440,20 @@ pub fn run() {
                     true,
                     Some("Ctrl+Alt+S"),
                 )?;
+                let capture_left = MenuItem::with_id(
+                    app,
+                    "capture-left",
+                    "Capture Left Half",
+                    true,
+                    Some("Ctrl+Alt+Shift+L"),
+                )?;
+                let capture_right = MenuItem::with_id(
+                    app,
+                    "capture-right",
+                    "Capture Right Half",
+                    true,
+                    Some("Ctrl+Alt+Shift+R"),
+                )?;
                 let solve = MenuItem::with_id(app, "solve", "Solve", true, Some("Ctrl+Alt+A"))?;
                 let overlay =
                     MenuItem::with_id(app, "overlay", "Toggle Glass Overlay", true, Some("Ctrl+Alt+O"))?;
@@ -433,7 +461,7 @@ pub fn run() {
                 let quit = MenuItem::with_id(app, "quit", "Quit Council Editor", true, None::<&str>)?;
                 let menu = Menu::with_items(
                     app,
-                    &[&show, &capture, &capture_screen, &solve, &overlay, &sep, &quit],
+                    &[&show, &capture, &capture_screen, &capture_left, &capture_right, &solve, &overlay, &sep, &quit],
                 )?;
 
                 // A template image: black-on-transparent, recoloured by macOS for
@@ -443,7 +471,7 @@ pub fn run() {
                 TrayIconBuilder::with_id("main-tray")
                     .icon(icon)
                     .icon_as_template(true)
-                    .tooltip("Council Editor — ⌃⌥S screen, ⌃⌥R region, ⌃⌥A audit, ⌃⌥O overlay")
+                    .tooltip("Council Editor — ⌃⌥S screen, ⌃⌥R region, ⌃⌥⇧L left, ⌃⌥⇧R right")
                     .menu(&menu)
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "show" => reveal(app),
@@ -452,6 +480,12 @@ pub fn run() {
                         }
                         "capture-screen" => {
                             let _ = app.emit(EV_CAPTURE_SCREEN, ());
+                        }
+                        "capture-left" => {
+                            let _ = app.emit(EV_CAPTURE_LEFT, ());
+                        }
+                        "capture-right" => {
+                            let _ = app.emit(EV_CAPTURE_RIGHT, ());
                         }
                         "solve" => {
                             let _ = app.emit(EV_SOLVE, ());
@@ -473,6 +507,8 @@ pub fn run() {
 
                 let cap_key = parse_accel(&cap_accel, ACCEL_CAPTURE);
                 let screen_key = parse_accel(&screen_accel, ACCEL_CAPTURE_SCREEN);
+                let left_key = parse_accel(&left_accel, ACCEL_CAPTURE_LEFT);
+                let right_key = parse_accel(&right_accel, ACCEL_CAPTURE_RIGHT);
                 let solve_key = parse_accel(&solve_accel, ACCEL_SOLVE);
                 let overlay_key = parse_accel(&overlay_accel, ACCEL_OVERLAY);
 
@@ -481,15 +517,15 @@ pub fn run() {
                 // loud startup error. Say so where it will be seen.
                 match app
                     .global_shortcut()
-                    .register_multiple([cap_key, screen_key, solve_key, overlay_key])
+                    .register_multiple([cap_key, screen_key, left_key, right_key, solve_key, overlay_key])
                 {
                     Ok(()) => trace(&format!(
-                        "claimed {cap_accel} (region), {screen_accel} (screen), {solve_accel} (solve), {overlay_accel} (overlay)"
+                        "claimed {cap_accel} (region), {screen_accel} (screen), {left_accel} (left half), {right_accel} (right half), {solve_accel} (solve), {overlay_accel} (overlay)"
                     )),
                     Err(e) => eprintln!(
-                        "Could not claim {cap_accel} / {screen_accel} / {solve_accel} / {overlay_accel} as global \
+                        "Could not claim {cap_accel} / {screen_accel} / {left_accel} / {right_accel} / {solve_accel} / {overlay_accel} as global \
                          shortcuts: {e}. Another app probably owns one of them; the tray menu \
-                         still works, and CODE_AUDITOR_CAPTURE_KEY / CODE_AUDITOR_SCREEN_KEY / \
+                         still works, and CODE_AUDITOR_CAPTURE_KEY / CODE_AUDITOR_SCREEN_KEY / CODE_AUDITOR_CAPTURE_LEFT_KEY / CODE_AUDITOR_CAPTURE_RIGHT_KEY / \
                          CODE_AUDITOR_SOLVE_KEY / CODE_AUDITOR_OVERLAY_KEY move them."
                     ),
                 }
