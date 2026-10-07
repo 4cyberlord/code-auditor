@@ -515,19 +515,24 @@ pub fn run() {
                 // Another app owning the accelerator is the common failure, and a
                 // hotkey that does nothing with no explanation is worse than a
                 // loud startup error. Say so where it will be seen.
-                match app
-                    .global_shortcut()
-                    .register_multiple([cap_key, screen_key, left_key, right_key, solve_key, overlay_key])
-                {
-                    Ok(()) => trace(&format!(
-                        "claimed {cap_accel} (region), {screen_accel} (screen), {left_accel} (left half), {right_accel} (right half), {solve_accel} (solve), {overlay_accel} (overlay)"
-                    )),
-                    Err(e) => eprintln!(
-                        "Could not claim {cap_accel} / {screen_accel} / {left_accel} / {right_accel} / {solve_accel} / {overlay_accel} as global \
-                         shortcuts: {e}. Another app probably owns one of them; the tray menu \
-                         still works, and CODE_AUDITOR_CAPTURE_KEY / CODE_AUDITOR_SCREEN_KEY / CODE_AUDITOR_CAPTURE_LEFT_KEY / CODE_AUDITOR_CAPTURE_RIGHT_KEY / \
-                         CODE_AUDITOR_SOLVE_KEY / CODE_AUDITOR_OVERLAY_KEY move them."
-                    ),
+                // Register each key separately. macOS can reject one global
+                // shortcut because another app owns it; grouping them made that
+                // one collision disable every capture shortcut, including the
+                // left/right actions that did not conflict.
+                for (label, key, spec) in [
+                    ("region", cap_key, cap_accel.as_str()),
+                    ("screen", screen_key, screen_accel.as_str()),
+                    ("left half", left_key, left_accel.as_str()),
+                    ("right half", right_key, right_accel.as_str()),
+                    ("solve", solve_key, solve_accel.as_str()),
+                    ("overlay", overlay_key, overlay_accel.as_str()),
+                ] {
+                    match app.global_shortcut().register(key) {
+                        Ok(()) => trace(&format!("claimed {spec} ({label})")),
+                        Err(e) => eprintln!(
+                            "Could not claim {spec} ({label}): {e}. Another app probably owns it; the tray menu still works."
+                        ),
+                    }
                 }
             }
             Ok(())
