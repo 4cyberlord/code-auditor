@@ -2808,6 +2808,7 @@ textarea.field {
 .preview-scrim {
   background: rgba(0, 0, 0, 0.78);
   padding: 32px;
+  z-index: 100;
 }
 
 .preview {

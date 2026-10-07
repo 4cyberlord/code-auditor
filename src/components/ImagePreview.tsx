@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { createPortal } from "react-dom";
 import { humanBytes } from "@/lib/image";
 import type { ImageAsset } from "@/lib/store";
 
@@ -43,7 +44,10 @@ export default function ImagePreview({
   // The image can be removed from underneath us by the delete button.
   if (!image) return null;
 
-  return (
+  // InputBar lives in a transformed workspace panel. A fixed-position child of
+  // that panel is fixed to the bottom bar rather than the window, so mount the
+  // viewer at document level where it can cover and center over the whole app.
+  return createPortal(
     <div
       className="scrim preview-scrim"
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}
@@ -106,6 +110,7 @@ export default function ImagePreview({
           Esc closes{images.length > 1 ? " · arrow keys move between captures" : ""}
         </figcaption>
       </figure>
-    </div>
+    </div>,
+    document.body
   );
 }
