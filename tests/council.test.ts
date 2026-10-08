@@ -493,5 +493,24 @@ CONTRACT>>>`);
   check("model analytics reports missing evidence as null rate", missing[0].verifiedRate === null && missing[0].untested === 1);
 }
 
+
+{
+  const candidate = (letter: string, model: string) => cand(letter, FINAL("code", "print(1)"), model);
+  const run = (letter: string, state: "completed" | "canceled" | "timed_out", passed: number): CandidateRun =>
+    ({letter, ran: true, ok: true, passed, failed: 0, state, timedOut: state === "timed_out",
+      durationMs: 0, note: "", runtime: "python"} as CandidateRun);
+  const base = { candidates: [candidate("A", "alpha")], suites: [], runs: { A: run("A", "canceled", 8) },
+    revisedRuns: {}, reviews: [], judges: [], synthesis: "", winner: "A" };
+  const canceled = modelPerformance([base])[0];
+  check("canceled work cannot inflate passing rates", canceled.verified === 0 && canceled.canceled === 1);
+  check("unmeasured zero time is not an average", canceled.meanExecutionMs === null);
+  const timeout = modelPerformance([{...base, runs: {A: run("A", "timed_out", 8)}}])[0];
+  check("timeouts not credited as verified", timeout.verified === 0 && timeout.timedOut === 1);
+  const revision = { ...base, candidates: [{...candidate("A", "alpha"), revised: FINAL("fixed", "print(2)")}],
+    revisedRuns: { A: run("A", "completed", 9) } };
+  const repaired = modelPerformance([revision])[0];
+  check("canceled baseline cannot be counted as a verified repair", repaired.repairsVerified === 0);
+}
+
 console.log(fail ? `\n${fail} FAILURES\n` : "\nall council checks passed\n");
 process.exit(fail ? 1 : 0);
