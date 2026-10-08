@@ -274,7 +274,7 @@ fn read_file(root: &Path, path: &str) -> Result<String, String> {
     // complete race resistance requires descriptor-relative traversal.
     let mut options = fs::OpenOptions::new();
     options.read(true);
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
