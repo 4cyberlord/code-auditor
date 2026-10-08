@@ -490,25 +490,8 @@ fn shell_enabled() -> bool {
     )
 }
 
-/// Opt-in macOS Seatbelt profile. We fail closed if the sandbox launcher is
-/// missing. This is defense in depth, not a replacement for testing on device.
-/// The profile permits process execution and read-only system runtime paths,
-/// but only project-tree file writes. Network connections are not permitted.
-#[cfg(target_os = "macos")]
-fn restricted_shell_profile(root: &Path) -> Result<String, String> {
-    let path = root.to_str().ok_or("Project root is not valid UTF-8.")?;
-    // Scheme strings must not allow interpolation or injected policy forms.
-    let quoted = path.replace('\\', "\\\\").replace('"', "\\\"");
-    Ok(format!(
-        r#"(version 1)
-(deny default)
-(allow process*)
-(allow sysctl-read)
-(allow mach-lookup)
-(allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Library/Frameworks") (subpath "/opt/homebrew") (subpath "{quoted}"))
-(allow file-write* (subpath "{quoted}"))
-"#
-    ))
+fn restricted_shell_unavailable() -> Result<String, String> {
+    Err("Restricted shell mode is unavailable: the experimental macOS runner failed isolation validation. Execution refused.".into())
 }
 
 async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
@@ -520,29 +503,12 @@ async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
         return Err("Command contains an invalid null byte.".into());
     }
 
-    #[cfg(target_os = "macos")]
-    let mut shell = if restricted {
-        let binary = Path::new("/usr/bin/sandbox-exec");
-        if !binary.is_file() {
-            return Err("Restricted shell unavailable: macOS sandbox-exec is missing. Refusing to run.".into());
-        }
-        let mut sandbox = Command::new(binary);
-        sandbox.arg("-p").arg(restricted_shell_profile(root)?).arg("/bin/sh").arg("-lc").arg(command);
-        sandbox
-    } else {
-        let mut unrestricted = Command::new("sh");
-        unrestricted.arg("-lc").arg(command);
-        unrestricted
-    };
-    #[cfg(not(target_os = "macos"))]
-    let mut shell = {
-        if restricted {
-            return Err("Restricted shell mode is only supported on macOS.".into());
-        }
-        let mut unrestricted = Command::new("sh");
-        unrestricted.arg("-lc").arg(command);
-        unrestricted
-    };
+    // No fallback to raw shell when restricted isolation is requested.
+    if restricted {
+        return restricted_shell_unavailable();
+    }
+    let mut shell = Command::new("sh");
+    shell.arg("-lc").arg(command);
     // Do not forward API tokens or app credentials to model-requested subprocesses.
     shell.env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin");
     let output = timeout(
@@ -596,57 +562,10 @@ fn display_rel(root: &Path, path: &Path) -> String {
 mod security_tests {
     use super::*;
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn sandbox_profile_escapes_injected_quotes() {
-        let policy = restricted_shell_profile(Path::new("/tmp/project\\\" ) (allow network*) \\\"")).unwrap();
-        assert!(!policy.contains("(allow network*)\\n"));
-        assert!(policy.contains("(deny default)"));
-        assert!(policy.contains("(allow file-write*"));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[tokio::test]
-    async fn restricted_shell_enforces_project_write_and_network_denial() {
-        let root = std::env::temp_dir().join(format!("council-shell-test-{}", uuid::Uuid::new_v4()));
-        let project = root.join("project");
-        fs::create_dir_all(&project).unwrap();
-        // macOS temp_dir() may be /var/folders while the kernel resolves it
-        // through /private/var/folders. The production entrypoint always
-        // canonicalizes project roots; the test must do the same.
-        let project = project.canonicalize().unwrap();
-        let outside = root.join("outside.txt");
-        let policy = restricted_shell_profile(&project).unwrap();
-        let run = |command: &'static str, profile: String, dir: PathBuf| async move {
-            Command::new("/usr/bin/sandbox-exec")
-                .arg("-p").arg(profile).arg("/bin/sh").arg("-c").arg(command)
-                .current_dir(dir)
-                .output().await.expect("sandbox-exec should launch")
-        };
-        let allowed = run("printf ok > inside.txt", policy.clone(), project.clone()).await;
-        assert!(
-            allowed.status.success(),
-            "project write denied: exit={} stdout={:?} stderr={:?} profile={:?} project={:?}",
-            allowed.status,
-            String::from_utf8_lossy(&allowed.stdout),
-            String::from_utf8_lossy(&allowed.stderr),
-            policy,
-            project
-        );
-        assert_eq!(fs::read_to_string(project.join("inside.txt")).unwrap(), "ok");
-        let blocked = run("printf breach > ../outside.txt", policy.clone(), project.clone()).await;
-        assert!(!blocked.status.success(), "outside-project write was permitted");
-        assert!(!outside.exists(), "outside-project file was created");
-        // Establish a real listening socket first: probing a closed port could
-        // falsely pass even when the sandbox permits network operations.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let network = Command::new("/usr/bin/sandbox-exec")
-            .arg("-p").arg(policy).arg("/usr/bin/nc").arg("-G").arg("2")
-            .arg("-z").arg("127.0.0.1").arg(port.to_string())
-            .current_dir(&project).output().await.unwrap();
-        assert!(!network.status.success(), "sandbox unexpectedly permitted local TCP connect");
-        fs::remove_dir_all(root).unwrap();
+    fn restricted_shell_is_disabled_until_validated() {
+        let err = restricted_shell_unavailable().unwrap_err();
+        assert!(err.contains("refused"));
     }
 
     #[test]
