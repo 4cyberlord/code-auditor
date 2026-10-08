@@ -1,3 +1,5 @@
+import { routeProblem, routingGuidance } from "./problemRouting.ts";
+
 /**
  * Turning a screenshot into structured engineering context.
  *
@@ -68,6 +70,12 @@ export const EXTRACTION_SYSTEM = `
 You are reading a screenshot and turning it into structured data. You are not
 solving anything — another model will do that from what you produce, and it will
 never see the picture. Everything it needs has to be in your output.
+
+Describe important visual relationships explicitly in "observations": edges,
+node positions, arrows, labels, axes, camera/icon placement, and before/after
+diagrams. Do NOT interpret an example output as the only accepted output when
+multiple valid outputs are indicated. For any obscured image portion, record
+the uncertainty in "ambiguities"; never silently invent missing structure.
 
 Transcribe exactly what is on screen. If the code contains a bug, transcribe the
 bug; do not correct it. If a line is cut off, say so rather than completing it.
@@ -147,6 +155,7 @@ export function renderForReasoning(e: Extraction): string {
   if (e.terminalOutput) out.push(`TERMINAL OUTPUT\n${e.terminalOutput}`);
   if (e.url) out.push(`URL\n${e.url}`);
   if (e.observations.length) out.push("NOTES\n" + e.observations.map((o) => `- ${o}`).join("\n"));
+  if (e.problemSummary || e.observations.length) out.push(routingGuidance(routeProblem(e)));
   if (e.ambiguities.length) {
     // Carried through deliberately. A reader who knows which characters were
     // uncertain can weigh the answer; one who does not, cannot.
