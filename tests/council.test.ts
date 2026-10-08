@@ -512,5 +512,16 @@ CONTRACT>>>`);
   check("canceled baseline cannot be counted as a verified repair", repaired.repairsVerified === 0);
 }
 
+
+{
+  const run = { letter: "A", ran: true, ok: true, passed: 1, failed: 0, durationMs: 12,
+    note: "", runtime: "python" } as CandidateRun;
+  const report = { candidates: [cand("A", FINAL("a", "print(1)"), "stable-model")],
+    suites: [], runs: {A: run}, revisedRuns: {}, reviews: [], judges: [],
+    synthesis: "", winner: "A" };
+  const same = modelPerformance([report, report]);
+  check("history aggregation combines separately supplied reports", same[0].candidateAttempts === 2 && same[0].verified === 2);
+}
+
 console.log(fail ? `\n${fail} FAILURES\n` : "\nall council checks passed\n");
 process.exit(fail ? 1 : 0);
