@@ -715,14 +715,23 @@ async function runLocalCode(language, code, timeoutMs = LOCAL_RUN_TIMEOUT_MS) {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
+    // The local mode is explicit, but hostile programs can still flood the
+    // worker's output pipes. Keep draining while bounding retained bytes.
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
+    let outputTruncated = false;
+    const keep = (previous, chunk) => {
+      const remaining = 65_536 - Buffer.byteLength(previous, "utf8");
+      if (remaining <= 0) {
+        outputTruncated = true;
+        return previous;
+      }
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (bytes.length > remaining) outputTruncated = true;
+      return previous + bytes.subarray(0, remaining).toString("utf8");
+    };
+    child.stdout.on("data", (chunk) => { stdout = keep(stdout, chunk); });
+    child.stderr.on("data", (chunk) => { stderr = keep(stderr, chunk); });
     const timer = setTimeout(() => {
       timedOut = true;
       try {
@@ -746,7 +755,7 @@ async function runLocalCode(language, code, timeoutMs = LOCAL_RUN_TIMEOUT_MS) {
       stderr: err.text,
       durationMs: Date.now() - started,
       timedOut,
-      truncated: out.truncated || err.truncated,
+      truncated: outputTruncated || out.truncated || err.truncated,
     };
   } finally {
     await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -917,7 +926,8 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
       bootMs,
     };
   } catch (error) {
-    await options.onState?.("failed", { executionId: id, sandboxId: sandbox.sandboxId, reason: String(error).slice(0, 200) }).catch(() => {});
+    const state = /timed out|timeout/i.test(String(error)) ? "timed_out" : "failed";
+    await options.onState?.(state, { executionId: id, sandboxId: sandbox.sandboxId, reason: String(error).slice(0, 200) }).catch(() => {});
     throw error;
   } finally {
     await sandbox.kill().catch(() => {});
