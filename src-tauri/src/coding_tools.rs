@@ -79,7 +79,7 @@ end run"#;
 
 #[cfg(target_os = "macos")]
 fn native_approval_granted(success: bool, output: &[u8]) -> bool {
-    success && output == b"Approve\\n" || success && output == b"Approve"
+    success && output == b"Approve\n" || success && output == b"Approve"
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -886,8 +886,8 @@ mod security_tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn native_approval_is_fail_closed() {
-        assert!(native_approval_granted(true, b"Approve\\n"));
-        assert!(!native_approval_granted(false, b"Approve\\n"));
+        assert!(native_approval_granted(true, b"Approve\n"));
+        assert!(!native_approval_granted(false, b"Approve\n"));
         for response in [b"Deny".as_slice(), b"".as_slice(), b"Approve extra".as_slice()] {
             assert!(!native_approval_granted(true, response));
         }
