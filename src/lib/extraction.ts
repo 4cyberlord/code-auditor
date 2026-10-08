@@ -1,4 +1,4 @@
-import { routeProblem, routingGuidance } from "./problemRouting.ts";
+import { routeProblem, routingGuidance, reconcileProblemReadings } from "./problemRouting.ts";
 
 /**
  * Turning a screenshot into structured engineering context.
@@ -634,6 +634,8 @@ export interface ReadingProvenance {
   readers: string[];
   /** Null when only one reader answered, so there was nothing to cross-check. */
   agreement: ExtractionAgreement | null;
+  /** Original independent readings, when available, for task-level cross checks. */
+  independentReadings?: Extraction[];
   /** The image manifest, so the document says what it is a reading *of*. */
   manifest?: string;
   /** ISO timestamp, passed in rather than taken, so the output is testable. */
@@ -690,6 +692,22 @@ export function readingMarkdown(e: Extraction, p: ReadingProvenance): string {
   out.push(meta.join("\n"));
 
   if (p.manifest) out.push(`## What was captured\n\n${p.manifest}`);
+
+  // The document is passed unchanged to the working Council models.
+  // Routing advice therefore reaches the actual solving path, not just tests.
+  const routing = reconcileProblemReadings(p.independentReadings?.length
+    ? p.independentReadings : [e]);
+  const unverifiedVisual = routing.path !== "standard" || (p.agreement && !p.agreement.agree);
+  out.push("## Problem understanding and verification plan\\n\\n" +
+    routingGuidance(routing) +
+    (routing.disagreements.length
+      ? "\\n\\nReader disagreements requiring source-image review:\\n" +
+        routing.disagreements.map((d) => "- " + d).join("\\n")
+      : "") +
+    (unverifiedVisual
+      ? "\\n\\nDo not claim this interpretation has been visually verified. Recheck the source image or clearly report the uncertainty."
+      : ""));
+
 
   // --- the doubt, before the content it applies to.
   if (high.length) {

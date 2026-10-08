@@ -2437,6 +2437,7 @@ export const useStore = create<State>((set, get) => ({
     const markdown = readingMarkdown(agreement.merged, {
       readers: readings.map((r) => agentSpec(r.provider).label),
       agreement: readings.length >= 2 ? agreement : null,
+      independentReadings: readings.map((r) => r.extraction),
       manifest: imageManifest(images),
       at: new Date().toISOString(),
     });

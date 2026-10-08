@@ -1,5 +1,5 @@
 import { routeProblem, routingGuidance, reconcileProblemReadings } from "../src/lib/problemRouting.ts";
-import { EMPTY_EXTRACTION, renderForReasoning, type Extraction } from "../src/lib/extraction.ts";
+import { EMPTY_EXTRACTION, renderForReasoning, readingMarkdown, type Extraction } from "../src/lib/extraction.ts";
 
 const ex = (summary: string, changes: Partial<Extraction> = {}): Extraction =>
   ({ ...EMPTY_EXTRACTION, confidence: 0.96, problemSummary: summary, ...changes });
@@ -37,3 +37,11 @@ const altered = reconcileProblemReadings([
 check("different code transcriptions require adjudication", altered.disagreements.some(s => s.includes("code")));
 const absent = reconcileProblemReadings([]);
 check("missing readers fail closed to review", absent.path === "ambiguity_review");
+
+const record = readingMarkdown(left, {readers:["vision-a","vision-b"], agreement:null,
+  independentReadings:[left,right]});
+check("live reading document includes adaptive routing plan", record.includes("Problem understanding and verification plan"));
+check("live reading document includes reader disputes", record.includes("Reader disagreements requiring source-image review"));
+check("live reading advises source recheck", record.includes("Recheck the source image"));
+const ordinaryRecord = readingMarkdown(ex("Compute a sum of an array"), {readers:["one"],agreement:null});
+check("simple reading receives routing context", ordinaryRecord.includes("Reading path: standard"));
