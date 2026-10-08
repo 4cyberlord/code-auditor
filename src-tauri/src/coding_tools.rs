@@ -690,10 +690,20 @@ async fn run_restricted_docker(root: &Path, command: &str) -> Result<String, Str
         Ok(value) => value.map_err(|e| format!("Container execution unavailable: {e}"))?,
         Err(_) => {
             // Kill by container name, not only the Docker client process.
-            let _ = timeout(Duration::from_secs(10),
-                Command::new(docker).arg("rm").arg("-f").arg(&name).output()
+            let cleanup = timeout(Duration::from_secs(10),
+                Command::new(docker)
+                    .arg("rm").arg("-f").arg(&name)
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin")
+                    .kill_on_drop(true)
+                    .output()
             ).await;
-            return Err("Restricted command timed out; container cleanup requested.".into());
+            let cleanup_succeeded = matches!(cleanup, Ok(Ok(ref output)) if output.status.success());
+            return Err(if cleanup_succeeded {
+                "Restricted command timed out; container was forcibly removed.".into()
+            } else {
+                "Restricted command timed out and container cleanup could not be verified. Inspect Docker for a remaining council-coding-* container.".into()
+            });
         }
     };
     let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
