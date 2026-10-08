@@ -625,10 +625,15 @@ mod security_tests {
         let blocked = run("printf breach > ../outside.txt", policy.clone(), project.clone()).await;
         assert!(!blocked.status.success(), "outside-project write was permitted");
         assert!(!outside.exists(), "outside-project file was created");
-        // Attempt a TCP connection without assuming internet connectivity.
-        // If the sandbox denies socket access, the command should fail.
-        let network = run("/usr/bin/nc -G 2 -z 127.0.0.1 1", policy, project.clone()).await;
-        assert!(!network.status.success(), "sandbox unexpectedly permitted TCP attempt");
+        // Establish a real listening socket first: probing a closed port could
+        // falsely pass even when the sandbox permits network operations.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let network = Command::new("/usr/bin/sandbox-exec")
+            .arg("-p").arg(policy).arg("/usr/bin/nc").arg("-G").arg("2")
+            .arg("-z").arg("127.0.0.1").arg(port.to_string())
+            .current_dir(&project).output().await.unwrap();
+        assert!(!network.status.success(), "sandbox unexpectedly permitted local TCP connect");
         fs::remove_dir_all(root).unwrap();
     }
 
