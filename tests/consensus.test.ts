@@ -362,5 +362,20 @@ console.log("\n6. same algorithm, nothing phrased alike (the realistic case)");
   check("strict threshold does not manufacture unanimity", strict.groups.length > 1);
 }
 
+
+// Agent arrival order must not change the camps or the representative.
+{
+  const mk = (id: string, answer: string) => ({ id, name: id, final: parseFinal(final({ answer, claims: [answer], code: "" }))! });
+  const agents = [mk("c", "Use one hash map pass"), mk("a", "Use a hash map in one pass"), mk("b", "Use exhaustive nested loops"), mk("d", "Use one pass with a dictionary")];
+  const digest = (arr: typeof agents) => {
+    const r = computeConsensus(arr);
+    return JSON.stringify({ verdict: r.verdict, groups: r.groups, representative: r.representative, outliers: r.outliers });
+  };
+  const expected = digest(agents);
+  for (const variant of [agents.slice().reverse(), [agents[2], agents[0], agents[3], agents[1]], [agents[3], agents[1], agents[0], agents[2]]]) {
+    check("arrival-order independent consensus", digest(variant) === expected);
+  }
+}
+
 console.log(failures ? `\n${failures} FAILURE(S)\n` : "\nall checks passed\n");
 process.exit(failures ? 1 : 0);

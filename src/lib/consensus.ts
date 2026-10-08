@@ -287,7 +287,9 @@ export function computeConsensus(inputs: ConsensusInput[], threshold = 0.55): Co
   // Complete-link clustering: every pair of members within a consensus group
   // must actually agree. Connected-component chaining can report unanimity
   // even when the first and last candidates explicitly disagree.
-  const order = new Map(usable.map((u, i) => [u.id, i]));
+  // Stable IDs make consensus independent of agent completion order.
+  const sorted = [...usable].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const order = new Map(sorted.map((u, i) => [u.id, i]));
   const scoreFor = new Map<string, number>();
   for (const p of pairs) {
     scoreFor.set([p.a, p.b].sort().join("\\0"), p.score);
@@ -295,7 +297,7 @@ export function computeConsensus(inputs: ConsensusInput[], threshold = 0.55): Co
   const agrees = (a: string, b: string) =>
     (scoreFor.get([a, b].sort().join("\\0")) ?? 0) >= threshold;
   const groups: string[][] = [];
-  for (const item of usable) {
+  for (const item of sorted) {
     const candidateGroups = groups
       .filter((g) => g.every((member) => agrees(item.id, member)))
       .sort((a, b) => b.length - a.length || order.get(a[0])! - order.get(b[0])!);
