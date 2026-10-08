@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import Markdown from "./Markdown";
 import {
   buildPresentation,
+  modelPerformance,
   candidateLanguage,
   councilMarkdown,
   executionDigest,
@@ -135,6 +136,7 @@ export default function CouncilPanel() {
   );
   const report = useMemo(() => councilMarkdown(record), [record]);
   const presentation = useMemo(() => buildPresentation(record), [record]);
+  const performance = useMemo(() => modelPerformance([record]), [record]);
 
   const winner = council.candidates.find((c) => c.letter === council.winner);
   const winnerFinal = winner?.revised ?? winner?.final ?? null;
@@ -497,6 +499,22 @@ export default function CouncilPanel() {
           </div>
         )}
 
+        {tab === "summary" && settled && performance.length > 0 && (
+          <details className="answer-card compact">
+            <summary>Model execution analytics — this run</summary>
+            <div className="hint">Only actual executed tests count; passing generated cases does not guarantee correctness.</div>
+            <table style={{ width: "100%", textAlign: "left" }}>
+              <thead><tr><th>Model</th><th>Verified</th><th>Failed</th><th>Canceled</th><th>Timed out</th><th>Mean time</th></tr></thead>
+              <tbody>{performance.map((item) => (
+                <tr key={item.model}>
+                  <td>{item.model}</td><td>{item.verified}/{item.executed}</td>
+                  <td>{item.failed}</td><td>{item.canceled}</td><td>{item.timedOut}</td>
+                  <td>{item.meanExecutionMs == null ? "—" : `${item.meanExecutionMs} ms`}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </details>
+        )}
         {tab === "reading" && (
           <div className="evidence-stack">
             <div className="answer-card compact">

@@ -1953,6 +1953,79 @@ export function buildPresentation(report: CouncilReport): Presentation {
   };
 }
 
+
+/** Evidence-backed model analytics. Pure aggregation; never estimates price or correctness. */
+export interface ModelPerformance {
+  model: string;
+  candidateAttempts: number;
+  executed: number;
+  verified: number;
+  failed: number;
+  canceled: number;
+  timedOut: number;
+  untested: number;
+  repairsVerified: number;
+  repairAttempts: number;
+  meanExecutionMs: number | null;
+  verifiedRate: number | null;
+}
+
+/**
+ * Combine stored Council reports without confusing generation attempts with
+ * actual executions. A test pass means passed generated cases, NOT ground-truth
+ * correctness. Null means there is no eligible evidence.
+ */
+export function modelPerformance(reports: CouncilReport[]): ModelPerformance[] {
+  const totals = new Map<string, { attempts: number; executed: number; verified: number; failed: number; canceled: number; timedOut: number; repairAttempts: number; repairsVerified: number; durations: number[] }>();
+  for (const report of reports) {
+    for (const candidate of report.candidates || []) {
+      const model = candidate.model;
+      if (!model) continue;
+      const stat = totals.get(model) ?? { attempts: 0, executed: 0, verified: 0, failed: 0, canceled: 0, timedOut: 0, repairAttempts: 0, repairsVerified: 0, durations: [] };
+      stat.attempts++;
+      // Revisions have to carry their own execution record. Do not credit an
+      // earlier successful run to a changed program.
+      const run = candidate.revised ? report.revisedRuns?.[candidate.letter] : report.runs?.[candidate.letter];
+      const canceled = run?.state === "canceled";
+      const timedOut = run?.state === "timed_out" || run?.timedOut === true;
+      const valid = Boolean(run?.ran && !canceled && !timedOut);
+      if (run?.ran) {
+        stat.executed++;
+        if (canceled) stat.canceled++;
+        else if (timedOut) stat.timedOut++;
+        else if (valid && gateFor(run) === "pass") stat.verified++;
+        else if (valid && gateFor(run) === "fail") stat.failed++;
+        // Duration zero is generally an unmeasured fallback in the worker;
+        // keep it out of means rather than reporting artificial speed.
+        const ms = run.remoteElapsedMs ?? run.durationMs;
+        if (typeof ms === "number" && Number.isFinite(ms) && ms > 0) stat.durations.push(ms);
+      }
+      if (candidate.revised) {
+        stat.repairAttempts++;
+        const initial = report.runs?.[candidate.letter];
+        const originallyFailed = Boolean(initial?.ran && !initial.timedOut &&
+          initial.state !== "canceled" && initial.state !== "timed_out" && gateFor(initial) === "fail");
+        if (originallyFailed && valid && gateFor(run) === "pass") stat.repairsVerified++;
+      }
+      totals.set(model, stat);
+    }
+  }
+  return [...totals.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([model, stat]) => ({
+    model,
+    candidateAttempts: stat.attempts,
+    executed: stat.executed,
+    verified: stat.verified,
+    failed: stat.failed,
+    canceled: stat.canceled,
+    timedOut: stat.timedOut,
+    untested: stat.attempts - stat.executed,
+    repairsVerified: stat.repairsVerified,
+    repairAttempts: stat.repairAttempts,
+    meanExecutionMs: stat.durations.length ? Math.round(stat.durations.reduce((a,b) => a + b, 0) / stat.durations.length) : null,
+    verifiedRate: stat.executed ? stat.verified / stat.executed : null,
+  }));
+}
+
 /** The complete report, as it is written to history and shown in the panel. */
 export function councilMarkdown(r: CouncilReport): string {
   const out: string[] = ["# Council report", ""];

@@ -19,6 +19,7 @@ import {
   contractQuery,
   reviseUserPrompt,
   buildPresentation,
+  modelPerformance,
   mutateCode,
   oracleSuspicion,
   oracleDigest,
@@ -470,6 +471,56 @@ CONTRACT>>>`);
     winner: "B", revisedRuns: {},
   });
   check("untested revision must not inherit initial pass", revised.standing !== "verified");
+}
+
+
+{
+  const mk = (letter: string, model: string) => cand(letter, FINAL("answer", "print(1)"), model);
+  const run = (letter: string, passed: number, failed = 0, ms = 25): CandidateRun =>
+    ({ letter, ran: true, ok: failed === 0, passed, failed, durationMs: ms, note: "", runtime: "python" });
+  const base = { candidates: [mk("A", "alpha"), mk("B", "beta")], suites: [], runs: {
+    A: run("A", 3), B: run("B", 0, 2),
+  }, revisedRuns: {}, reviews: [], judges: [], synthesis: "", winner: "A" };
+  const revised = { ...base, candidates: [{ ...mk("A", "alpha"), revised: FINAL("fixed", "print(2)") }, mk("B", "beta")],
+    runs: { A: run("A", 1, 2), B: run("B", 0, 1) }, revisedRuns: { A: run("A", 4, 0, 35) } };
+  const data = modelPerformance([base, revised]);
+  const alpha = data.find(d => d.model === "alpha")!;
+  check("model analytics counts verified executions", alpha.executed === 2 && alpha.verified === 2);
+  check("model analytics tracks actual repaired attempts", alpha.repairAttempts === 1 && alpha.repairsVerified === 1);
+  check("model analytics preserves real timings", alpha.meanExecutionMs === 30);
+  check("model analytics is not confused by failed peers", data.find(d => d.model === "beta")?.failed === 2);
+  const missing = modelPerformance([{ ...base, candidates: [mk("C", "unverified")], runs: {} }]);
+  check("model analytics reports missing evidence as null rate", missing[0].verifiedRate === null && missing[0].untested === 1);
+}
+
+
+{
+  const candidate = (letter: string, model: string) => cand(letter, FINAL("code", "print(1)"), model);
+  const run = (letter: string, state: "completed" | "canceled" | "timed_out", passed: number): CandidateRun =>
+    ({letter, ran: true, ok: true, passed, failed: 0, state, timedOut: state === "timed_out",
+      durationMs: 0, note: "", runtime: "python"} as CandidateRun);
+  const base = { candidates: [candidate("A", "alpha")], suites: [], runs: { A: run("A", "canceled", 8) },
+    revisedRuns: {}, reviews: [], judges: [], synthesis: "", winner: "A" };
+  const canceled = modelPerformance([base])[0];
+  check("canceled work cannot inflate passing rates", canceled.verified === 0 && canceled.canceled === 1);
+  check("unmeasured zero time is not an average", canceled.meanExecutionMs === null);
+  const timeout = modelPerformance([{...base, runs: {A: run("A", "timed_out", 8)}}])[0];
+  check("timeouts not credited as verified", timeout.verified === 0 && timeout.timedOut === 1);
+  const revision = { ...base, candidates: [{...candidate("A", "alpha"), revised: FINAL("fixed", "print(2)")}],
+    revisedRuns: { A: run("A", "completed", 9) } };
+  const repaired = modelPerformance([revision])[0];
+  check("canceled baseline cannot be counted as a verified repair", repaired.repairsVerified === 0);
+}
+
+
+{
+  const run = { letter: "A", ran: true, ok: true, passed: 1, failed: 0, durationMs: 12,
+    note: "", runtime: "python" } as CandidateRun;
+  const report = { candidates: [cand("A", FINAL("a", "print(1)"), "stable-model")],
+    suites: [], runs: {A: run}, revisedRuns: {}, reviews: [], judges: [],
+    synthesis: "", winner: "A" };
+  const same = modelPerformance([report, report]);
+  check("history aggregation combines separately supplied reports", same[0].candidateAttempts === 2 && same[0].verified === 2);
 }
 
 console.log(fail ? `\n${fail} FAILURES\n` : "\nall council checks passed\n");
