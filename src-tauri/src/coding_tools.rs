@@ -9,6 +9,7 @@ use tokio::time::{timeout, Duration};
 const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 500;
 const MAX_BASH_BYTES: usize = 120_000;
+const MAX_BASH_COMMAND_BYTES: usize = 16_384;
 const MAX_MATCH_LINE_CHARS: usize = 400;
 
 /// Keeps one minified line from swallowing the whole tool result. Counts
@@ -490,6 +491,15 @@ fn shell_enabled() -> bool {
     )
 }
 
+fn validate_shell_command(command: &str) -> Result<(), String> {
+    if command.trim().is_empty() { return Err("Shell command is empty.".into()); }
+    if command.len() > MAX_BASH_COMMAND_BYTES {
+        return Err(format!("Shell command exceeds {MAX_BASH_COMMAND_BYTES} bytes."));
+    }
+    if command.as_bytes().contains(&0) { return Err("Shell command contains a null byte.".into()); }
+    Ok(())
+}
+
 fn restricted_shell_unavailable() -> Result<String, String> {
     Err("Restricted shell mode is unavailable: the experimental macOS runner failed isolation validation. Execution refused.".into())
 }
@@ -499,9 +509,7 @@ async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
     if !restricted && !shell_enabled() {
         return Err("Shell execution is disabled by default. For a macOS sandboxed attempt set COUNCIL_EDITOR_SHELL_MODE=restricted; for trusted unrestricted execution set COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL=1. A user approval is still required for each command.".into());
     }
-    if command.contains('\0') {
-        return Err("Command contains an invalid null byte.".into());
-    }
+    validate_shell_command(command)?;
 
     // No fallback to raw shell when restricted isolation is requested.
     if restricted {
@@ -561,6 +569,15 @@ fn display_rel(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+
+    #[test]
+    fn rejects_invalid_and_oversized_shell_commands() {
+        assert!(validate_shell_command("").is_err());
+        assert!(validate_shell_command("  ").is_err());
+        assert!(validate_shell_command(&String::from_utf8(vec![0]).unwrap()).is_err());
+        assert!(validate_shell_command(&"x".repeat(MAX_BASH_COMMAND_BYTES + 1)).is_err());
+        assert!(validate_shell_command("printf ok").is_ok());
+    }
 
     #[test]
     fn restricted_shell_is_disabled_until_validated() {
