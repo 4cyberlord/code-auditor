@@ -619,7 +619,7 @@ async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
         ShellPolicy::Disabled => {
             return Err("Shell execution is disabled by default. Trusted local users may opt into unsandboxed execution with COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL=1. A human must approve each command.".into());
         }
-        ShellPolicy::ContainerRestricted => return restricted_shell_unavailable(),
+        ShellPolicy::ContainerRestricted => return run_restricted_docker(root, command).await,
         ShellPolicy::TrustedUnrestricted => {}
     }
     validate_shell_command(command)?;
@@ -693,7 +693,7 @@ mod security_tests {
     fn shell_policy_never_falls_back_from_restricted_to_unsafe() {
         assert_eq!(shell_policy(None, false), ShellPolicy::Disabled);
         assert_eq!(shell_policy(Some("restricted"), false), ShellPolicy::ContainerRestricted);
-        assert_eq!(shell_policy(Some("restricted"), true), ShellPolicy::RestrictedUnavailable);
+        assert_eq!(shell_policy(Some("restricted"), true), ShellPolicy::ContainerRestricted);
         assert_eq!(shell_policy(None, true), ShellPolicy::TrustedUnrestricted);
     }
 
