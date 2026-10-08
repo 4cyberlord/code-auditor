@@ -30,7 +30,7 @@ export function parseExecutionOutput(raw) {
   const stdout = complete ? text.slice(stdoutBegin + "CA_STDOUT_BEGIN\n".length, stdoutEnd) : "";
   const stderr = complete ? text.slice(stderrBegin + "CA_STDERR_BEGIN\n".length, stderrEnd) : "";
   const metrics = {};
-  for (const line of stderr.split("\n")) {
+  for (const line of (complete ? stderr : "").split("\n")) {
     if (!line.startsWith("CA_METRICS ")) continue;
     for (const pair of line.slice("CA_METRICS ".length).split(/\s+/)) {
       const [key, value] = pair.split("=");
@@ -41,10 +41,10 @@ export function parseExecutionOutput(raw) {
   const seconds = metric(metrics.elapsed_s);
   return {
     complete, stdout, stderr,
-    exitCode: complete ? Number(match[1]) : null,
+    exitCode: complete && Number.isSafeInteger(Number(match[1])) ? Number(match[1]) : null,
     runtime: complete ? match[2].trim() : "remote",
-    remoteElapsedMs: seconds != null ? Math.round(seconds * 1000) : metric(metrics.elapsed_ms),
-    peakMemoryKb: metric(metrics.maxrss_kb),
+    remoteElapsedMs: complete ? (seconds != null ? Math.round(seconds * 1000) : metric(metrics.elapsed_ms)) : null,
+    peakMemoryKb: complete ? metric(metrics.maxrss_kb) : null,
   };
 }
 export function executionStatus(result) {
@@ -58,13 +58,19 @@ export function requiresRepair(run) {
 }
 
 export async function withSandboxLifecycle(sandbox, onStart, execute, onFailure) {
+  let failed = false;
   try {
     await onStart?.();
     return await execute();
   } catch (error) {
+    failed = true;
     try { await onFailure?.(error); } catch { /* retain original error */ }
     throw error;
   } finally {
-    try { await sandbox.kill(); } catch { /* best-effort cleanup */ }
+    try { await sandbox.kill(); } catch (error) { 
+      // Failure to dispose a sandbox is a security-relevant error. A caller must
+      // not report successful execution while its isolated workspace persists.
+      if (!failed) throw new Error("Sandbox cleanup failed", { cause: error });
+    }
   }
 }
