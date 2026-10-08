@@ -1420,7 +1420,7 @@ export async function runCodingIntelligence(
       // plan approval is not blanket permission to execute arbitrary commands.
       if (toolName === "bash") {
         const requested = toolTarget(event.args);
-        const question = `Approve this shell command for project ${config.projectRoot}?\\n\\n${requested}\\n\\nThe shell is NOT sandboxed and may access files or networks outside this project. Reply APPROVE to run this exact command; anything else denies it.`;
+        const question = `Approve this shell command for project ${config.projectRoot}?\n\n${requested}\n\nThe shell is NOT sandboxed and may access files or networks outside this project. Reply APPROVE to run this exact command; anything else denies it.`;
         note("question", turn + 1, question, event.id);
         const response = onQuestion ? (await onQuestion(question)).trim() : "";
         if (control?.cancelled || response !== "APPROVE") {
