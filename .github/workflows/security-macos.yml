@@ -1,0 +1,61 @@
+name: Security branch macOS validation
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+concurrency:
+  group: security-macos-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-validation:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: council-macos-rust
+          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'pull_request' }}
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Node tests
+        run: npm test
+      - name: Prepare Tauri external binary placeholder for Rust tests
+        run: |
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          mkdir -p src-tauri/binaries
+          printf '#!/bin/sh\\nexit 70\\n' > "src-tauri/binaries/mds-${target}"
+          chmod +x "src-tauri/binaries/mds-${target}"
+      - name: Rust security regression tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib coding_tools::security_tests -- --nocapture
+      - name: Rust compile check
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+      - name: Prepare real sidecar and frontend
+        env:
+          CODE_AUDITOR_ALLOW_ADHOC: '1'
+        run: npm run helper:sidecar
+      - name: Build desktop application (unsigned CI build)
+        env:
+          CODE_AUDITOR_ALLOW_ADHOC: '1'
+        run: npm run app:build
+
+  docker-runtime-containment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull test image (CI only; app never pulls implicitly)
+        run: docker pull alpine:3.20
+      - name: Verify container isolation and cleanup on real Docker
+        run: bash tests/security/docker-containment.sh

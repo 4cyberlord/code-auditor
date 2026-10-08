@@ -335,6 +335,16 @@ tests/              TypeScript and worker tests
 public/             Public assets used by the app and README
 ```
 
+### Restricted shell status: container-backed candidate (not yet validated)
+
+A new **opt-in** `COUNCIL_EDITOR_SHELL_MODE=restricted` path now launches commands in a Docker container with network disabled, read-only container root filesystem, capability removal, no-new-privileges, process count, CPU and memory limits, and an explicit project bind mount. It requires Docker Desktop and the `alpine:3.20` image to be installed in advance; otherwise execution fails closed. This is a candidate implementation, **not** a validated complete sandbox. Mounting the writable project still allows destructive edits to the project; Docker Desktop VM isolation and runtime policy must be evaluated with real containment tests. The trusted unsandboxed mode remains separate and explicit. Human command approval is required by the coding agent but the native command endpoint needs its own enforcement for complete authorization. Mac CI does not prove Docker execution works.
+
+### Priority 1 implementation (proposed branch)
+
+The branch `security/coding-shell-opt-in` introduces a first defensive step: coding-agent `bash` requests are **denied by default**. A trusted operator may deliberately permit the previous unrestricted shell behavior by setting `COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL=1` in the environment **before launching Council Editor**. This is **not a sandbox** or per-command approval; the opt-in grants broad shell access and should never be enabled for untrusted prompts. Recursive folder copying also rejects symbolic links, with regression tests for path traversal and copied symlinks.
+
+This is an incremental mitigation only. Before enabling unrestricted shell for general users, replace it with actual isolation and a user-visible command approval workflow, including process-tree cancellation, network controls, and filesystem confinement.
+
 ## Planned Engineering Improvements — Seven Review Priorities
 
 > **Status: Review backlog only.** The items below are investigation and hardening priorities identified from source review, not verified vulnerabilities or implemented fixes. Keep this list separate from the planned PrivateTrigger iOS companion feature.

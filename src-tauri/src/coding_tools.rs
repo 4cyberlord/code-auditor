@@ -1,5 +1,9 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+
+#[cfg(target_os = "macos")]
+mod confined;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -9,6 +13,7 @@ use tokio::time::{timeout, Duration};
 const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_LIST_ENTRIES: usize = 500;
 const MAX_BASH_BYTES: usize = 120_000;
+const MAX_BASH_COMMAND_BYTES: usize = 16_384;
 const MAX_MATCH_LINE_CHARS: usize = 400;
 
 /// Keeps one minified line from swallowing the whole tool result. Counts
@@ -33,7 +38,53 @@ pub struct CodingToolRequest {
 #[tauri::command]
 pub async fn coding_tool_execute(req: CodingToolRequest) -> Result<String, String> {
     crate::auth::require()?;
+    // The renderer's approval prompt is not an authorization boundary:
+    // independently ask the macOS user before invoking a native shell.
+    if req.name.trim().eq_ignore_ascii_case("bash") {
+        let args = req.args.as_object().ok_or("Tool arguments must be an object.")?;
+        let command = string_arg(args, &["command", "cmd", "shell"])?;
+        validate_shell_command(command)?;
+        require_native_shell_approval(&req.root, command).await?;
+    }
     execute(req).await
+}
+
+/// Authorization must be outside the renderer, which model-generated content
+/// can influence. macOS AppleScript presents a native system dialog. Deny on
+/// dialog errors, user cancellation, missing binary or unexpected output.
+#[cfg(target_os = "macos")]
+async fn require_native_shell_approval(root: &str, command: &str) -> Result<(), String> {
+    const PROMPT: &str = r#"on run argv
+set promptText to item 1 of argv
+set reply to display dialog promptText with title "Council Editor: Shell Permission" buttons {"Deny", "Approve"} default button "Deny" with icon caution
+return button returned of reply
+end run"#;
+    let message = format!("Approve command in project {}?\\n\\n{}\\n\\nThe command may modify project files. Trusted unrestricted mode can access files and network outside the project.", root, command);
+    let status = timeout(Duration::from_secs(90),
+        Command::new("/usr/bin/osascript")
+            .arg("-e").arg(PROMPT).arg(message)
+            .env_clear()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output()
+    ).await.map_err(|_| "Native shell approval timed out; command denied.".to_string())?
+     .map_err(|_| "Native shell approval unavailable; command denied.".to_string())?;
+    if native_approval_granted(status.status.success(), &status.stdout) {
+        Ok(())
+    } else {
+        Err("Native user approval was not granted; command denied.".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_approval_granted(success: bool, output: &[u8]) -> bool {
+    success && output == b"Approve\n" || success && output == b"Approve"
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn require_native_shell_approval(_root: &str, _command: &str) -> Result<(), String> {
+    Err("Native shell approval is only supported on macOS; command denied.".into())
 }
 
 async fn execute(req: CodingToolRequest) -> Result<String, String> {
@@ -43,6 +94,11 @@ async fn execute(req: CodingToolRequest) -> Result<String, String> {
         .args
         .as_object()
         .ok_or("Tool arguments must be an object.")?;
+
+    #[cfg(target_os = "macos")]
+    if name != "bash" {
+        return confined::execute_file_tool(&root, &name, args);
+    }
 
     match name.as_str() {
         "read" => read_file(&root, path_arg(args)?),
@@ -111,8 +167,26 @@ fn canonical_root(root: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 
+fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), String> {
+    let relative = path.strip_prefix(root)
+        .map_err(|_| "Tool path is outside the configured project root.")?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() =>
+                return Err("Tool path contains a symbolic link; refusing access.".into()),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(format!("Could not inspect path component: {e}")),
+        }
+    }
+    Ok(())
+}
+
 fn resolve_existing(root: &Path, value: &str) -> Result<PathBuf, String> {
     let path = safe_join(root, value)?;
+    reject_symlink_components(root, &path)?;
     path.canonicalize()
         .map_err(|e| format!("Path does not exist inside project: {value} ({e})"))
         .and_then(|p| ensure_inside(root, p))
@@ -120,24 +194,37 @@ fn resolve_existing(root: &Path, value: &str) -> Result<PathBuf, String> {
 
 fn resolve_target(root: &Path, value: &str) -> Result<PathBuf, String> {
     let path = safe_join(root, value)?;
-    if let Some(parent) = path.parent() {
-        if parent.exists() {
-            let parent = parent
-                .canonicalize()
-                .map_err(|e| format!("Could not read target parent: {e}"))?;
-            ensure_inside(root, parent)?;
+    // Walk every existing ancestor, even when the immediate parent has not
+    // been created. A symlink above a missing intermediate directory can
+    // otherwise redirect create_dir_all and writes outside the project.
+    let mut ancestor = path.parent().ok_or("Target has no parent.")?;
+    loop {
+        match fs::symlink_metadata(ancestor) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err("Target parent is a symlink; refusing path.".into());
+                }
+                let real = ancestor.canonicalize()
+                    .map_err(|e| format!("Could not resolve target ancestor: {e}"))?;
+                ensure_inside(root, real)?;
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor.parent().ok_or("Target has no existing ancestor.")?;
+            }
+            Err(e) => return Err(format!("Could not inspect target ancestor: {e}")),
         }
     }
-    // A containing directory inside the root is not enough: the final
-    // component can itself be a symlink pointing out of the project, and
-    // fs::write/rename/copy would follow it. Refuse the link rather than
-    // writing through it.
-    if let Ok(meta) = fs::symlink_metadata(&path) {
-        if meta.file_type().is_symlink() {
-            return Err("Target is a symlink; refusing to write through it.".into());
-        }
+    // Reject any existing symlink in the lexical path, not only the target.
+    reject_symlink_components(root, &path)?;
+    // Reject target symlinks, including broken links whose exists() is false.
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() =>
+            Err("Target is a symlink; refusing to write through it.".into()),
+        Ok(_) => Ok(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(path),
+        Err(e) => Err(format!("Could not inspect target: {e}")),
     }
-    Ok(path)
 }
 
 fn safe_join(root: &Path, value: &str) -> Result<PathBuf, String> {
@@ -234,19 +321,72 @@ fn destination_arg(args: &serde_json::Map<String, Value>) -> Result<&str, String
     )
 }
 
+#[cfg(target_os = "macos")]
+fn open_confined_file(root: &Path, target: &Path, flags: i32, mode: libc::mode_t) -> Result<fs::File, String> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let relative = target.strip_prefix(root).map_err(|_| "Path outside project.")?;
+    let mut components = relative.components().peekable();
+    let root_bytes = CString::new(root.as_os_str().as_bytes()).map_err(|_| "Invalid root path.")?;
+    let raw_root = unsafe { libc::open(root_bytes.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+    if raw_root < 0 { return Err(format!("Could not open project directory: {}", std::io::Error::last_os_error())); }
+    let mut parent = unsafe { OwnedFd::from_raw_fd(raw_root) };
+    let mut final_name = None;
+    while let Some(component) = components.next() {
+        let name = match component {
+            Component::Normal(name) => CString::new(name.as_bytes()).map_err(|_| "Null byte in path.")?,
+            Component::CurDir => continue,
+            _ => return Err("Invalid project-relative path.".into()),
+        };
+        if components.peek().is_none() {
+            final_name = Some(name);
+            break;
+        }
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+        if fd < 0 { return Err(format!("Unsafe or missing directory component: {}", std::io::Error::last_os_error())); }
+        parent = unsafe { OwnedFd::from_raw_fd(fd) };
+    }
+    let name = final_name.ok_or("Expected file path.")?;
+    let raw_file = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(),
+        flags | libc::O_CLOEXEC | libc::O_NOFOLLOW, mode as libc::c_uint) };
+    if raw_file < 0 { return Err(format!("Could not open confined file: {}", std::io::Error::last_os_error())); }
+    Ok(unsafe { fs::File::from_raw_fd(raw_file) })
+}
+
 fn read_file(root: &Path, path: &str) -> Result<String, String> {
     let path = resolve_existing(root, path)?;
-    let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+    // O_NOFOLLOW prevents a last-component symlink swap between path
+    // validation and open. This does not yet protect ancestor components;
+    // complete race resistance requires descriptor-relative traversal.
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(target_os = "macos")]
+    let file = open_confined_file(root, &path, libc::O_RDONLY, 0)?;
+    #[cfg(not(target_os = "macos"))]
+    let file = options.open(&path).map_err(|e| format!("Could not open file: {e}"))?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() {
         return Err("Read target is not a file.".into());
     }
     if meta.len() > MAX_READ_BYTES {
-        return Err(format!(
-            "File is too large to read safely ({} bytes).",
-            meta.len()
-        ));
+        return Err(format!("File is too large to read safely ({} bytes).", meta.len()));
     }
-    fs::read_to_string(&path).map_err(|e| format!("Could not read file: {e}"))
+    let mut bytes = Vec::new();
+    file.take(MAX_READ_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Could not read file: {e}"))?;
+    if bytes.len() as u64 > MAX_READ_BYTES {
+        return Err("File grew beyond the read size limit.".into());
+    }
+    String::from_utf8(bytes).map_err(|e| format!("File is not valid UTF-8: {e}"))
 }
 
 fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> {
@@ -255,7 +395,21 @@ fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> 
         fs::create_dir_all(parent)
             .map_err(|e| format!("Could not create parent directory: {e}"))?;
     }
-    fs::write(&path, content).map_err(|e| format!("Could not write file: {e}"))?;
+    // Hold a no-follow handle for the final component rather than a separate
+    // metadata check followed by fs::write (which follows a swapped symlink).
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(target_os = "macos")]
+    let mut file = open_confined_file(root, &path, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o644)?;
+    #[cfg(not(target_os = "macos"))]
+    let mut file = options.open(&path).map_err(|e| format!("Could not open file for writing: {e}"))?;
+    use std::io::Write;
+    file.write_all(content.as_bytes()).map_err(|e| format!("Could not write file: {e}"))?;
     Ok(format!("Wrote {}", display_rel(root, &path)))
 }
 
@@ -336,6 +490,11 @@ fn copy_dir(root: &Path, source: &str, destination: &str) -> Result<String, Stri
     if !source.is_dir() {
         return Err("Copy source is not a folder.".into());
     }
+    // A destination inside the source tree would be discovered again while
+    // traversing and recursively copied without a natural stopping point.
+    if destination.starts_with(&source) {
+        return Err("Cannot copy a folder into itself or one of its descendants.".into());
+    }
     copy_dir_recursive(&source, &destination)?;
     Ok(format!(
         "Copied folder {} to {}",
@@ -351,7 +510,16 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
         let entry = entry.map_err(|e| e.to_string())?;
         let src = entry.path();
         let dest = destination.join(entry.file_name());
-        if src.is_dir() {
+        // Do not traverse a symlink encountered inside the tree. Otherwise an
+        // innocent-looking copy_folder could read files outside the project.
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_symlink() {
+            return Err(format!("Refusing to copy a symbolic link: {}", src.display()));
+        }
+        if dest.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            return Err(format!("Refusing to overwrite a symbolic link: {}", dest.display()));
+        }
+        if kind.is_dir() {
             copy_dir_recursive(&src, &dest)?;
         } else {
             fs::copy(&src, &dest).map_err(|e| format!("Could not copy file: {e}"))?;
@@ -391,6 +559,10 @@ fn visit(dir: &Path, root: &Path, out: &mut Vec<String>) -> Result<(), String> {
         }
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
+        // Never traverse directory symlinks during discovery. They may point
+        // outside the project even if the initially selected directory is safe.
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_symlink() { continue; }
         let name = entry.file_name().to_string_lossy().to_string();
         if name == "node_modules" || name == ".git" || name == "target" || name == ".next" {
             continue;
@@ -437,7 +609,8 @@ fn grep_visit(
             }
             let entry = entry.map_err(|e| e.to_string())?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == "node_modules" || name == ".git" || name == "target" || name == ".next" {
+            let kind = entry.file_type().map_err(|e| e.to_string())?;
+            if kind.is_symlink() || name == "node_modules" || name == ".git" || name == "target" || name == ".next" {
                 continue;
             }
             grep_visit(&entry.path(), root, pattern, out)?;
@@ -471,26 +644,207 @@ fn grep_visit(
     Ok(())
 }
 
-async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
-    if command.contains('\0') {
-        return Err("Command contains an invalid null byte.".into());
-    }
-
-    let output = timeout(
-        Duration::from_secs(120),
-        Command::new("sh")
-            .arg("-lc")
-            .arg(command)
-            .current_dir(root)
-            // Without this the timeout only drops the future: the shell and its
-            // children keep running unsupervised, and a `npm run dev` the model
-            // tried to verify with would hold the port until the app is killed.
-            .kill_on_drop(true)
-            .output(),
+/// The coding model's shell is NOT sandboxed by setting current_dir(root).
+/// Default-deny until an explicit operator opt-in. This does not claim to
+/// confine an opted-in shell: use a real isolated runner for untrusted commands.
+fn shell_enabled() -> bool {
+    matches!(
+        std::env::var("COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL").as_deref(),
+        Ok("1")
     )
-    .await
-    .map_err(|_| "Command timed out after 120 seconds.".to_string())?
-    .map_err(|e| format!("Could not run command: {e}"))?;
+}
+
+fn validate_shell_command(command: &str) -> Result<(), String> {
+    if command.trim().is_empty() { return Err("Shell command is empty.".into()); }
+    if command.len() > MAX_BASH_COMMAND_BYTES {
+        return Err(format!("Shell command exceeds {MAX_BASH_COMMAND_BYTES} bytes."));
+    }
+    if command.as_bytes().contains(&0) { return Err("Shell command contains a null byte.".into()); }
+    Ok(())
+}
+
+/// Explicit execution policy for the Coding Intelligence shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellPolicy {
+    Disabled,
+    ContainerRestricted,
+    TrustedUnrestricted,
+}
+
+fn shell_policy(mode: Option<&str>, allow_unsafe: bool) -> ShellPolicy {
+    // A restricted-mode request must never silently fall back to an unrestricted
+    // shell, even if the operator enabled the latter separately.
+    if mode == Some("restricted") {
+        ShellPolicy::ContainerRestricted
+    } else if allow_unsafe {
+        ShellPolicy::TrustedUnrestricted
+    } else {
+        ShellPolicy::Disabled
+    }
+}
+
+/// Restricted execution uses an OCI container engine, never macOS
+/// sandbox-exec. The container image is pinned by deployment configuration;
+/// it must be pulled explicitly beforehand. No image downloads at runtime.
+fn restricted_docker_args(root: &Path, command: &str, name: &str) -> Result<Vec<String>, String> {
+    validate_shell_command(command)?;
+    let path = root.to_str().ok_or("Project path must be valid UTF-8.")?;
+    if !root.is_absolute() || !root.is_dir() || path.contains(',') || path.contains(':') {
+        return Err("Invalid project path for Docker bind mount.".into());
+    }
+    if !name.starts_with("council-coding-")
+        || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err("Invalid container name.".into());
+    }
+    let image = "alpine:3.20";
+    let mount = format!("type=bind,source={path},target=/workspace");
+    Ok(vec![
+        "run", "--rm", "--init",
+        "--name", name,
+        "--pull", "never",
+        "--network", "none",
+        "--read-only",
+        "--ipc", "none",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--pids-limit", "64",
+        "--ulimit", "nofile=256:256",
+        "--ulimit", "fsize=8388608:8388608",
+        "--memory", "512m",
+        "--memory-swap", "512m",
+        "--cpus", "1",
+        "--tmpfs", "/tmp:rw,nosuid,noexec,size=64m",
+        "--user", "1000:1000",
+        "--mount", mount.as_str(),
+        "--workdir", "/workspace",
+        image, "/bin/sh", "-lc", command
+    ].into_iter().map(str::to_string).collect())
+}
+
+
+#[cfg(target_os = "macos")]
+struct ProcessGroupGuard(Option<u32>);
+#[cfg(target_os = "macos")]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+        }
+    }
+}
+
+/// On task cancellation, arrange forced cleanup without trusting the docker
+/// CLI process to terminate its container merely because the client exited.
+struct DockerCleanupGuard {
+    docker: String,
+    container_name: String,
+    armed: bool,
+}
+impl Drop for DockerCleanupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::process::Command::new(&self.docker)
+                .args(["rm", "-f", &self.container_name])
+                .env_clear()
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    }
+}
+
+async fn run_restricted_docker(root: &Path, command: &str) -> Result<String, String> {
+    let name = format!("council-coding-{}", uuid::Uuid::new_v4().simple());
+    let args = restricted_docker_args(root, command, &name)?;
+    // Docker Desktop must already be installed and running. No fallback.
+    // Docker Desktop also uses /opt/homebrew/bin/docker on Apple Silicon.
+    let docker = if Path::new("/usr/local/bin/docker").is_file() {
+        "/usr/local/bin/docker"
+    } else if Path::new("/opt/homebrew/bin/docker").is_file() {
+        "/opt/homebrew/bin/docker"
+    } else {
+        return Err("Restricted execution requires an installed Docker CLI and Docker Desktop; refusing to run.".into());
+    };
+    let mut cleanup_guard = DockerCleanupGuard {
+        docker: docker.to_string(), container_name: name.clone(), armed: true,
+    };
+    let mut child = Command::new(docker);
+    child.args(&args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let output = match timeout(Duration::from_secs(120), child.output()).await {
+        Ok(value) => value.map_err(|e| format!("Container execution unavailable: {e}"))?,
+        Err(_) => {
+            // Kill by container name, not only the Docker client process.
+            let cleanup = timeout(Duration::from_secs(10),
+                Command::new(docker)
+                    .arg("rm").arg("-f").arg(&name)
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin")
+                    .kill_on_drop(true)
+                    .output()
+            ).await;
+            let cleanup_succeeded = matches!(cleanup, Ok(Ok(ref output)) if output.status.success());
+            if cleanup_succeeded { cleanup_guard.armed = false; }
+            return Err(if cleanup_succeeded {
+                "Restricted command timed out; container was forcibly removed.".into()
+            } else {
+                "Restricted command timed out and container cleanup could not be verified. Inspect Docker for a remaining council-coding-* container.".into()
+            });
+        }
+    };
+    cleanup_guard.armed = false;
+    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        return Err(format!("Restricted container exited with {}: {}", output.status, truncate_line(&text)));
+    }
+    Ok(if text.trim().is_empty() { "(command completed with no output)".into() }
+       else { text.chars().take(MAX_BASH_BYTES).collect() })
+}
+
+async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
+    let mode = std::env::var("COUNCIL_EDITOR_SHELL_MODE").ok();
+    match shell_policy(mode.as_deref(), shell_enabled()) {
+        ShellPolicy::Disabled => {
+            return Err("Shell execution is disabled by default. Trusted local users may opt into unsandboxed execution with COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL=1. A human must approve each command.".into());
+        }
+        ShellPolicy::ContainerRestricted => return run_restricted_docker(root, command).await,
+        ShellPolicy::TrustedUnrestricted => {}
+    }
+    validate_shell_command(command)?;
+    let mut shell = Command::new("sh");
+    shell.arg("-lc").arg(command);
+    // Do not forward API tokens or app credentials to model-requested subprocesses.
+    shell.env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin");
+    // Put the shell in its own process group on macOS. Terminate the group
+    // on timeout so ordinary children cannot outlive the command's deadline.
+    #[cfg(target_os = "macos")]
+    shell.process_group(0);
+    let child = shell
+        .current_dir(root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("Could not start command: {e}"))?;
+    #[cfg(target_os = "macos")]
+    let mut process_guard = ProcessGroupGuard(child.id());
+    let output = match timeout(Duration::from_secs(120), child.wait_with_output()).await {
+        Ok(result) => result.map_err(|e| format!("Could not run command: {e}"))?,
+        Err(_) => {
+            #[cfg(target_os = "macos")]
+            if let Some(pid) = process_guard.0.take() {
+                unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+            }
+            return Err("Command timed out after 120 seconds; process group terminated.".into());
+        }
+    };
+    #[cfg(target_os = "macos")]
+    { process_guard.0 = None; }
     let mut text = String::new();
     if !output.stdout.is_empty() {
         text.push_str(&String::from_utf8_lossy(&output.stdout));
@@ -523,4 +877,139 @@ fn display_rel(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .to_string()
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_approval_is_fail_closed() {
+        assert!(native_approval_granted(true, b"Approve\n"));
+        assert!(!native_approval_granted(false, b"Approve\n"));
+        for response in [b"Deny".as_slice(), b"".as_slice(), b"Approve extra".as_slice()] {
+            assert!(!native_approval_granted(true, response));
+        }
+    }
+
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn cancellation_kills_native_shell_process_group() {
+        use tokio::time::{sleep, Duration};
+        // Exercise the same process-group guard used by run_bash. A canceled
+        // task drops its guard before the command's 120-second timeout.
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("sleep 30 & wait")
+            .process_group(0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn isolated process group");
+        let pid = child.id().expect("child process id");
+        let guard = ProcessGroupGuard(Some(pid));
+        sleep(Duration::from_millis(150)).await;
+        drop(guard);
+        let stopped = timeout(Duration::from_secs(4), child.wait()).await;
+        assert!(stopped.is_ok(), "canceled shell must exit promptly");
+        // Kill the complete process group; no shell or child should remain
+        // running under this process-group ID.
+        sleep(Duration::from_millis(150)).await;
+        let alive = unsafe { libc::kill(-(pid as i32), 0) };
+        assert_eq!(alive, -1, "shell process group must be terminated");
+    }
+
+    #[test]
+    fn shell_policy_never_falls_back_from_restricted_to_unsafe() {
+        assert_eq!(shell_policy(None, false), ShellPolicy::Disabled);
+        assert_eq!(shell_policy(Some("restricted"), false), ShellPolicy::ContainerRestricted);
+        assert_eq!(shell_policy(Some("restricted"), true), ShellPolicy::ContainerRestricted);
+        assert_eq!(shell_policy(None, true), ShellPolicy::TrustedUnrestricted);
+    }
+
+    #[test]
+    fn rejects_invalid_and_oversized_shell_commands() {
+        assert!(validate_shell_command("").is_err());
+        assert!(validate_shell_command("  ").is_err());
+        assert!(validate_shell_command(&String::from_utf8(vec![0]).unwrap()).is_err());
+        assert!(validate_shell_command(&"x".repeat(MAX_BASH_COMMAND_BYTES + 1)).is_err());
+        assert!(validate_shell_command("printf ok").is_ok());
+    }
+
+    #[test]
+    fn restricted_container_has_explicit_isolation_flags() {
+        let root = std::env::temp_dir().canonicalize().unwrap();
+        let args = restricted_docker_args(&root, "printf ok", "council-coding-abc").unwrap();
+        for flag in ["--network", "none", "--read-only", "--cap-drop", "ALL", "--pids-limit",
+                     "--memory", "--cpus", "--pull", "never", "--security-opt", "no-new-privileges"] {
+            assert!(args.iter().any(|arg| arg == flag), "missing {flag}");
+        }
+        assert!(args.iter().any(|arg| arg.contains("target=/workspace")));
+        assert!(args.windows(2).any(|w| w == ["--ulimit", "nofile=256:256"]));
+        assert!(args.windows(2).any(|w| w == ["--ulimit", "fsize=8388608:8388608"]));
+        assert!(!args.iter().any(|arg| arg == "--privileged"));
+        assert!(args.windows(2).any(|w| w == ["--ipc", "none"]));
+
+        assert!(restricted_docker_args(&root, "echo ok", "malicious").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlinks_even_when_they_point_inside_project() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("council-internal-link-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(base.join("real")).unwrap();
+        fs::write(base.join("real/file.txt"), "ok").unwrap();
+        symlink(base.join("real"), base.join("alias")).unwrap();
+        let root = base.canonicalize().unwrap();
+        assert!(resolve_existing(&root, "alias/file.txt").is_err());
+        assert!(resolve_target(&root, "alias/new.txt").is_err());
+        assert!(resolve_existing(&root, "real/file.txt").is_ok());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn descriptor_relative_file_open_rejects_parent_symlink() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("council-openat-{}", uuid::Uuid::new_v4()));
+        let root = base.join("project");
+        let outside = base.join("private");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        let root = root.canonicalize().unwrap();
+        assert!(open_confined_file(&root, &root.join("escape/secret.txt"),
+            libc::O_WRONLY | libc::O_CREAT, 0o644).is_err());
+        assert!(!outside.join("secret.txt").exists());
+        fs::create_dir_all(root.join("safe")).unwrap();
+        let mut output = open_confined_file(&root, &root.join("safe/ok.txt"),
+            libc::O_WRONLY | libc::O_CREAT, 0o644).unwrap();
+        use std::io::Write;
+        output.write_all(b"ok").unwrap();
+        assert_eq!(fs::read_to_string(root.join("safe/ok.txt")).unwrap(), "ok");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn rejects_parent_traversal() {
+        let root = Path::new("/tmp/project");
+        assert!(safe_join(root, "../outside").is_err());
+        assert!(safe_join(root, "src/../../outside").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlink_inside_copied_tree() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("council-coding-security-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        let target = root.join("destination");
+        fs::create_dir_all(&source).unwrap();
+        symlink("/etc", source.join("outside")).unwrap();
+        let result = copy_dir_recursive(&source, &target);
+        assert!(result.is_err(), "copying a tree containing symlinks must fail");
+        fs::remove_dir_all(root).unwrap();
+    }
 }
