@@ -2450,12 +2450,16 @@ export async function runCouncilJob(job) {
           // A malformed revision is not silently adopted. The original stays the
           // candidate and the gate keeps judging the thing that actually ran.
           const parsed = parseFinal(text);
-          if (parsed) revisions.set(candidate.letter, { final: parsed, text });
+          // Do not adopt a salvaged/truncated FINAL block as repaired code.
+          // Reject revisions that silently swap a code candidate for prose.
+          const validRevision = Boolean(parsed?.wellFormed && parsed.kind !== "unknown" &&
+            (candidate.final?.kind !== "code" || (parsed.kind === "code" && parsed.code.trim())));
+          if (validRevision) revisions.set(candidate.letter, { final: parsed, text });
           await addEvent(
             job.id,
-            parsed ? "info" : "warn",
-            parsed ? "revision_done" : "revision_unparsed",
-            parsed
+            validRevision ? "info" : "warn",
+            validRevision ? "revision_done" : "revision_unparsed",
+            validRevision
               ? `${candidate.model} revised Candidate ${candidate.letter}.`
               : `${candidate.model} answered but the revision of Candidate ${candidate.letter} did not parse; the original stands.`,
             { model: candidate.model, letter: candidate.letter }

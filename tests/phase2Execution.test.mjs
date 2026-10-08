@@ -74,3 +74,8 @@ assert.equal(repairOutcome(failedRun, { ...passingRun, timedOut: true }), "still
 assert.equal(repairOutcome(failedRun, { ...passingRun, state: "canceled" }), "still_failing");
 assert.equal(repairOutcome(failedRun, { ...passingRun, passed: 0 }), "still_failing");
 console.log("Phase 4 repair evidence tests passed.");
+
+assert.equal(repairOutcome(null, passingRun), "unverified");
+assert.equal(repairOutcome({ ran: false, ok: false }, passingRun), "unverified");
+assert.equal(repairOutcome(failedRun, { ...passingRun, ran: false }), "unverified");
+console.log("Phase 4 rejects repairs without an original execution baseline.");

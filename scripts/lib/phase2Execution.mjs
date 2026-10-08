@@ -87,7 +87,7 @@ export function repairOutcome(original, revised) {
     !run.timedOut && !run.canceled && run.state !== "canceled" &&
     run.state !== "timed_out"
   );
-  if (!revised || !revised.ran) return "unverified";
+  if (!revised || !revised.ran || !original?.ran) return "unverified";
   if (verified(revised)) return verified(original) ? "still_passing" : "repaired";
   if (verified(original)) return "regressed";
   return "still_failing";
