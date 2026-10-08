@@ -910,8 +910,9 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
     const parsed = parseRemoteOutput(`${result.stdout || ""}\n${result.stderr || ""}`);
     const out = clampOutput(parsed.stdout || result.stdout || "");
     const err = clampOutput(parsed.stderr || result.stderr || "");
-    const exitCode = parsed.exitCode ?? result.exitCode ?? 0;
+    const exitCode = parsed.exitCode ?? result.exitCode ?? null;
     return {
+      // A missing exit status must not be presented as a passing verification.
       ok: exitCode === 0,
       runtime: parsed.runtime || "e2b",
       exitCode,
