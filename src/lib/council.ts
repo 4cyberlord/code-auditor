@@ -337,6 +337,46 @@ export function gateFor(run: CandidateRun | undefined): "pass" | "fail" | "untes
   return "pass";
 }
 
+
+/**
+ * Phase 5: an evidence-first shortlist for synthesizers.
+ * Only passing executions can be ranked when any code was executed.
+ * Never convert majority opinion or model confidence into test evidence.
+ */
+export function selectVerifiedCandidate(runs: Record<string, CandidateRun>): {
+  winner: string | null;
+  eligible: string[];
+  reason: string;
+} {
+  const all = Object.entries(runs);
+  const passed = all.filter(([, run]) => gateFor(run) === "pass");
+  if (!passed.length) {
+    return {
+      winner: null, eligible: [],
+      reason: all.some(([, run]) => run?.ran)
+        ? "No candidate passed executable tests; no winner is justified."
+        : "No execution evidence is available; do not claim a verified winner.",
+    };
+  }
+  passed.sort(([letterA, a], [letterB, b]) => {
+    // More passing cases are stronger coverage evidence, not a popularity vote.
+    if (a.passed !== b.passed) return b.passed - a.passed;
+    // A reliable elapsed metric can break ties, but missing data cannot win.
+    const elapsedA = a.remoteElapsedMs;
+    const elapsedB = b.remoteElapsedMs;
+    const validA = typeof elapsedA === "number" && Number.isFinite(elapsedA) && elapsedA >= 0;
+    const validB = typeof elapsedB === "number" && Number.isFinite(elapsedB) && elapsedB >= 0;
+    if (validA && validB && elapsedA !== elapsedB) return elapsedA - elapsedB;
+    if (validA !== validB) return validA ? -1 : 1;
+    return letterA.localeCompare(letterB);
+  });
+  return {
+    winner: passed[0][0],
+    eligible: passed.map(([letter]) => letter),
+    reason: `Candidate ${passed[0][0]} has a passing execution (${passed[0][1].passed} tests). This is evidence-based selection, not proof beyond the tested cases.`,
+  };
+}
+
 /**
  * Did the *test* fail, rather than the code?
  *
@@ -1603,7 +1643,7 @@ export function aggregateJudgeRankings(
 export interface WinnerDecision {
   winner: string;
   /** Where the surviving winner came from. */
-  source: "synthesis" | "judges" | "none";
+  source: "synthesis" | "judges" | "evidence" | "none";
   /** Set when the gate rejected the synthesis' pick. */
   overruledReason: string;
   /** Set when the judges' scoreboard did not agree with the synthesis. */
@@ -1637,6 +1677,19 @@ export function decideWinner(args: {
   const tally = aggregateJudgeRankings(args.judges, args.letters, args.runs);
   const ruling = enforceWinnerGate(args.claimed, args.runs);
   const executed = Object.values(args.runs).some((r) => r?.ran);
+  // Verified execution outranks syntheses and judge popularity.
+  // Keep the original judge/synthesis policy for reasoning-only questions.
+  if (executed) {
+    const evidence = selectVerifiedCandidate(args.runs);
+    if (!evidence.winner) {
+      return { winner: "", source: "none", overruledReason: ruling.overruledReason,
+        disagreement: evidence.reason, tally };
+    }
+    return { winner: evidence.winner, source: "evidence", overruledReason: ruling.overruledReason,
+      disagreement: args.claimed && args.claimed !== evidence.winner
+        ? `The synthesis preferred Candidate ${args.claimed}, but ${evidence.reason}`
+        : evidence.reason, tally };
+  }
   const eligible = tally.filter((row) => (executed ? row.gate === "pass" : true) && row.points > 0);
   const leader = eligible[0];
 
@@ -1829,7 +1882,8 @@ export function buildPresentation(report: CouncilReport): Presentation {
   // A revised candidate is represented by its revision everywhere: that is the
   // thing that was judged, and showing round one's numbers beside a revised
   // answer would be evidence for a program nobody shipped.
-  const runFor = (c: Candidate) => (c.revised ? report.revisedRuns?.[c.letter] : undefined) ?? report.runs?.[c.letter];
+  // Never attach round-one evidence to a revision that was never retested.
+  const runFor = (c: Candidate) => c.revised ? report.revisedRuns?.[c.letter] : report.runs?.[c.letter];
   const gateRuns: Record<string, CandidateRun> = {};
   for (const c of report.candidates) {
     const run = runFor(c);
@@ -1891,11 +1945,11 @@ export function buildPresentation(report: CouncilReport): Presentation {
       .filter(Boolean)
       .join("\n\n"),
     contractDisputes: report.contractAgreement?.differences ?? [],
-    // The synthesis assembles the shipped answer, so its code is preferred; the
-    // winning candidate's own code is the fallback when the synthesis wrote
-    // prose around a candidate rather than restating it.
-    code: synth?.code || winnerFinal?.code || "",
-    language: synth?.language || (winnerFinal ? candidateLanguage(winnerFinal) : ""),
+    // A synthesizer may describe or rewrite a different candidate's program.
+    // Only the exact selected candidate's code was tested. Never advertise
+    // synthesis-generated code as the verified winner's executable artifact.
+    code: winnerFinal?.kind === "code" ? winnerFinal.code : "",
+    language: winnerFinal?.kind === "code" ? candidateLanguage(winnerFinal) : "",
   };
 }
 

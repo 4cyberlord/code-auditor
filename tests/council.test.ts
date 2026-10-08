@@ -7,6 +7,8 @@ import {
   countCases,
   executionDigest,
   gateFor,
+  selectVerifiedCandidate,
+  decideWinner,
   parseReviewSet,
   parseTestSuites,
   parseCouncilSynthesis,
@@ -401,6 +403,73 @@ CONTRACT>>>`);
       execution: "e",
     }).includes("Local Knowledge/RAG")
   );
+}
+
+
+{
+  const run = (letter: string, passed: number, failed = 0, ms: number | null = null): CandidateRun =>
+    ({ letter, ran: true, ok: failed === 0, passed, failed, remoteElapsedMs: ms } as CandidateRun);
+  const ranking = selectVerifiedCandidate({
+    A: run("A", 7, 3, 5),
+    B: run("B", 10, 0, 12),
+    C: run("C", 8, 0, 4),
+  });
+  check("verified minority beats failed majority", ranking.winner === "B");
+  check("failed candidates are ineligible", ranking.eligible.join(",") === "B,C");
+  const tied = selectVerifiedCandidate({ B: run("B", 10, 0, 8), A: run("A", 10, 0, 5) });
+  check("runtime evidence resolves equal passing coverage", tied.winner === "A");
+  const noTests = selectVerifiedCandidate({ A: run("A", 0, 0, 0) });
+  check("zero passed tests is not verification", noTests.winner === null);
+  const allFailed = selectVerifiedCandidate({ A: run("A", 1, 1) });
+  check("failed execution cannot win", allFailed.winner === null);
+  const unexecuted = selectVerifiedCandidate({});
+  check("missing evidence never implies verified", unexecuted.winner === null);
+}
+
+
+// Phase 5: synthesis and judges cannot override real executable evidence.
+{
+  const run = (letter: string, passed: number, failed = 0) =>
+    ({ letter, ran: true, ok: failed === 0, passed, failed } as CandidateRun);
+  const result = decideWinner({ claimed: "A", judges: [], runs: {
+    A: run("A", 9, 1), B: run("B", 10), C: run("C", 8),
+  }, letters: ["A","B","C"] });
+  check("verified minority is the actual Council winner", result.winner === "B");
+  check("selection is labeled evidence-derived", result.source === "evidence");
+  const noWinner = decideWinner({ claimed: "A", judges: [], runs: { A: run("A", 0, 1) }, letters: ["A"] });
+  check("no execution success means no winner", noWinner.winner === "");
+  const reasoning = decideWinner({ claimed: "A", judges: [], runs: {}, letters: ["A"] });
+  check("research or MCQ without execution can keep synthesis", reasoning.winner === "A");
+}
+
+
+{
+  const mkRun = (letter: string, ok: boolean): CandidateRun => ({
+    letter, ran: true, ok, passed: ok ? 3 : 1, failed: ok ? 0 : 2,
+    durationMs: 10, note: "", runtime: "python3",
+  });
+  const safe = FINAL("Use verified program", "print('VERIFIED_B')", "python");
+  const rejected = FINAL("Wrong program", "print('REJECTED_A')", "python");
+  const report = {
+    candidates: [cand("A", rejected), cand("B", safe)],
+    suites: [], runs: { A: mkRun("A", false), B: mkRun("B", true) },
+    revisedRuns: {}, reviews: [], judges: [], synthesis: "synthesis",
+    winner: "B",
+    dossier: {
+      synthesis: { ...parseCouncilSynthesis("WINNER: A"), code: "print('SYNTHESIS_UNTESTED')", language: "javascript" },
+      judges: [], tally: [], winnerSource: "evidence" as const, disagreement: "",
+    },
+  };
+  const presentation = buildPresentation(report);
+  check("displayed code belongs to verified winner", presentation.code === safe.code);
+  check("displayed language belongs to verified winner", presentation.language === "python");
+  const none = buildPresentation({ ...report, winner: "" });
+  check("no winner means no copyable candidate code", none.code === "" && none.language === "");
+  const revised = buildPresentation({
+    ...report, candidates: [cand("A", rejected), { ...cand("B", safe), revised: FINAL("Broken revision", "print('UNTESTED_REVISED')") }],
+    winner: "B", revisedRuns: {},
+  });
+  check("untested revision must not inherit initial pass", revised.standing !== "verified");
 }
 
 console.log(fail ? `\n${fail} FAILURES\n` : "\nall council checks passed\n");
