@@ -33,6 +33,12 @@ docker run --rm --init --name "$name" --pull never --network none --read-only \
     test ! -e /sys/class/net/eth0
   '
 test "$(cat "$work/workspace/result.txt")" = ok
+echo "Checking macOS native AppleScript approval dialog (click Deny for the first test)."
+osascript -e 'button returned of (display dialog "Council Editor security acceptance: choose Deny" with title "Native authorization test" buttons {"Deny", "Approve"} default button "Deny" giving up after 30)' | grep -qx "Deny"
+echo "PASS: Native Deny action reported by macOS."
+echo "Checking native dialog Approve action (click Approve for the second test)."
+osascript -e 'button returned of (display dialog "Council Editor security acceptance: choose Approve" with title "Native authorization test" buttons {"Deny", "Approve"} default button "Deny" giving up after 30)' | grep -qx "Approve"
+echo "PASS: Native Approve action reported by macOS."
 echo "PASS: Docker Desktop restricted container filesystem/network checks."
 echo ""
 echo "INTERACTIVE VERIFICATION REQUIRED IN THE RUNNING APP:"
