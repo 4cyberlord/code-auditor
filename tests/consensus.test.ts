@@ -325,3 +325,16 @@ console.log("\n6. same algorithm, nothing phrased alike (the realistic case)");
 
 console.log(failures ? `\n${failures} FAILURE(S)\n` : "\nall checks passed\n");
 process.exit(failures ? 1 : 0);
+// Phase 3: every group must have direct pairwise agreement, not a chained bridge.
+// This invariant is independent of candidate ordering and forbids false unanimity.
+{
+  const mk = (answer: string) => ({ id: answer, name: answer, final: parseFinal(final({ answer, claims: [answer], code: "" }))! });
+  const inputs = [mk("one two three four five"), mk("one two three five six"), mk("five six seven eight nine")];
+  const result = computeConsensus(inputs, 0.55);
+  for (const group of result.groups) {
+    for (let i=0; i<group.length; i++) for (let j=i+1; j<group.length; j++) {
+      const pair = result.pairs.find(p => (p.a===group[i] && p.b===group[j]) || (p.b===group[i] && p.a===group[j]));
+      check("no chained agreement without pair support", Boolean(pair && pair.score>=0.55));
+    }
+  }
+}

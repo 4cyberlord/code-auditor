@@ -272,33 +272,25 @@ export function computeConsensus(inputs: ConsensusInput[], threshold = 0.55): Co
     for (let j = i + 1; j < usable.length; j++) pairs.push(pairScore(usable[i], usable[j]));
   }
 
-  // Agreement is transitive here by design: connected components, not cliques.
-  // Two agents that each agree with a third are treated as one camp, which matches
-  // how a person reading four answers would group them.
-  const parent = new Map(usable.map((u) => [u.id, u.id]));
-  const find = (x: string): string => {
-    let r = x;
-    while (parent.get(r) !== r) r = parent.get(r)!;
-    while (parent.get(x) !== r) {
-      const next = parent.get(x)!;
-      parent.set(x, r);
-      x = next;
-    }
-    return r;
-  };
-  for (const p of pairs) {
-    if (p.score >= threshold) parent.set(find(p.a), find(p.b));
-  }
-
-  const byRoot = new Map<string, string[]>();
-  for (const u of usable) {
-    const r = find(u.id);
-    byRoot.set(r, [...(byRoot.get(r) ?? []), u.id]);
-  }
+  // Complete-link clustering: every pair of members within a consensus group
+  // must actually agree. Connected-component chaining can report unanimity
+  // even when the first and last candidates explicitly disagree.
   const order = new Map(usable.map((u, i) => [u.id, i]));
-  const groups = [...byRoot.values()]
-    .map((g) => g.sort((a, b) => order.get(a)! - order.get(b)!))
-    .sort((a, b) => b.length - a.length || order.get(a[0])! - order.get(b[0])!);
+  const scoreFor = new Map<string, number>();
+  for (const p of pairs) {
+    scoreFor.set([p.a, p.b].sort().join("\\0"), p.score);
+  }
+  const agrees = (a: string, b: string) =>
+    (scoreFor.get([a, b].sort().join("\\0")) ?? 0) >= threshold;
+  const groups: string[][] = [];
+  for (const item of usable) {
+    const candidateGroups = groups
+      .filter((g) => g.every((member) => agrees(item.id, member)))
+      .sort((a, b) => b.length - a.length || order.get(a[0])! - order.get(b[0])!);
+    if (candidateGroups[0]) candidateGroups[0].push(item.id);
+    else groups.push([item.id]);
+  }
+  groups.sort((a, b) => b.length - a.length || order.get(a[0])! - order.get(b[0])!);
 
   const largest = groups[0];
   const n = usable.length;
