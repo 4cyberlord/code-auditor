@@ -156,6 +156,8 @@ export interface CodingActivity {
 }
 
 export interface CodingRunOptions {
+  /** Screenshot PNG data URLs included in the current request, never stored with run history. */
+  images?: string[];
   control?: CodingRunControl;
   onEvent?: (event: CodingToolEvent) => void;
   onProgress?: (progress: CodingProgress) => void;
@@ -1267,6 +1269,15 @@ function normalizeRun(run: CodingRun): CodingRun {
   };
 }
 
+/** Multimodal content for an explicitly user-captured screenshot. */
+function codingUserContent(text: string, images: string[] = []): string | Array<Record<string, unknown>> {
+  if (!images.length) return text;
+  return [
+    { type: "text", text: text + "\n\nRead the attached screenshot(s) carefully and solve the visible coding question. Explain time and space complexity, code quality, and relevant syntax. Never invent measured runtime or memory." },
+    ...images.slice(0, 3).map((url) => ({ type: "image_url", image_url: { url, detail: "high" } })),
+  ];
+}
+
 export async function runCodingIntelligence(
   task: string,
   config: CodingAgentConfig,
@@ -1285,7 +1296,7 @@ export async function runCodingIntelligence(
 
   const messages: Array<Record<string, unknown>> = [
     { role: "system", content: codingSystemPrompt(CODING_SYSTEM_PROMPT, config) },
-    { role: "user", content: userText },
+    { role: "user", content: codingUserContent(userText, options.images) },
   ];
   let raw = "";
   let lastContent = "";
@@ -1575,7 +1586,7 @@ function eventSummary(event: CodingToolEvent): string {
 export async function runCodingPlan(
   task: string,
   config: CodingAgentConfig,
-  options: Pick<CodingRunOptions, "control" | "onProgress"> & { promptOverride?: string } = {}
+  options: Pick<CodingRunOptions, "control" | "onProgress" | "images"> & { promptOverride?: string } = {}
 ): Promise<CodingRun> {
   const { control, onProgress } = options;
   onProgress?.({ phase: "thinking", turn: 1, detail: "Analyzing the task" });
@@ -1590,7 +1601,7 @@ export async function runCodingPlan(
     temperature: config.temperature,
     messages: [
       { role: "system", content: codingSystemPrompt(CODING_PLAN_SYSTEM_PROMPT, config) },
-      { role: "user", content: (options.promptOverride ?? buildCodingPlanContext(task)) + await codingStudyContext(task) },
+      { role: "user", content: codingUserContent((options.promptOverride ?? buildCodingPlanContext(task)) + await codingStudyContext(task), options.images) },
     ],
   });
 

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Markdown from "./Markdown";
+import * as bridge from "@/lib/bridge";
 import Splitter from "./Splitter";
 import {
   CodingRunCancelled,
@@ -75,6 +76,8 @@ function supportsCodingTools(route: Route | null): boolean {
 
 export default function CodingWorkspace() {
   const [task, setTask] = useState("");
+  const [screenshots, setScreenshots] = useState<bridge.Capture[]>([]);
+  const [capturing, setCapturing] = useState(false);
   const [runs, setRuns] = useState<CodingRun[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -446,6 +449,7 @@ export default function CodingWorkspace() {
       const run = await runCodingPlan(refineOf ? refineOf.task : clean, config, {
         control,
         onProgress: setProgress,
+        images: screenshots.map((shot) => shot.dataUrl),
         ...(refineOf ? { promptOverride: refinementPrompt(clean, refineOf) } : {}),
       });
       const seeded = refineOf
@@ -501,6 +505,7 @@ export default function CodingWorkspace() {
       const run = await runCodingIntelligence(clean, config, {
         control,
         planRun: planBase,
+        images: screenshots.map((shot) => shot.dataUrl),
         onProgress: setProgress,
         onEvent: trackEvent,
         onActivity: (entry) => setLiveActivity((current) => [...current, entry]),
@@ -571,9 +576,30 @@ export default function CodingWorkspace() {
     await execute(active);
   };
 
+  const captureForCoding = async (mode: "screen" | "left" | "right" | "region") => {
+    setCapturing(true);
+    setError(null);
+    try {
+      const result = mode === "screen" ? await bridge.captureScreen()
+        : mode === "left" ? await bridge.captureLeftHalf()
+        : mode === "right" ? await bridge.captureRightHalf()
+        : await bridge.captureSelection();
+      if (!result?.length) return;
+      const valid = result.filter((shot) => shot.dataUrl.startsWith("data:image/png;base64,") && shot.dataUrl.length < 12_000_000).slice(0, 3);
+      if (!valid.length) throw new Error("Capture is too large to send. Select a smaller region.");
+      setScreenshots(valid);
+      setTask((current) => current.trim() ? current : "Solve the coding question in the attached screenshot. Give the best solution, time and space complexity, optimization and code-style review, and explain the key functions and syntax.");
+    } catch (err) {
+      setError(String(err).replace(/^Error:\s*/, ""));
+    } finally {
+      setCapturing(false);
+    }
+  };
+
   const newConversation = () => {
     queueRef.current = [];
     setTask("");
+    setScreenshots([]);
     setActiveId(null);
     setCleared(true);
     setResultsOpen(false);
@@ -850,6 +876,32 @@ export default function CodingWorkspace() {
               spellCheck={false}
               autoCapitalize="off"
             />
+            <div className="coding-capture-actions" style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "8px 12px" }}>
+              {(["screen", "left", "right", "region"] as const).map((mode) => (
+                <button key={mode} type="button" className="btn tiny ghost"
+                  disabled={capturing || busy || !bridge.inTauri()}
+                  onClick={() => void captureForCoding(mode)}
+                  title={"Capture " + mode + " and attach it to your coding question"}>
+                  {capturing ? "Capturing..." : mode === "screen" ? "Full screen" : mode === "region" ? "Select area" : mode === "left" ? "Left half" : "Right half"}
+                </button>
+              ))}
+              {!!screenshots.length && (
+                <button type="button" className="btn tiny ghost" onClick={() => setScreenshots([])}
+                  disabled={busy} title="Remove attached captures">Remove {screenshots.length} screenshot(s)</button>
+              )}
+            </div>
+            {!!screenshots.length && (
+              <div style={{ display: "flex", gap: 8, padding: "0 12px 8px", overflowX: "auto" }}
+                aria-label="Screenshots attached to coding question">
+                {screenshots.map((shot, i) => (
+                  <div key={shot.path} role="img" aria-label={"Screenshot " + (i + 1)}
+                    title={shot.path}
+                    style={{ width: 100, height: 65, flexShrink: 0, backgroundSize: "contain",
+                      backgroundPosition: "center", backgroundRepeat: "no-repeat",
+                      backgroundImage: `url("${shot.dataUrl}")`, borderRadius: 6, border: "1px solid var(--border)" }} />
+                ))}
+              </div>
+            )}
             <div className="coding-composer-bar">
               <button className="composer-icon" type="button" disabled title="Attach context">
                 +
