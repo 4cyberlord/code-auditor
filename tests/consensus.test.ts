@@ -323,8 +323,7 @@ console.log("\n6. same algorithm, nothing phrased alike (the realistic case)");
   );
 }
 
-console.log(failures ? `\n${failures} FAILURE(S)\n` : "\nall checks passed\n");
-// Keep process exit after all regression suites.
+// Phase 3 regression suites run before the final test report.
 // Phase 3: every group must have direct pairwise agreement, not a chained bridge.
 // This invariant is independent of candidate ordering and forbids false unanimity.
 {
@@ -339,4 +338,29 @@ console.log(failures ? `\n${failures} FAILURE(S)\n` : "\nall checks passed\n");
   }
 }
 
+
+// Invalid thresholds, duplicate agent IDs, and empty identities must never
+// produce a misleading unanimous or majority decision.
+{
+  const mk = (id: string, answer: string) => ({
+    id, name: id, final: parseFinal(final({ answer, claims: [answer], code: "" }))!,
+  });
+  const valid = [mk("a", "Choose the first solution."), mk("b", "Choose the second solution.")];
+  for (const threshold of [Number.NaN, Number.POSITIVE_INFINITY, -0.01, 1.01]) {
+    let rejected = false;
+    try { computeConsensus(valid, threshold); } catch (e) { rejected = e instanceof RangeError; }
+    check("reject invalid consensus threshold", rejected, String(threshold));
+  }
+  for (const invalid of [[mk("a", "first"), mk("a", "second")], [mk("", "first"), mk("b", "second")]]) {
+    let rejected = false;
+    try { computeConsensus(invalid); } catch { rejected = true; }
+    check("reject invalid agent identity", rejected);
+  }
+  const zero = computeConsensus(valid, 0);
+  check("explicit threshold zero is supported", zero.verdict === "unanimous");
+  const strict = computeConsensus(valid, 1);
+  check("strict threshold does not manufacture unanimity", strict.groups.length > 1);
+}
+
+console.log(failures ? `\n${failures} FAILURE(S)\n` : "\nall checks passed\n");
 process.exit(failures ? 1 : 0);

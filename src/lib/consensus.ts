@@ -247,6 +247,18 @@ function pairScore(x: ConsensusInput, y: ConsensusInput): PairScore {
 // ------------------------------------------------------------------ clustering
 
 export function computeConsensus(inputs: ConsensusInput[], threshold = 0.55): ConsensusResult {
+  if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+    throw new RangeError("Consensus threshold must be between 0 and 1.");
+  }
+  // IDs determine pair identity and grouping. Duplicates silently collapse
+  // distinct agents into one group and can manufacture majority or unanimity.
+  const ids = new Set<string>();
+  for (const input of inputs) {
+    if (typeof input.id !== "string" || !input.id.trim() || ids.has(input.id)) {
+      throw new Error("Consensus inputs require unique, nonempty agent IDs.");
+    }
+    ids.add(input.id);
+  }
   const usable = inputs.filter((i) => i.final && (i.final.answer.trim() || i.final.code.trim()));
 
   if (usable.length < 2) {
