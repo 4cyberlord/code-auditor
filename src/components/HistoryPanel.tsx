@@ -46,7 +46,7 @@ export default function HistoryPanel() {
       setPerformanceLoading(true);
       try {
         const jobs = (await listSolveJobs("completed"))
-          .filter((j) => j.sessionId === current && j.kind === "council")
+          .filter((j) => j.sessionId === current && j.mode === "council")
           .slice(0, 25);
         const saved = await Promise.all(jobs.map(async (job) => {
           try {
