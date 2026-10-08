@@ -1,11 +1,11 @@
 name: Security branch macOS validation
 on:
-  push:
+  pull_request:
     branches:
-      - security/coding-shell-opt-in
+      - main
   workflow_dispatch:
 concurrency:
-  group: security-macos-${{ github.ref }}
+  group: security-macos-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
