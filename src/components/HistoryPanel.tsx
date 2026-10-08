@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { modelPerformance, type CouncilReport, type ModelPerformance } from "@/lib/council";
+import { getCouncilReport, listSolveJobs } from "@/lib/sessions";
 import { formatWhen } from "@/lib/when";
 import { useStore } from "@/lib/store";
 
@@ -24,10 +26,46 @@ export default function HistoryPanel() {
 
   const open = useStore((s) => s.settings.railPanel === "history");
   const toggleRail = useStore((s) => s.toggleRailPanel);
+  const [performance, setPerformance] = useState<ModelPerformance[]>([]);
+  const [performanceLoading, setPerformanceLoading] = useState(false);
 
   useEffect(() => {
     void loadHistory();
   }, [loadHistory, current, running]);
+
+  // Historical Council reports are persisted separately from ordinary run
+  // summaries. Read only completed reports for this session and cap the sample
+  // to avoid excessive desktop/IPC work on heavily used installations.
+  useEffect(() => {
+    let canceled = false;
+    if (!current || !open) {
+      queueMicrotask(() => { if (!canceled) { setPerformance([]); setPerformanceLoading(false); } });
+      return () => { canceled = true; };
+    }
+    const load = async () => {
+      setPerformanceLoading(true);
+      try {
+        const jobs = (await listSolveJobs("completed"))
+          .filter((j) => j.sessionId === current && j.kind === "council")
+          .slice(0, 25);
+        const saved = await Promise.all(jobs.map(async (job) => {
+          try {
+            const row = await getCouncilReport(job.id);
+            const data = row?.report as Partial<CouncilReport> | undefined;
+            return data && Array.isArray(data.candidates) && data.runs && typeof data.runs === "object"
+              ? data as CouncilReport : null;
+          } catch { return null; }
+        }));
+        if (!canceled) setPerformance(modelPerformance(saved.filter((r): r is CouncilReport => Boolean(r))));
+      } catch {
+        if (!canceled) setPerformance([]);
+      } finally {
+        if (!canceled) setPerformanceLoading(false);
+      }
+    };
+    void load();
+    return () => { canceled = true; };
+  }, [current, open, running]);
 
   return (
     <aside className="history-panel" data-open={open}>
@@ -69,6 +107,20 @@ export default function HistoryPanel() {
 
       {open && (
         <div className="history-panel-body">
+          {performanceLoading && <div className="hint">Loading Council performance history…</div>}
+          {performance.length > 0 && (
+            <details className="history-performance">
+              <summary>Saved Council model performance (up to 25 jobs)</summary>
+              <div className="hint">Derived from saved execution evidence; generated test passes do not prove general correctness.</div>
+              <table style={{ width: "100%", textAlign: "left" }}>
+                <thead><tr><th>Model</th><th>Verified</th><th>Failed</th><th>Repairs</th></tr></thead>
+                <tbody>{performance.map((m) => (
+                  <tr key={m.model}><td>{m.model}</td><td>{m.verified}/{m.executed}</td>
+                    <td>{m.failed}</td><td>{m.repairsVerified}/{m.repairAttempts}</td></tr>
+                ))}</tbody>
+              </table>
+            </details>
+          )}
           {viewingRunId && (
             <div className="history-inspecting-notice">
               <span>Inspecting saved run</span>
