@@ -605,6 +605,33 @@ mod security_tests {
         assert!(policy.contains("(allow file-write*"));
     }
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn restricted_shell_enforces_project_write_and_network_denial() {
+        let root = std::env::temp_dir().join(format!("council-shell-test-{}", uuid::Uuid::new_v4()));
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let outside = root.join("outside.txt");
+        let policy = restricted_shell_profile(&project).unwrap();
+        let run = |command: &'static str, profile: String, dir: PathBuf| async move {
+            Command::new("/usr/bin/sandbox-exec")
+                .arg("-p").arg(profile).arg("/bin/sh").arg("-c").arg(command)
+                .current_dir(dir)
+                .output().await.expect("sandbox-exec should launch")
+        };
+        let allowed = run("printf ok > inside.txt", policy.clone(), project.clone()).await;
+        assert!(allowed.status.success(), "project write denied: {}", String::from_utf8_lossy(&allowed.stderr));
+        assert_eq!(fs::read_to_string(project.join("inside.txt")).unwrap(), "ok");
+        let blocked = run("printf breach > ../outside.txt", policy.clone(), project.clone()).await;
+        assert!(!blocked.status.success(), "outside-project write was permitted");
+        assert!(!outside.exists(), "outside-project file was created");
+        // Attempt a TCP connection without assuming internet connectivity.
+        // If the sandbox denies socket access, the command should fail.
+        let network = run("/usr/bin/nc -G 2 -z 127.0.0.1 1", policy, project.clone()).await;
+        assert!(!network.status.success(), "sandbox unexpectedly permitted TCP attempt");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn rejects_parent_traversal() {
         let root = Path::new("/tmp/project");
