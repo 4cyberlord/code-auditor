@@ -559,19 +559,28 @@ async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
     shell.arg("-lc").arg(command);
     // Do not forward API tokens or app credentials to model-requested subprocesses.
     shell.env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin");
-    let output = timeout(
-        Duration::from_secs(120),
-        shell
-            .current_dir(root)
-            // Without this the timeout only drops the future: the shell and its
-            // children keep running unsupervised, and a `npm run dev` the model
-            // tried to verify with would hold the port until the app is killed.
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| "Command timed out after 120 seconds.".to_string())?
-    .map_err(|e| format!("Could not run command: {e}"))?;
+    // Put the shell in its own process group on macOS. Terminate the group
+    // on timeout so ordinary children cannot outlive the command's deadline.
+    #[cfg(target_os = "macos")]
+    shell.process_group(0);
+    let mut child = shell
+        .current_dir(root)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("Could not start command: {e}"))?;
+    #[cfg(target_os = "macos")]
+    let group = child.id();
+    let output = match timeout(Duration::from_secs(120), child.wait_with_output()).await {
+        Ok(result) => result.map_err(|e| format!("Could not run command: {e}"))?,
+        Err(_) => {
+            #[cfg(target_os = "macos")]
+            if let Some(pid) = group {
+                // Negative PID targets the process group created above.
+                unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+            }
+            return Err("Command timed out after 120 seconds; process group terminated.".into());
+        }
+    };
     let mut text = String::new();
     if !output.stdout.is_empty() {
         text.push_str(&String::from_utf8_lossy(&output.stdout));
