@@ -351,7 +351,16 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
         let entry = entry.map_err(|e| e.to_string())?;
         let src = entry.path();
         let dest = destination.join(entry.file_name());
-        if src.is_dir() {
+        // Do not traverse a symlink encountered inside the tree. Otherwise an
+        // innocent-looking copy_folder could read files outside the project.
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_symlink() {
+            return Err(format!("Refusing to copy a symbolic link: {}", src.display()));
+        }
+        if dest.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            return Err(format!("Refusing to overwrite a symbolic link: {}", dest.display()));
+        }
+        if kind.is_dir() {
             copy_dir_recursive(&src, &dest)?;
         } else {
             fs::copy(&src, &dest).map_err(|e| format!("Could not copy file: {e}"))?;
@@ -471,7 +480,20 @@ fn grep_visit(
     Ok(())
 }
 
+/// The coding model's shell is NOT sandboxed by setting current_dir(root).
+/// Default-deny until an explicit operator opt-in. This does not claim to
+/// confine an opted-in shell: use a real isolated runner for untrusted commands.
+fn shell_enabled() -> bool {
+    matches!(
+        std::env::var("COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL").as_deref(),
+        Ok("1")
+    )
+}
+
 async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
+    if !shell_enabled() {
+        return Err("Shell execution is disabled by default because it can access files and networks outside the selected project. To explicitly accept this risk for a trusted local session, set COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL=1 before starting Council Editor. A real isolated runner is required for untrusted commands.".into());
+    }
     if command.contains('\0') {
         return Err("Command contains an invalid null byte.".into());
     }
@@ -523,4 +545,30 @@ fn display_rel(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .to_string()
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_parent_traversal() {
+        let root = Path::new("/tmp/project");
+        assert!(safe_join(root, "../outside").is_err());
+        assert!(safe_join(root, "src/../../outside").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlink_inside_copied_tree() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("council-coding-security-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        let target = root.join("destination");
+        fs::create_dir_all(&source).unwrap();
+        symlink("/etc", source.join("outside")).unwrap();
+        let result = copy_dir_recursive(&source, &target);
+        assert!(result.is_err(), "copying a tree containing symlinks must fail");
+        fs::remove_dir_all(root).unwrap();
+    }
 }
