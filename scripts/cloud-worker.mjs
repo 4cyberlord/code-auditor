@@ -19,7 +19,7 @@
 import "./lib/config.mjs";
 
 import { createSign } from "node:crypto";
-import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
+import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { readFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
@@ -2450,12 +2450,16 @@ export async function runCouncilJob(job) {
           // A malformed revision is not silently adopted. The original stays the
           // candidate and the gate keeps judging the thing that actually ran.
           const parsed = parseFinal(text);
-          if (parsed) revisions.set(candidate.letter, { final: parsed, text });
+          // Do not adopt a salvaged/truncated FINAL block as repaired code.
+          // Reject revisions that silently swap a code candidate for prose.
+          const validRevision = Boolean(parsed?.wellFormed && parsed.kind !== "unknown" &&
+            (candidate.final?.kind !== "code" || (parsed.kind === "code" && parsed.code.trim())));
+          if (validRevision) revisions.set(candidate.letter, { final: parsed, text });
           await addEvent(
             job.id,
-            parsed ? "info" : "warn",
-            parsed ? "revision_done" : "revision_unparsed",
-            parsed
+            validRevision ? "info" : "warn",
+            validRevision ? "revision_done" : "revision_unparsed",
+            validRevision
               ? `${candidate.model} revised Candidate ${candidate.letter}.`
               : `${candidate.model} answered but the revision of Candidate ${candidate.letter} did not parse; the original stands.`,
             { model: candidate.model, letter: candidate.letter }
@@ -2480,6 +2484,20 @@ export async function runCouncilJob(job) {
       await patchJob(job.id, { progress_phase: "reverifying" });
       await addEvent(job.id, "info", "reverifying", "Re-running the revised field against the same harnesses.");
       revisedRuns = await executeField(job, settings, benchmark.suites, field3, { revised: true });
+      // Distinguish a verified fix from a failed, regressed, or unverified
+      // revision. Judges must not treat generation of new code as success.
+      for (const c of field3.filter((item) => item.revised)) {
+        const outcome = repairOutcome(benchmark.runs[c.letter], revisedRuns[c.letter]);
+        await addEvent(job.id, outcome === "repaired" || outcome === "still_passing" ? "info" : "warn",
+          "repair_outcome", `Candidate ${c.letter}: ${outcome} after retest.`,
+          { letter: c.letter, originalExecutionId: benchmark.runs[c.letter]?.executionId ?? null,
+            revisedExecutionId: revisedRuns[c.letter]?.executionId ?? null,
+            outcome, originalPassed: benchmark.runs[c.letter]?.passed ?? 0,
+            originalFailed: benchmark.runs[c.letter]?.failed ?? 0,
+            revisedPassed: revisedRuns[c.letter]?.passed ?? 0,
+            revisedFailed: revisedRuns[c.letter]?.failed ?? 0 });
+      }
+
     }
   }
 
@@ -2492,7 +2510,7 @@ export async function runCouncilJob(job) {
   const executionBoth = [
     execution,
     revisedAny && Object.keys(revisedRuns).length
-      ? `=== REVISED RUNS ===\n${executionDigest(field3, revisedRuns, { revised: true })}`
+      ? `=== REVISED RUNS ===\n${executionDigest(field3, revisedRuns, { revised: true })}\n=== REPAIR OUTCOMES ===\n${field3.filter((c) => c.revised).map((c) => `Candidate ${c.letter}: ${repairOutcome(benchmark.runs[c.letter], revisedRuns[c.letter])}`).join("\\n")}\nA repair is verified only when its retest ran and passed actual test cases.`
       : "",
   ]
     .filter(Boolean)

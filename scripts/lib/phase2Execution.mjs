@@ -54,7 +54,9 @@ export function executionStatus(result) {
 }
 export function requiresRepair(run) {
   // Missing or invalid harnesses should be diagnosed, not attributed to bad code.
-  return !!run?.ran && (run.ok === false || run.failed > 0);
+  // A user-canceled execution or broken harness is not a code defect.
+  if (!run?.ran || run.canceled || run.state === "canceled" || run.note === "the generated harness did not build or start") return false;
+  return run.ok === false || run.failed > 0;
 }
 
 export async function withSandboxLifecycle(sandbox, onStart, execute, onFailure) {
@@ -73,4 +75,20 @@ export async function withSandboxLifecycle(sandbox, onStart, execute, onFailure)
       if (!failed) throw new Error("Sandbox cleanup failed", { cause: error });
     }
   }
+}
+
+/**
+ * Evidence gate for the one bounded repair attempt. A revision is not a
+ * successful repair merely because an agent produced new code.
+ */
+export function repairOutcome(original, revised) {
+  const verified = (run) => Boolean(
+    run?.ran && run.ok === true && run.passed > 0 && run.failed === 0 &&
+    !run.timedOut && !run.canceled && run.state !== "canceled" &&
+    run.state !== "timed_out"
+  );
+  if (!revised || !revised.ran || !original?.ran) return "unverified";
+  if (verified(revised)) return verified(original) ? "still_passing" : "repaired";
+  if (verified(original)) return "regressed";
+  return "still_failing";
 }
