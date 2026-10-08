@@ -19,7 +19,7 @@
 import "./lib/config.mjs";
 
 import { createSign } from "node:crypto";
-import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair } from "./lib/phase2Execution.mjs";
+import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { readFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
@@ -886,8 +886,9 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
   };
   const sandbox = template ? await Sandbox.create(template, opts) : await Sandbox.create(opts);
   const bootMs = Date.now() - bootStarted;
-  await options.onState?.("running", { executionId: id, sandboxId: sandbox.sandboxId, bootMs });
-  try {
+  return withSandboxLifecycle(sandbox,
+    () => options.onState?.("running", { executionId: id, sandboxId: sandbox.sandboxId, bootMs }),
+    async () => {
     let result;
     try {
       result = await sandbox.commands.run(`bash -lc ${shellSingle(remoteScript(language, code, "e2b"))}`, {
@@ -925,13 +926,12 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
       sandboxId: sandbox.sandboxId,
       bootMs,
     };
-  } catch (error) {
-    const state = /timed out|timeout/i.test(String(error)) ? "timed_out" : "failed";
-    await options.onState?.(state, { executionId: id, sandboxId: sandbox.sandboxId, reason: String(error).slice(0, 200) }).catch(() => {});
-    throw error;
-  } finally {
-    await sandbox.kill().catch(() => {});
-  }
+    },
+    async (error) => {
+      const state = /timed out|timeout/i.test(String(error)) ? "timed_out" : "failed";
+      await options.onState?.(state, { executionId: id, sandboxId: sandbox.sandboxId, reason: String(error).slice(0, 200) });
+    }
+  );
 }
 
 function executionProvider(settings) {

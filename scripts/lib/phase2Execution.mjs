@@ -56,3 +56,15 @@ export function requiresRepair(run) {
   // Missing or invalid harnesses should be diagnosed, not attributed to bad code.
   return !!run?.ran && (run.ok === false || run.failed > 0);
 }
+
+export async function withSandboxLifecycle(sandbox, onStart, execute, onFailure) {
+  try {
+    await onStart?.();
+    return await execute();
+  } catch (error) {
+    try { await onFailure?.(error); } catch { /* retain original error */ }
+    throw error;
+  } finally {
+    try { await sandbox.kill(); } catch { /* best-effort cleanup */ }
+  }
+}

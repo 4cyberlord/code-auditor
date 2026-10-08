@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair } from "../scripts/lib/phase2Execution.mjs";
+import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, withSandboxLifecycle } from "../scripts/lib/phase2Execution.mjs";
 assert.match(executionId(), /^[a-f0-9-]{36}$/);
 assert.notEqual(executionId(), executionId());
 for (const lang of ["python","javascript","typescript","rust","go","php","java","c","cpp"]) {
@@ -23,3 +23,9 @@ assert.equal(executionStatus({timedOut:true}),"timed_out");
 assert.equal(requiresRepair({ran:true,ok:false,failed:2}),true);
 assert.equal(requiresRepair({ran:false,ok:false,failed:0}),false);
 console.log("Phase 2 sandbox evidence and policy tests passed.");
+
+const lifecycle=[];
+await assert.rejects(withSandboxLifecycle({kill:async()=>lifecycle.push("kill")},async()=>{throw Error("start failed")},async()=>lifecycle.push("execute"),async()=>lifecycle.push("fail")),/start failed/);
+assert.deepEqual(lifecycle,["fail","kill"]);
+const ok=await withSandboxLifecycle({kill:async()=>{throw Error("cleanup")}},async()=>{},async()=>42);
+assert.equal(ok,42);
