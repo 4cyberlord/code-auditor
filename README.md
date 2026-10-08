@@ -339,6 +339,12 @@ public/             Public assets used by the app and README
 
 The experimental macOS `sandbox-exec` runner failed runtime validation on macOS CI: even an allowed project write aborted with `SIGABRT`. The `COUNCIL_EDITOR_SHELL_MODE=restricted` setting now **fails closed** and executes nothing, rather than silently falling back to a less restricted shell. This is not a working sandbox feature. A stronger isolated runner, tested against filesystem/network escapes and process cleanup, is required before restricted execution can be enabled.
 
+### Priority 1 security boundary and release gates
+
+The coding-agent Bash tool is disabled by default. The unsupported restricted mode deliberately refuses to run, and trusted unrestricted Bash remains an explicit opt-in with human approval per command. **Neither the selected project working directory nor a textual approval prompt creates an OS sandbox.** A production-grade restricted command runner, reliable descendant-process termination, race-resistant filesystem access, and adversarial macOS runtime verification remain outstanding. Do not mark Priority 1 complete or merge solely on the strength of compilation/unit tests.
+
+This branch also guards project discovery against directory symlinks and rejects writes through symlink ancestors. Existing path resolution still has time-of-check/time-of-use concerns that require descriptor-relative operations and actual containment tests.
+
 ### Priority 1 implementation (proposed branch)
 
 The branch `security/coding-shell-opt-in` introduces a first defensive step: coding-agent `bash` requests are **denied by default**. A trusted operator may deliberately permit the previous unrestricted shell behavior by setting `COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL=1` in the environment **before launching Council Editor**. This is **not a sandbox** or per-command approval; the opt-in grants broad shell access and should never be enabled for untrusted prompts. Recursive folder copying also rejects symbolic links, with regression tests for path traversal and copied symlinks.
