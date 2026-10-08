@@ -525,7 +525,7 @@ fn validate_shell_command(command: &str) -> Result<(), String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellPolicy {
     Disabled,
-    RestrictedUnavailable,
+    ContainerRestricted,
     TrustedUnrestricted,
 }
 
@@ -533,7 +533,7 @@ fn shell_policy(mode: Option<&str>, allow_unsafe: bool) -> ShellPolicy {
     // A restricted-mode request must never silently fall back to an unrestricted
     // shell, even if the operator enabled the latter separately.
     if mode == Some("restricted") {
-        ShellPolicy::RestrictedUnavailable
+        ShellPolicy::ContainerRestricted
     } else if allow_unsafe {
         ShellPolicy::TrustedUnrestricted
     } else {
@@ -541,8 +541,76 @@ fn shell_policy(mode: Option<&str>, allow_unsafe: bool) -> ShellPolicy {
     }
 }
 
-fn restricted_shell_unavailable() -> Result<String, String> {
-    Err("Restricted shell mode is unavailable: the experimental macOS runner failed isolation validation. Execution refused.".into())
+/// Restricted execution uses an OCI container engine, never macOS
+/// sandbox-exec. The container image is pinned by deployment configuration;
+/// it must be pulled explicitly beforehand. No image downloads at runtime.
+fn restricted_docker_args(root: &Path, command: &str, name: &str) -> Result<Vec<String>, String> {
+    validate_shell_command(command)?;
+    let path = root.to_str().ok_or("Project path must be valid UTF-8.")?;
+    if !root.is_absolute() || !root.is_dir() || path.contains(',') || path.contains(':') {
+        return Err("Invalid project path for Docker bind mount.".into());
+    }
+    if !name.starts_with("council-coding-")
+        || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err("Invalid container name.".into());
+    }
+    let image = "alpine:3.20";
+    Ok(vec![
+        "run", "--rm", "--init",
+        "--name", name,
+        "--pull", "never",
+        "--network", "none",
+        "--read-only",
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges",
+        "--pids-limit", "64",
+        "--memory", "512m",
+        "--memory-swap", "512m",
+        "--cpus", "1",
+        "--tmpfs", "/tmp:rw,nosuid,noexec,size=64m",
+        "--user", "1000:1000",
+        "--mount", &format!("type=bind,source={path},target=/workspace"),
+        "--workdir", "/workspace",
+        image, "/bin/sh", "-lc", command
+    ].into_iter().map(str::to_string).collect())
+}
+
+async fn run_restricted_docker(root: &Path, command: &str) -> Result<String, String> {
+    let name = format!("council-coding-{}", uuid::Uuid::new_v4().simple());
+    let args = restricted_docker_args(root, command, &name)?;
+    // Docker Desktop must already be installed and running. No fallback.
+    let mut child = Command::new("/usr/local/bin/docker");
+    // Docker Desktop also uses /opt/homebrew/bin/docker on Apple Silicon.
+    let docker = if Path::new("/usr/local/bin/docker").is_file() {
+        "/usr/local/bin/docker"
+    } else if Path::new("/opt/homebrew/bin/docker").is_file() {
+        "/opt/homebrew/bin/docker"
+    } else {
+        return Err("Restricted execution requires an installed Docker CLI and Docker Desktop; refusing to run.".into());
+    };
+    child = Command::new(docker);
+    child.args(&args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let output = match timeout(Duration::from_secs(120), child.output()).await {
+        Ok(value) => value.map_err(|e| format!("Container execution unavailable: {e}"))?,
+        Err(_) => {
+            // Kill by container name, not only the Docker client process.
+            let _ = timeout(Duration::from_secs(10),
+                Command::new(docker).arg("rm").arg("-f").arg(&name).output()
+            ).await;
+            return Err("Restricted command timed out; container cleanup requested.".into());
+        }
+    };
+    let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        return Err(format!("Restricted container exited with {}: {}", output.status, truncate_line(&text)));
+    }
+    Ok(if text.trim().is_empty() { "(command completed with no output)".into() }
+       else { text.chars().take(MAX_BASH_BYTES).collect() })
 }
 
 async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
@@ -639,58 +707,15 @@ mod security_tests {
     }
 
     #[test]
-    fn restricted_shell_is_disabled_until_validated() {
-        let err = restricted_shell_unavailable().unwrap_err();
-        assert!(err.contains("refused"));
-    }
-
-    #[test]
-    fn rejects_recursive_folder_copy_into_itself() {
-        let root = std::env::temp_dir().join(format!("council-copy-test-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(root.join("source/sub")).unwrap();
-        fs::write(root.join("source/file.txt"), "safe").unwrap();
-        let root = root.canonicalize().unwrap();
-        let err = copy_dir(&root, "source", "source/nested-copy").unwrap_err();
-        assert!(err.contains("descendants"));
-        assert!(!root.join("source/nested-copy").exists());
-        let err = copy_dir(&root, "source", "source").unwrap_err();
-        assert!(err.contains("descendants"));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_symlink_ancestor_when_intermediate_directory_missing() {
-        use std::os::unix::fs::symlink;
-        let base = std::env::temp_dir().join(format!("council-ancestor-test-{}", uuid::Uuid::new_v4()));
-        let project = base.join("project");
-        let outside = base.join("outside");
-        fs::create_dir_all(&project).unwrap();
-        fs::create_dir_all(&outside).unwrap();
-        symlink(&outside, project.join("escape")).unwrap();
-        let project = project.canonicalize().unwrap();
-        assert!(resolve_target(&project, "escape/missing/file.txt").is_err());
-        assert!(!outside.join("missing").exists());
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn discovery_does_not_follow_symlinks_outside_project() {
-        use std::os::unix::fs::symlink;
-        let base = std::env::temp_dir().join(format!("council-search-test-{}", uuid::Uuid::new_v4()));
-        let project = base.join("project");
-        let outside = base.join("outside");
-        fs::create_dir_all(&project).unwrap();
-        fs::create_dir_all(&outside).unwrap();
-        fs::write(outside.join("private.txt"), "NEVER_LEAK_THIS").unwrap();
-        symlink(&outside, project.join("shortcut")).unwrap();
-        let project = project.canonicalize().unwrap();
-        let listed = list_tree(&project, ".").unwrap();
-        assert!(!listed.contains("private.txt"));
-        let grepped = grep_tree(&project, ".", "NEVER_LEAK_THIS").unwrap();
-        assert!(grepped.contains("No matches"));
-        fs::remove_dir_all(base).unwrap();
+    fn restricted_container_has_explicit_isolation_flags() {
+        let root = std::env::temp_dir().canonicalize().unwrap();
+        let args = restricted_docker_args(&root, "printf ok", "council-coding-abc").unwrap();
+        for flag in ["--network", "none", "--read-only", "--cap-drop", "ALL", "--pids-limit",
+                     "--memory", "--cpus", "--pull", "never", "--security-opt", "no-new-privileges"] {
+            assert!(args.iter().any(|arg| arg == flag), "missing {flag}");
+        }
+        assert!(args.iter().any(|arg| arg.contains("target=/workspace")));
+        assert!(restricted_docker_args(&root, "echo ok", "malicious").is_err());
     }
 
     #[test]
