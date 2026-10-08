@@ -44,3 +44,12 @@ jobs:
         env:
           CODE_AUDITOR_ALLOW_ADHOC: '1'
         run: npm run app:build
+
+  docker-runtime-containment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull test image (CI only; app never pulls implicitly)
+        run: docker pull alpine:3.20
+      - name: Verify container isolation and cleanup on real Docker
+        run: bash tests/security/docker-containment.sh

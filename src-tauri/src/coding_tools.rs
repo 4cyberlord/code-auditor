@@ -2,6 +2,9 @@ use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(target_os = "macos")]
+mod confined;
+
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::process::Command;
@@ -67,11 +70,16 @@ end run"#;
             .output()
     ).await.map_err(|_| "Native shell approval timed out; command denied.".to_string())?
      .map_err(|_| "Native shell approval unavailable; command denied.".to_string())?;
-    if status.status.success() && String::from_utf8_lossy(&status.stdout).trim() == "Approve" {
+    if native_approval_granted(status.status.success(), &status.stdout) {
         Ok(())
     } else {
         Err("Native user approval was not granted; command denied.".into())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn native_approval_granted(success: bool, output: &[u8]) -> bool {
+    success && output == b"Approve\\n" || success && output == b"Approve"
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -86,6 +94,11 @@ async fn execute(req: CodingToolRequest) -> Result<String, String> {
         .args
         .as_object()
         .ok_or("Tool arguments must be an object.")?;
+
+    #[cfg(target_os = "macos")]
+    if name != "bash" {
+        return confined::execute_file_tool(&root, &name, args);
+    }
 
     match name.as_str() {
         "read" => read_file(&root, path_arg(args)?),
@@ -338,7 +351,7 @@ fn open_confined_file(root: &Path, target: &Path, flags: i32, mode: libc::mode_t
     }
     let name = final_name.ok_or("Expected file path.")?;
     let raw_file = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(),
-        flags | libc::O_CLOEXEC | libc::O_NOFOLLOW, mode) };
+        flags | libc::O_CLOEXEC | libc::O_NOFOLLOW, mode as libc::c_uint) };
     if raw_file < 0 { return Err(format!("Could not open confined file: {}", std::io::Error::last_os_error())); }
     Ok(unsafe { fs::File::from_raw_fd(raw_file) })
 }
@@ -708,6 +721,39 @@ fn restricted_docker_args(root: &Path, command: &str, name: &str) -> Result<Vec<
     ].into_iter().map(str::to_string).collect())
 }
 
+
+#[cfg(target_os = "macos")]
+struct ProcessGroupGuard(Option<u32>);
+#[cfg(target_os = "macos")]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+        }
+    }
+}
+
+/// On task cancellation, arrange forced cleanup without trusting the docker
+/// CLI process to terminate its container merely because the client exited.
+struct DockerCleanupGuard {
+    docker: String,
+    container_name: String,
+    armed: bool,
+}
+impl Drop for DockerCleanupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::process::Command::new(&self.docker)
+                .args(["rm", "-f", &self.container_name])
+                .env_clear()
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    }
+}
+
 async fn run_restricted_docker(root: &Path, command: &str) -> Result<String, String> {
     let name = format!("council-coding-{}", uuid::Uuid::new_v4().simple());
     let args = restricted_docker_args(root, command, &name)?;
@@ -719,6 +765,9 @@ async fn run_restricted_docker(root: &Path, command: &str) -> Result<String, Str
         "/opt/homebrew/bin/docker"
     } else {
         return Err("Restricted execution requires an installed Docker CLI and Docker Desktop; refusing to run.".into());
+    };
+    let mut cleanup_guard = DockerCleanupGuard {
+        docker: docker.to_string(), container_name: name.clone(), armed: true,
     };
     let mut child = Command::new(docker);
     child.args(&args)
@@ -740,6 +789,7 @@ async fn run_restricted_docker(root: &Path, command: &str) -> Result<String, Str
                     .output()
             ).await;
             let cleanup_succeeded = matches!(cleanup, Ok(Ok(ref output)) if output.status.success());
+            if cleanup_succeeded { cleanup_guard.armed = false; }
             return Err(if cleanup_succeeded {
                 "Restricted command timed out; container was forcibly removed.".into()
             } else {
@@ -747,6 +797,7 @@ async fn run_restricted_docker(root: &Path, command: &str) -> Result<String, Str
             });
         }
     };
+    cleanup_guard.armed = false;
     let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     if !output.status.success() {
         return Err(format!("Restricted container exited with {}: {}", output.status, truncate_line(&text)));
@@ -781,18 +832,19 @@ async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
         .spawn()
         .map_err(|e| format!("Could not start command: {e}"))?;
     #[cfg(target_os = "macos")]
-    let group = child.id();
+    let mut process_guard = ProcessGroupGuard(child.id());
     let output = match timeout(Duration::from_secs(120), child.wait_with_output()).await {
         Ok(result) => result.map_err(|e| format!("Could not run command: {e}"))?,
         Err(_) => {
             #[cfg(target_os = "macos")]
-            if let Some(pid) = group {
-                // Negative PID targets the process group created above.
+            if let Some(pid) = process_guard.0.take() {
                 unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
             }
             return Err("Command timed out after 120 seconds; process group terminated.".into());
         }
     };
+    #[cfg(target_os = "macos")]
+    { process_guard.0 = None; }
     let mut text = String::new();
     if !output.stdout.is_empty() {
         text.push_str(&String::from_utf8_lossy(&output.stdout));
@@ -830,6 +882,16 @@ fn display_rel(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_approval_is_fail_closed() {
+        assert!(native_approval_granted(true, b"Approve\\n"));
+        assert!(!native_approval_granted(false, b"Approve\\n"));
+        for response in [b"Deny".as_slice(), b"".as_slice(), b"Approve extra".as_slice()] {
+            assert!(!native_approval_granted(true, response));
+        }
+    }
 
     #[test]
     fn shell_policy_never_falls_back_from_restricted_to_unsafe() {
