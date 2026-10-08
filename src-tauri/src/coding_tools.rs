@@ -565,6 +565,8 @@ fn restricted_docker_args(root: &Path, command: &str, name: &str) -> Result<Vec<
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
         "--pids-limit", "64",
+        "--ulimit", "nofile=256:256",
+        "--ulimit", "fsize=8388608:8388608",
         "--memory", "512m",
         "--memory-swap", "512m",
         "--cpus", "1",
@@ -715,6 +717,10 @@ mod security_tests {
             assert!(args.iter().any(|arg| arg == flag), "missing {flag}");
         }
         assert!(args.iter().any(|arg| arg.contains("target=/workspace")));
+        assert!(args.windows(2).any(|w| w == ["--ulimit", "nofile=256:256"]));
+        assert!(args.windows(2).any(|w| w == ["--ulimit", "fsize=8388608:8388608"]));
+        assert!(!args.iter().any(|arg| arg == "--privileged"));
+
         assert!(restricted_docker_args(&root, "echo ok", "malicious").is_err());
     }
 
