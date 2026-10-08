@@ -335,15 +335,9 @@ tests/              TypeScript and worker tests
 public/             Public assets used by the app and README
 ```
 
-### Restricted shell status: disabled pending replacement
+### Restricted shell status: container-backed candidate (not yet validated)
 
-The experimental macOS `sandbox-exec` runner failed runtime validation on macOS CI: even an allowed project write aborted with `SIGABRT`. The `COUNCIL_EDITOR_SHELL_MODE=restricted` setting now **fails closed** and executes nothing, rather than silently falling back to a less restricted shell. This is not a working sandbox feature. A stronger isolated runner, tested against filesystem/network escapes and process cleanup, is required before restricted execution can be enabled.
-
-### Priority 1 security boundary and release gates
-
-The coding-agent Bash tool is disabled by default. The unsupported restricted mode deliberately refuses to run, and trusted unrestricted Bash remains an explicit opt-in with human approval per command. **Neither the selected project working directory nor a textual approval prompt creates an OS sandbox.** A production-grade restricted command runner, reliable descendant-process termination, race-resistant filesystem access, and adversarial macOS runtime verification remain outstanding. Do not mark Priority 1 complete or merge solely on the strength of compilation/unit tests.
-
-This branch also guards project discovery against directory symlinks and rejects writes through symlink ancestors. Existing path resolution still has time-of-check/time-of-use concerns that require descriptor-relative operations and actual containment tests.
+A new **opt-in** `COUNCIL_EDITOR_SHELL_MODE=restricted` path now launches commands in a Docker container with network disabled, read-only container root filesystem, capability removal, no-new-privileges, process count, CPU and memory limits, and an explicit project bind mount. It requires Docker Desktop and the `alpine:3.20` image to be installed in advance; otherwise execution fails closed. This is a candidate implementation, **not** a validated complete sandbox. Mounting the writable project still allows destructive edits to the project; Docker Desktop VM isolation and runtime policy must be evaluated with real containment tests. The trusted unsandboxed mode remains separate and explicit. Human command approval is required by the coding agent but the native command endpoint needs its own enforcement for complete authorization. Mac CI does not prove Docker execution works.
 
 ### Priority 1 implementation (proposed branch)
 
