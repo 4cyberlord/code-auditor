@@ -1,4 +1,4 @@
-import { routeProblem, routingGuidance } from "../src/lib/problemRouting.ts";
+import { routeProblem, routingGuidance, reconcileProblemReadings } from "../src/lib/problemRouting.ts";
 import { EMPTY_EXTRACTION, renderForReasoning, type Extraction } from "../src/lib/extraction.ts";
 
 const ex = (summary: string, changes: Partial<Extraction> = {}): Extraction =>
@@ -21,3 +21,19 @@ const unknown = routeProblem(ex("Solve this task."));
 check("unseen algorithms are not force-labeled", unknown.families.join(",") === "other");
 check("routing advice reaches text-only solvers", renderForReasoning(ex("Delete node from BST. Another valid output is accepted.")).includes("Validate required properties"));
 check("route records source uncertainty", routingGuidance(dubious).includes("do not invent missing notation"));
+
+const left = ex("Delete a node in a BST. Another valid output is accepted.", {
+  observations: ["Shown above: tree image with edges connecting nodes"]
+});
+const right = ex("Delete a node in a BST. Another valid output is accepted.");
+const compared = reconcileProblemReadings([left, right]);
+check("missing diagram observation escalates to ambiguous review", compared.path === "ambiguity_review");
+check("multiple valid answers retain property verification", compared.verification === "property_validator");
+check("multiple readers preserve tree classification", compared.families.includes("tree"));
+const altered = reconcileProblemReadings([
+  ex("Repair array", { code: "return x + 1" }),
+  ex("Repair array", { code: "return x - 1" })
+]);
+check("different code transcriptions require adjudication", altered.disagreements.some(s => s.includes("code")));
+const absent = reconcileProblemReadings([]);
+check("missing readers fail closed to review", absent.path === "ambiguity_review");

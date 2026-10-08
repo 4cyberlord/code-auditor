@@ -71,3 +71,39 @@ export function routingGuidance(route: ProblemRouting): string {
   if (route.verification === "property_validator") lines.push("Validate required properties; a single example serialization may not be the only correct output.");
   return lines.concat(route.reasons).join("\n");
 }
+
+/** Combines independent readings without quietly trusting a single interpretation. */
+export function reconcileProblemReadings(
+  readings: Array<Pick<Extraction, "problemSummary" | "observations" | "ambiguities" | "confidence" | "code" | "kind">>,
+): ProblemRouting & { disagreements: string[] } {
+  if (!readings.length) {
+    return { ...routeProblem({ problemSummary: "", observations: [], ambiguities: ["No readable source"],
+      confidence: 0, code: "", kind: "other" }), disagreements: ["No independent readings"] };
+  }
+  const routes = readings.map(routeProblem);
+  const families = [...new Set(routes.flatMap(r => r.families).filter(f => f !== "other"))] as ProblemFamily[];
+  if (!families.length) families.push("other");
+  const disagreements: string[] = [];
+  const normalize = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+  const values = readings.map(r => normalize(r.code)).filter(Boolean);
+  if (values.length > 1 && new Set(values).size > 1) disagreements.push("Readers disagree on transcribed code.");
+  const summaries = readings.map(r => normalize(r.problemSummary));
+  // Do not demand identical paraphrases; flag absent or materially divergent
+  // readings only. The original image is still needed for adjudication.
+  if (readings.length > 1 && summaries.some(s => !s) && summaries.some(Boolean))
+    disagreements.push("One reader omitted the problem statement.");
+  const visual = routes.some(r => r.needsVisualStructure);
+  const paths = routes.map(r => r.path);
+  if (visual && paths.includes("standard"))
+    disagreements.push("Readers disagree on whether the problem contains visual relationships.");
+  const verificationKinds = [...new Set(routes.map(r => r.verification))];
+  if (verificationKinds.length > 1)
+    disagreements.push("Readers disagree on the required verification strategy.");
+  const path: ReadingPath = disagreements.length || paths.includes("ambiguity_review")
+    ? "ambiguity_review" : visual ? "visual_review" : "standard";
+  const verification: VerificationPlan = verificationKinds.includes("specialized_validator")
+    ? "specialized_validator"
+    : verificationKinds.includes("property_validator") ? "property_validator" : "exact_output";
+  return { families, path, verification, needsVisualStructure: visual,
+    reasons: [...new Set(routes.flatMap(r => r.reasons)), ...disagreements], disagreements };
+}
