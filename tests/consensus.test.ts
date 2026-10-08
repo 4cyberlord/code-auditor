@@ -324,7 +324,7 @@ console.log("\n6. same algorithm, nothing phrased alike (the realistic case)");
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)\n` : "\nall checks passed\n");
-process.exit(failures ? 1 : 0);
+// Keep process exit after all regression suites.
 // Phase 3: every group must have direct pairwise agreement, not a chained bridge.
 // This invariant is independent of candidate ordering and forbids false unanimity.
 {
@@ -338,3 +338,5 @@ process.exit(failures ? 1 : 0);
     }
   }
 }
+
+process.exit(failures ? 1 : 0);
