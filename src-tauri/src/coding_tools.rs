@@ -611,6 +611,10 @@ mod security_tests {
         let root = std::env::temp_dir().join(format!("council-shell-test-{}", uuid::Uuid::new_v4()));
         let project = root.join("project");
         fs::create_dir_all(&project).unwrap();
+        // macOS temp_dir() may be /var/folders while the kernel resolves it
+        // through /private/var/folders. The production entrypoint always
+        // canonicalizes project roots; the test must do the same.
+        let project = project.canonicalize().unwrap();
         let outside = root.join("outside.txt");
         let policy = restricted_shell_profile(&project).unwrap();
         let run = |command: &'static str, profile: String, dir: PathBuf| async move {
