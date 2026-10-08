@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, withSandboxLifecycle } from "../scripts/lib/phase2Execution.mjs";
+import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "../scripts/lib/phase2Execution.mjs";
 assert.match(executionId(), /^[a-f0-9-]{36}$/);
 assert.notEqual(executionId(), executionId());
 for (const lang of ["python","javascript","typescript","rust","go","php","java","c","cpp"]) {
@@ -58,3 +58,19 @@ await assert.rejects(withSandboxLifecycle(
   async () => order.push("failed"),
 ), /execution failed/);
 assert.deepEqual(order, ["started","executed","failed","cleanup"]);
+
+assert.equal(requiresRepair({ ran: true, ok: false, failed: 1, state: "canceled" }), false);
+assert.equal(requiresRepair({ ran: true, ok: false, failed: 1, note: "the generated harness did not build or start" }), false);
+assert.equal(requiresRepair({ ran: true, ok: false, failed: 1, timedOut: true }), true);
+const failedRun = { ran: true, ok: false, passed: 1, failed: 1, state: "failed" };
+const passingRun = { ran: true, ok: true, passed: 2, failed: 0, state: "completed" };
+assert.equal(repairOutcome(failedRun, passingRun), "repaired");
+assert.equal(repairOutcome(failedRun, failedRun), "still_failing");
+assert.equal(repairOutcome(passingRun, failedRun), "regressed");
+assert.equal(repairOutcome(passingRun, passingRun), "still_passing");
+assert.equal(repairOutcome(failedRun, null), "unverified");
+assert.equal(repairOutcome(failedRun, { ran: false, ok: true, passed: 0, failed: 0 }), "unverified");
+assert.equal(repairOutcome(failedRun, { ...passingRun, timedOut: true }), "still_failing");
+assert.equal(repairOutcome(failedRun, { ...passingRun, state: "canceled" }), "still_failing");
+assert.equal(repairOutcome(failedRun, { ...passingRun, passed: 0 }), "still_failing");
+console.log("Phase 4 repair evidence tests passed.");
