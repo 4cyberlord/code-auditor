@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
@@ -268,17 +269,32 @@ fn destination_arg(args: &serde_json::Map<String, Value>) -> Result<&str, String
 
 fn read_file(root: &Path, path: &str) -> Result<String, String> {
     let path = resolve_existing(root, path)?;
-    let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+    // O_NOFOLLOW prevents a last-component symlink swap between path
+    // validation and open. This does not yet protect ancestor components;
+    // complete race resistance requires descriptor-relative traversal.
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(&path).map_err(|e| format!("Could not open file: {e}"))?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() {
         return Err("Read target is not a file.".into());
     }
     if meta.len() > MAX_READ_BYTES {
-        return Err(format!(
-            "File is too large to read safely ({} bytes).",
-            meta.len()
-        ));
+        return Err(format!("File is too large to read safely ({} bytes).", meta.len()));
     }
-    fs::read_to_string(&path).map_err(|e| format!("Could not read file: {e}"))
+    let mut bytes = Vec::new();
+    file.take(MAX_READ_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Could not read file: {e}"))?;
+    if bytes.len() as u64 > MAX_READ_BYTES {
+        return Err("File grew beyond the read size limit.".into());
+    }
+    String::from_utf8(bytes).map_err(|e| format!("File is not valid UTF-8: {e}"))
 }
 
 fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> {
