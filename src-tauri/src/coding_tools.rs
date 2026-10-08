@@ -417,6 +417,10 @@ fn visit(dir: &Path, root: &Path, out: &mut Vec<String>) -> Result<(), String> {
         }
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
+        // Never traverse directory symlinks during discovery. They may point
+        // outside the project even if the initially selected directory is safe.
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        if kind.is_symlink() { continue; }
         let name = entry.file_name().to_string_lossy().to_string();
         if name == "node_modules" || name == ".git" || name == "target" || name == ".next" {
             continue;
@@ -463,7 +467,8 @@ fn grep_visit(
             }
             let entry = entry.map_err(|e| e.to_string())?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == "node_modules" || name == ".git" || name == "target" || name == ".next" {
+            let kind = entry.file_type().map_err(|e| e.to_string())?;
+            if kind.is_symlink() || name == "node_modules" || name == ".git" || name == "target" || name == ".next" {
                 continue;
             }
             grep_visit(&entry.path(), root, pattern, out)?;
@@ -655,6 +660,25 @@ mod security_tests {
         let project = project.canonicalize().unwrap();
         assert!(resolve_target(&project, "escape/missing/file.txt").is_err());
         assert!(!outside.join("missing").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_does_not_follow_symlinks_outside_project() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("council-search-test-{}", uuid::Uuid::new_v4()));
+        let project = base.join("project");
+        let outside = base.join("outside");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("private.txt"), "NEVER_LEAK_THIS").unwrap();
+        symlink(&outside, project.join("shortcut")).unwrap();
+        let project = project.canonicalize().unwrap();
+        let listed = list_tree(&project, ".").unwrap();
+        assert!(!listed.contains("private.txt"));
+        let grepped = grep_tree(&project, ".", "NEVER_LEAK_THIS").unwrap();
+        assert!(grepped.contains("No matches"));
         fs::remove_dir_all(base).unwrap();
     }
 
