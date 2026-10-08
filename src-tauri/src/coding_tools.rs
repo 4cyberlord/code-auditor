@@ -112,8 +112,26 @@ fn canonical_root(root: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 
+fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), String> {
+    let relative = path.strip_prefix(root)
+        .map_err(|_| "Tool path is outside the configured project root.")?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() =>
+                return Err("Tool path contains a symbolic link; refusing access.".into()),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(format!("Could not inspect path component: {e}")),
+        }
+    }
+    Ok(())
+}
+
 fn resolve_existing(root: &Path, value: &str) -> Result<PathBuf, String> {
     let path = safe_join(root, value)?;
+    reject_symlink_components(root, &path)?;
     path.canonicalize()
         .map_err(|e| format!("Path does not exist inside project: {value} ({e})"))
         .and_then(|p| ensure_inside(root, p))
@@ -142,6 +160,8 @@ fn resolve_target(root: &Path, value: &str) -> Result<PathBuf, String> {
             Err(e) => return Err(format!("Could not inspect target ancestor: {e}")),
         }
     }
+    // Reject any existing symlink in the lexical path, not only the target.
+    reject_symlink_components(root, &path)?;
     // Reject target symlinks, including broken links whose exists() is false.
     match fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_symlink() =>
@@ -722,6 +742,21 @@ mod security_tests {
         assert!(!args.iter().any(|arg| arg == "--privileged"));
 
         assert!(restricted_docker_args(&root, "echo ok", "malicious").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlinks_even_when_they_point_inside_project() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("council-internal-link-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(base.join("real")).unwrap();
+        fs::write(base.join("real/file.txt"), "ok").unwrap();
+        symlink(base.join("real"), base.join("alias")).unwrap();
+        let root = base.canonicalize().unwrap();
+        assert!(resolve_existing(&root, "alias/file.txt").is_err());
+        assert!(resolve_target(&root, "alias/new.txt").is_err());
+        assert!(resolve_existing(&root, "real/file.txt").is_ok());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
