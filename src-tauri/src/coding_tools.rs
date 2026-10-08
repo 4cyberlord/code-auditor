@@ -500,7 +500,14 @@ fn restricted_shell_profile(root: &Path) -> Result<String, String> {
     // Scheme strings must not allow interpolation or injected policy forms.
     let quoted = path.replace('\\', "\\\\").replace('"', "\\\"");
     Ok(format!(
-        "(version 1)\\n(deny default)\\n(allow process*)\\n(allow sysctl-read)\\n(allow mach-lookup)\\n(allow file-read* (subpath \\"/System\\") (subpath \\"/usr\\") (subpath \\"/bin\\") (subpath \\"/sbin\\") (subpath \\"/Library/Frameworks\\") (subpath \\"/opt/homebrew\\") (subpath \\"{quoted}\\"))\\n(allow file-write* (subpath \\"{quoted}\\"))\\n"
+        r#"(version 1)
+(deny default)
+(allow process*)
+(allow sysctl-read)
+(allow mach-lookup)
+(allow file-read* (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Library/Frameworks") (subpath "/opt/homebrew") (subpath "{quoted}"))
+(allow file-write* (subpath "{quoted}"))
+"#
     ))
 }
 
