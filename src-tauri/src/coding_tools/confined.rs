@@ -104,8 +104,17 @@ fn open_file(parent: RawFd, name: &CStr, write: bool) -> Result<File, String> {
         flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK, 0o644 as libc::c_uint) };
     if fd < 0 { return Err(io_error("Could not open confined project file")); }
     let file = unsafe { File::from_raw_fd(fd) };
-    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file() {
         return Err("Project entry is not a regular file.".into());
+    }
+    // A hard link can point to the same inode as a file outside the project.
+    // Never modify shared inodes from the coding-tool boundary.
+    if write {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() > 1 {
+            return Err("Refusing to modify a multiply-linked file.".into());
+        }
     }
     Ok(file)
 }
@@ -162,6 +171,12 @@ fn copy_regular(source_parent: RawFd, source_name: &CStr, target_parent: RawFd, 
         return Err("Copy source exceeds 64 MiB limit.".into());
     }
     let mut destination = open_file(target_parent, target_name, true)?;
+    use std::os::unix::fs::MetadataExt;
+    let source_meta = source.metadata().map_err(|e| e.to_string())?;
+    let target_meta = destination.metadata().map_err(|e| e.to_string())?;
+    if source_meta.dev() == target_meta.dev() && source_meta.ino() == target_meta.ino() {
+        return Err("Refusing to copy a file onto itself.".into());
+    }
     destination.set_len(0).map_err(|e| e.to_string())?;
     let mut bytes = 0u64;
     let mut buf = [0u8; 8192];
@@ -469,6 +484,20 @@ mod security_tests {
         assert_eq!(std::fs::read_to_string(outside.join("secret")).unwrap(), "private");
         assert!(!outside.join("created").exists());
         assert!(!outside.join("subdir").exists());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn denies_hardlinked_writes_and_copy_to_self() {
+        let (base, root) = temp();
+        std::fs::write(root.join("a.txt"), "unchanged").unwrap();
+        assert!(call(&root, "copy_file", json!({"source":"a.txt","destination":"a.txt"})).is_err());
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "unchanged");
+        let outside = base.join("outside.txt");
+        std::fs::hard_link(root.join("a.txt"), &outside).unwrap();
+        assert!(call(&root, "write", json!({"path":"a.txt","content":"corrupted"})).is_err());
+        assert!(call(&root, "edit", json!({"path":"a.txt","old":"unchanged","new":"corrupted"})).is_err());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "unchanged");
         std::fs::remove_dir_all(base).unwrap();
     }
 
