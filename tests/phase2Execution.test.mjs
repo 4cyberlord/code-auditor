@@ -34,3 +34,27 @@ const partial=parseExecutionOutput("CA_STDOUT_BEGIN\ntext\nCA_STDOUT_END\nCA_STD
 assert.equal(partial.complete,false);
 assert.equal(partial.remoteElapsedMs,null);
 assert.equal(partial.peakMemoryKb,null);
+
+
+// Fail-closed regression checks: malformed markers must not supply success evidence.
+for (const malformed of [
+  "CA_EXIT:0\nCA_RUNTIME:e2b python3\n",
+  "CA_STDOUT_BEGIN\nOK\nCA_STDOUT_END\nCA_STDERR_BEGIN\nCA_METRICS elapsed_s=1 maxrss_kb=12\n",
+  "CA_STDOUT_BEGIN\nOK\nCA_STDOUT_END\nCA_STDERR_BEGIN\nCA_STDERR_END\nCA_EXIT:not-a-number\nCA_RUNTIME:e2b python3\n",
+]) {
+  const result = parseExecutionOutput(malformed);
+  assert.equal(result.complete, false);
+  assert.equal(result.exitCode, null);
+  assert.equal(result.remoteElapsedMs, null);
+  assert.equal(result.peakMemoryKb, null);
+}
+assert.equal(executionStatus({canceled:true,ok:true,exitCode:0}), "canceled");
+assert.equal(executionStatus({timedOut:true,ok:true,exitCode:0}), "timed_out");
+const order=[];
+await assert.rejects(withSandboxLifecycle(
+  { kill: async () => order.push("cleanup") },
+  async () => order.push("started"),
+  async () => { order.push("executed"); throw Error("execution failed"); },
+  async () => order.push("failed"),
+), /execution failed/);
+assert.deepEqual(order, ["started","executed","failed","cleanup"]);
