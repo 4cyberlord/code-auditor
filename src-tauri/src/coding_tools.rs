@@ -624,7 +624,15 @@ mod security_tests {
                 .output().await.expect("sandbox-exec should launch")
         };
         let allowed = run("printf ok > inside.txt", policy.clone(), project.clone()).await;
-        assert!(allowed.status.success(), "project write denied: {}", String::from_utf8_lossy(&allowed.stderr));
+        assert!(
+            allowed.status.success(),
+            "project write denied: exit={} stdout={:?} stderr={:?} profile={:?} project={:?}",
+            allowed.status,
+            String::from_utf8_lossy(&allowed.stdout),
+            String::from_utf8_lossy(&allowed.stderr),
+            policy,
+            project
+        );
         assert_eq!(fs::read_to_string(project.join("inside.txt")).unwrap(), "ok");
         let blocked = run("printf breach > ../outside.txt", policy.clone(), project.clone()).await;
         assert!(!blocked.status.success(), "outside-project write was permitted");
