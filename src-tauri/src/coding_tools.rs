@@ -500,21 +500,40 @@ fn validate_shell_command(command: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Explicit execution policy for the Coding Intelligence shell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellPolicy {
+    Disabled,
+    RestrictedUnavailable,
+    TrustedUnrestricted,
+}
+
+fn shell_policy(mode: Option<&str>, allow_unsafe: bool) -> ShellPolicy {
+    // A restricted-mode request must never silently fall back to an unrestricted
+    // shell, even if the operator enabled the latter separately.
+    if mode == Some("restricted") {
+        ShellPolicy::RestrictedUnavailable
+    } else if allow_unsafe {
+        ShellPolicy::TrustedUnrestricted
+    } else {
+        ShellPolicy::Disabled
+    }
+}
+
 fn restricted_shell_unavailable() -> Result<String, String> {
     Err("Restricted shell mode is unavailable: the experimental macOS runner failed isolation validation. Execution refused.".into())
 }
 
 async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
-    let restricted = std::env::var("COUNCIL_EDITOR_SHELL_MODE").as_deref() == Ok("restricted");
-    if !restricted && !shell_enabled() {
-        return Err("Shell execution is disabled by default. For a macOS sandboxed attempt set COUNCIL_EDITOR_SHELL_MODE=restricted; for trusted unrestricted execution set COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL=1. A user approval is still required for each command.".into());
+    let mode = std::env::var("COUNCIL_EDITOR_SHELL_MODE").ok();
+    match shell_policy(mode.as_deref(), shell_enabled()) {
+        ShellPolicy::Disabled => {
+            return Err("Shell execution is disabled by default. Trusted local users may opt into unsandboxed execution with COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL=1. A human must approve each command.".into());
+        }
+        ShellPolicy::RestrictedUnavailable => return restricted_shell_unavailable(),
+        ShellPolicy::TrustedUnrestricted => {}
     }
     validate_shell_command(command)?;
-
-    // No fallback to raw shell when restricted isolation is requested.
-    if restricted {
-        return restricted_shell_unavailable();
-    }
     let mut shell = Command::new("sh");
     shell.arg("-lc").arg(command);
     // Do not forward API tokens or app credentials to model-requested subprocesses.
@@ -569,6 +588,14 @@ fn display_rel(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+
+    #[test]
+    fn shell_policy_never_falls_back_from_restricted_to_unsafe() {
+        assert_eq!(shell_policy(None, false), ShellPolicy::Disabled);
+        assert_eq!(shell_policy(Some("restricted"), false), ShellPolicy::RestrictedUnavailable);
+        assert_eq!(shell_policy(Some("restricted"), true), ShellPolicy::RestrictedUnavailable);
+        assert_eq!(shell_policy(None, true), ShellPolicy::TrustedUnrestricted);
+    }
 
     #[test]
     fn rejects_invalid_and_oversized_shell_commands() {
