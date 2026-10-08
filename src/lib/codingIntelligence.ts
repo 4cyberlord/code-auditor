@@ -1415,6 +1415,24 @@ export async function runCodingIntelligence(
         event.id
       );
 
+      // Even when the operator has explicitly enabled the legacy Bash tool,
+      // each individual shell command must be reviewed and approved. A coding
+      // plan approval is not blanket permission to execute arbitrary commands.
+      if (toolName === "bash") {
+        const requested = toolTarget(event.args);
+        const question = `Approve this shell command for project ${config.projectRoot}?\\n\\n${requested}\\n\\nThe shell is NOT sandboxed and may access files or networks outside this project. Reply APPROVE to run this exact command; anything else denies it.`;
+        note("question", turn + 1, question, event.id);
+        const response = onQuestion ? (await onQuestion(question)).trim() : "";
+        if (control?.cancelled || response !== "APPROVE") {
+          content = "Error: shell command denied. Explicit approval is required for every command.";
+          event.status = "error";
+          event.result = content;
+          onEvent?.({ ...event });
+          messages.push({ role: "tool", tool_call_id: call.id, content });
+          continue;
+        }
+      }
+
       try {
         content = await bridge.executeCodingTool({
           name: call.name,
