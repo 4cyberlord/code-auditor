@@ -75,6 +75,21 @@ export interface CodingSolution {
   }>;
   architecture_memory?: string[];
   confidence?: number;
+  coding_analysis?: {
+    language?: string;
+    current_time_complexity?: string;
+    suggested_time_complexity?: string;
+    space_complexity?: string;
+    runtime_ms?: number | null;
+    memory_mb?: number | null;
+    runtime_measured?: boolean;
+    memory_measured?: boolean;
+    optimization_suggestions?: string[];
+    readability?: string;
+    structure?: string;
+    style_suggestions?: string[];
+    syntax_explanations?: Array<{ token: string; meaning: string }>;
+  };
 }
 
 /** Why a run ended before the model said it was done. */
@@ -712,7 +727,14 @@ Return only a JSON object with this envelope:
   "verification": [],
   "additional_context_required": [],
   "architecture_memory": [],
-  "confidence": 0.0
+  "confidence": 0.0,
+  "coding_analysis": {
+    "language": "", "current_time_complexity": "", "suggested_time_complexity": "",
+    "space_complexity": "", "runtime_ms": null, "memory_mb": null,
+    "runtime_measured": false, "memory_measured": false,
+    "optimization_suggestions": [], "readability": "", "structure": "",
+    "style_suggestions": [], "syntax_explanations": []
+  }
 }
 `.trim();
 
