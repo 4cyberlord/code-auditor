@@ -143,6 +143,8 @@ export default function CouncilPanel() {
       ? council.revisedRuns[winner.letter]
       : council.runs[winner.letter]
     : undefined;
+  const measuredMs = winnerRun?.remoteElapsedMs ?? null;
+  const measuredMemoryKb = winnerRun?.peakMemoryKb ?? null;
   const settled = council.phase === "done";
   const stageIndex = STAGES.findIndex((x) => x.phase === council.phase);
   const stageDone = settled ? STAGES.length : stageIndex < 0 ? 0 : stageIndex;
@@ -321,6 +323,24 @@ export default function CouncilPanel() {
                 </strong>
               </div>
             </div>
+            {winnerRun && (
+              <section className="council-execution-metrics" aria-label="Code execution evidence" style={{ marginTop: 12 }}>
+                <div className="insight-grid">
+                  <div><span>Measured runtime</span><strong>{winnerRun.ran && measuredMs != null ? `${measuredMs} ms` : "Not measured"}</strong></div>
+                  <div><span>Peak memory</span><strong>{winnerRun.ran && measuredMemoryKb != null ? `${(measuredMemoryKb / 1024).toFixed(1)} MB` : "Not measured"}</strong></div>
+                  <div><span>Test results</span><strong>{gateFor(winnerRun) === "pass" ? `${winnerRun.passed} passed` : winnerRun.note || "Not verified"}</strong></div>
+                  <div><span>Execution</span><strong>{winnerRun.provider || "Unknown"} · {winnerRun.state || "unknown"}</strong></div>
+                </div>
+                {(winnerRun.stderr || winnerRun.stdout) && (
+                  <details style={{ marginTop: 8 }}>
+                    <summary>Test output and compiler/runtime diagnostics</summary>
+                    {winnerRun.stderr && <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{winnerRun.stderr}</pre>}
+                    {winnerRun.stdout && <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{winnerRun.stdout}</pre>}
+                  </details>
+                )}
+                <p className="hint">Measured performance comes from the execution provider when available. Big-O complexity is a separate analytical estimate.</p>
+              </section>
+            )}
             {Object.keys(council.runs).length > 0 && (
               <div className="council-gates">
                 {council.candidates.map((c) => {

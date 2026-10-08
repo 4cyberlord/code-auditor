@@ -9,7 +9,7 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "node tests/auth.test.ts && node tests/consensus.test.ts",
+    "test": "node tests/auth.test.ts && node tests/consensus.test.ts && node tests/phase2Execution.test.mjs",
     "helper:build": "node scripts/build-helper.mjs",
     "helper:sidecar": "node scripts/prepare-tauri-build.mjs",
     "helper:sidecar:dev": "node scripts/prepare-tauri-build.mjs --profile debug --skip-frontend",
