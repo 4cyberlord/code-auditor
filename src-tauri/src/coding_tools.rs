@@ -121,24 +121,35 @@ fn resolve_existing(root: &Path, value: &str) -> Result<PathBuf, String> {
 
 fn resolve_target(root: &Path, value: &str) -> Result<PathBuf, String> {
     let path = safe_join(root, value)?;
-    if let Some(parent) = path.parent() {
-        if parent.exists() {
-            let parent = parent
-                .canonicalize()
-                .map_err(|e| format!("Could not read target parent: {e}"))?;
-            ensure_inside(root, parent)?;
+    // Walk every existing ancestor, even when the immediate parent has not
+    // been created. A symlink above a missing intermediate directory can
+    // otherwise redirect create_dir_all and writes outside the project.
+    let mut ancestor = path.parent().ok_or("Target has no parent.")?;
+    loop {
+        match fs::symlink_metadata(ancestor) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err("Target parent is a symlink; refusing path.".into());
+                }
+                let real = ancestor.canonicalize()
+                    .map_err(|e| format!("Could not resolve target ancestor: {e}"))?;
+                ensure_inside(root, real)?;
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor.parent().ok_or("Target has no existing ancestor.")?;
+            }
+            Err(e) => return Err(format!("Could not inspect target ancestor: {e}")),
         }
     }
-    // A containing directory inside the root is not enough: the final
-    // component can itself be a symlink pointing out of the project, and
-    // fs::write/rename/copy would follow it. Refuse the link rather than
-    // writing through it.
-    if let Ok(meta) = fs::symlink_metadata(&path) {
-        if meta.file_type().is_symlink() {
-            return Err("Target is a symlink; refusing to write through it.".into());
-        }
+    // Reject target symlinks, including broken links whose exists() is false.
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() =>
+            Err("Target is a symlink; refusing to write through it.".into()),
+        Ok(_) => Ok(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(path),
+        Err(e) => Err(format!("Could not inspect target: {e}")),
     }
-    Ok(path)
 }
 
 fn safe_join(root: &Path, value: &str) -> Result<PathBuf, String> {
@@ -629,6 +640,22 @@ mod security_tests {
         let err = copy_dir(&root, "source", "source").unwrap_err();
         assert!(err.contains("descendants"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_ancestor_when_intermediate_directory_missing() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("council-ancestor-test-{}", uuid::Uuid::new_v4()));
+        let project = base.join("project");
+        let outside = base.join("outside");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, project.join("escape")).unwrap();
+        let project = project.canonicalize().unwrap();
+        assert!(resolve_target(&project, "escape/missing/file.txt").is_err());
+        assert!(!outside.join("missing").exists());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
