@@ -3,10 +3,10 @@ on:
   push:
     branches:
       - security/coding-shell-opt-in
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
+concurrency:
+  group: security-macos-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   macos-validation:
