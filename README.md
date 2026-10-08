@@ -335,6 +335,38 @@ tests/              TypeScript and worker tests
 public/             Public assets used by the app and README
 ```
 
+## Planned Engineering Improvements — Seven Review Priorities
+
+> **Status: Review backlog only.** The items below are investigation and hardening priorities identified from source review, not verified vulnerabilities or implemented fixes. Keep this list separate from the planned PrivateTrigger iOS companion feature.
+
+| Priority | Section | What to investigate |
+| --- | --- | --- |
+| **1 — Critical** | **Coding Intelligence & Shell Execution** | Secure Bash execution, prevent access outside the selected project, and improve command isolation. |
+| **2 — Critical** | **Code Execution Sandbox** | Strengthen isolation for AI-generated code, resource limits, filesystem access, and network restrictions. |
+| **3 — High** | **Council Intelligence & Consensus** | Improve winner selection, test-harness reliability, judge accuracy, and protection against incorrect model agreement. |
+| **4 — High** | **Cloud Worker & Authentication** | Verify user isolation, secret handling, job ownership, retry behavior, and access controls. |
+| **5 — High** | **Ghost Mode & Background Helper** | Check which process, overlay, lifecycle, and visibility capabilities actually work on macOS. |
+| **6 — Medium** | **Desktop vs. Cloud Consistency** | Ensure identical problems produce equivalent evaluation results in local and cloud workflows. |
+| **7 — Medium** | **Automated Testing & Reliability** | Add comprehensive integration, security, recovery, and end-to-end tests. |
+
+### Relevant source files
+
+- **Coding:** `src/lib/codingIntelligence.ts`, `src-tauri/src/coding_tools.rs`
+- **Sandbox:** `src-tauri/src/exec.rs`, `src-tauri/src/runner.rs`
+- **Council:** `src/lib/council.ts`, `src/lib/consensus.ts`, `src/lib/store.ts`
+- **Cloud:** `scripts/cloud-worker.mjs`, `supabase/functions/council-editor-api/`
+- **Ghost Mode:** `src-tauri/src/ghost_mode/`, `src-tauri/src/bin/mds.rs`
+- **Testing:** `tests/`, `scripts/`
+
+### Recommended implementation order
+
+1. **Start with sections 1 and 2:** AI-generated code and shell commands run on the user's machine. Establish and test meaningful execution boundaries, including the fact that a shell's working directory alone is not a security sandbox.
+2. **Then sections 3 and 4:** Strengthen correctness evidence and judgment while auditing authorization and isolation for cloud users.
+3. **Next section 5:** Validate actual background helper and overlay behavior against macOS permissions and documented claims.
+4. **Finish with sections 6 and 7:** Lock in desktop/cloud consistency and comprehensive test/release coverage.
+
+**Engineering principle:** Improve the dependability of Council's existing verification and scoring mechanisms before expanding the model roster or adding more agents.
+
 ## Validation
 
 Before publishing a change, run:
