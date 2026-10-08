@@ -2008,6 +2008,34 @@ function ModelResponse({ run }: { run: CodingRun }) {
 
   return (
     <>
+      {run.parsed.coding_analysis && (
+        <section className="rail-details" aria-label="Coding analysis" style={{ padding: 14 }}>
+          <strong>Coding analysis {run.parsed.coding_analysis.language ? `· ${run.parsed.coding_analysis.language}` : ""}</strong>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12, marginTop: 12 }}>
+            <div><div className="section-label">Current complexity</div><strong>{run.parsed.coding_analysis.current_time_complexity || "Not determined"}</strong></div>
+            <div><div className="section-label">Suggested complexity</div><strong>{run.parsed.coding_analysis.suggested_time_complexity || "Not determined"}</strong></div>
+            <div><div className="section-label">Space complexity</div><strong>{run.parsed.coding_analysis.space_complexity || "Not determined"}</strong></div>
+            <div><div className="section-label">Measured performance</div>
+              <div>{run.parsed.coding_analysis.runtime_measured && typeof run.parsed.coding_analysis.runtime_ms === "number" ? `${run.parsed.coding_analysis.runtime_ms} ms` : "Runtime not measured"}</div>
+              <div>{run.parsed.coding_analysis.memory_measured && typeof run.parsed.coding_analysis.memory_mb === "number" ? `${run.parsed.coding_analysis.memory_mb} MB` : "Memory not measured"}</div>
+            </div>
+            <div><div className="section-label">Readability</div><strong>{run.parsed.coding_analysis.readability || "Not rated"}</strong></div>
+            <div><div className="section-label">Structure</div><strong>{run.parsed.coding_analysis.structure || "Not rated"}</strong></div>
+          </div>
+          {!!run.parsed.coding_analysis.optimization_suggestions?.length && (
+            <div style={{ marginTop: 12 }}><div className="section-label">Optimization suggestions</div>
+              <ul>{run.parsed.coding_analysis.optimization_suggestions.map((x, i) => <li key={i}>{x}</li>)}</ul></div>
+          )}
+          {!!run.parsed.coding_analysis.style_suggestions?.length && (
+            <div style={{ marginTop: 12 }}><div className="section-label">Code style</div>
+              <ul>{run.parsed.coding_analysis.style_suggestions.map((x, i) => <li key={i}>{x}</li>)}</ul></div>
+          )}
+          {!!run.parsed.coding_analysis.syntax_explanations?.length && (
+            <div style={{ marginTop: 12 }}><div className="section-label">Functions and syntax</div>
+              {run.parsed.coding_analysis.syntax_explanations.map((x, i) => <p key={i}><code>{x.token}</code> — {x.meaning}</p>)}</div>
+          )}
+        </section>
+      )}
       {sections.length > 0 && (
         <details className="rail-details" open>
           <summary>
