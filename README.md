@@ -100,6 +100,113 @@ When the installed background helper is running, these are the overlay test shor
 | `Shift+Option+Arrow Keys` | Move the visible helper overlay |
 | `Option+Up / Option+Down` | Scroll the visible helper overlay |
 
+## Planned Feature: PrivateTrigger iOS Companion
+
+**Status: Planned — not yet implemented.** Council Editor will support a dedicated native iPhone remote-control app, developed as an iOS feature of the Council Editor project. Its companion protocol may also be reusable by the separate [PrivateTrigger project](https://github.com/4cyberlord/PrivateTrigger), but this specification belongs to **Council Editor**.
+
+### Purpose and requirements
+
+- Build a local-first **SwiftUI iOS controller** for a paired Mac running Council Editor.
+- Deliver **named commands directly** to authenticated native handlers, **never** by sending synthetic keyboard events or triggering the existing shortcut combinations.
+- Discover the Mac on the local network with Bonjour and connect using the Apple Network framework over authenticated TLS. Pair explicitly using a short-lived challenge, verify the device identity, and keep credentials in Keychain on both devices.
+- A separately installed, authorized macOS helper should receive commands even when the main Council Editor window is closed. Existing permission and helper-lifecycle requirements still apply.
+- Prefer LAN-only operation for v1. Optional remote relay and internet access are future features, not default behavior.
+- Provide connection state, acknowledgements, per-command results, activity history, cancellation where supported, and a Mac-side emergency disconnect/revocation control.
+- No external keyboard monitoring application receives a *Mac shortcut* for commands initiated from the iPhone because those shortcuts are not pressed. This does **not** guarantee that privileged software cannot observe app activity or the effects of a command.
+
+### Architecture
+
+```text
+PrivateTrigger iPhone app (SwiftUI)
+          |
+          | Bonjour discovery + mutually authenticated encrypted connection
+          v
+Council Editor macOS background helper / remote command receiver
+          |
+          | verified command ID + per-action authorization
+          v
+Native capture / batch / solve / overlay / coding / workspace handlers
+          |
+          +---- acknowledgement, status, and consented results ----> iPhone
+```
+
+### iPhone sections and command registry
+
+These are **proposed remote protocol commands**; some target existing desktop features, while status, cancellation, reset, and selected remote workflows need new adapters.
+
+| iPhone section | Command | Behavior |
+| --- | --- | --- |
+| **Screenshots** | `capture.screen` | Full-screen screenshot |
+| | `capture.region` | Interactive screen-region selection on the Mac |
+| | `capture.left` | Capture left half of the display |
+| | `capture.right` | Capture right half of the display |
+| | `capture.status` | Latest capture status |
+| **Capture batches** | `capture.batch.start` | Start a new batch |
+| | `capture.batch.add` | Capture current screen and add it to the batch |
+| | `capture.batch.submit` | Submit the accumulated screenshots for solving |
+| | `capture.batch.cancel` | Cancel a pending batch |
+| | `capture.batch.status` | Return batch count and state |
+| **Council AI** | `solve.start` | Run the prepared task |
+| | `solve.status` | Show processing progress |
+| | `solve.cancel` | Cancel the active run when supported |
+| | `solve.latest` | Fetch the latest result, subject to privacy policy |
+| | `solve.history` | Summaries of earlier runs |
+| **Overlay** | `overlay.open` | Show glass overlay |
+| | `overlay.close` | Hide it |
+| | `overlay.toggle` | Toggle it |
+| | `overlay.coding` | Coding overlay mode |
+| | `overlay.mcq` | MCQ overlay mode |
+| | `overlay.status` | Overlay visibility and mode |
+| **Overlay navigation** | `overlay.move.up`, `overlay.move.down`, `overlay.move.left`, `overlay.move.right` | Move overlay |
+| | `overlay.scroll.up`, `overlay.scroll.down` | Scroll overlay |
+| | `overlay.position.reset` | Restore default location |
+| **Coding** | `coding.plan` | Prepare proposed plan |
+| | `coding.approve` | Confirm a specific reviewed plan |
+| | `coding.execute` | Run that approved plan in an authorized project |
+| | `coding.continue` | Resume incomplete session |
+| | `coding.stop` | Stop current run |
+| | `coding.status` | Progress and todos |
+| | `coding.history` | Previous coding runs |
+| **Workspaces** | `workspace.council`, `workspace.coding`, `workspace.knowledge` | Select desktop workspace (may need the UI open) |
+| | `workspace.settings` | Open settings on Mac |
+| | `workspace.status` | Active workspace |
+| **Device and privacy** | `device.pair` | Start Mac-approved pairing |
+| | `device.status` | Connection and permissions |
+| | `device.unpair` | Revoke device |
+| | `remote.pause`, `remote.resume` | Disable/re-enable remote actions |
+| | `remote.history` | Local audit trail |
+
+**Capture parity is mandatory:** full-screen, manual region, left-half, right-half, start batch, add screenshot, and submit batch must all be present in the iOS UI.
+
+### Security and consent
+
+- Accept connections **only from explicitly paired devices**; require freshness, unique request IDs, message integrity, expiration, and replay rejection.
+- Enforce permissions on the Mac, not only in the iOS UI. Never expose an unauthenticated command server or unrestricted shell executor.
+- Screen capture requires the Mac's existing Screen Recording permission and an explicit user-enabled remote-capture setting; no silent first-time permission bypass.
+- Coding changes require a specific reviewed and approved plan, authorized project root, and confirmation for destructive changes. The iPhone must not become an unrestricted remote terminal.
+- Keep screenshot pixels and model outputs on the Mac by default; send only necessary status/metadata unless the user explicitly enables returning content to the phone.
+- Keep device keys in platform-secure storage, support immediate revocation, and log sensitive actions without logging passwords or screenshot contents.
+- A private transport protects command contents from ordinary network observers, **not** from all privileged host monitoring or observation of the visible effects.
+
+### Build phases
+
+1. SwiftUI app shell, device status, and section/button interface.
+2. Bonjour discovery, mutual authentication, pairing approval, TLS, and secure key storage.
+3. macOS helper receiver with typed command dispatcher, acknowledgements, authorization, and audit.
+4. Complete screenshot and batch integration, including **left and right capture**.
+5. Council solving, overlay visibility, MCQ/coding modes, positioning, and scrolling.
+6. Approved coding workflows, workspace controls, results, and robust reconnect behavior.
+7. Integration/security tests, Mac and iOS packaging, permission validation, and on-device testing.
+
+### Acceptance criteria
+
+- A paired iPhone can capture the **full screen, region, left half, and right half** and operate batch capture.
+- Every authorized button delivers a named command with success/failure feedback without synthesizing a macOS hotkey.
+- The receiver works while the main Council Editor window is closed, if the installed helper is running.
+- Unpaired, expired, replayed, and unauthorized commands are rejected.
+- Revocation immediately prevents future remote commands, and macOS privacy permissions remain enforced.
+- Local-first functionality works without relying on Telegram or an external command server.
+
 ## Getting Started
 
 ### Requirements
