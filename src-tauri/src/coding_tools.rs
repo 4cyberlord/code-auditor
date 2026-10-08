@@ -308,6 +308,41 @@ fn destination_arg(args: &serde_json::Map<String, Value>) -> Result<&str, String
     )
 }
 
+#[cfg(target_os = "macos")]
+fn open_confined_file(root: &Path, target: &Path, flags: i32, mode: libc::mode_t) -> Result<fs::File, String> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let relative = target.strip_prefix(root).map_err(|_| "Path outside project.")?;
+    let mut components = relative.components().peekable();
+    let root_bytes = CString::new(root.as_os_str().as_bytes()).map_err(|_| "Invalid root path.")?;
+    let raw_root = unsafe { libc::open(root_bytes.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+    if raw_root < 0 { return Err(format!("Could not open project directory: {}", std::io::Error::last_os_error())); }
+    let mut parent = unsafe { OwnedFd::from_raw_fd(raw_root) };
+    let mut final_name = None;
+    while let Some(component) = components.next() {
+        let name = match component {
+            Component::Normal(name) => CString::new(name.as_bytes()).map_err(|_| "Null byte in path.")?,
+            Component::CurDir => continue,
+            _ => return Err("Invalid project-relative path.".into()),
+        };
+        if components.peek().is_none() {
+            final_name = Some(name);
+            break;
+        }
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW) };
+        if fd < 0 { return Err(format!("Unsafe or missing directory component: {}", std::io::Error::last_os_error())); }
+        parent = unsafe { OwnedFd::from_raw_fd(fd) };
+    }
+    let name = final_name.ok_or("Expected file path.")?;
+    let raw_file = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(),
+        flags | libc::O_CLOEXEC | libc::O_NOFOLLOW, mode) };
+    if raw_file < 0 { return Err(format!("Could not open confined file: {}", std::io::Error::last_os_error())); }
+    Ok(unsafe { fs::File::from_raw_fd(raw_file) })
+}
+
 fn read_file(root: &Path, path: &str) -> Result<String, String> {
     let path = resolve_existing(root, path)?;
     // O_NOFOLLOW prevents a last-component symlink swap between path
@@ -320,7 +355,10 @@ fn read_file(root: &Path, path: &str) -> Result<String, String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
-    let mut file = options.open(&path).map_err(|e| format!("Could not open file: {e}"))?;
+    #[cfg(target_os = "macos")]
+    let file = open_confined_file(root, &path, libc::O_RDONLY, 0)?;
+    #[cfg(not(target_os = "macos"))]
+    let file = options.open(&path).map_err(|e| format!("Could not open file: {e}"))?;
     let meta = file.metadata().map_err(|e| e.to_string())?;
     if !meta.is_file() {
         return Err("Read target is not a file.".into());
@@ -353,6 +391,9 @@ fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> 
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW);
     }
+    #[cfg(target_os = "macos")]
+    let mut file = open_confined_file(root, &path, libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, 0o644)?;
+    #[cfg(not(target_os = "macos"))]
     let mut file = options.open(&path).map_err(|e| format!("Could not open file for writing: {e}"))?;
     use std::io::Write;
     file.write_all(content.as_bytes()).map_err(|e| format!("Could not write file: {e}"))?;
@@ -836,6 +877,29 @@ mod security_tests {
         assert!(resolve_existing(&root, "alias/file.txt").is_err());
         assert!(resolve_target(&root, "alias/new.txt").is_err());
         assert!(resolve_existing(&root, "real/file.txt").is_ok());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn descriptor_relative_file_open_rejects_parent_symlink() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("council-openat-{}", uuid::Uuid::new_v4()));
+        let root = base.join("project");
+        let outside = base.join("private");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        let root = root.canonicalize().unwrap();
+        assert!(open_confined_file(&root, &root.join("escape/secret.txt"),
+            libc::O_WRONLY | libc::O_CREAT, 0o644).is_err());
+        assert!(!outside.join("secret.txt").exists());
+        fs::create_dir_all(root.join("safe")).unwrap();
+        let mut output = open_confined_file(&root, &root.join("safe/ok.txt"),
+            libc::O_WRONLY | libc::O_CREAT, 0o644).unwrap();
+        use std::io::Write;
+        output.write_all(b"ok").unwrap();
+        assert_eq!(fs::read_to_string(root.join("safe/ok.txt")).unwrap(), "ok");
         fs::remove_dir_all(base).unwrap();
     }
 
