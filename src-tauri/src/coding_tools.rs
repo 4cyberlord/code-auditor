@@ -555,6 +555,7 @@ fn restricted_docker_args(root: &Path, command: &str, name: &str) -> Result<Vec<
         return Err("Invalid container name.".into());
     }
     let image = "alpine:3.20";
+    let mount = format!("type=bind,source={path},target=/workspace");
     Ok(vec![
         "run", "--rm", "--init",
         "--name", name,
@@ -569,7 +570,7 @@ fn restricted_docker_args(root: &Path, command: &str, name: &str) -> Result<Vec<
         "--cpus", "1",
         "--tmpfs", "/tmp:rw,nosuid,noexec,size=64m",
         "--user", "1000:1000",
-        "--mount", &format!("type=bind,source={path},target=/workspace"),
+        "--mount", mount.as_str(),
         "--workdir", "/workspace",
         image, "/bin/sh", "-lc", command
     ].into_iter().map(str::to_string).collect())
@@ -579,7 +580,6 @@ async fn run_restricted_docker(root: &Path, command: &str) -> Result<String, Str
     let name = format!("council-coding-{}", uuid::Uuid::new_v4().simple());
     let args = restricted_docker_args(root, command, &name)?;
     // Docker Desktop must already be installed and running. No fallback.
-    let mut child = Command::new("/usr/local/bin/docker");
     // Docker Desktop also uses /opt/homebrew/bin/docker on Apple Silicon.
     let docker = if Path::new("/usr/local/bin/docker").is_file() {
         "/usr/local/bin/docker"
@@ -588,7 +588,7 @@ async fn run_restricted_docker(root: &Path, command: &str) -> Result<String, Str
     } else {
         return Err("Restricted execution requires an installed Docker CLI and Docker Desktop; refusing to run.".into());
     };
-    child = Command::new(docker);
+    let mut child = Command::new(docker);
     child.args(&args)
         .env_clear()
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin")
@@ -619,7 +619,7 @@ async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
         ShellPolicy::Disabled => {
             return Err("Shell execution is disabled by default. Trusted local users may opt into unsandboxed execution with COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL=1. A human must approve each command.".into());
         }
-        ShellPolicy::RestrictedUnavailable => return restricted_shell_unavailable(),
+        ShellPolicy::ContainerRestricted => return restricted_shell_unavailable(),
         ShellPolicy::TrustedUnrestricted => {}
     }
     validate_shell_command(command)?;
@@ -692,7 +692,7 @@ mod security_tests {
     #[test]
     fn shell_policy_never_falls_back_from_restricted_to_unsafe() {
         assert_eq!(shell_policy(None, false), ShellPolicy::Disabled);
-        assert_eq!(shell_policy(Some("restricted"), false), ShellPolicy::RestrictedUnavailable);
+        assert_eq!(shell_policy(Some("restricted"), false), ShellPolicy::ContainerRestricted);
         assert_eq!(shell_policy(Some("restricted"), true), ShellPolicy::RestrictedUnavailable);
         assert_eq!(shell_policy(None, true), ShellPolicy::TrustedUnrestricted);
     }
