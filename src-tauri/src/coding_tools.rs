@@ -337,6 +337,11 @@ fn copy_dir(root: &Path, source: &str, destination: &str) -> Result<String, Stri
     if !source.is_dir() {
         return Err("Copy source is not a folder.".into());
     }
+    // A destination inside the source tree would be discovered again while
+    // traversing and recursively copied without a natural stopping point.
+    if destination.starts_with(&source) {
+        return Err("Cannot copy a folder into itself or one of its descendants.".into());
+    }
     copy_dir_recursive(&source, &destination)?;
     Ok(format!(
         "Copied folder {} to {}",
@@ -610,6 +615,20 @@ mod security_tests {
     fn restricted_shell_is_disabled_until_validated() {
         let err = restricted_shell_unavailable().unwrap_err();
         assert!(err.contains("refused"));
+    }
+
+    #[test]
+    fn rejects_recursive_folder_copy_into_itself() {
+        let root = std::env::temp_dir().join(format!("council-copy-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("source/sub")).unwrap();
+        fs::write(root.join("source/file.txt"), "safe").unwrap();
+        let root = root.canonicalize().unwrap();
+        let err = copy_dir(&root, "source", "source/nested-copy").unwrap_err();
+        assert!(err.contains("descendants"));
+        assert!(!root.join("source/nested-copy").exists());
+        let err = copy_dir(&root, "source", "source").unwrap_err();
+        assert!(err.contains("descendants"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
