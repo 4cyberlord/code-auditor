@@ -35,7 +35,48 @@ pub struct CodingToolRequest {
 #[tauri::command]
 pub async fn coding_tool_execute(req: CodingToolRequest) -> Result<String, String> {
     crate::auth::require()?;
+    // The renderer's approval prompt is not an authorization boundary:
+    // independently ask the macOS user before invoking a native shell.
+    if req.name.trim().eq_ignore_ascii_case("bash") {
+        let args = req.args.as_object().ok_or("Tool arguments must be an object.")?;
+        let command = string_arg(args, &["command", "cmd", "shell"])?;
+        validate_shell_command(command)?;
+        require_native_shell_approval(&req.root, command).await?;
+    }
     execute(req).await
+}
+
+/// Authorization must be outside the renderer, which model-generated content
+/// can influence. macOS AppleScript presents a native system dialog. Deny on
+/// dialog errors, user cancellation, missing binary or unexpected output.
+#[cfg(target_os = "macos")]
+async fn require_native_shell_approval(root: &str, command: &str) -> Result<(), String> {
+    const PROMPT: &str = r#"on run argv
+set promptText to item 1 of argv
+set reply to display dialog promptText with title "Council Editor: Shell Permission" buttons {"Deny", "Approve"} default button "Deny" with icon caution
+return button returned of reply
+end run"#;
+    let message = format!("Approve command in project {}?\\n\\n{}\\n\\nThe command may modify project files. Trusted unrestricted mode can access files and network outside the project.", root, command);
+    let status = timeout(Duration::from_secs(90),
+        Command::new("/usr/bin/osascript")
+            .arg("-e").arg(PROMPT).arg(message)
+            .env_clear()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output()
+    ).await.map_err(|_| "Native shell approval timed out; command denied.".to_string())?
+     .map_err(|_| "Native shell approval unavailable; command denied.".to_string())?;
+    if status.status.success() && String::from_utf8_lossy(&status.stdout).trim() == "Approve" {
+        Ok(())
+    } else {
+        Err("Native user approval was not granted; command denied.".into())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn require_native_shell_approval(_root: &str, _command: &str) -> Result<(), String> {
+    Err("Native shell approval is only supported on macOS; command denied.".into())
 }
 
 async fn execute(req: CodingToolRequest) -> Result<String, String> {
@@ -303,7 +344,18 @@ fn write_file(root: &Path, path: &str, content: &str) -> Result<String, String> 
         fs::create_dir_all(parent)
             .map_err(|e| format!("Could not create parent directory: {e}"))?;
     }
-    fs::write(&path, content).map_err(|e| format!("Could not write file: {e}"))?;
+    // Hold a no-follow handle for the final component rather than a separate
+    // metadata check followed by fs::write (which follows a swapped symlink).
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(&path).map_err(|e| format!("Could not open file for writing: {e}"))?;
+    use std::io::Write;
+    file.write_all(content.as_bytes()).map_err(|e| format!("Could not write file: {e}"))?;
     Ok(format!("Wrote {}", display_rel(root, &path)))
 }
 
@@ -598,6 +650,7 @@ fn restricted_docker_args(root: &Path, command: &str, name: &str) -> Result<Vec<
         "--pull", "never",
         "--network", "none",
         "--read-only",
+        "--ipc", "none",
         "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges",
         "--pids-limit", "64",
@@ -756,6 +809,7 @@ mod security_tests {
         assert!(args.windows(2).any(|w| w == ["--ulimit", "nofile=256:256"]));
         assert!(args.windows(2).any(|w| w == ["--ulimit", "fsize=8388608:8388608"]));
         assert!(!args.iter().any(|arg| arg == "--privileged"));
+        assert!(args.windows(2).any(|w| w == ["--ipc", "none"]));
 
         assert!(restricted_docker_args(&root, "echo ok", "malicious").is_err());
     }
