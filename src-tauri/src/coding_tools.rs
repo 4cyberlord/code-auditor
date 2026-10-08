@@ -490,19 +490,57 @@ fn shell_enabled() -> bool {
     )
 }
 
+/// Opt-in macOS Seatbelt profile. We fail closed if the sandbox launcher is
+/// missing. This is defense in depth, not a replacement for testing on device.
+/// The profile permits process execution and read-only system runtime paths,
+/// but only project-tree file writes. Network connections are not permitted.
+#[cfg(target_os = "macos")]
+fn restricted_shell_profile(root: &Path) -> Result<String, String> {
+    let path = root.to_str().ok_or("Project root is not valid UTF-8.")?;
+    // Scheme strings must not allow interpolation or injected policy forms.
+    let quoted = path.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok(format!(
+        "(version 1)\\n(deny default)\\n(allow process*)\\n(allow sysctl-read)\\n(allow mach-lookup)\\n(allow file-read* (subpath \\"/System\\") (subpath \\"/usr\\") (subpath \\"/bin\\") (subpath \\"/sbin\\") (subpath \\"/Library/Frameworks\\") (subpath \\"/opt/homebrew\\") (subpath \\"{quoted}\\"))\\n(allow file-write* (subpath \\"{quoted}\\"))\\n"
+    ))
+}
+
 async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
-    if !shell_enabled() {
-        return Err("Shell execution is disabled by default because it can access files and networks outside the selected project. To explicitly accept this risk for a trusted local session, set COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL=1 before starting Council Editor. A real isolated runner is required for untrusted commands.".into());
+    let restricted = std::env::var("COUNCIL_EDITOR_SHELL_MODE").as_deref() == Ok("restricted");
+    if !restricted && !shell_enabled() {
+        return Err("Shell execution is disabled by default. For a macOS sandboxed attempt set COUNCIL_EDITOR_SHELL_MODE=restricted; for trusted unrestricted execution set COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL=1. A user approval is still required for each command.".into());
     }
     if command.contains('\0') {
         return Err("Command contains an invalid null byte.".into());
     }
 
+    #[cfg(target_os = "macos")]
+    let mut shell = if restricted {
+        let binary = Path::new("/usr/bin/sandbox-exec");
+        if !binary.is_file() {
+            return Err("Restricted shell unavailable: macOS sandbox-exec is missing. Refusing to run.".into());
+        }
+        let mut sandbox = Command::new(binary);
+        sandbox.arg("-p").arg(restricted_shell_profile(root)?).arg("/bin/sh").arg("-lc").arg(command);
+        sandbox
+    } else {
+        let mut unrestricted = Command::new("sh");
+        unrestricted.arg("-lc").arg(command);
+        unrestricted
+    };
+    #[cfg(not(target_os = "macos"))]
+    let mut shell = {
+        if restricted {
+            return Err("Restricted shell mode is only supported on macOS.".into());
+        }
+        let mut unrestricted = Command::new("sh");
+        unrestricted.arg("-lc").arg(command);
+        unrestricted
+    };
+    // Do not forward API tokens or app credentials to model-requested subprocesses.
+    shell.env_clear().env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin");
     let output = timeout(
         Duration::from_secs(120),
-        Command::new("sh")
-            .arg("-lc")
-            .arg(command)
+        shell
             .current_dir(root)
             // Without this the timeout only drops the future: the shell and its
             // children keep running unsupervised, and a `npm run dev` the model
@@ -550,6 +588,15 @@ fn display_rel(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod security_tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandbox_profile_escapes_injected_quotes() {
+        let policy = restricted_shell_profile(Path::new("/tmp/project\\\" ) (allow network*) \\\"")).unwrap();
+        assert!(!policy.contains("(allow network*)\\n"));
+        assert!(policy.contains("(deny default)"));
+        assert!(policy.contains("(allow file-write*"));
+    }
 
     #[test]
     fn rejects_parent_traversal() {
