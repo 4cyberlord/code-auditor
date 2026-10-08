@@ -57,5 +57,26 @@ check("undefined settings", resolveBenchmarkBackend(undefined, REPO), "off");
 // And asking for it plainly still works.
 check("asking for Actions is honoured", resolveBenchmarkBackend({ benchmarkBackend: "actions" }, REPO), "actions");
 
+
+// Phase 2: the execution provider may never silently switch to host execution.
+// Extract the real production resolver, as with resolveBenchmarkBackend above.
+const execStart = src.indexOf("function executionProvider(settings)");
+const execEnd = src.indexOf("async function runVerification(", execStart);
+if (execStart < 0 || execEnd < 0) throw new Error("Execution provider function not found");
+const execModule = src.slice(execStart, execEnd);
+const { executionProvider } = await import(
+  "data:text/javascript," + encodeURIComponent(execModule + "\nexport { executionProvider };")
+);
+
+console.log("\n6. E2B-first sandbox selection and fail-closed policy");
+check("missing settings still selects E2B", executionProvider({}), "e2b");
+check("missing key does not change the default", executionProvider({ executionProvider: "" }), "e2b");
+check("local requires explicit selection", executionProvider({ executionProvider: "local" }), "local");
+check("E2B explicitly selected", executionProvider({ executionProvider: "e2b" }), "e2b");
+check("whitespace and casing normalize", executionProvider({ executionProvider: " E2B " }), "e2b");
+let rejected = false;
+try { executionProvider({ executionProvider: "docker" }); } catch { rejected = true; }
+check("unexpected provider is refused", rejected, true);
+
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall backend checks passed\n");
 process.exit(fail ? 1 : 0);
