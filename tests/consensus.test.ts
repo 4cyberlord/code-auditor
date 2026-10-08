@@ -323,5 +323,59 @@ console.log("\n6. same algorithm, nothing phrased alike (the realistic case)");
   );
 }
 
+// Phase 3 regression suites run before the final test report.
+// Phase 3: every group must have direct pairwise agreement, not a chained bridge.
+// This invariant is independent of candidate ordering and forbids false unanimity.
+{
+  const mk = (answer: string) => ({ id: answer, name: answer, final: parseFinal(final({ answer, claims: [answer], code: "" }))! });
+  const inputs = [mk("one two three four five"), mk("one two three five six"), mk("five six seven eight nine")];
+  const result = computeConsensus(inputs, 0.55);
+  for (const group of result.groups) {
+    for (let i=0; i<group.length; i++) for (let j=i+1; j<group.length; j++) {
+      const pair = result.pairs.find(p => (p.a===group[i] && p.b===group[j]) || (p.b===group[i] && p.a===group[j]));
+      check("no chained agreement without pair support", Boolean(pair && pair.score>=0.55));
+    }
+  }
+}
+
+
+// Invalid thresholds, duplicate agent IDs, and empty identities must never
+// produce a misleading unanimous or majority decision.
+{
+  const mk = (id: string, answer: string) => ({
+    id, name: id, final: parseFinal(final({ answer, claims: [answer], code: "" }))!,
+  });
+  const valid = [mk("a", "Choose the first solution."), mk("b", "Choose the second solution.")];
+  for (const threshold of [Number.NaN, Number.POSITIVE_INFINITY, -0.01, 1.01]) {
+    let rejected = false;
+    try { computeConsensus(valid, threshold); } catch (e) { rejected = e instanceof RangeError; }
+    check("reject invalid consensus threshold", rejected, String(threshold));
+  }
+  for (const invalid of [[mk("a", "first"), mk("a", "second")], [mk("", "first"), mk("b", "second")]]) {
+    let rejected = false;
+    try { computeConsensus(invalid); } catch { rejected = true; }
+    check("reject invalid agent identity", rejected);
+  }
+  const zero = computeConsensus(valid, 0);
+  check("explicit threshold zero is supported", zero.verdict === "unanimous");
+  const strict = computeConsensus(valid, 1);
+  check("strict threshold does not manufacture unanimity", strict.groups.length > 1);
+}
+
+
+// Agent arrival order must not change the camps or the representative.
+{
+  const mk = (id: string, answer: string) => ({ id, name: id, final: parseFinal(final({ answer, claims: [answer], code: "" }))! });
+  const agents = [mk("c", "Use one hash map pass"), mk("a", "Use a hash map in one pass"), mk("b", "Use exhaustive nested loops"), mk("d", "Use one pass with a dictionary")];
+  const digest = (arr: typeof agents) => {
+    const r = computeConsensus(arr);
+    return JSON.stringify({ verdict: r.verdict, groups: r.groups, representative: r.representative, outliers: r.outliers });
+  };
+  const expected = digest(agents);
+  for (const variant of [agents.slice().reverse(), [agents[2], agents[0], agents[3], agents[1]], [agents[3], agents[1], agents[0], agents[2]]]) {
+    check("arrival-order independent consensus", digest(variant) === expected);
+  }
+}
+
 console.log(failures ? `\n${failures} FAILURE(S)\n` : "\nall checks passed\n");
 process.exit(failures ? 1 : 0);

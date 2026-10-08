@@ -247,6 +247,18 @@ function pairScore(x: ConsensusInput, y: ConsensusInput): PairScore {
 // ------------------------------------------------------------------ clustering
 
 export function computeConsensus(inputs: ConsensusInput[], threshold = 0.55): ConsensusResult {
+  if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+    throw new RangeError("Consensus threshold must be between 0 and 1.");
+  }
+  // IDs determine pair identity and grouping. Duplicates silently collapse
+  // distinct agents into one group and can manufacture majority or unanimity.
+  const ids = new Set<string>();
+  for (const input of inputs) {
+    if (typeof input.id !== "string" || !input.id.trim() || ids.has(input.id)) {
+      throw new Error("Consensus inputs require unique, nonempty agent IDs.");
+    }
+    ids.add(input.id);
+  }
   const usable = inputs.filter((i) => i.final && (i.final.answer.trim() || i.final.code.trim()));
 
   if (usable.length < 2) {
@@ -272,33 +284,27 @@ export function computeConsensus(inputs: ConsensusInput[], threshold = 0.55): Co
     for (let j = i + 1; j < usable.length; j++) pairs.push(pairScore(usable[i], usable[j]));
   }
 
-  // Agreement is transitive here by design: connected components, not cliques.
-  // Two agents that each agree with a third are treated as one camp, which matches
-  // how a person reading four answers would group them.
-  const parent = new Map(usable.map((u) => [u.id, u.id]));
-  const find = (x: string): string => {
-    let r = x;
-    while (parent.get(r) !== r) r = parent.get(r)!;
-    while (parent.get(x) !== r) {
-      const next = parent.get(x)!;
-      parent.set(x, r);
-      x = next;
-    }
-    return r;
-  };
+  // Complete-link clustering: every pair of members within a consensus group
+  // must actually agree. Connected-component chaining can report unanimity
+  // even when the first and last candidates explicitly disagree.
+  // Stable IDs make consensus independent of agent completion order.
+  const sorted = [...usable].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const order = new Map(sorted.map((u, i) => [u.id, i]));
+  const scoreFor = new Map<string, number>();
   for (const p of pairs) {
-    if (p.score >= threshold) parent.set(find(p.a), find(p.b));
+    scoreFor.set([p.a, p.b].sort().join("\\0"), p.score);
   }
-
-  const byRoot = new Map<string, string[]>();
-  for (const u of usable) {
-    const r = find(u.id);
-    byRoot.set(r, [...(byRoot.get(r) ?? []), u.id]);
+  const agrees = (a: string, b: string) =>
+    (scoreFor.get([a, b].sort().join("\\0")) ?? 0) >= threshold;
+  const groups: string[][] = [];
+  for (const item of sorted) {
+    const candidateGroups = groups
+      .filter((g) => g.every((member) => agrees(item.id, member)))
+      .sort((a, b) => b.length - a.length || order.get(a[0])! - order.get(b[0])!);
+    if (candidateGroups[0]) candidateGroups[0].push(item.id);
+    else groups.push([item.id]);
   }
-  const order = new Map(usable.map((u, i) => [u.id, i]));
-  const groups = [...byRoot.values()]
-    .map((g) => g.sort((a, b) => order.get(a)! - order.get(b)!))
-    .sort((a, b) => b.length - a.length || order.get(a[0])! - order.get(b[0])!);
+  groups.sort((a, b) => b.length - a.length || order.get(a[0])! - order.get(b[0])!);
 
   const largest = groups[0];
   const n = usable.length;
