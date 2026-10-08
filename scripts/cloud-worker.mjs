@@ -19,6 +19,7 @@
 import "./lib/config.mjs";
 
 import { createSign } from "node:crypto";
+import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { readFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
@@ -714,14 +715,23 @@ async function runLocalCode(language, code, timeoutMs = LOCAL_RUN_TIMEOUT_MS) {
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
+    // The local mode is explicit, but hostile programs can still flood the
+    // worker's output pipes. Keep draining while bounding retained bytes.
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
+    let outputTruncated = false;
+    const keep = (previous, chunk) => {
+      const remaining = 65_536 - Buffer.byteLength(previous, "utf8");
+      if (remaining <= 0) {
+        outputTruncated = true;
+        return previous;
+      }
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (bytes.length > remaining) outputTruncated = true;
+      return previous + bytes.subarray(0, remaining).toString("utf8");
+    };
+    child.stdout.on("data", (chunk) => { stdout = keep(stdout, chunk); });
+    child.stderr.on("data", (chunk) => { stderr = keep(stderr, chunk); });
     const timer = setTimeout(() => {
       timedOut = true;
       try {
@@ -745,7 +755,7 @@ async function runLocalCode(language, code, timeoutMs = LOCAL_RUN_TIMEOUT_MS) {
       stderr: err.text,
       durationMs: Date.now() - started,
       timedOut,
-      truncated: out.truncated || err.truncated,
+      truncated: outputTruncated || out.truncated || err.truncated,
     };
   } finally {
     await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -763,6 +773,11 @@ tmp="$(mktemp -d "\${TMPDIR:-/tmp}/council-editor-bench.XXXXXX")" || exit 98
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT
 cd "$tmp" || exit 98
+# Restrict generated processes even inside the E2B microVM. E2B enforces
+# the outer wall-clock deadline, and the workspace is disposable.
+ulimit -f 32768 || exit 98
+ulimit -v 2097152 || exit 98
+ulimit -t 120 || exit 98
 cat > code.b64 <<'CA_CODE'
 ${encoded}
 CA_CODE
@@ -811,41 +826,12 @@ PY
   printf 'CA_METRICS elapsed_ms=%s maxrss_kb=\\n' "$((finish - start))" >>stderr.txt
 fi
 printf 'CA_STDOUT_BEGIN\\n'
-cat stdout.txt 2>/dev/null || true
+head -c 65536 stdout.txt 2>/dev/null || true
 printf '\\nCA_STDOUT_END\\nCA_STDERR_BEGIN\\n'
-cat stderr.txt 2>/dev/null || true
+head -c 65536 stderr.txt 2>/dev/null || true
 printf '\\nCA_STDERR_END\\nCA_EXIT:%s\\nCA_RUNTIME:%s\\n' "$status" "$runtime"
 exit "$status"
 `;
-}
-
-function parseRemoteOutput(raw) {
-  const between = (start, end) => {
-    const from = raw.indexOf(start);
-    if (from < 0) return "";
-    const begin = from + start.length;
-    const to = raw.indexOf(end, begin);
-    return to < 0 ? "" : raw.slice(begin, to);
-  };
-  const stderr = between("CA_STDERR_BEGIN\n", "\nCA_STDERR_END");
-  const metrics = {};
-  for (const line of stderr.split("\n")) {
-    if (!line.startsWith("CA_METRICS ")) continue;
-    for (const part of line.slice("CA_METRICS ".length).split(/\s+/)) {
-      const [key, value] = part.split("=");
-      if (key) metrics[key] = value;
-    }
-  }
-  const exit = raw.match(/^CA_EXIT:(-?\d+)/m);
-  const runtime = raw.match(/^CA_RUNTIME:(.+)$/m);
-  return {
-    stdout: between("CA_STDOUT_BEGIN\n", "\nCA_STDOUT_END"),
-    stderr,
-    exitCode: exit ? Number(exit[1]) : null,
-    runtime: runtime?.[1]?.trim() || "remote",
-    remoteElapsedMs: metrics.elapsed_s ? Math.round(Number(metrics.elapsed_s) * 1000) : metrics.elapsed_ms ? Number(metrics.elapsed_ms) : null,
-    peakMemoryKb: metrics.maxrss_kb ? Number(metrics.maxrss_kb) : null,
-  };
 }
 
 /**
@@ -878,14 +864,20 @@ export function repoFor(env = process.env) {
   return String(env.GITHUB_REPOSITORY || env.CODE_AUDITOR_GITHUB_REPOSITORY || "").trim();
 }
 
-async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
+async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, options = {}) {
+  const policy = validateExecution(language, code, timeoutMs);
+  const id = options.executionId || executionId();
   const started = Date.now();
   const { Sandbox } = await import("@e2b/code-interpreter");
   const bootStarted = Date.now();
   const template = String(process.env.CODE_AUDITOR_E2B_TEMPLATE || "").trim();
   const opts = {
-    timeoutMs: Math.max(timeoutMs + 30_000, 90_000),
+    timeoutMs: Math.max(policy.timeoutMs + 30_000, 90_000),
+    // E2B microVM egress is denied unless a future explicitly approved
+    // network policy is implemented and tested.
+    allowInternetAccess: false,
     metadata: {
+      executionId: id,
       app: "code-editor",
       workerId: WORKER_ID,
       purpose: "benchmark",
@@ -894,11 +886,13 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
   };
   const sandbox = template ? await Sandbox.create(template, opts) : await Sandbox.create(opts);
   const bootMs = Date.now() - bootStarted;
-  try {
+  return withSandboxLifecycle(sandbox,
+    () => options.onState?.("running", { executionId: id, sandboxId: sandbox.sandboxId, bootMs }),
+    async () => {
     let result;
     try {
       result = await sandbox.commands.run(`bash -lc ${shellSingle(remoteScript(language, code, "e2b"))}`, {
-        timeoutMs,
+        timeoutMs: policy.timeoutMs,
       });
     } catch (err) {
       if (err?.result) {
@@ -907,11 +901,13 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
         throw err;
       }
     }
-    const parsed = parseRemoteOutput(`${result.stdout || ""}\n${result.stderr || ""}`);
-    const out = clampOutput(parsed.stdout || result.stdout || "");
-    const err = clampOutput(parsed.stderr || result.stderr || "");
-    const exitCode = parsed.exitCode ?? result.exitCode ?? 0;
+    const parsed = parseExecutionOutput(`${result.stdout || ""}\n${result.stderr || ""}`);
+    const exitCode = parsed.complete && (result.exitCode == null || result.exitCode === parsed.exitCode)
+      ? parsed.exitCode : null;
+    const out = clampOutput(parsed.complete ? parsed.stdout : result.stdout || "");
+    const err = clampOutput(parsed.complete ? parsed.stderr : result.stderr || "");
     return {
+      // A missing exit status must not be presented as a passing verification.
       ok: exitCode === 0,
       runtime: parsed.runtime || "e2b",
       exitCode,
@@ -922,33 +918,43 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
       peakMemoryKb: parsed.peakMemoryKb,
       timedOut: false,
       truncated: out.truncated || err.truncated,
+      executionId: id,
+      state: exitCode === 0 ? "completed" : "failed",
+      exitVerified: parsed.complete,
+      network: "denied",
       provider: "e2b",
       sandboxId: sandbox.sandboxId,
       bootMs,
     };
-  } finally {
-    await sandbox.kill().catch(() => {});
-  }
+    },
+    async (error) => {
+      const state = /timed out|timeout/i.test(String(error)) ? "timed_out" : "failed";
+      await options.onState?.(state, { executionId: id, sandboxId: sandbox.sandboxId, reason: String(error).slice(0, 200) });
+    }
+  );
 }
 
 function executionProvider(settings) {
-  const fallback = secret("E2B_API_KEY") ? "e2b" : "local";
-  return String(
+  // Never silently run untrusted generated code on the host when E2B is
+  // unavailable. The local runner is an explicit operator-only selection.
+  const selected = String(
     settings.executionProvider ||
       process.env.CODE_AUDITOR_EXECUTION_PROVIDER ||
-      fallback
-  )
-    .trim()
-    .toLowerCase();
+      "e2b"
+  ).trim().toLowerCase();
+  if (selected !== "e2b" && selected !== "local") {
+    throw new Error(`Unsupported execution provider: ${selected}`);
+  }
+  return selected;
 }
 
-async function runVerification(settings, suite, program) {
+async function runVerification(settings, suite, program, options = {}) {
   const provider = executionProvider(settings);
   if (provider === "e2b") {
     if (!secret("E2B_API_KEY")) {
       throw new Error("No E2B key is saved for the account that owns this job.");
     }
-    return runE2BCode(suite.language, program, Number(settings.e2bTimeoutMs || REMOTE_RUN_TIMEOUT_MS));
+    return runE2BCode(suite.language, program, Number(settings.e2bTimeoutMs || REMOTE_RUN_TIMEOUT_MS), options);
   }
   return runLocalCode(suite.language, program, LOCAL_RUN_TIMEOUT_MS);
 }
@@ -988,8 +994,17 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
       runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: "harness has no splice marker", runtime: "" };
       continue;
     }
+    const id = executionId();
+    await addEvent(job.id, "info", "execution_queued",
+      `Candidate ${candidate.letter}${tag} queued for execution.`,
+      { executionId: id, state: "queued", letter: candidate.letter });
     try {
-      const local = await runVerification(settings, suite, program);
+      const local = await runVerification(settings, suite, program, {
+        executionId: id,
+        onState: (state, meta) => addEvent(job.id, "info", "execution_state",
+          `Candidate ${candidate.letter}${tag}: ${state}.`,
+          { ...meta, letter: candidate.letter, state }).catch(() => {}),
+      });
       const localCases = countCases(local.stdout);
       let remote;
       const backend = resolveBenchmarkBackend(settings);
@@ -1071,7 +1086,16 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
         remoteElapsedMs: local.remoteElapsedMs ?? null,
         peakMemoryKb: local.peakMemoryKb ?? null,
         provider: local.provider || executionProvider(settings),
+        executionId: local.executionId || id,
+        sandboxId: local.sandboxId || null,
+        state: executionStatus(local),
+        exitCode: local.exitCode ?? null,
+        timedOut: Boolean(local.timedOut),
+        truncated: Boolean(local.truncated),
+        bootMs: local.bootMs ?? null,
+        network: local.network || "unknown",
         stderr: diagnostic,
+        stdout: String(local.stdout || "").slice(0, 4096),
         remote,
       };
       await addEvent(job.id, local.ok && localCases.failed === 0 ? "info" : "warn", "benchmark_done", `Candidate ${candidate.letter}${tag}: ${runs[candidate.letter].note || `${localCases.passed} case(s) passed`}.${diagnostic ? ` — ${diagnostic.split("\n")[0]}` : ""}`, runs[candidate.letter]);
@@ -2384,10 +2408,14 @@ export async function runCouncilJob(job) {
   // re-answering a question already answered.
   let field3 = field;
   let revisedRuns = {};
-  if (reviewSets.some((set) => set.reviews.length > 0)) {
+  const hasReviews = reviewSets.some((set) => set.reviews.length > 0);
+  // Failed executions trigger one bounded repair round even with no peer
+  // critique. The corrected program is retested by the same E2B gate.
+  const failedCandidates = field.filter((c) => requiresRepair(benchmark.runs[c.letter]));
+  if (hasReviews || failedCandidates.length > 0) {
     await patchJob(job.id, { progress_phase: "revising" });
     const revising = bench.keep(
-      field.filter((c) => c.final || c.text),
+      field.filter((c) => (c.final || c.text) && (hasReviews || requiresRepair(benchmark.runs[c.letter]))),
       (c) => c.model
     );
     await bench.announce("revising", field.filter((c) => bench.has(c.model)).map((c) => c.model));
@@ -2395,9 +2423,13 @@ export async function runCouncilJob(job) {
     const revisions = new Map();
     await Promise.all(
       revising.map(async (candidate) => {
-        const received = reviewsOf(reviewSets, candidate.letter)
-          .map((r) => `- [${r.reviewer}] correct: ${r.correct}. ${r.problems}`)
-          .join("\n");
+        const run = benchmark.runs[candidate.letter];
+        const feedback = reviewsOf(reviewSets, candidate.letter)
+          .map((r) => `- [${r.reviewer}] correct: ${r.correct}. ${r.problems}`);
+        if (requiresRepair(run)) feedback.push(
+          `- [TEST FAILURES] ${run.passed} passed, ${run.failed} failed; ${run.note || "execution rejected"}. Compiler/runtime output: ${String(run.stderr || "").slice(0, 1000)}. Repair the code, not the test harness.`
+        );
+        const received = feedback.join("\n");
         try {
           const text = await tokenRouterGenerate({
             settings,

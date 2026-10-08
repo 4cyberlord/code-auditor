@@ -281,6 +281,16 @@ export interface CandidateRun {
   peakMemoryKb?: number | null;
   /** Which runner produced the figures above: "local", "e2b", … */
   provider?: string;
+  executionId?: string;
+  sandboxId?: string | null;
+  state?: "queued" | "running" | "completed" | "failed" | "canceled" | "timed_out";
+  exitCode?: number | null;
+  timedOut?: boolean;
+  truncated?: boolean;
+  bootMs?: number | null;
+  network?: "denied" | "unknown" | "allowed";
+  stderr?: string;
+  stdout?: string;
   /** "no suite for rust", "empty code", "exit 1", … */
   note: string;
   /** What executed it — "node 22", "python3". From the Rust runner. */
@@ -1350,6 +1360,8 @@ export function executionDigest(
       lines.push(
         `Candidate ${c.letter}${tag}: ${run.failed === 0 && run.ok ? "ALL PASSED" : "FAILED"} — ` +
           `${run.passed} passed, ${run.failed} failed, ${run.runtime}, ${run.durationMs}ms` +
+          (run.remoteElapsedMs != null ? `, measured ${run.remoteElapsedMs}ms` : "") +
+          (run.peakMemoryKb != null ? `, peak ${Math.round(run.peakMemoryKb / 1024 * 10) / 10}MB` : "") +
           (run.remote
             ? `; remote ${run.remote.ok ? "OK" : "FAILED"} on ${run.remote.runner || run.remote.codespace || "unknown runner"}, ` +
               `${run.remote.runtime}, ` +

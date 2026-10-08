@@ -59,3 +59,20 @@ jobs:
         run: docker pull alpine:3.20
       - name: Verify container isolation and cleanup on real Docker
         run: bash tests/security/docker-containment.sh
+
+  e2b-live-smoke:
+    # Secrets never enter pull-request builds. Run explicitly on the trusted branch.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Live E2B smoke test
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+        run: node tests/security/e2b-smoke.mjs
