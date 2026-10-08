@@ -563,8 +563,10 @@ async fn run_bash(root: &Path, command: &str) -> Result<String, String> {
     // on timeout so ordinary children cannot outlive the command's deadline.
     #[cfg(target_os = "macos")]
     shell.process_group(0);
-    let mut child = shell
+    let child = shell
         .current_dir(root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("Could not start command: {e}"))?;
