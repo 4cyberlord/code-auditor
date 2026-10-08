@@ -932,14 +932,17 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS) {
 }
 
 function executionProvider(settings) {
-  const fallback = secret("E2B_API_KEY") ? "e2b" : "local";
-  return String(
+  // Never silently run untrusted generated code on the host when E2B is
+  // unavailable. The local runner is an explicit operator-only selection.
+  const selected = String(
     settings.executionProvider ||
       process.env.CODE_AUDITOR_EXECUTION_PROVIDER ||
-      fallback
-  )
-    .trim()
-    .toLowerCase();
+      "e2b"
+  ).trim().toLowerCase();
+  if (selected !== "e2b" && selected !== "local") {
+    throw new Error(`Unsupported execution provider: ${selected}`);
+  }
+  return selected;
 }
 
 async function runVerification(settings, suite, program) {
