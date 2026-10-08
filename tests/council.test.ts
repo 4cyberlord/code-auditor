@@ -8,6 +8,7 @@ import {
   executionDigest,
   gateFor,
   selectVerifiedCandidate,
+  decideWinner,
   parseReviewSet,
   parseTestSuites,
   parseCouncilSynthesis,
@@ -423,6 +424,22 @@ CONTRACT>>>`);
   check("failed execution cannot win", allFailed.winner === null);
   const unexecuted = selectVerifiedCandidate({});
   check("missing evidence never implies verified", unexecuted.winner === null);
+}
+
+
+// Phase 5: synthesis and judges cannot override real executable evidence.
+{
+  const run = (letter: string, passed: number, failed = 0) =>
+    ({ letter, ran: true, ok: failed === 0, passed, failed } as CandidateRun);
+  const result = decideWinner({ claimed: "A", judges: [], runs: {
+    A: run("A", 9, 1), B: run("B", 10), C: run("C", 8),
+  }, letters: ["A","B","C"] });
+  check("verified minority is the actual Council winner", result.winner === "B");
+  check("selection is labeled evidence-derived", result.source === "evidence");
+  const noWinner = decideWinner({ claimed: "A", judges: [], runs: { A: run("A", 0, 1) }, letters: ["A"] });
+  check("no execution success means no winner", noWinner.winner === "");
+  const reasoning = decideWinner({ claimed: "A", judges: [], runs: {}, letters: ["A"] });
+  check("research or MCQ without execution can keep synthesis", reasoning.winner === "A");
 }
 
 console.log(fail ? `\n${fail} FAILURES\n` : "\nall council checks passed\n");

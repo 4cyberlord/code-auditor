@@ -1643,7 +1643,7 @@ export function aggregateJudgeRankings(
 export interface WinnerDecision {
   winner: string;
   /** Where the surviving winner came from. */
-  source: "synthesis" | "judges" | "none";
+  source: "synthesis" | "judges" | "evidence" | "none";
   /** Set when the gate rejected the synthesis' pick. */
   overruledReason: string;
   /** Set when the judges' scoreboard did not agree with the synthesis. */
@@ -1677,6 +1677,19 @@ export function decideWinner(args: {
   const tally = aggregateJudgeRankings(args.judges, args.letters, args.runs);
   const ruling = enforceWinnerGate(args.claimed, args.runs);
   const executed = Object.values(args.runs).some((r) => r?.ran);
+  // Verified execution outranks syntheses and judge popularity.
+  // Keep the original judge/synthesis policy for reasoning-only questions.
+  if (executed) {
+    const evidence = selectVerifiedCandidate(args.runs);
+    if (!evidence.winner) {
+      return { winner: "", source: "none", overruledReason: ruling.overruledReason,
+        disagreement: evidence.reason, tally };
+    }
+    return { winner: evidence.winner, source: "evidence", overruledReason: ruling.overruledReason,
+      disagreement: args.claimed && args.claimed !== evidence.winner
+        ? `The synthesis preferred Candidate ${args.claimed}, but ${evidence.reason}`
+        : evidence.reason, tally };
+  }
   const eligible = tally.filter((row) => (executed ? row.gate === "pass" : true) && row.points > 0);
   const leader = eligible[0];
 
