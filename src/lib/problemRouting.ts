@@ -107,3 +107,9 @@ export function reconcileProblemReadings(
   return { families, path, verification, needsVisualStructure: visual,
     reasons: [...new Set(routes.flatMap(r => r.reasons)), ...disagreements], disagreements };
 }
+
+export function selectContractReaders<T>(configured: T[], idOf: (item:T)=>string, visual: boolean, preference:readonly string[], count=2):T[] {
+  if (!visual) return configured.slice(0,count);
+  const preferred = configured.filter(item=>preference.includes(idOf(item))).sort((a,b)=>preference.indexOf(idOf(a))-preference.indexOf(idOf(b)));
+  return preferred.length>=count ? preferred.slice(0,count) : configured.slice(0,count);
+}

@@ -37,6 +37,7 @@ import {
 } from "./prompts.ts";
 import {
   EXTRACTION_SYSTEM,
+  VISION_PREFERENCE,
   extractionUserPrompt,
   parseExtraction,
   compareExtractions,
@@ -55,6 +56,7 @@ import {
   type Extraction,
   type ExtractionAgreement,
 } from "./extraction.ts";
+import { routeProblem, reconcileProblemReadings, selectContractReaders } from "./problemRouting.ts";
 import { captureNameOf } from "./image.ts";
 import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
 import * as bridge from "./bridge.ts";
@@ -3899,7 +3901,12 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // reading of the problem, the reviewers grade against their own, and a
   // disagreement about what was *asked* arrives disguised as a disagreement
   // about who is right.
-  const contractSeats = (settings.councilModels ?? []).slice(0, 2);
+  const reading = s0.extraction.agreement?.merged;
+  const readers = s0.extraction.readings.map(r=>r.extraction);
+  const route = readers.length ? reconcileProblemReadings(readers)
+    : routeProblem(reading ?? { problemSummary: s0.note, observations: [], ambiguities: [], confidence: 1, code: "", kind: "other" });
+  const contractSeats = selectContractReaders(settings.councilModels ?? [], m=>m.id,
+    s0.images.length>0 && route.path!=="standard", VISION_PREFERENCE);
   let contract: ProblemContract | null = null;
   let contractAgreement: ContractAgreement | null = null;
   if (contractSeats.length && settings.councilProblemContract !== false) {
