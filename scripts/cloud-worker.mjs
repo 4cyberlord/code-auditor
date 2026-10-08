@@ -2691,6 +2691,9 @@ export async function runCouncilJob(job) {
     // Stamped at the top, not appended at the bottom. A warning below a code
     // block is a warning nobody reads before copying the code block.
     synthesis: [
+      decision.winner && standing.standing === "verified"
+        ? `> **AUTHORITATIVE EXECUTION SELECTION: Candidate ${decision.winner}.** Copy only the selected candidate's tested code from the structured result. The synthesis text below is commentary and may name or rewrite a different candidate.\\n`
+        : "",
       standing.standing === "unverified"
         ? `> **UNVERIFIED ANSWER.** ${standing.reason}\n`
         : standing.standing === "unexecuted"

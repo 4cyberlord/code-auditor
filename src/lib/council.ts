@@ -1882,7 +1882,8 @@ export function buildPresentation(report: CouncilReport): Presentation {
   // A revised candidate is represented by its revision everywhere: that is the
   // thing that was judged, and showing round one's numbers beside a revised
   // answer would be evidence for a program nobody shipped.
-  const runFor = (c: Candidate) => (c.revised ? report.revisedRuns?.[c.letter] : undefined) ?? report.runs?.[c.letter];
+  // Never attach round-one evidence to a revision that was never retested.
+  const runFor = (c: Candidate) => c.revised ? report.revisedRuns?.[c.letter] : report.runs?.[c.letter];
   const gateRuns: Record<string, CandidateRun> = {};
   for (const c of report.candidates) {
     const run = runFor(c);
@@ -1944,11 +1945,11 @@ export function buildPresentation(report: CouncilReport): Presentation {
       .filter(Boolean)
       .join("\n\n"),
     contractDisputes: report.contractAgreement?.differences ?? [],
-    // The synthesis assembles the shipped answer, so its code is preferred; the
-    // winning candidate's own code is the fallback when the synthesis wrote
-    // prose around a candidate rather than restating it.
-    code: synth?.code || winnerFinal?.code || "",
-    language: synth?.language || (winnerFinal ? candidateLanguage(winnerFinal) : ""),
+    // A synthesizer may describe or rewrite a different candidate's program.
+    // Only the exact selected candidate's code was tested. Never advertise
+    // synthesis-generated code as the verified winner's executable artifact.
+    code: winnerFinal?.kind === "code" ? winnerFinal.code : "",
+    language: winnerFinal?.kind === "code" ? candidateLanguage(winnerFinal) : "",
   };
 }
 

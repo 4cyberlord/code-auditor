@@ -442,5 +442,35 @@ CONTRACT>>>`);
   check("research or MCQ without execution can keep synthesis", reasoning.winner === "A");
 }
 
+
+{
+  const mkRun = (letter: string, ok: boolean): CandidateRun => ({
+    letter, ran: true, ok, passed: ok ? 3 : 1, failed: ok ? 0 : 2,
+    durationMs: 10, note: "", runtime: "python3",
+  });
+  const safe = FINAL("Use verified program", "print('VERIFIED_B')", "python");
+  const rejected = FINAL("Wrong program", "print('REJECTED_A')", "python");
+  const report = {
+    candidates: [cand("A", rejected), cand("B", safe)],
+    suites: [], runs: { A: mkRun("A", false), B: mkRun("B", true) },
+    revisedRuns: {}, reviews: [], judges: [], synthesis: "synthesis",
+    winner: "B",
+    dossier: {
+      synthesis: { ...parseCouncilSynthesis("WINNER: A"), code: "print('SYNTHESIS_UNTESTED')", language: "javascript" },
+      judges: [], tally: [], winnerSource: "evidence" as const, disagreement: "",
+    },
+  };
+  const presentation = buildPresentation(report);
+  check("displayed code belongs to verified winner", presentation.code === safe.code);
+  check("displayed language belongs to verified winner", presentation.language === "python");
+  const none = buildPresentation({ ...report, winner: "" });
+  check("no winner means no copyable candidate code", none.code === "" && none.language === "");
+  const revised = buildPresentation({
+    ...report, candidates: [cand("A", rejected), { ...cand("B", safe), revised: FINAL("Broken revision", "print('UNTESTED_REVISED')") }],
+    winner: "B", revisedRuns: {},
+  });
+  check("untested revision must not inherit initial pass", revised.standing !== "verified");
+}
+
 console.log(fail ? `\n${fail} FAILURES\n` : "\nall council checks passed\n");
 process.exit(fail ? 1 : 0);
