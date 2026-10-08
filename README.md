@@ -335,6 +335,10 @@ tests/              TypeScript and worker tests
 public/             Public assets used by the app and README
 ```
 
+### Experimental restricted shell mode
+
+The security branch also includes an **experimental**, opt-in macOS Seatbelt command runner (`COUNCIL_EDITOR_SHELL_MODE=restricted`). It invokes `/usr/bin/sandbox-exec` with a default-deny profile, project-write paths, restricted file reads, and no declared network allowance. Every command still needs explicit human approval. This runner has **not been security-validated** against symlink, process, IPC, or filesystem escape scenarios; `sandbox-exec` is a legacy interface, so treat this as defense in depth rather than a hardened isolation guarantee. If the binary is unavailable, restricted mode refuses execution. Production-grade untrusted execution still requires a stronger isolated runner and adversarial validation.
+
 ### Priority 1 implementation (proposed branch)
 
 The branch `security/coding-shell-opt-in` introduces a first defensive step: coding-agent `bash` requests are **denied by default**. A trusted operator may deliberately permit the previous unrestricted shell behavior by setting `COUNCIL_EDITOR_ALLOW_UNSANDBOXED_SHELL=1` in the environment **before launching Council Editor**. This is **not a sandbox** or per-command approval; the opt-in grants broad shell access and should never be enabled for untrusted prompts. Recursive folder copying also rejects symbolic links, with regression tests for path traversal and copied symlinks.
