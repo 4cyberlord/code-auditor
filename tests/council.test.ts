@@ -7,6 +7,7 @@ import {
   countCases,
   executionDigest,
   gateFor,
+  selectVerifiedCandidate,
   parseReviewSet,
   parseTestSuites,
   parseCouncilSynthesis,
@@ -401,6 +402,27 @@ CONTRACT>>>`);
       execution: "e",
     }).includes("Local Knowledge/RAG")
   );
+}
+
+
+{
+  const run = (letter: string, passed: number, failed = 0, ms: number | null = null): CandidateRun =>
+    ({ letter, ran: true, ok: failed === 0, passed, failed, remoteElapsedMs: ms } as CandidateRun);
+  const ranking = selectVerifiedCandidate({
+    A: run("A", 7, 3, 5),
+    B: run("B", 10, 0, 12),
+    C: run("C", 8, 0, 4),
+  });
+  check("verified minority beats failed majority", ranking.winner === "B");
+  check("failed candidates are ineligible", ranking.eligible.join(",") === "B,C");
+  const tied = selectVerifiedCandidate({ B: run("B", 10, 0, 8), A: run("A", 10, 0, 5) });
+  check("runtime evidence resolves equal passing coverage", tied.winner === "A");
+  const noTests = selectVerifiedCandidate({ A: run("A", 0, 0, 0) });
+  check("zero passed tests is not verification", noTests.winner === null);
+  const allFailed = selectVerifiedCandidate({ A: run("A", 1, 1) });
+  check("failed execution cannot win", allFailed.winner === null);
+  const unexecuted = selectVerifiedCandidate({});
+  check("missing evidence never implies verified", unexecuted.winner === null);
 }
 
 console.log(fail ? `\n${fail} FAILURES\n` : "\nall council checks passed\n");

@@ -337,6 +337,46 @@ export function gateFor(run: CandidateRun | undefined): "pass" | "fail" | "untes
   return "pass";
 }
 
+
+/**
+ * Phase 5: an evidence-first shortlist for synthesizers.
+ * Only passing executions can be ranked when any code was executed.
+ * Never convert majority opinion or model confidence into test evidence.
+ */
+export function selectVerifiedCandidate(runs: Record<string, CandidateRun>): {
+  winner: string | null;
+  eligible: string[];
+  reason: string;
+} {
+  const all = Object.entries(runs);
+  const passed = all.filter(([, run]) => gateFor(run) === "pass");
+  if (!passed.length) {
+    return {
+      winner: null, eligible: [],
+      reason: all.some(([, run]) => run?.ran)
+        ? "No candidate passed executable tests; no winner is justified."
+        : "No execution evidence is available; do not claim a verified winner.",
+    };
+  }
+  passed.sort(([letterA, a], [letterB, b]) => {
+    // More passing cases are stronger coverage evidence, not a popularity vote.
+    if (a.passed !== b.passed) return b.passed - a.passed;
+    // A reliable elapsed metric can break ties, but missing data cannot win.
+    const elapsedA = a.remoteElapsedMs;
+    const elapsedB = b.remoteElapsedMs;
+    const validA = typeof elapsedA === "number" && Number.isFinite(elapsedA) && elapsedA >= 0;
+    const validB = typeof elapsedB === "number" && Number.isFinite(elapsedB) && elapsedB >= 0;
+    if (validA && validB && elapsedA !== elapsedB) return elapsedA - elapsedB;
+    if (validA !== validB) return validA ? -1 : 1;
+    return letterA.localeCompare(letterB);
+  });
+  return {
+    winner: passed[0][0],
+    eligible: passed.map(([letter]) => letter),
+    reason: `Candidate ${passed[0][0]} has a passing execution (${passed[0][1].passed} tests). This is evidence-based selection, not proof beyond the tested cases.`,
+  };
+}
+
 /**
  * Did the *test* fail, rather than the code?
  *
