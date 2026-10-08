@@ -19,6 +19,7 @@ import {
   contractQuery,
   reviseUserPrompt,
   buildPresentation,
+  modelPerformance,
   mutateCode,
   oracleSuspicion,
   oracleDigest,
@@ -470,6 +471,26 @@ CONTRACT>>>`);
     winner: "B", revisedRuns: {},
   });
   check("untested revision must not inherit initial pass", revised.standing !== "verified");
+}
+
+
+{
+  const mk = (letter: string, model: string) => cand(letter, FINAL("answer", "print(1)"), model);
+  const run = (letter: string, passed: number, failed = 0, ms = 25): CandidateRun =>
+    ({ letter, ran: true, ok: failed === 0, passed, failed, durationMs: ms, note: "", runtime: "python" });
+  const base = { candidates: [mk("A", "alpha"), mk("B", "beta")], suites: [], runs: {
+    A: run("A", 3), B: run("B", 0, 2),
+  }, revisedRuns: {}, reviews: [], judges: [], synthesis: "", winner: "A" };
+  const revised = { ...base, candidates: [{ ...mk("A", "alpha"), revised: FINAL("fixed", "print(2)") }, mk("B", "beta")],
+    runs: { A: run("A", 1, 2), B: run("B", 0, 1) }, revisedRuns: { A: run("A", 4, 0, 35) } };
+  const data = modelPerformance([base, revised]);
+  const alpha = data.find(d => d.model === "alpha")!;
+  check("model analytics counts verified executions", alpha.executed === 2 && alpha.verified === 2);
+  check("model analytics tracks actual repaired attempts", alpha.repairAttempts === 1 && alpha.repairsVerified === 1);
+  check("model analytics preserves real timings", alpha.meanExecutionMs === 30);
+  check("model analytics is not confused by failed peers", data.find(d => d.model === "beta")?.failed === 2);
+  const missing = modelPerformance([{ ...base, candidates: [mk("C", "unverified")], runs: {} }]);
+  check("model analytics reports missing evidence as null rate", missing[0].verifiedRate === null && missing[0].untested === 1);
 }
 
 console.log(fail ? `\n${fail} FAILURES\n` : "\nall council checks passed\n");
