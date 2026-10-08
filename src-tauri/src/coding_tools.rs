@@ -893,6 +893,33 @@ mod security_tests {
         }
     }
 
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn cancellation_kills_native_shell_process_group() {
+        use tokio::time::{sleep, Duration};
+        // Exercise the same process-group guard used by run_bash. A canceled
+        // task drops its guard before the command's 120-second timeout.
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("sleep 30 & wait")
+            .process_group(0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("spawn isolated process group");
+        let pid = child.id().expect("child process id");
+        let guard = ProcessGroupGuard(Some(pid));
+        sleep(Duration::from_millis(150)).await;
+        drop(guard);
+        let stopped = timeout(Duration::from_secs(4), child.wait()).await;
+        assert!(stopped.is_ok(), "canceled shell must exit promptly");
+        // Kill the complete process group; no shell or child should remain
+        // running under this process-group ID.
+        sleep(Duration::from_millis(150)).await;
+        let alive = unsafe { libc::kill(-(pid as i32), 0) };
+        assert_eq!(alive, -1, "shell process group must be terminated");
+    }
+
     #[test]
     fn shell_policy_never_falls_back_from_restricted_to_unsafe() {
         assert_eq!(shell_policy(None, false), ShellPolicy::Disabled);
