@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -24,7 +24,6 @@ import * as bridge from "@/lib/bridge";
 import AccountCard from "./AccountCard";
 import HelperCard from "./HelperCard";
 import { classifyProbeResult } from "@/lib/probeFit";
-import { PIN_LENGTH, authReauthenticate, reason, sanitizePin } from "@/lib/auth";
 
 /**
  * One probe truth badge.
@@ -76,83 +75,6 @@ function ProbeBadge({
     >
       {rep.status === "unsupported" ? "different endpoint" : "failed"}
     </span>
-  );
-}
-
-function SensitiveSettingsGate({
-  title,
-  detail,
-  children,
-}: {
-  title: string;
-  detail: string;
-  children: ReactNode;
-}) {
-  const [verified, setVerified] = useState(false);
-  const [pin, setPin] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = async () => {
-    if (pin.length !== PIN_LENGTH || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await authReauthenticate(pin);
-      setVerified(true);
-      setPin("");
-    } catch (err) {
-      setError(reason(err));
-      setPin("");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (verified) return <>{children}</>;
-
-  return (
-    <form
-      className="provider-card"
-      onSubmit={(e) => {
-        e.preventDefault();
-        void submit();
-      }}
-    >
-      <div className="top">
-        <span className="name">{title}</span>
-        <span className="spacer" />
-        <span className="badge" data-tone="warn">
-          locked
-        </span>
-      </div>
-      <p className="hint" style={{ marginTop: 0 }}>
-        {detail}
-      </p>
-      <div className="row">
-        <label htmlFor={`reauth-${title.replace(/\W+/g, "-").toLowerCase()}`}>PIN</label>
-        <div className="with-btn">
-          <input
-            id={`reauth-${title.replace(/\W+/g, "-").toLowerCase()}`}
-            className="field mono"
-            type="password"
-            inputMode="numeric"
-            autoComplete="current-password"
-            maxLength={PIN_LENGTH}
-            value={pin}
-            onChange={(e) => setPin(sanitizePin(e.target.value))}
-          />
-          <button className="btn" type="submit" disabled={busy || pin.length !== PIN_LENGTH}>
-            {busy ? "Checking…" : "Unlock"}
-          </button>
-        </div>
-      </div>
-      {error && (
-        <p className="hint" style={{ margin: "0 0 6px", color: "var(--bad)" }}>
-          {error}
-        </p>
-      )}
-    </form>
   );
 }
 
@@ -2082,15 +2004,10 @@ export default function SettingsDialog() {
         <div className="content">
           {tab === "api" && (
             <>
-              <SensitiveSettingsGate
-                title="Unlock API settings"
-                detail="Confirm your PIN before adding, removing, or changing API keys."
-              >
-                <GatewayCard />
-                {PROVIDER_ORDER.map((p) => (
-                  <ProviderCard key={p} id={p} />
-                ))}
-              </SensitiveSettingsGate>
+              <GatewayCard />
+              {PROVIDER_ORDER.map((p) => (
+                <ProviderCard key={p} id={p} />
+              ))}
               <CodingSettingsCard />
             </>
           )}
@@ -2107,14 +2024,9 @@ export default function SettingsDialog() {
             <>
               {/* The account lives in the database, so it belongs on the tab
                   where the database does rather than in a tab of its own. */}
-              <SensitiveSettingsGate
-                title="Unlock account settings"
-                detail="Confirm your PIN before changing the account PIN, helper authorisation, or storage credentials."
-              >
-                <AccountCard />
-                <HelperCard />
-                <StorageCard />
-              </SensitiveSettingsGate>
+              <AccountCard />
+              <HelperCard />
+              <StorageCard />
               <TimeZoneCard />
             </>
           )}

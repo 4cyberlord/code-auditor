@@ -33,6 +33,7 @@
 use keyring::Entry;
 use serde::Serialize;
 use std::sync::{OnceLock, RwLock};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::db::Db;
@@ -112,6 +113,15 @@ fn hold_token(token: Option<String>) {
     if let Ok(mut slot) = token_slot().write() {
         *slot = token;
     }
+}
+
+/// Only one startup path may restore the desktop session at a time. Without
+/// this, two overlapping `auth_status` calls can both begin a restore; if one
+/// succeeds while the other receives a transient transport error, the latter
+/// clears the token after the former has marked the user signed in.
+fn restore_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 const SESSION_SERVICE: &str = "com.council-editor.desktop-session";
@@ -246,6 +256,7 @@ pub async fn auth_status(db: tauri::State<'_, Db>) -> Result<AuthStatus, String>
 /// render. Transport failures leave the saved token alone so an offline launch
 /// does not turn a temporary network problem into a new credential prompt.
 async fn restore_saved_session(db: &Db) {
+    let _restore = restore_lock().lock().await;
     if current().is_some() {
         return;
     }
