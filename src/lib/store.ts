@@ -1359,6 +1359,7 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
     enabled: { ...base.enabled, ...(saved.enabled ?? {}) },
     extractors: saved.extractors ?? base.extractors,
     probes: saved.probes ?? {},
+    verifiedModelOutcomes: Array.isArray(saved.verifiedModelOutcomes) ? saved.verifiedModelOutcomes.slice(-2000) : [],
   });
 }
 
