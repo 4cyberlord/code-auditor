@@ -1,4 +1,4 @@
-import { routeProblem, routingGuidance, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem, rankSolversForProblem } from "../src/lib/problemRouting.ts";
+import { routeProblem, routingGuidance, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem, rankSolversForProblem, solverEvidenceFromReports } from "../src/lib/problemRouting.ts";
 import { EMPTY_EXTRACTION, renderForReasoning, readingMarkdown, type Extraction } from "../src/lib/extraction.ts";
 
 const ex = (summary: string, changes: Partial<Extraction> = {}): Extraction =>
@@ -98,3 +98,14 @@ check("combined samples are used instead of best batch",
  {model:"solver-b",families:["array"],executed:10,verified:8}
  ])[0].id==="solver-b");
 check("invalid sample threshold disables reranking",rankSolversForProblem(existing,m=>m.id,arrayTask,evidence,0)[0].id==="solver-a");
+
+const historical=solverEvidenceFromReports([{
+ contract:{inputs:"array of integers"},candidates:[{letter:"A",model:"solver-a"}],
+ runs:{A:{ran:true,ok:true,passed:4,failed:0}}
+},{
+ contract:{inputs:"array of integers"},candidates:[{letter:"B",model:"solver-b",revised:{}}],
+ runs:{B:{ran:true,ok:true,passed:4,failed:0}},revisedRuns:{}
+}]);
+check("only tested historical candidates count",historical.length===1 && historical[0].verified===1);
+check("stored missing revision execution is excluded",!historical.some(x=>x.model==="solver-b"));
+check("reports without a contract are not classified",solverEvidenceFromReports([{candidates:[{letter:"A",model:"a"}]}]).length===0);

@@ -174,3 +174,28 @@ export function rankSolversForProblem<T>(
   let next=0;
   return configured.map(entry=>scores.has(idOf(entry)) ? known[next++].entry : entry);
 }
+
+/** Convert persisted, fully executed Council results into task-relevant evidence. */
+export function solverEvidenceFromReports(reports: Array<{
+  candidates?: Array<{letter:string;model:string;revised?:unknown}>;
+  runs?: Record<string,{ran:boolean;ok:boolean;passed:number;failed:number;state?:string;timedOut?:boolean}>;
+  revisedRuns?: Record<string,{ran:boolean;ok:boolean;passed:number;failed:number;state?:string;timedOut?:boolean}>;
+  contract?: {signature?:string;inputs?:string;outputs?:string;constraints?:string} | null;
+}>): SolverEvidence[] {
+  const result: SolverEvidence[]=[];
+  for(const report of reports) {
+    const c=report.contract;
+    if(!c) continue;
+    const families=routeProblem({kind:"other",code:"",confidence:1,ambiguities:[],
+      observations:[],problemSummary:[c.signature,c.inputs,c.outputs,c.constraints].filter(Boolean).join(" ")}).families;
+    if(families.length===1 && families[0]==="other") continue;
+    for(const candidate of report.candidates??[]) {
+      const run=candidate.revised ? report.revisedRuns?.[candidate.letter] : report.runs?.[candidate.letter];
+      if(!candidate.model || !run?.ran || run.state==="canceled" || run.state==="timed_out" || run.timedOut) continue;
+      const tested=run.passed>0 || run.failed>0;
+      if(!tested) continue;
+      result.push({model:candidate.model,families,executed:1,verified:run.ok && run.failed===0 && run.passed>0 ? 1 : 0});
+    }
+  }
+  return result;
+}

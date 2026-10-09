@@ -56,7 +56,7 @@ import {
   type Extraction,
   type ExtractionAgreement,
 } from "./extraction.ts";
-import { routeProblem, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem } from "./problemRouting.ts";
+import { routeProblem, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem, rankSolversForProblem, solverEvidenceFromReports } from "./problemRouting.ts";
 import { captureNameOf } from "./image.ts";
 import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
 import * as bridge from "./bridge.ts";
@@ -3889,9 +3889,28 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // paying for a second opinion of itself.
   const paneAnswers = s0.agents.filter((a) => a.enabled && a.final);
   const paneModels = new Set(paneAnswers.map((a) => a.model));
+  // Only complete saved reports with a parseable problem contract can inform
+  // task-specific routing. Failed persistence leaves the configured order intact.
+  const reading = s0.extraction.agreement?.merged;
+  const originalReaders = s0.extraction.readings.map(r=>r.extraction);
+  const taskRoute = originalReaders.length ? reconcileProblemReadings(originalReaders)
+    : reading ? routeProblem(reading) : routeUnparsedProblem(s0.note,s0.images.length>0);
+  let evidence: ReturnType<typeof solverEvidenceFromReports> = [];
+  if (s0.currentSessionId && bridge.inTauri()) {
+    try {
+      const jobs=(await db.listSolveJobs("completed"))
+        .filter(j=>j.sessionId===s0.currentSessionId && j.mode==="council")
+        .slice(0,25);
+      const reports=await Promise.all(jobs.map(async j=>{
+        try {return (await db.getCouncilReport(j.id))?.report ?? null;} catch {return null;}
+      }));
+      evidence=solverEvidenceFromReports(reports.filter((r):r is NonNullable<typeof r>=>r!==null));
+    } catch { /* No history is not evidence of poor performance. */ }
+  }
+  const roster = rankSolversForProblem(settings.councilModels, m=>m.id, taskRoute, evidence);
   const extras = settings.councilIncludePanel
-    ? settings.councilModels.filter((m) => !paneModels.has(m.id))
-    : settings.councilModels;
+    ? roster.filter((m) => !paneModels.has(m.id))
+    : roster;
 
   // ------------------------------------------------------ the problem contract
   //
