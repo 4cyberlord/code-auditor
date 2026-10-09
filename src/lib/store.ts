@@ -57,6 +57,7 @@ import {
   type ExtractionAgreement,
 } from "./extraction.ts";
 import { routeProblem, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem } from "./problemRouting.ts";
+import { selectAdaptiveModels, selectAdaptiveJudges } from "./adaptiveModelRouting.ts";
 import { captureNameOf } from "./image.ts";
 import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
 import * as bridge from "./bridge.ts";
@@ -3965,7 +3966,9 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
 
   set((st) => ({ council: { ...st.council, phase: "solving" as const } }));
   const seats = Math.max(0, COUNCIL_SIZE.solversMax - paneAnswers.length);
-  const solveSlots: CouncilSlot[] = extras.slice(0, seats).map((entry, i) => ({
+  const selectedSolvers = selectAdaptiveModels(extras, m => m.id, route, [], seats,
+    { excludedIds: [...paneModels] }).selected;
+  const solveSlots: CouncilSlot[] = selectedSolvers.map((entry, i) => ({
     id: `council-solve:${i}`,
     kind: "solve",
     model: entry.id,
@@ -4003,7 +4006,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     solveSlots.map((slot, i) =>
       wait(i * COUNCIL_STEP_MS).then(() => {
         if (!councilAlive(get().council, runId)) return null;
-        const entry = extras[i];
+        const entry = selectedSolvers[i];
         return runCouncilSlot(
           get,
           set,
@@ -4270,7 +4273,8 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     .map((r) => `Reviewer ${r.reviewer.slice(0, 30)}… best ${r.best || "?"}, worst ${r.worst || "?"}\n${r.raw}`)
     .join("\n\n");
 
-  const bench = settings.councilJudges.slice(0, COUNCIL_SIZE.judgesMax);
+  const bench = selectAdaptiveJudges(settings.councilJudges, seat => seat.model,
+    route, [], COUNCIL_SIZE.judgesMax).selected;
   const judgeSlots: CouncilSlot[] = bench.map((seat, i) => ({
     id: `council-judge:${i}`,
     kind: "judge",
