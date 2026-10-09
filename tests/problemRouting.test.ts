@@ -1,4 +1,4 @@
-import { routeProblem, routingGuidance, reconcileProblemReadings, selectContractReaders } from "../src/lib/problemRouting.ts";
+import { routeProblem, routingGuidance, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem } from "../src/lib/problemRouting.ts";
 import { EMPTY_EXTRACTION, renderForReasoning, readingMarkdown, type Extraction } from "../src/lib/extraction.ts";
 
 const ex = (summary: string, changes: Partial<Extraction> = {}): Extraction =>
@@ -67,3 +67,6 @@ const sameEdges = reconcileProblemReadings([edgesA,ex("Find paths in this graph 
   observations:["Diagram with nodes.", "relation:  b  -> c", "relation: a -> b"]
 })]);
 check("relation comparison ignores order and spacing", !sameEdges.disagreements.some(d=>d.includes("diagram relationships")));
+
+check("images without extraction escalate instead of implying certainty", routeUnparsedProblem("Solve this", true).path === "ambiguity_review");
+check("typed questions without images retain fast path", routeUnparsedProblem("Sum an array", false).path === "standard");

@@ -127,3 +127,11 @@ export function selectContractReaders<T>(configured: T[], idOf: (item:T)=>string
   const preferred = configured.filter(item=>preference.includes(idOf(item))).sort((a,b)=>preference.indexOf(idOf(a))-preference.indexOf(idOf(b)));
   return preferred.length>=count ? preferred.slice(0,count) : configured.slice(0,count);
 }
+
+/** Missing screenshot readings are not evidence that a visual task is easy. */
+export function routeUnparsedProblem(note: string, hasImages: boolean): ProblemRouting {
+  const extraction = { problemSummary: note, observations: [], ambiguities:
+    hasImages ? ["Screenshot content has not been verified by any reader."] : [],
+    confidence: hasImages ? 0 : 1, code: "", kind: "other" as const };
+  return routeProblem(extraction);
+}
