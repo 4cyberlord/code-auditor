@@ -56,7 +56,11 @@ import {
   type Extraction,
   type ExtractionAgreement,
 } from "./extraction.ts";
-import { routeProblem, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem } from "./problemRouting.ts";
+import { routeProblem, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
+import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders, type ModelCapability } from "./adaptiveModelRouting.ts";
+import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
+import { loadAuthenticatedBenchmarkCapabilities } from "./benchmarkFeed.ts";
+import { attachSignedBenchmarkMetrics } from "./authenticatedBenchmarkRouting.ts";
 import { captureNameOf } from "./image.ts";
 import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
 import * as bridge from "./bridge.ts";
@@ -571,6 +575,8 @@ interface Settings {
    * more than five is not.
    */
   councilJudges: JudgeSeat[];
+  /** Independently audited fixture outcomes. Persisted with existing settings; never created from council votes. */
+  verifiedModelOutcomes: VerifiedModelOutcome[];
   /**
    * The model that executes the final synthesis. Any id the gateway serves.
    * Empty means the first judge's model does it.
@@ -796,6 +802,7 @@ interface State {
   clearImages: () => void;
   setNote: (note: string) => void;
   patchSettings: (patch: Partial<Settings>) => void;
+  /** Ingest a result ONLY from an independently vetted fixture runner. */
   setSettingsOpen: (open: boolean) => void;
   /**
    * Open one drawer, closing whichever was open.
@@ -1008,6 +1015,7 @@ const defaultSettings = (): Settings => ({
   councilEnabled: true,
   councilModels: COUNCIL_DEFAULT_MODELS,
   councilJudges: COUNCIL_DEFAULT_JUDGES,
+  verifiedModelOutcomes: [],
   synthesisModel: "openai/gpt-5.6-sol",
   councilIncludePanel: true,
   councilProblemContract: true,
@@ -1354,6 +1362,7 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
     enabled: { ...base.enabled, ...(saved.enabled ?? {}) },
     extractors: saved.extractors ?? base.extractors,
     probes: saved.probes ?? {},
+    verifiedModelOutcomes: Array.isArray(saved.verifiedModelOutcomes) ? saved.verifiedModelOutcomes.slice(-2000) : [],
   });
 }
 
@@ -3905,10 +3914,19 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   const readers = s0.extraction.readings.map(r=>r.extraction);
   const route = readers.length ? reconcileProblemReadings(readers)
     : reading ? routeProblem(reading) : routeUnparsedProblem(s0.note, s0.images.length > 0);
-  const contractSeats = selectContractReaders(settings.councilModels ?? [], m=>m.id,
-    s0.images.length>0 && route.path!=="standard", VISION_PREFERENCE);
+  const contractSeats = selectVerifiedContractReaders(
+    settings.councilModels ?? [], m=>m.id, settings.probes ?? {},
+    s0.images.length > 0, s0.images.length > 0 && route.path !== "standard" ? VISION_PREFERENCE : [],
+  );
   let contract: ProblemContract | null = null;
   let contractAgreement: ContractAgreement | null = null;
+  if (s0.images.length > 0 && contractSeats.length === 0 && settings.councilProblemContract !== false) {
+    // No reader should be sent unverified screenshot pixels.
+    set(st => ({ council: { ...st.council, phase: "error",
+      error: "No confirmed vision-capable contract reader is available. Run an image-capability probe before continuing." }, running: false }));
+    void get().persistRun();
+    return;
+  }
   if (contractSeats.length && settings.councilProblemContract !== false) {
     set((st) => ({ council: { ...st.council, phase: "contracting" as const } }));
     const contractSlots: CouncilSlot[] = contractSeats.map((entry, i) => ({
@@ -3965,7 +3983,63 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
 
   set((st) => ({ council: { ...st.council, phase: "solving" as const } }));
   const seats = Math.max(0, COUNCIL_SIZE.solversMax - paneAnswers.length);
-  const solveSlots: CouncilSlot[] = extras.slice(0, seats).map((entry, i) => ({
+  // Saved settings can be edited by the user or imported from disk. They are
+  // NOT an authenticated benchmark feed and must not confer verified accuracy.
+  // Re-enable historical ranking only after a trusted server verifies fixtures,
+  // execution evidence, and producer identity before supplying scores.
+  // Build-time deployment configuration is not editable in Council settings.
+  // Both values must be explicitly provisioned; otherwise use no historical
+  // accuracy evidence. Never fetch a key from the benchmark report itself.
+  const deployedFeed = process.env.NEXT_PUBLIC_COUNCIL_BENCHMARK_FEED_URL ?? "";
+  const deployedKey = process.env.NEXT_PUBLIC_COUNCIL_BENCHMARK_P256_JWK ?? "";
+  let signedBenchmarkMetrics: ModelCapability[] = [];
+  if (deployedFeed && deployedKey) {
+    try {
+      const jwk = JSON.parse(deployedKey) as JsonWebKey;
+      if (jwk.kty === "EC" && jwk.crv === "P-256" && jwk.d === undefined) {
+        const key = await crypto.subtle.importKey("jwk", jwk,
+          { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+        signedBenchmarkMetrics = await loadAuthenticatedBenchmarkCapabilities(
+          deployedFeed, key,
+        ) ?? [];
+      }
+    } catch {
+      // Bad provisioning or feed outage must never promote unsigned metrics.
+    }
+  }
+  const capabilityEvidence: ModelCapability[] = (settings.councilModels ?? []).map(m => {
+    const probe = settings.probes?.[m.id];
+    return {
+      id: m.id,
+      families: m.expertise,
+      // An actual image probe overrides a user's manually configured guess.
+      vision: typeof probe?.vision === "boolean" ? probe.vision : m.vision,
+      verifiedVisual: probe?.vision === true,
+      availability: probe && !probe.ok ? "unknown" : "available",
+      verifiedAccuracy: undefined,
+      evaluatedSamples: undefined,
+      latencyMs: probe?.ok && Number.isFinite(probe.ms) ? probe.ms : m.latencyMs,
+      costPerMillion: m.costPerMillion,
+    };
+  });
+  const routedCapabilities = attachSignedBenchmarkMetrics(capabilityEvidence, signedBenchmarkMetrics);
+  // Preserve source-image evidence unless independent extraction is confident.
+  // A contract alone is not proof that the pixels were understood.
+  const safeTextOnly = verifiedTextOnlyScreenshot(
+    s0.images.length > 0, readers, reading, route, contractAgreement?.differences ?? [],
+  );
+  const selection = selectAdaptiveModels(extras, m => m.id, route, routedCapabilities, seats,
+    { excludedIds: [...paneModels], passesImages: s0.images.length > 0 && !safeTextOnly });
+  const selectedSolvers = selection.selected;
+  // If image-capable models are unavailable, do not turn an unread screenshot
+  // into a guessed text prompt just to fill council seats.
+  if (s0.images.length > 0 && !safeTextOnly && selectedSolvers.length === 0 && paneAnswers.length < 2) {
+    set(st => ({ council: { ...st.council, phase: "error",
+      error: "No verified vision-capable council solvers are available for this screenshot. Verify model vision or provide an independently checked transcription." }, running: false }));
+    void get().persistRun();
+    return;
+  }
+  const solveSlots: CouncilSlot[] = selectedSolvers.map((entry, i) => ({
     id: `council-solve:${i}`,
     kind: "solve",
     model: entry.id,
@@ -4003,7 +4077,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     solveSlots.map((slot, i) =>
       wait(i * COUNCIL_STEP_MS).then(() => {
         if (!councilAlive(get().council, runId)) return null;
-        const entry = extras[i];
+        const entry = selectedSolvers[i];
         return runCouncilSlot(
           get,
           set,
@@ -4023,7 +4097,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
                 settings.memoryTargetKb || 20 * 1024
               )
             ),
-            images: allImages,
+            images: safeTextOnly ? [] : allImages,
             maxTokens: settings.maxTokens,
             temperature: 0,
           },
@@ -4270,7 +4344,8 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     .map((r) => `Reviewer ${r.reviewer.slice(0, 30)}… best ${r.best || "?"}, worst ${r.worst || "?"}\n${r.raw}`)
     .join("\n\n");
 
-  const bench = settings.councilJudges.slice(0, COUNCIL_SIZE.judgesMax);
+  const bench = selectAdaptiveJudges(settings.councilJudges, seat => seat.model,
+    route, routedCapabilities, COUNCIL_SIZE.judgesMax).selected;
   const judgeSlots: CouncilSlot[] = bench.map((seat, i) => ({
     id: `council-judge:${i}`,
     kind: "judge",

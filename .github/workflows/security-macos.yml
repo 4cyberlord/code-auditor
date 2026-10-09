@@ -56,7 +56,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pull test image (CI only; app never pulls implicitly)
-        run: docker pull alpine:3.20
+        run: docker pull public.ecr.aws/docker/library/alpine:3.20
       - name: Verify container isolation and cleanup on real Docker
         run: bash tests/security/docker-containment.sh
 
