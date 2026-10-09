@@ -29,7 +29,14 @@ try {
  }
  // Child process is bounded but not an OS security sandbox. Never execute
  // untrusted code outside a dedicated container/VM with network blocked.
+ // A path within the reviewed benchmark workspace is necessary, but not a
+ // substitute for OS/container isolation of untrusted candidate code.
  const childScript=resolve(spec.candidate.script);
+ const benchmarkRoot=resolve(process.env.COUNCIL_BENCHMARK_ROOT || process.cwd());
+ const { relative, isAbsolute } = await import("node:path");
+ const candidateRelative=relative(benchmarkRoot,childScript);
+ if (!candidateRelative || candidateRelative===".." || candidateRelative.startsWith("../") ||
+     isAbsolute(candidateRelative)) throw Error("Candidate is outside benchmark workspace");
  const { lstat } = await import("node:fs/promises");
  const entry = await lstat(childScript);
  if (entry.isSymbolicLink()) throw Error("Symlinked candidate entry point is not allowed");
