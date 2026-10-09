@@ -56,7 +56,7 @@ import {
   type Extraction,
   type ExtractionAgreement,
 } from "./extraction.ts";
-import { routeProblem, reconcileProblemReadings, selectContractReaders } from "./problemRouting.ts";
+import { routeProblem, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem } from "./problemRouting.ts";
 import { captureNameOf } from "./image.ts";
 import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
 import * as bridge from "./bridge.ts";
@@ -3904,7 +3904,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   const reading = s0.extraction.agreement?.merged;
   const readers = s0.extraction.readings.map(r=>r.extraction);
   const route = readers.length ? reconcileProblemReadings(readers)
-    : routeProblem(reading ?? { problemSummary: s0.note, observations: [], ambiguities: [], confidence: 1, code: "", kind: "other" });
+    : reading ? routeProblem(reading) : routeUnparsedProblem(s0.note, s0.images.length > 0);
   const contractSeats = selectContractReaders(settings.councilModels ?? [], m=>m.id,
     s0.images.length>0 && route.path!=="standard", VISION_PREFERENCE);
   let contract: ProblemContract | null = null;
