@@ -46,6 +46,10 @@ try {
  const entry = await lstat(childScript);
  if (entry.isSymbolicLink()) throw Error("Symlinked candidate entry point is not allowed");
  if (!entry.isFile()) throw Error("Candidate must be a regular file");
+ // Reject scripts capable of traversing arbitrarily large input/output payloads
+ // before spawning any candidate process. Execution still requires OS isolation.
+ const manifestBytes=Buffer.byteLength(JSON.stringify(spec));
+ if (manifestBytes>2_000_000) throw Error("Benchmark manifest exceeds 2 MB");
  const timeoutMs=1500;
  const outcomes=[];
  for(const fixture of spec.fixtures) {
