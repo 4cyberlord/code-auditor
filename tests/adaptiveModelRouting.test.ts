@@ -1,4 +1,4 @@
-import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot } from "../src/lib/adaptiveModelRouting.ts";
+import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders } from "../src/lib/adaptiveModelRouting.ts";
 import { routeProblem, routeUnparsedProblem } from "../src/lib/problemRouting.ts";
 const check=(name:string, ok:boolean)=>{if(!ok)throw Error(name);console.log("PASS:",name)};
 const route=routeProblem({problemSummary:"Find shortest path in a graph",observations:[],ambiguities:[],confidence:1,code:"",kind:"other"});
@@ -44,3 +44,13 @@ check("low merged confidence preserves image", !verifiedTextOnlyScreenshot(true,
 
 const unmeasuredVision=selectAdaptiveModels([{id:"manual"}],x=>x.id,route,[{id:"manual",vision:true}],1,{passesImages:true});
 check("manual vision assertion cannot receive raw screenshot bytes",unmeasuredVision.selected.length===0);
+
+const readerRoster=[{id:"unprobed"},{id:"reader-a"},{id:"reader-b"},{id:"reader-c"}];
+const probes={"reader-a":{vision:true},"reader-b":{vision:false},"reader-c":{vision:true}};
+const selectedReaders=selectVerifiedContractReaders(readerRoster,r=>r.id,probes,true,["reader-c","reader-b"],2);
+check("screenshot contract requires probed vision and retains preferred order",
+  selectedReaders.map(r=>r.id).join(",")==="reader-c,reader-a");
+check("text-only contract retains configured seats",
+  selectVerifiedContractReaders(readerRoster,r=>r.id,{},false,[],2)[0].id==="unprobed");
+check("unverified screenshot readers yield empty selection",
+  selectVerifiedContractReaders(readerRoster,r=>r.id,{},true,[],2).length===0);
