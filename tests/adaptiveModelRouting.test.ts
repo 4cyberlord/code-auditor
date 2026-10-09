@@ -54,3 +54,10 @@ check("text-only contract retains configured seats",
   selectVerifiedContractReaders(readerRoster,r=>r.id,{},false,[],2)[0].id==="unprobed");
 check("unverified screenshot readers yield empty selection",
   selectVerifiedContractReaders(readerRoster,r=>r.id,{},true,[],2).length===0);
+
+const conflicting=selectAdaptiveModels([{id:"model-x"}],x=>x.id,route,[
+  {id:"model-x",vision:true,verifiedVisual:true},
+  {id:"model-x",vision:false,verifiedVisual:false},
+],1,{passesImages:true});
+check("conflicting capability records do not authorize image access",conflicting.selected.length===0);
+check("capability conflicts are reported",conflicting.excluded.some(x=>x.reason.includes("Conflicting")));
