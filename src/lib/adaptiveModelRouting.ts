@@ -47,7 +47,16 @@ export function selectAdaptiveModels<T>(
   count: number,
   options: { passesImages?: boolean; excludedIds?: readonly string[] } = {},
 ): RoutingDecision<T> {
-  const byId = new Map(capabilities.map(c => [c.id, c]));
+  // Reject duplicate or malformed capability rows rather than letting a later
+  // conflicting entry silently overwrite earlier evidence.
+  const byId = new Map<string, ModelCapability>();
+  const conflicted = new Set<string>();
+  for (const cap of capabilities) {
+    if (!cap.id?.trim()) continue;
+    if (byId.has(cap.id)) conflicted.add(cap.id);
+    else byId.set(cap.id, cap);
+  }
+  for (const id of conflicted) byId.delete(id);
   const excluded: RoutingDecision<T>["excluded"] = [];
   const seen = new Set(options.excludedIds ?? []);
   const candidates: { item: T; index: number; rank: number }[] = [];
@@ -55,6 +64,9 @@ export function selectAdaptiveModels<T>(
     const id = idOf(item), cap = byId.get(id);
     if (!id || seen.has(id)) { excluded.push({ id, reason: "Duplicate or already seated" }); return; }
     seen.add(id);
+    if (conflicted.has(id)) {
+      excluded.push({ id, reason: "Conflicting capability evidence" }); return;
+    }
     if (cap?.availability === "unavailable") {
       excluded.push({ id, reason: "Unavailable" }); return;
     }
