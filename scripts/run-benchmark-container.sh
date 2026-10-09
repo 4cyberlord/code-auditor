@@ -7,6 +7,7 @@ if [ "$#" -ne 2 ]; then
   exit 2
 fi
 workspace="$(cd "$1" && pwd -P)"
+runner="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/run-benchmark.mjs"
 output="$(cd "$2" && pwd -P)"
 [ -f "$workspace/manifest.json" ] || { echo "Missing reviewed manifest.json" >&2; exit 2; }
 [ "$workspace" != "$output" ] || { echo "Output must be separate from input workspace" >&2; exit 2; }
@@ -19,8 +20,9 @@ docker run --rm --pull never \
   --tmpfs /tmp:rw,nosuid,size=64m \
   --user 1000:1000 \
   --mount "type=bind,source=$workspace,target=/workspace,readonly" \
+  --mount "type=bind,source=$runner,target=/runner/run-benchmark.mjs,readonly" \
   --mount "type=bind,source=$output,target=/output" \
   -e COUNCIL_TRUSTED_BENCHMARK_ENV=isolated-operator \
   -e COUNCIL_BENCHMARK_ROOT=/workspace \
   --workdir /workspace \
-  "$image" node /workspace/run-benchmark.mjs /workspace/manifest.json /output/unreviewed.json
+  "$image" node /runner/run-benchmark.mjs /workspace/manifest.json /output/unreviewed.json
