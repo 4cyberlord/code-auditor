@@ -16,6 +16,7 @@ const [inputPath,outputPath]=process.argv.slice(2);
 if (!inputPath || !outputPath) { console.error("Usage: node scripts/run-benchmark.mjs input.json outcomes.json");process.exit(2); }
 const allowed=new Set(["array","string","tree","graph","dynamic_programming","linked_list","heap","math","geometry","database","concurrency","greedy","backtracking","other"]);
 try {
+ if (process.env.COUNCIL_TRUSTED_BENCHMARK_ENV !== "isolated-operator") throw Error("Refusing to execute outside a designated isolated benchmark environment");
  const spec=JSON.parse(await readFile(inputPath,"utf8"));
  if (!spec || !Array.isArray(spec.fixtures) || !spec.fixtures.length || spec.fixtures.length>2000 ||
      typeof spec.candidate?.model!=="string" || !spec.candidate.model.trim() ||
@@ -54,10 +55,10 @@ try {
      child.stdin.end(JSON.stringify(fixture.input));
    });
    outcomes.push({model:spec.candidate.model,family:fixture.family,evaluationId:fixture.id,
-     verified:true,provenance:"trusted_fixture_runner",
+     verified:false,provenance:"unreviewed_execution",
      correct:output?.ok===true && JSON.stringify(output.result)===JSON.stringify(fixture.expected),
      latencyMs:Date.now()-begin});
  }
  await writeFile(outputPath,JSON.stringify(outcomes,null,2)+"\n",{flag:"wx",mode:0o600});
- console.log("Executed",outcomes.length,"trusted fixtures");
+ console.log("Executed",outcomes.length,"fixtures; results REQUIRE independent operator review before signing");
 } catch(error) {console.error(error instanceof Error?error.message:"Benchmark failed");process.exitCode=1;}
