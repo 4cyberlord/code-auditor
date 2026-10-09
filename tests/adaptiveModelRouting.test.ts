@@ -4,7 +4,7 @@ const check=(name:string, ok:boolean)=>{if(!ok)throw Error(name);console.log("PA
 const route=routeProblem({problemSummary:"Find shortest path in a graph",observations:[],ambiguities:[],confidence:1,code:"",kind:"other"});
 const models=[{id:"general"},{id:"graph-specialist"},{id:"offline"},{id:"unverified-vision"}];
 const caps=[
-{id:"graph-specialist",families:["graph"] as const,verifiedAccuracy:0.92,evaluatedSamples:40,vision:true},
+{id:"graph-specialist",families:["graph"] as const,verifiedAccuracy:0.92,evaluatedSamples:40,vision:true,verifiedVisual:true},
 {id:"offline",availability:"unavailable" as const},
 {id:"unverified-vision",vision:false},
 ];
@@ -41,3 +41,6 @@ check("independent confident readers allow text-only", verifiedTextOnlyScreensho
 check("reading ambiguity preserves image", !verifiedTextOnlyScreenshot(true,[cleanReaders[0],{confidence:0.9,ambiguities:["missing edge"]}],{confidence:0.94},route));
 check("contract disagreement preserves image", !verifiedTextOnlyScreenshot(true,cleanReaders,{confidence:0.94},route,["different graph nodes"]));
 check("low merged confidence preserves image", !verifiedTextOnlyScreenshot(true,cleanReaders,{confidence:0.4},route));
+
+const unmeasuredVision=selectAdaptiveModels([{id:"manual"}],x=>x.id,route,[{id:"manual",vision:true}],1,{passesImages:true});
+check("manual vision assertion cannot receive raw screenshot bytes",unmeasuredVision.selected.length===0);
