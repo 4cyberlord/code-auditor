@@ -30,6 +30,9 @@ try {
  // Child process is bounded but not an OS security sandbox. Never execute
  // untrusted code outside a dedicated container/VM with network blocked.
  const childScript=resolve(spec.candidate.script);
+ const { realpath, stat } = await import("node:fs/promises");
+ if (!(await stat(childScript)).isFile()) throw Error("Candidate must be a regular file");
+ if ((await realpath(childScript)) !== childScript) throw Error("Symlinked candidate entry point is not allowed");
  const timeoutMs=1500;
  const outcomes=[];
  for(const fixture of spec.fixtures) {
@@ -51,6 +54,7 @@ try {
      const timer=setTimeout(()=>{child.kill("SIGKILL");settle({ok:false});},timeoutMs);
      child.stdout.on("data",buf=>{data+=buf.toString();if(data.length>65536){child.kill("SIGKILL");settle({ok:false});}});
      child.on("error",()=>settle({ok:false}));
+     child.stdin.on("error",()=>settle({ok:false}));
      child.on("close",()=>{try{settle(JSON.parse(data));}catch{settle({ok:false});}});
      child.stdin.end(JSON.stringify(fixture.input));
    });
