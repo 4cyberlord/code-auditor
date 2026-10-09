@@ -86,3 +86,15 @@ check("few observations are too weak to change routing",
   rankSolversForProblem(existing.slice(0,2),m=>m.id,arrayTask,[{model:"solver-b",families:["array"],executed:1,verified:1}])[0].id==="solver-a");
 check("cannot introduce unconfigured models",
   rankSolversForProblem(existing.slice(0,1),m=>m.id,arrayTask,evidence).length===1);
+
+const interleaved=[{id:"solver-a"},{id:"unmeasured"},{id:"solver-b"}];
+const selected=rankSolversForProblem(interleaved,m=>m.id,arrayTask,evidence);
+check("unmeasured model stays in its original slot",selected[1].id==="unmeasured");
+check("measured solver reorder is deterministic around unknown seats",selected[0].id==="solver-b" && selected[2].id==="solver-a");
+check("combined samples are used instead of best batch",
+ rankSolversForProblem(existing.slice(0,2),m=>m.id,arrayTask,[
+ {model:"solver-a",families:["array"],executed:5,verified:5},
+ {model:"solver-a",families:["array"],executed:5,verified:0},
+ {model:"solver-b",families:["array"],executed:10,verified:8}
+ ])[0].id==="solver-b");
+check("invalid sample threshold disables reranking",rankSolversForProblem(existing,m=>m.id,arrayTask,evidence,0)[0].id==="solver-a");

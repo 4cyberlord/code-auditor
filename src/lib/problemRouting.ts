@@ -152,20 +152,25 @@ export function rankSolversForProblem<T>(
   configured: T[], idOf: (entry: T) => string, routing: ProblemRouting,
   history: SolverEvidence[], minimumSamples = 5,
 ): T[] {
-  const eligible = history.filter(h => h.executed >= minimumSamples &&
-    Number.isFinite(h.executed) && Number.isFinite(h.verified) &&
-    h.executed > 0 && h.verified >= 0 && h.verified <= h.executed &&
-    h.families.some(f => routing.families.includes(f) && f !== "other"));
-  const scores = new Map<string, number>();
-  for (const sample of eligible) {
-    const score = sample.verified / sample.executed;
-    const old = scores.get(sample.model);
-    if (old === undefined || score > old) scores.set(sample.model, score);
+  if (!Number.isInteger(minimumSamples) || minimumSamples < 1 || routing.families.includes("other") && routing.families.length === 1) return [...configured];
+  // Aggregate all eligible observations, rather than cherry-picking the best
+  // batch for a model. Reject invalid or contradictory records.
+  const totals = new Map<string, {executed:number;verified:number}>();
+  for (const item of history) {
+    if (!item.families.some(f=>f!=="other" && routing.families.includes(f)) ||
+        !Number.isSafeInteger(item.executed) || !Number.isSafeInteger(item.verified) ||
+        item.executed < 1 || item.verified < 0 || item.verified > item.executed) continue;
+    const prior=totals.get(item.model) ?? {executed:0,verified:0};
+    totals.set(item.model,{executed:prior.executed+item.executed,verified:prior.verified+item.verified});
   }
-  return [...configured].map((entry, index) => ({entry, index, score: scores.get(idOf(entry))}))
-    .sort((a, b) => {
-      // Models without adequate relevant evidence preserve their configured order.
-      if (a.score === undefined || b.score === undefined) return a.index - b.index;
-      return b.score - a.score || a.index - b.index;
-    }).map(row => row.entry);
+  const scores=new Map<string,number>();
+  for (const [model,total] of totals) if (total.executed>=minimumSamples) scores.set(model,total.verified/total.executed);
+  // Preserve slots without enough evidence. Reorder only the adequately
+  // measured models, making the result deterministic and avoiding a
+  // non-transitive comparator when measured and unknown seats are interleaved.
+  const known=configured.filter(entry=>scores.has(idOf(entry)))
+    .map((entry,index)=>({entry,index}))
+    .sort((a,b)=>(scores.get(idOf(b.entry)) ?? 0)-(scores.get(idOf(a.entry)) ?? 0)||a.index-b.index);
+  let next=0;
+  return configured.map(entry=>scores.has(idOf(entry)) ? known[next++].entry : entry);
 }
