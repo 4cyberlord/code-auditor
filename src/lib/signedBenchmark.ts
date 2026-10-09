@@ -1,5 +1,11 @@
 import type { VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 
+const ALLOWED_FAMILIES = new Set([
+  "array", "string", "tree", "graph", "dynamic_programming", "linked_list",
+  "heap", "math", "geometry", "database", "concurrency", "greedy",
+  "backtracking", "other",
+]);
+
 export interface SignedBenchmarkReport {
   version: 1;
   /** Immutable canonical JSON serialized by the trusted producer. */
@@ -50,13 +56,18 @@ export async function verifySignedBenchmarkReport(
     const parsed: unknown = JSON.parse(report.payload);
     if (!Array.isArray(parsed) || parsed.length > 2000) return null;
     const results: VerifiedModelOutcome[] = [];
+    const seen = new Set<string>();
     for (const entry of parsed) {
       if (!entry || typeof entry !== "object") return null;
       const item = entry as Record<string, unknown>;
       if (item.verified !== true || item.provenance !== "trusted_fixture_runner" ||
           typeof item.model !== "string" || !item.model.trim() ||
           typeof item.evaluationId !== "string" || !item.evaluationId.trim() ||
-          typeof item.family !== "string" || typeof item.correct !== "boolean") return null;
+          typeof item.family !== "string" || !ALLOWED_FAMILIES.has(item.family) ||
+          typeof item.correct !== "boolean") return null;
+      const identity = JSON.stringify([item.model, item.family, item.evaluationId]);
+      if (seen.has(identity)) return null;
+      seen.add(identity);
       if (item.latencyMs !== undefined &&
           (typeof item.latencyMs !== "number" || !Number.isFinite(item.latencyMs) || item.latencyMs < 0)) return null;
       results.push(item as unknown as VerifiedModelOutcome);
