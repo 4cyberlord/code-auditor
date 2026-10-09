@@ -1,0 +1,10 @@
+import { strict as assert } from "node:assert";
+import { validateProperty } from "../src/lib/propertyVerification.ts";
+assert.equal(validateProperty({kind:"unique",values:[1,2,3]}).ok,true);
+assert.equal(validateProperty({kind:"unique",values:[1,1]}).ok,false);
+assert.equal(validateProperty({kind:"permutation",actual:[2,1,2],expected:[1,2,2]}).ok,true);
+assert.equal(validateProperty({kind:"permutation",actual:[2,1],expected:[1,2,2]}).ok,false);
+assert.equal(validateProperty({kind:"topological_order",nodes:["a","b","c"],edges:[["a","b"],["b","c"]],order:["a","b","c"]}).ok,true);
+assert.equal(validateProperty({kind:"topological_order",nodes:["a","b","c"],edges:[["a","b"]],order:["b","a","c"]}).ok,false);
+assert.equal(validateProperty({kind:"topological_order",nodes:["a","b"],edges:[],order:["a","a"]}).ok,false);
+console.log("PASS: property verification");
