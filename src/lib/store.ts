@@ -3988,7 +3988,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     && Number.isFinite(reading.confidence)
     && reading.confidence >= 0.85
     && route.path === "standard"
-    && !(contractAgreement?.disagreements?.length);
+    && !(contractAgreement?.differences?.length);
   const selection = selectAdaptiveModels(extras, m => m.id, route, capabilityEvidence, seats,
     { excludedIds: [...paneModels], passesImages: s0.images.length > 0 && !safeTextOnly });
   const selectedSolvers = selection.selected;
@@ -3996,7 +3996,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // into a guessed text prompt just to fill council seats.
   if (s0.images.length > 0 && !safeTextOnly && selectedSolvers.length === 0 && paneAnswers.length < 2) {
     set(st => ({ council: { ...st.council, phase: "error",
-      error: "No verified vision-capable council solvers are available for this screenshot. Verify model vision or provide a independently checked transcription." }, running: false }));
+      error: "No verified vision-capable council solvers are available for this screenshot. Verify model vision or provide an independently checked transcription." }, running: false }));
     void get().persistRun();
     return;
   }
