@@ -3912,10 +3912,23 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   const readers = s0.extraction.readings.map(r=>r.extraction);
   const route = readers.length ? reconcileProblemReadings(readers)
     : reading ? routeProblem(reading) : routeUnparsedProblem(s0.note, s0.images.length > 0);
-  const contractSeats = selectContractReaders(settings.councilModels ?? [], m=>m.id,
-    s0.images.length>0 && route.path!=="standard", VISION_PREFERENCE);
+  const contractCandidates = selectContractReaders(settings.councilModels ?? [], m=>m.id,
+    s0.images.length>0 && route.path!=="standard", VISION_PREFERENCE,
+    (settings.councilModels ?? []).length);
+  // Contract readers receive raw images. Only routes with a confirmed vision
+  // probe may receive them; saved roster assertions are not sufficient.
+  const contractSeats = s0.images.length > 0
+    ? contractCandidates.filter(m => settings.probes?.[m.id]?.vision === true).slice(0, 2)
+    : contractCandidates.slice(0, 2);
   let contract: ProblemContract | null = null;
   let contractAgreement: ContractAgreement | null = null;
+  if (s0.images.length > 0 && contractSeats.length === 0 && settings.councilProblemContract !== false) {
+    // No reader should be sent unverified screenshot pixels.
+    set(st => ({ council: { ...st.council, phase: "error",
+      error: "No confirmed vision-capable contract reader is available. Run an image-capability probe before continuing." }, running: false }));
+    void get().persistRun();
+    return;
+  }
   if (contractSeats.length && settings.councilProblemContract !== false) {
     set((st) => ({ council: { ...st.council, phase: "contracting" as const } }));
     const contractSlots: CouncilSlot[] = contractSeats.map((entry, i) => ({
