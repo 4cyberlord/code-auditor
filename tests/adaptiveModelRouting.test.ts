@@ -22,3 +22,15 @@ const judge=selectAdaptiveJudges([{model:"general"},{model:"graph-specialist"}],
 check("judge selection uses specialist evidence",judge.selected[0].model==="graph-specialist");
 const ties=selectAdaptiveModels(models.slice(0,2),m=>m.id,route,[],2);
 check("unknown capabilities preserve configured order",ties.selected[0].id==="general");
+
+const reliabilityRoute=routeProblem({problemSummary:"Compute array prefix sums",observations:[],ambiguities:[],confidence:1,code:"",kind:"other"});
+const comparable=[{id:"weak"},{id:"strong"}];
+const assessed=selectAdaptiveModels(comparable,m=>m.id,reliabilityRoute,[
+  {id:"weak",verifiedAccuracy:0.99,evaluatedSamples:2},
+  {id:"strong",verifiedAccuracy:0.82,evaluatedSamples:40}
+],2);
+check("unverified sample-poor accuracy never outranks trusted history",assessed.selected[0].id==="strong");
+const unavailable=selectAdaptiveModels([{id:"a"},{id:"b"}],m=>m.id,reliabilityRoute,[
+  {id:"a",availability:"unavailable"},{id:"b",availability:"unavailable"}
+],4);
+check("no model fabricated when every route is unavailable",unavailable.selected.length===0);
