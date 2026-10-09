@@ -59,6 +59,8 @@ import {
 import { routeProblem, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders, type ModelCapability } from "./adaptiveModelRouting.ts";
 import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
+import { loadAuthenticatedBenchmarkCapabilities } from "./benchmarkFeed.ts";
+import { attachSignedBenchmarkMetrics } from "./authenticatedBenchmarkRouting.ts";
 import { captureNameOf } from "./image.ts";
 import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
 import * as bridge from "./bridge.ts";
@@ -3985,6 +3987,26 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // NOT an authenticated benchmark feed and must not confer verified accuracy.
   // Re-enable historical ranking only after a trusted server verifies fixtures,
   // execution evidence, and producer identity before supplying scores.
+  // Build-time deployment configuration is not editable in Council settings.
+  // Both values must be explicitly provisioned; otherwise use no historical
+  // accuracy evidence. Never fetch a key from the benchmark report itself.
+  const deployedFeed = process.env.NEXT_PUBLIC_COUNCIL_BENCHMARK_FEED_URL ?? "";
+  const deployedKey = process.env.NEXT_PUBLIC_COUNCIL_BENCHMARK_P256_JWK ?? "";
+  let signedBenchmarkMetrics: ModelCapability[] = [];
+  if (deployedFeed && deployedKey) {
+    try {
+      const jwk = JSON.parse(deployedKey) as JsonWebKey;
+      if (jwk.kty === "EC" && jwk.crv === "P-256" && jwk.d === undefined) {
+        const key = await crypto.subtle.importKey("jwk", jwk,
+          { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+        signedBenchmarkMetrics = await loadAuthenticatedBenchmarkCapabilities(
+          deployedFeed, key,
+        ) ?? [];
+      }
+    } catch {
+      // Bad provisioning or feed outage must never promote unsigned metrics.
+    }
+  }
   const capabilityEvidence: ModelCapability[] = (settings.councilModels ?? []).map(m => {
     const probe = settings.probes?.[m.id];
     return {
@@ -4000,12 +4022,13 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       costPerMillion: m.costPerMillion,
     };
   });
+  const routedCapabilities = attachSignedBenchmarkMetrics(capabilityEvidence, signedBenchmarkMetrics);
   // Preserve source-image evidence unless independent extraction is confident.
   // A contract alone is not proof that the pixels were understood.
   const safeTextOnly = verifiedTextOnlyScreenshot(
     s0.images.length > 0, readers, reading, route, contractAgreement?.differences ?? [],
   );
-  const selection = selectAdaptiveModels(extras, m => m.id, route, capabilityEvidence, seats,
+  const selection = selectAdaptiveModels(extras, m => m.id, route, routedCapabilities, seats,
     { excludedIds: [...paneModels], passesImages: s0.images.length > 0 && !safeTextOnly });
   const selectedSolvers = selection.selected;
   // If image-capable models are unavailable, do not turn an unread screenshot
@@ -4322,7 +4345,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     .join("\n\n");
 
   const bench = selectAdaptiveJudges(settings.councilJudges, seat => seat.model,
-    route, capabilityEvidence, COUNCIL_SIZE.judgesMax).selected;
+    route, routedCapabilities, COUNCIL_SIZE.judgesMax).selected;
   const judgeSlots: CouncilSlot[] = bench.map((seat, i) => ({
     id: `council-judge:${i}`,
     kind: "judge",
