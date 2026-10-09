@@ -28,3 +28,8 @@ async function signFixture(records: unknown[]) {
 assert.equal(await verifySignedBenchmarkReport(await signFixture([{...record,family:"fake_family"}]),keys.publicKey),null);
 assert.equal(await verifySignedBenchmarkReport(await signFixture([record,record]),keys.publicKey),null);
 console.log("PASS: malformed signed benchmark fixtures rejected");
+
+assert.equal(await verifySignedBenchmarkReport(
+  await signFixture([record,{...record,family:"tree"}]),keys.publicKey
+),null);
+console.log("PASS: fixture IDs cannot be reused across problem categories");
