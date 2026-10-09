@@ -58,6 +58,7 @@ import {
 } from "./extraction.ts";
 import { routeProblem, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem } from "./problemRouting.ts";
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, type ModelCapability } from "./adaptiveModelRouting.ts";
+import { summarizeVerifiedOutcomes, type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { captureNameOf } from "./image.ts";
 import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
 import * as bridge from "./bridge.ts";
@@ -572,6 +573,8 @@ interface Settings {
    * more than five is not.
    */
   councilJudges: JudgeSeat[];
+  /** Independently audited fixture outcomes. Persisted with existing settings; never created from council votes. */
+  verifiedModelOutcomes: VerifiedModelOutcome[];
   /**
    * The model that executes the final synthesis. Any id the gateway serves.
    * Empty means the first judge's model does it.
@@ -1009,6 +1012,7 @@ const defaultSettings = (): Settings => ({
   councilEnabled: true,
   councilModels: COUNCIL_DEFAULT_MODELS,
   councilJudges: COUNCIL_DEFAULT_JUDGES,
+  verifiedModelOutcomes: [],
   synthesisModel: "openai/gpt-5.6-sol",
   councilIncludePanel: true,
   councilProblemContract: true,
@@ -3966,17 +3970,21 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
 
   set((st) => ({ council: { ...st.council, phase: "solving" as const } }));
   const seats = Math.max(0, COUNCIL_SIZE.solversMax - paneAnswers.length);
+  const auditedCapabilities = new Map(summarizeVerifiedOutcomes(
+    settings.verifiedModelOutcomes ?? [],
+  ).map(m => [m.id, m]));
   const capabilityEvidence: ModelCapability[] = (settings.councilModels ?? []).map(m => {
     const probe = settings.probes?.[m.id];
+    const audited = auditedCapabilities.get(m.id);
     return {
       id: m.id,
-      families: m.expertise,
+      families: audited?.families?.length ? audited.families : m.expertise,
       // An actual image probe overrides a user's manually configured guess.
       vision: typeof probe?.vision === "boolean" ? probe.vision : m.vision,
       verifiedVisual: probe?.vision === true,
       availability: probe && !probe.ok ? "unknown" : "available",
-      verifiedAccuracy: m.verifiedAccuracy,
-      evaluatedSamples: m.evaluatedSamples,
+      verifiedAccuracy: audited?.verifiedAccuracy,
+      evaluatedSamples: audited?.evaluatedSamples,
       latencyMs: probe?.ok && Number.isFinite(probe.ms) ? probe.ms : m.latencyMs,
       costPerMillion: m.costPerMillion,
     };
