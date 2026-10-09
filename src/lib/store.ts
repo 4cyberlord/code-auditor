@@ -3984,6 +3984,9 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // Preserve source-image evidence unless independent extraction is confident.
   // A contract alone is not proof that the pixels were understood.
   const safeTextOnly = s0.images.length > 0
+    // One high-confidence reading is insufficient evidence for discarding pixels.
+    && readers.length >= 2
+    && readers.every(r => Number.isFinite(r.confidence) && r.confidence >= 0.85 && r.ambiguities.length === 0)
     && reading !== undefined && reading !== null
     && Number.isFinite(reading.confidence)
     && reading.confidence >= 0.85
