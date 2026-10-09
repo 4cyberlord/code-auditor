@@ -37,7 +37,12 @@ try {
  const candidateRelative=relative(benchmarkRoot,childScript);
  if (!candidateRelative || candidateRelative===".." || candidateRelative.startsWith("../") ||
      isAbsolute(candidateRelative)) throw Error("Candidate is outside benchmark workspace");
- const { lstat } = await import("node:fs/promises");
+ const { lstat, realpath } = await import("node:fs/promises");
+ const actualRoot = await realpath(benchmarkRoot);
+ const actualCandidate = await realpath(childScript);
+ const actualRelative = relative(actualRoot, actualCandidate);
+ if (!actualRelative || actualRelative === ".." || actualRelative.startsWith("../") ||
+     isAbsolute(actualRelative)) throw Error("Candidate resolves outside benchmark workspace");
  const entry = await lstat(childScript);
  if (entry.isSymbolicLink()) throw Error("Symlinked candidate entry point is not allowed");
  if (!entry.isFile()) throw Error("Candidate must be a regular file");
