@@ -65,7 +65,8 @@ export async function verifySignedBenchmarkReport(
           typeof item.evaluationId !== "string" || !item.evaluationId.trim() ||
           typeof item.family !== "string" || !ALLOWED_FAMILIES.has(item.family) ||
           typeof item.correct !== "boolean") return null;
-      const identity = JSON.stringify([item.model, item.family, item.evaluationId]);
+      // One fixture must count once per model, regardless of claimed category.
+      const identity = JSON.stringify([item.model, item.evaluationId]);
       if (seen.has(identity)) return null;
       seen.add(identity);
       if (item.latencyMs !== undefined &&
