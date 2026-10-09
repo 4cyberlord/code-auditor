@@ -11,16 +11,21 @@ export interface VerifiedModelOutcome {
   evaluationId: string;
   /** Gateway/model-specific observed latency, when available. */
   latencyMs?: number;
+  /** Exact origin of independently validated fixtures. */
+  provenance?: "trusted_fixture_runner";
 }
 
 export function summarizeVerifiedOutcomes(
   records: readonly VerifiedModelOutcome[],
   minimumSamples = 20,
 ): ModelCapability[] {
+  // Stored settings are user-editable. A verified label alone is not trustworthy:
+  // only a producer with an independent provenance can promote outcomes.
+  // Legacy entries without provenance are ignored for routing accuracy.
   const groups = new Map<string, Map<ProblemFamily, { correct: number; total: number; latency: number[] }>>();
   const ids = new Set<string>();
   for (const record of records) {
-    if (!record.verified || !record.model?.trim() || !record.evaluationId?.trim()) continue;
+    if (!record.verified || record.provenance !== "trusted_fixture_runner" || !record.model?.trim() || !record.evaluationId?.trim()) continue;
     const key = JSON.stringify([record.model, record.family, record.evaluationId]);
     if (ids.has(key)) continue; // Retries must not inflate evidence.
     ids.add(key);
@@ -75,6 +80,7 @@ export function outcomeFromTrustedExecution(input: {
     family: input.family,
     evaluationId: input.evaluationId,
     verified: true,
+    provenance: "trusted_fixture_runner",
     correct: input.ok && !input.timedOut && input.failed === 0 && input.passed > 0,
     ...(typeof input.durationMs === "number" && Number.isFinite(input.durationMs) &&
       input.durationMs >= 0 ? { latencyMs: input.durationMs } : {}),
@@ -89,7 +95,7 @@ export function mergeVerifiedOutcomes(
 ): VerifiedModelOutcome[] {
   const records = new Map<string, VerifiedModelOutcome>();
   for (const item of [...current, ...incoming]) {
-    if (!item.verified || !item.model?.trim() || !item.evaluationId?.trim()) continue;
+    if (!item.verified || item.provenance !== "trusted_fixture_runner" || !item.model?.trim() || !item.evaluationId?.trim()) continue;
     records.set(JSON.stringify([item.model, item.family, item.evaluationId]), item);
   }
   return [...records.values()].slice(-Math.max(0, Math.floor(limit)));
