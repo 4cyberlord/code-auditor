@@ -58,7 +58,7 @@ import {
 } from "./extraction.ts";
 import { routeProblem, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem } from "./problemRouting.ts";
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, type ModelCapability } from "./adaptiveModelRouting.ts";
-import { summarizeVerifiedOutcomes, outcomeFromTrustedExecution, mergeVerifiedOutcomes, type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
+import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { captureNameOf } from "./image.ts";
 import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
 import * as bridge from "./bridge.ts";
@@ -801,7 +801,6 @@ interface State {
   setNote: (note: string) => void;
   patchSettings: (patch: Partial<Settings>) => void;
   /** Ingest a result ONLY from an independently vetted fixture runner. */
-  recordTrustedEvaluation: (result: Parameters<typeof outcomeFromTrustedExecution>[0]) => boolean;
   setSettingsOpen: (open: boolean) => void;
   /**
    * Open one drawer, closing whichever was open.
@@ -1969,16 +1968,6 @@ export const useStore = create<State>((set, get) => ({
       // No database yet: captures still work, they are just not persisted.
       return null;
     }
-  },
-
-  recordTrustedEvaluation: (result) => {
-    const outcome = outcomeFromTrustedExecution(result);
-    if (!outcome) return false;
-    // Reuse settings persistence so evaluations survive restart in desktop DB.
-    get().patchSettings({
-      verifiedModelOutcomes: mergeVerifiedOutcomes(get().settings.verifiedModelOutcomes ?? [], [outcome]),
-    });
-    return true;
   },
 
   patchSettings: (patch) =>
@@ -3983,21 +3972,21 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
 
   set((st) => ({ council: { ...st.council, phase: "solving" as const } }));
   const seats = Math.max(0, COUNCIL_SIZE.solversMax - paneAnswers.length);
-  const auditedCapabilities = new Map(summarizeVerifiedOutcomes(
-    settings.verifiedModelOutcomes ?? [],
-  ).map(m => [m.id, m]));
+  // Saved settings can be edited by the user or imported from disk. They are
+  // NOT an authenticated benchmark feed and must not confer verified accuracy.
+  // Re-enable historical ranking only after a trusted server verifies fixtures,
+  // execution evidence, and producer identity before supplying scores.
   const capabilityEvidence: ModelCapability[] = (settings.councilModels ?? []).map(m => {
     const probe = settings.probes?.[m.id];
-    const audited = auditedCapabilities.get(m.id);
     return {
       id: m.id,
-      families: audited?.families?.length ? audited.families : m.expertise,
+      families: m.expertise,
       // An actual image probe overrides a user's manually configured guess.
       vision: typeof probe?.vision === "boolean" ? probe.vision : m.vision,
       verifiedVisual: probe?.vision === true,
       availability: probe && !probe.ok ? "unknown" : "available",
-      verifiedAccuracy: audited?.verifiedAccuracy,
-      evaluatedSamples: audited?.evaluatedSamples,
+      verifiedAccuracy: undefined,
+      evaluatedSamples: undefined,
       latencyMs: probe?.ok && Number.isFinite(probe.ms) ? probe.ms : m.latencyMs,
       costPerMillion: m.costPerMillion,
     };
