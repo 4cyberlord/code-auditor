@@ -73,6 +73,13 @@ never see the picture. Everything it needs has to be in your output.
 
 For graphs and diagrams, include one observation per explicit relation in the
 form "RELATION: node A -> node B" or "RELATION: node 1 left-child node 2".
+For formulas, grids, tables, and charts, add explicit facts using these prefixes:
+"SYMBOL: [exact expression or operator as seen]"
+"TABLE: [row/column labels and one explicit cell/value]"
+"AXIS: [axis name, direction, scale, and visible units]"
+"DIMENSION: [measured/labelled size and units]"
+Only record visible facts. Ambiguous subscripts, inequality direction, graph
+arrowheads, table alignment, and units MUST also appear in "ambiguities".
 Use labels visible in the image. Never fabricate missing links or complete
 occluded diagrams; record unclear relations in "ambiguities".
 
