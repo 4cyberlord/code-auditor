@@ -3966,13 +3966,23 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
 
   set((st) => ({ council: { ...st.council, phase: "solving" as const } }));
   const seats = Math.max(0, COUNCIL_SIZE.solversMax - paneAnswers.length);
-  const capabilityEvidence: ModelCapability[] = (settings.councilModels ?? []).map(m => ({
-    id: m.id, families: m.expertise, vision: m.vision,
-    verifiedAccuracy: m.verifiedAccuracy, evaluatedSamples: m.evaluatedSamples,
-    latencyMs: m.latencyMs, costPerMillion: m.costPerMillion,
-  }));
+  const capabilityEvidence: ModelCapability[] = (settings.councilModels ?? []).map(m => {
+    const probe = settings.probes?.[m.id];
+    return {
+      id: m.id,
+      families: m.expertise,
+      // An actual image probe overrides a user's manually configured guess.
+      vision: typeof probe?.vision === "boolean" ? probe.vision : m.vision,
+      verifiedVisual: probe?.vision === true,
+      availability: probe && !probe.ok ? "unknown" : "available",
+      verifiedAccuracy: m.verifiedAccuracy,
+      evaluatedSamples: m.evaluatedSamples,
+      latencyMs: probe?.ok && Number.isFinite(probe.ms) ? probe.ms : m.latencyMs,
+      costPerMillion: m.costPerMillion,
+    };
+  });
   const selectedSolvers = selectAdaptiveModels(extras, m => m.id, route, capabilityEvidence, seats,
-    { excludedIds: [...paneModels] }).selected;
+    { excludedIds: [...paneModels], passesImages: s0.images.length > 0 }).selected;
   const solveSlots: CouncilSlot[] = selectedSolvers.map((entry, i) => ({
     id: `council-solve:${i}`,
     kind: "solve",
