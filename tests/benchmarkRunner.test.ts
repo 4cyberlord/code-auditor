@@ -33,5 +33,13 @@ try {
  const linkedRun=spawnSync(process.execPath,["scripts/run-benchmark.mjs",linkedManifest,join(dir,"linked-out.json")],
    {env:{...process.env,COUNCIL_TRUSTED_BENCHMARK_ENV:"isolated-operator",COUNCIL_BENCHMARK_ROOT:root},encoding:"utf8"});
  assert.notEqual(linkedRun.status,0,"symlinked parent escape must fail");
+ const oversizedManifest=join(dir,"oversized.json");
+ await writeFile(oversizedManifest,JSON.stringify({
+   candidate:{model:"fixture-test",script:candidate},
+   fixtures:[{id:"large",family:"string",input:"x".repeat(2_100_000),expected:"y"}],
+ }));
+ const oversized=spawnSync(process.execPath,["scripts/run-benchmark.mjs",oversizedManifest,join(dir,"oversized-out.json")],
+   {env:{...process.env,COUNCIL_TRUSTED_BENCHMARK_ENV:"isolated-operator",COUNCIL_BENCHMARK_ROOT:dir},encoding:"utf8"});
+ assert.notEqual(oversized.status,0,"oversized manifest must fail before child execution");
  console.log("PASS: independent execution runner refuses non-isolated runs and cannot self-attest results");
 } finally {await rm(dir,{recursive:true,force:true});}
