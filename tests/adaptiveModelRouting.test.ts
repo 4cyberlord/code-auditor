@@ -1,4 +1,4 @@
-import { selectAdaptiveModels, selectAdaptiveJudges } from "../src/lib/adaptiveModelRouting.ts";
+import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot } from "../src/lib/adaptiveModelRouting.ts";
 import { routeProblem, routeUnparsedProblem } from "../src/lib/problemRouting.ts";
 const check=(name:string, ok:boolean)=>{if(!ok)throw Error(name);console.log("PASS:",name)};
 const route=routeProblem({problemSummary:"Find shortest path in a graph",observations:[],ambiguities:[],confidence:1,code:"",kind:"other"});
@@ -34,3 +34,10 @@ const unavailable=selectAdaptiveModels([{id:"a"},{id:"b"}],m=>m.id,reliabilityRo
   {id:"a",availability:"unavailable"},{id:"b",availability:"unavailable"}
 ],4);
 check("no model fabricated when every route is unavailable",unavailable.selected.length===0);
+
+const cleanReaders=[{confidence:0.96,ambiguities:[]},{confidence:0.92,ambiguities:[]}];
+check("single screenshot reader cannot discard pixels", !verifiedTextOnlyScreenshot(true,cleanReaders.slice(0,1),{confidence:0.96},route));
+check("independent confident readers allow text-only", verifiedTextOnlyScreenshot(true,cleanReaders,{confidence:0.94},route));
+check("reading ambiguity preserves image", !verifiedTextOnlyScreenshot(true,[cleanReaders[0],{confidence:0.9,ambiguities:["missing edge"]}],{confidence:0.94},route));
+check("contract disagreement preserves image", !verifiedTextOnlyScreenshot(true,cleanReaders,{confidence:0.94},route,["different graph nodes"]));
+check("low merged confidence preserves image", !verifiedTextOnlyScreenshot(true,cleanReaders,{confidence:0.4},route));
