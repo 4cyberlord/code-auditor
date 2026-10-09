@@ -62,6 +62,8 @@ export function outcomeFromTrustedExecution(input: {
   family: ProblemFamily;
   evaluationId: string;
   independentlyVerifiedFixture: boolean;
+  /** Only a locally trusted runner attestation can promote this record. */
+  trustedRunnerAttested?: boolean;
   ran: boolean;
   ok: boolean;
   passed: number;
@@ -70,7 +72,7 @@ export function outcomeFromTrustedExecution(input: {
   truncated?: boolean;
   durationMs?: number;
 }): VerifiedModelOutcome | null {
-  if (!input.independentlyVerifiedFixture || !input.model?.trim() ||
+  if (!input.independentlyVerifiedFixture || input.trustedRunnerAttested !== true || !input.model?.trim() ||
       !input.evaluationId?.trim() || !input.ran ||
       !Number.isSafeInteger(input.passed) || !Number.isSafeInteger(input.failed) ||
       input.passed < 0 || input.failed < 0 || input.passed + input.failed === 0 ||
