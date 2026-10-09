@@ -81,3 +81,17 @@ export function selectAdaptiveJudges<T>(
 ): RoutingDecision<T> {
   return selectAdaptiveModels(judges, modelOf, route, capabilities, count);
 }
+
+/** Screenshot bytes can be omitted only after independent, consistent reading. */
+export function verifiedTextOnlyScreenshot(
+  hasImages: boolean,
+  readers: readonly { confidence: number; ambiguities: readonly string[] }[],
+  merged: { confidence: number } | null | undefined,
+  route: ProblemRouting,
+  contractDifferences: readonly string[] = [],
+): boolean {
+  return hasImages && readers.length >= 2
+    && readers.every(r => Number.isFinite(r.confidence) && r.confidence >= 0.85 && r.ambiguities.length === 0)
+    && merged != null && Number.isFinite(merged.confidence) && merged.confidence >= 0.85
+    && route.path === "standard" && contractDifferences.length === 0;
+}
