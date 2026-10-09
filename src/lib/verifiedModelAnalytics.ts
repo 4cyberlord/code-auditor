@@ -46,3 +46,51 @@ export function summarizeVerifiedOutcomes(
     };
   });
 }
+
+/**
+ * Convert measured sandbox execution into an evaluation record, but only when
+ * the harness is independently trusted. AI-generated suites from this council
+ * are NOT trusted fixtures and must never call this without outside review.
+ */
+export function outcomeFromTrustedExecution(input: {
+  model: string;
+  family: ProblemFamily;
+  evaluationId: string;
+  independentlyVerifiedFixture: boolean;
+  ran: boolean;
+  ok: boolean;
+  passed: number;
+  failed: number;
+  timedOut?: boolean;
+  truncated?: boolean;
+  durationMs?: number;
+}): VerifiedModelOutcome | null {
+  if (!input.independentlyVerifiedFixture || !input.model.trim() ||
+      !input.evaluationId.trim() || !input.ran ||
+      !Number.isSafeInteger(input.passed) || !Number.isSafeInteger(input.failed) ||
+      input.passed < 0 || input.failed < 0 || input.passed + input.failed === 0 ||
+      input.truncated) return null;
+  return {
+    model: input.model,
+    family: input.family,
+    evaluationId: input.evaluationId,
+    verified: true,
+    correct: input.ok && !input.timedOut && input.failed === 0 && input.passed > 0,
+    ...(typeof input.durationMs === "number" && Number.isFinite(input.durationMs) &&
+      input.durationMs >= 0 ? { latencyMs: input.durationMs } : {}),
+  };
+}
+
+/** Idempotent, bounded history insertion. Repeat fixture results replace older results. */
+export function mergeVerifiedOutcomes(
+  current: readonly VerifiedModelOutcome[],
+  incoming: readonly VerifiedModelOutcome[],
+  limit = 2000,
+): VerifiedModelOutcome[] {
+  const records = new Map<string, VerifiedModelOutcome>();
+  for (const item of [...current, ...incoming]) {
+    if (!item.verified || !item.model?.trim() || !item.evaluationId?.trim()) continue;
+    records.set(JSON.stringify([item.model, item.family, item.evaluationId]), item);
+  }
+  return [...records.values()].slice(-Math.max(0, Math.floor(limit)));
+}
