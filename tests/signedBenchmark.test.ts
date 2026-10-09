@@ -19,3 +19,12 @@ const invalidPayload=JSON.stringify([{...record,provenance:"self_reported"}]);
 const invalidSig=Buffer.from(await crypto.subtle.sign({name:"ECDSA",hash:"SHA-256"},keys.privateKey,new TextEncoder().encode(invalidPayload))).toString("base64url");
 assert.equal(await verifySignedBenchmarkReport({version:1,payload:invalidPayload,signature:invalidSig},keys.publicKey),null);
 console.log("PASS: signed benchmark key pinning, tampering and schema checks");
+
+async function signFixture(records: unknown[]) {
+  const payload=JSON.stringify(records);
+  const signature=Buffer.from(await crypto.subtle.sign({name:"ECDSA",hash:"SHA-256"},keys.privateKey,new TextEncoder().encode(payload))).toString("base64url");
+  return {version:1 as const,payload,signature};
+}
+assert.equal(await verifySignedBenchmarkReport(await signFixture([{...record,family:"fake_family"}]),keys.publicKey),null);
+assert.equal(await verifySignedBenchmarkReport(await signFixture([record,record]),keys.publicKey),null);
+console.log("PASS: malformed signed benchmark fixtures rejected");
