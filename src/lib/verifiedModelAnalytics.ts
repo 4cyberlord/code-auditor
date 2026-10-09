@@ -65,8 +65,8 @@ export function outcomeFromTrustedExecution(input: {
   truncated?: boolean;
   durationMs?: number;
 }): VerifiedModelOutcome | null {
-  if (!input.independentlyVerifiedFixture || !input.model.trim() ||
-      !input.evaluationId.trim() || !input.ran ||
+  if (!input.independentlyVerifiedFixture || !input.model?.trim() ||
+      !input.evaluationId?.trim() || !input.ran ||
       !Number.isSafeInteger(input.passed) || !Number.isSafeInteger(input.failed) ||
       input.passed < 0 || input.failed < 0 || input.passed + input.failed === 0 ||
       input.truncated) return null;
