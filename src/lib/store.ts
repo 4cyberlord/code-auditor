@@ -58,7 +58,7 @@ import {
 } from "./extraction.ts";
 import { routeProblem, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem } from "./problemRouting.ts";
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, type ModelCapability } from "./adaptiveModelRouting.ts";
-import { summarizeVerifiedOutcomes, type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
+import { summarizeVerifiedOutcomes, outcomeFromTrustedExecution, mergeVerifiedOutcomes, type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { captureNameOf } from "./image.ts";
 import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
 import * as bridge from "./bridge.ts";
@@ -800,6 +800,8 @@ interface State {
   clearImages: () => void;
   setNote: (note: string) => void;
   patchSettings: (patch: Partial<Settings>) => void;
+  /** Ingest a result ONLY from an independently vetted fixture runner. */
+  recordTrustedEvaluation: (result: Parameters<typeof outcomeFromTrustedExecution>[0]) => boolean;
   setSettingsOpen: (open: boolean) => void;
   /**
    * Open one drawer, closing whichever was open.
@@ -1967,6 +1969,16 @@ export const useStore = create<State>((set, get) => ({
       // No database yet: captures still work, they are just not persisted.
       return null;
     }
+  },
+
+  recordTrustedEvaluation: (result) => {
+    const outcome = outcomeFromTrustedExecution(result);
+    if (!outcome) return false;
+    // Reuse settings persistence so evaluations survive restart in desktop DB.
+    get().patchSettings({
+      verifiedModelOutcomes: mergeVerifiedOutcomes(get().settings.verifiedModelOutcomes ?? [], [outcome]),
+    });
+    return true;
   },
 
   patchSettings: (patch) =>
