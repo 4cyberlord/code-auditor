@@ -1,0 +1,21 @@
+import { strict as assert } from "node:assert";
+import { loadAuthenticatedBenchmarkCapabilities } from "../src/lib/benchmarkFeed.ts";
+const keys=await crypto.subtle.generateKey({name:"ECDSA",namedCurve:"P-256"},true,["sign","verify"]);
+const data=Array.from({length:20},(_,i)=>({model:"trusted",family:"graph",evaluationId:"test-"+i,verified:true,correct:true,provenance:"trusted_fixture_runner"}));
+const payload=JSON.stringify(data);
+const signature=Buffer.from(await crypto.subtle.sign({name:"ECDSA",hash:"SHA-256"},keys.privateKey,new TextEncoder().encode(payload))).toString("base64url");
+const report={version:1,payload,signature};
+let called=0;
+const fakeFetch=(async (_url: string, options?: RequestInit) => {
+  called++;
+  assert.equal(options?.credentials,"omit");
+  assert.equal(options?.redirect,"error");
+  return new Response(JSON.stringify(report),{status:200});
+}) as typeof fetch;
+assert.equal((await loadAuthenticatedBenchmarkCapabilities("https://benchmark.example.test/signed",keys.publicKey,fakeFetch))?.[0].evaluatedSamples,20);
+assert.equal(await loadAuthenticatedBenchmarkCapabilities("http://benchmark.example.test/signed",keys.publicKey,fakeFetch),null);
+assert.equal(await loadAuthenticatedBenchmarkCapabilities("https://benchmark.example.test/signed",null,fakeFetch),null);
+assert.equal(called,1);
+const tampered=(async()=>new Response(JSON.stringify({...report,payload:"[]"}))) as typeof fetch;
+assert.equal(await loadAuthenticatedBenchmarkCapabilities("https://benchmark.example.test/signed",keys.publicKey,tampered),null);
+console.log("PASS: benchmark feed HTTPS, independent key and signature requirements");
