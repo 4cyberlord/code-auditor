@@ -8,7 +8,7 @@ if (result[0].verifiedAccuracy !== 21/24) throw Error("accuracy failed");
 if (summarizeVerifiedOutcomes(rows.slice(0,5))[0].evaluatedSamples !== undefined) throw Error("sample threshold failed");
 console.log("PASS: verified analytics aggregation");
 
-const fixture = {model:"candidate-x",family:"array" as const,evaluationId:"official-fixture-1",independentlyVerifiedFixture:true,ran:true,ok:true,passed:8,failed:0,durationMs:50};
+const fixture = {model:"candidate-x",family:"array" as const,evaluationId:"official-fixture-1",independentlyVerifiedFixture:true,trustedRunnerAttested:true,ran:true,ok:true,passed:8,failed:0,durationMs:50};
 const trusted=outcomeFromTrustedExecution(fixture);
 if (!trusted?.verified || !trusted.correct) throw Error("trusted execution not recorded");
 if (outcomeFromTrustedExecution({...fixture,independentlyVerifiedFixture:false}) !== null) throw Error("untrusted fixture accepted");
@@ -23,3 +23,7 @@ const spoofed = rows.map(({provenance, ...row}) => row);
 if (summarizeVerifiedOutcomes(spoofed).some(x=>x.verifiedAccuracy !== undefined)) throw Error("legacy unproven records accepted");
 if (mergeVerifiedOutcomes([], spoofed).length !== 0) throw Error("unproven records persisted");
 console.log("PASS: unproven history cannot influence routing");
+
+if (outcomeFromTrustedExecution({...fixture,trustedRunnerAttested:false}) !== null) throw Error("unattested runner accepted");
+if (outcomeFromTrustedExecution({...fixture,trustedRunnerAttested:undefined}) !== null) throw Error("missing attestation accepted");
+console.log("PASS: runner attestation required");
