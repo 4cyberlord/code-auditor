@@ -1,3 +1,5 @@
+import { routeProblem, routingGuidance, reconcileProblemReadings } from "./problemRouting.ts";
+
 /**
  * Turning a screenshot into structured engineering context.
  *
@@ -68,6 +70,17 @@ export const EXTRACTION_SYSTEM = `
 You are reading a screenshot and turning it into structured data. You are not
 solving anything — another model will do that from what you produce, and it will
 never see the picture. Everything it needs has to be in your output.
+
+For graphs and diagrams, include one observation per explicit relation in the
+form "RELATION: node A -> node B" or "RELATION: node 1 left-child node 2".
+Use labels visible in the image. Never fabricate missing links or complete
+occluded diagrams; record unclear relations in "ambiguities".
+
+Describe important visual relationships explicitly in "observations": edges,
+node positions, arrows, labels, axes, camera/icon placement, and before/after
+diagrams. Do NOT interpret an example output as the only accepted output when
+multiple valid outputs are indicated. For any obscured image portion, record
+the uncertainty in "ambiguities"; never silently invent missing structure.
 
 Transcribe exactly what is on screen. If the code contains a bug, transcribe the
 bug; do not correct it. If a line is cut off, say so rather than completing it.
@@ -147,6 +160,7 @@ export function renderForReasoning(e: Extraction): string {
   if (e.terminalOutput) out.push(`TERMINAL OUTPUT\n${e.terminalOutput}`);
   if (e.url) out.push(`URL\n${e.url}`);
   if (e.observations.length) out.push("NOTES\n" + e.observations.map((o) => `- ${o}`).join("\n"));
+  if (e.problemSummary || e.observations.length) out.push(routingGuidance(routeProblem(e)));
   if (e.ambiguities.length) {
     // Carried through deliberately. A reader who knows which characters were
     // uncertain can weigh the answer; one who does not, cannot.
@@ -625,6 +639,8 @@ export interface ReadingProvenance {
   readers: string[];
   /** Null when only one reader answered, so there was nothing to cross-check. */
   agreement: ExtractionAgreement | null;
+  /** Original independent readings, when available, for task-level cross checks. */
+  independentReadings?: Extraction[];
   /** The image manifest, so the document says what it is a reading *of*. */
   manifest?: string;
   /** ISO timestamp, passed in rather than taken, so the output is testable. */
@@ -681,6 +697,22 @@ export function readingMarkdown(e: Extraction, p: ReadingProvenance): string {
   out.push(meta.join("\n"));
 
   if (p.manifest) out.push(`## What was captured\n\n${p.manifest}`);
+
+  // The document is passed unchanged to the working Council models.
+  // Routing advice therefore reaches the actual solving path, not just tests.
+  const routing = reconcileProblemReadings(p.independentReadings?.length
+    ? p.independentReadings : [e]);
+  const unverifiedVisual = routing.path !== "standard" || (p.agreement && !p.agreement.agree);
+  out.push("## Problem understanding and verification plan\\n\\n" +
+    routingGuidance(routing) +
+    (routing.disagreements.length
+      ? "\\n\\nReader disagreements requiring source-image review:\\n" +
+        routing.disagreements.map((d) => "- " + d).join("\\n")
+      : "") +
+    (unverifiedVisual
+      ? "\\n\\nDo not claim this interpretation has been visually verified. Recheck the source image or clearly report the uncertainty."
+      : ""));
+
 
   // --- the doubt, before the content it applies to.
   if (high.length) {
