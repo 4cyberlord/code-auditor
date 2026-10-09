@@ -58,8 +58,8 @@ export function selectAdaptiveModels<T>(
     if (cap?.availability === "unavailable") {
       excluded.push({ id, reason: "Unavailable" }); return;
     }
-    if (options.passesImages && cap?.vision !== true) {
-      excluded.push({ id, reason: "Vision capability not verified" }); return;
+    if (options.passesImages && (cap?.vision !== true || cap.verifiedVisual !== true)) {
+      excluded.push({ id, reason: "Image route not confirmed by a successful vision probe" }); return;
     }
     candidates.push({ item, index, rank: cap ? score(route, cap) : 0 });
   });
