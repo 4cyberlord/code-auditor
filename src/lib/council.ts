@@ -582,6 +582,15 @@ export interface CouncilModelSpec {
    * A measured probe always outranks whatever is written here.
    */
   vision?: boolean;
+  /** Optional, explicitly audited specialization evidence for adaptive routing. */
+  expertise?: import("./problemRouting.ts").ProblemFamily[];
+  /** Accuracy from independently adjudicated runs, 0..1 (never model self-grading). */
+  verifiedAccuracy?: number;
+  evaluatedSamples?: number;
+  /** Observed latency for this precise gateway/model route. */
+  latencyMs?: number;
+  /** Measured or billed USD cost per million tokens. */
+  costPerMillion?: number;
 }
 
 export interface JudgeReport {
