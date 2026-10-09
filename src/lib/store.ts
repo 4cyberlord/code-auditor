@@ -57,7 +57,7 @@ import {
   type ExtractionAgreement,
 } from "./extraction.ts";
 import { routeProblem, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem } from "./problemRouting.ts";
-import { selectAdaptiveModels, selectAdaptiveJudges } from "./adaptiveModelRouting.ts";
+import { selectAdaptiveModels, selectAdaptiveJudges, type ModelCapability } from "./adaptiveModelRouting.ts";
 import { captureNameOf } from "./image.ts";
 import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
 import * as bridge from "./bridge.ts";
@@ -3966,7 +3966,12 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
 
   set((st) => ({ council: { ...st.council, phase: "solving" as const } }));
   const seats = Math.max(0, COUNCIL_SIZE.solversMax - paneAnswers.length);
-  const selectedSolvers = selectAdaptiveModels(extras, m => m.id, route, [], seats,
+  const capabilityEvidence: ModelCapability[] = (settings.councilModels ?? []).map(m => ({
+    id: m.id, families: m.expertise, vision: m.vision,
+    verifiedAccuracy: m.verifiedAccuracy, evaluatedSamples: m.evaluatedSamples,
+    latencyMs: m.latencyMs, costPerMillion: m.costPerMillion,
+  }));
+  const selectedSolvers = selectAdaptiveModels(extras, m => m.id, route, capabilityEvidence, seats,
     { excludedIds: [...paneModels] }).selected;
   const solveSlots: CouncilSlot[] = selectedSolvers.map((entry, i) => ({
     id: `council-solve:${i}`,
@@ -4274,7 +4279,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     .join("\n\n");
 
   const bench = selectAdaptiveJudges(settings.councilJudges, seat => seat.model,
-    route, [], COUNCIL_SIZE.judgesMax).selected;
+    route, capabilityEvidence, COUNCIL_SIZE.judgesMax).selected;
   const judgeSlots: CouncilSlot[] = bench.map((seat, i) => ({
     id: `council-judge:${i}`,
     kind: "judge",
