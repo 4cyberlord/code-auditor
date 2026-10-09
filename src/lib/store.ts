@@ -56,8 +56,8 @@ import {
   type Extraction,
   type ExtractionAgreement,
 } from "./extraction.ts";
-import { routeProblem, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem } from "./problemRouting.ts";
-import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, type ModelCapability } from "./adaptiveModelRouting.ts";
+import { routeProblem, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
+import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders, type ModelCapability } from "./adaptiveModelRouting.ts";
 import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { captureNameOf } from "./image.ts";
 import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
@@ -3912,14 +3912,10 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   const readers = s0.extraction.readings.map(r=>r.extraction);
   const route = readers.length ? reconcileProblemReadings(readers)
     : reading ? routeProblem(reading) : routeUnparsedProblem(s0.note, s0.images.length > 0);
-  const contractCandidates = selectContractReaders(settings.councilModels ?? [], m=>m.id,
-    s0.images.length>0 && route.path!=="standard", VISION_PREFERENCE,
-    (settings.councilModels ?? []).length);
-  // Contract readers receive raw images. Only routes with a confirmed vision
-  // probe may receive them; saved roster assertions are not sufficient.
-  const contractSeats = s0.images.length > 0
-    ? contractCandidates.filter(m => settings.probes?.[m.id]?.vision === true).slice(0, 2)
-    : contractCandidates.slice(0, 2);
+  const contractSeats = selectVerifiedContractReaders(
+    settings.councilModels ?? [], m=>m.id, settings.probes ?? {},
+    s0.images.length > 0, s0.images.length > 0 && route.path !== "standard" ? VISION_PREFERENCE : [],
+  );
   let contract: ProblemContract | null = null;
   let contractAgreement: ContractAgreement | null = null;
   if (s0.images.length > 0 && contractSeats.length === 0 && settings.councilProblemContract !== false) {
