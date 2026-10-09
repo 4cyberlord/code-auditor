@@ -30,9 +30,10 @@ try {
  // Child process is bounded but not an OS security sandbox. Never execute
  // untrusted code outside a dedicated container/VM with network blocked.
  const childScript=resolve(spec.candidate.script);
- const { realpath, stat } = await import("node:fs/promises");
- if (!(await stat(childScript)).isFile()) throw Error("Candidate must be a regular file");
- if ((await realpath(childScript)) !== childScript) throw Error("Symlinked candidate entry point is not allowed");
+ const { lstat } = await import("node:fs/promises");
+ const entry = await lstat(childScript);
+ if (entry.isSymbolicLink()) throw Error("Symlinked candidate entry point is not allowed");
+ if (!entry.isFile()) throw Error("Candidate must be a regular file");
  const timeoutMs=1500;
  const outcomes=[];
  for(const fixture of spec.fixtures) {
