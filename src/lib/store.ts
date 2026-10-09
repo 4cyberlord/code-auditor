@@ -3981,8 +3981,25 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       costPerMillion: m.costPerMillion,
     };
   });
-  const selectedSolvers = selectAdaptiveModels(extras, m => m.id, route, capabilityEvidence, seats,
-    { excludedIds: [...paneModels], passesImages: s0.images.length > 0 }).selected;
+  // Preserve source-image evidence unless independent extraction is confident.
+  // A contract alone is not proof that the pixels were understood.
+  const safeTextOnly = s0.images.length > 0
+    && Boolean(reading)
+    && Number.isFinite(reading.confidence)
+    && reading.confidence >= 0.85
+    && route.path === "standard"
+    && !(contractAgreement?.disagreements?.length);
+  const selection = selectAdaptiveModels(extras, m => m.id, route, capabilityEvidence, seats,
+    { excludedIds: [...paneModels], passesImages: s0.images.length > 0 && !safeTextOnly });
+  const selectedSolvers = selection.selected;
+  // If image-capable models are unavailable, do not turn an unread screenshot
+  // into a guessed text prompt just to fill council seats.
+  if (s0.images.length > 0 && !safeTextOnly && selectedSolvers.length === 0 && paneAnswers.length < 2) {
+    set(st => ({ council: { ...st.council, phase: "error",
+      error: "No verified vision-capable council solvers are available for this screenshot. Verify model vision or provide a independently checked transcription." }, running: false }));
+    void get().persistRun();
+    return;
+  }
   const solveSlots: CouncilSlot[] = selectedSolvers.map((entry, i) => ({
     id: `council-solve:${i}`,
     kind: "solve",
@@ -4041,7 +4058,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
                 settings.memoryTargetKb || 20 * 1024
               )
             ),
-            images: allImages,
+            images: safeTextOnly ? [] : allImages,
             maxTokens: settings.maxTokens,
             temperature: 0,
           },
