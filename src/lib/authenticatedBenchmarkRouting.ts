@@ -34,7 +34,7 @@ export function attachSignedBenchmarkMetrics(
   ).map(item => [item.id, item]));
   return capabilities.map(cap => {
     const report = byId.get(cap.id);
-    if (!report) return { ...cap, verifiedAccuracy: undefined, evaluatedSamples: undefined };
-    return { ...cap, verifiedAccuracy: report.verifiedAccuracy, evaluatedSamples: report.evaluatedSamples };
+    if (!report) return { ...cap, families: undefined, verifiedAccuracy: undefined, evaluatedSamples: undefined };
+    return { ...cap, families: report.families, verifiedAccuracy: report.verifiedAccuracy, evaluatedSamples: report.evaluatedSamples };
   });
 }
