@@ -95,3 +95,35 @@ export function verifiedTextOnlyScreenshot(
     && merged != null && Number.isFinite(merged.confidence) && merged.confidence >= 0.85
     && route.path === "standard" && contractDifferences.length === 0;
 }
+
+/**
+ * Select screenshot contract readers from the configured roster. Independent
+ * image probes are required; a user-supplied vision flag is not evidence.
+ * Preserve the preferred order, then fill from remaining probed models.
+ */
+export function selectVerifiedContractReaders<T>(
+  configured: readonly T[],
+  idOf: (item:T)=>string,
+  probes: Readonly<Record<string, { vision?: boolean | null } | undefined>>,
+  hasImages: boolean,
+  preference: readonly string[],
+  count=2,
+): T[] {
+  const eligible = hasImages
+    ? configured.filter(item => probes[idOf(item)]?.vision === true)
+    : [...configured];
+  const ranked = eligible.map((item, index) => ({
+    item, index, preferenceIndex: preference.indexOf(idOf(item)),
+  })).sort((a,b) => {
+    const ap = a.preferenceIndex < 0 ? Number.MAX_SAFE_INTEGER : a.preferenceIndex;
+    const bp = b.preferenceIndex < 0 ? Number.MAX_SAFE_INTEGER : b.preferenceIndex;
+    return ap - bp || a.index - b.index;
+  });
+  const seen = new Set<string>();
+  return ranked.filter(x => {
+    const id=idOf(x.item);
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  }).slice(0,Math.max(0,count)).map(x=>x.item);
+}
