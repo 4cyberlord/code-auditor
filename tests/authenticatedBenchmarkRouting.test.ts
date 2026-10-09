@@ -21,3 +21,8 @@ assert.equal(result[0].verifiedAccuracy,0.9);
 assert.equal(result[0].vision,false);
 assert.equal(result[1].verifiedAccuracy,undefined);
 console.log("PASS: authenticated reports alone supply historical routing accuracy");
+
+const forgedFamily=attachSignedBenchmarkMetrics([{id:"unknown",families:["graph"],verifiedAccuracy:1,evaluatedSamples:200}],[]);
+assert.equal(forgedFamily[0].families,undefined);
+const authenticatedFamily=attachSignedBenchmarkMetrics([{id:"specialist",families:["tree"]}],metrics ?? []);
+assert.deepEqual(authenticatedFamily[0].families,["graph"]);
