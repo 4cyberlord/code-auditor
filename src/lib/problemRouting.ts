@@ -100,8 +100,8 @@ export function reconcileProblemReadings(
   // presence of the word "diagram". Absence in one reading is also uncertainty.
   // Structured RELATION: entries are normalized but not guessed from prose.
   const relationSets = readings.map(r => new Set(r.observations.flatMap(line =>
-    line.split("\\n").filter(part => /^\\s*RELATION\\s*:/i.test(part))
-      .map(part => part.replace(/^\\s*RELATION\\s*:/i, "").replace(/\\s+/g, " ").trim().toLowerCase())
+    line.split("\n").filter(part => /^\s*RELATION\s*:/i.test(part))
+      .map(part => part.replace(/^\s*RELATION\s*:/i, "").replace(/\s+/g, " ").trim().toLowerCase())
       .filter(Boolean)
   )));
   if (relationSets.some(set => set.size > 0)) {
