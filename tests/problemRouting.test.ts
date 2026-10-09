@@ -51,3 +51,19 @@ const order=["openai/gpt-5.6-sol","google/gemini-3.7-flash"];
 check("complex visual problems prefer capable configured readers",selectContractReaders(roster,r=>r.id,true,order)[0].id==="openai/gpt-5.6-sol");
 check("ordinary problems retain roster order",selectContractReaders(roster,r=>r.id,false,order)[0].id==="text-only");
 check("no unconfigured models are introduced",selectContractReaders(roster.slice(0,2),r=>r.id,true,order)[0].id==="text-only");
+
+const edgesA = ex("Find paths in this graph diagram.", {
+  observations: ["Diagram with nodes.", "RELATION: A -> B", "RELATION: B -> C"]
+});
+const edgesB = ex("Find paths in this graph diagram.", {
+  observations: ["Diagram with nodes.", "RELATION: A -> B", "RELATION: B -> D"]
+});
+const relationMismatch = reconcileProblemReadings([edgesA,edgesB]);
+check("different diagram edges trigger review", relationMismatch.path === "ambiguity_review"
+  && relationMismatch.disagreements.some(d=>d.includes("diagram relationships")));
+const missingEdge = reconcileProblemReadings([edgesA,ex("Find paths in this graph diagram.",{ observations:["Diagram with nodes."] })]);
+check("omitted diagram edges trigger review", missingEdge.disagreements.some(d=>d.includes("diagram relationships")));
+const sameEdges = reconcileProblemReadings([edgesA,ex("Find paths in this graph diagram.",{
+  observations:["Diagram with nodes.", "relation:  b  -> c", "relation: a -> b"]
+})]);
+check("relation comparison ignores order and spacing", !sameEdges.disagreements.some(d=>d.includes("diagram relationships")));

@@ -96,6 +96,20 @@ export function reconcileProblemReadings(
   const paths = routes.map(r => r.path);
   if (visual && paths.includes("standard"))
     disagreements.push("Readers disagree on whether the problem contains visual relationships.");
+  // Compare explicitly transcribed graph/tree relationships, not merely the
+  // presence of the word "diagram". Absence in one reading is also uncertainty.
+  // Structured RELATION: entries are normalized but not guessed from prose.
+  const relationSets = readings.map(r => new Set(r.observations.flatMap(line =>
+    line.split("\\n").filter(part => /^\\s*RELATION\\s*:/i.test(part))
+      .map(part => part.replace(/^\\s*RELATION\\s*:/i, "").replace(/\\s+/g, " ").trim().toLowerCase())
+      .filter(Boolean)
+  )));
+  if (relationSets.some(set => set.size > 0)) {
+    const first = relationSets[0];
+    if (relationSets.some(set => set.size !== first.size || [...set].some(fact => !first.has(fact)))) {
+      disagreements.push("Readers disagree on diagram relationships (RELATION facts); recheck nodes, edges and directions against the image.");
+    }
+  }
   const verificationKinds = [...new Set(routes.map(r => r.verification))];
   if (verificationKinds.length > 1)
     disagreements.push("Readers disagree on the required verification strategy.");
