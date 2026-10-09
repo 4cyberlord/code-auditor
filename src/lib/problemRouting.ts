@@ -134,3 +134,38 @@ export function routeUnparsedProblem(note: string, hasImages: boolean): ProblemR
     hasImages ? ["Screenshot content has not been verified by any reader."] : [],
     confidence: hasImages ? 0 : 1, code: "", kind: "other" });
 }
+
+/** Per-model evidence from comparable completed tasks, never self-reported confidence. */
+export interface SolverEvidence {
+  model: string;
+  families: ProblemFamily[];
+  executed: number;
+  verified: number;
+}
+
+/**
+ * Rank only already-configured solvers. Sparse history never beats the user's
+ * roster order; samples must be relevant to one of the current task families.
+ * Results of generated tests are useful routing signals, not correctness proof.
+ */
+export function rankSolversForProblem<T>(
+  configured: T[], idOf: (entry: T) => string, routing: ProblemRouting,
+  history: SolverEvidence[], minimumSamples = 5,
+): T[] {
+  const eligible = history.filter(h => h.executed >= minimumSamples &&
+    Number.isFinite(h.executed) && Number.isFinite(h.verified) &&
+    h.executed > 0 && h.verified >= 0 && h.verified <= h.executed &&
+    h.families.some(f => routing.families.includes(f) && f !== "other"));
+  const scores = new Map<string, number>();
+  for (const sample of eligible) {
+    const score = sample.verified / sample.executed;
+    const old = scores.get(sample.model);
+    if (old === undefined || score > old) scores.set(sample.model, score);
+  }
+  return [...configured].map((entry, index) => ({entry, index, score: scores.get(idOf(entry))}))
+    .sort((a, b) => {
+      // Models without adequate relevant evidence preserve their configured order.
+      if (a.score === undefined || b.score === undefined) return a.index - b.index;
+      return b.score - a.score || a.index - b.index;
+    }).map(row => row.entry);
+}
