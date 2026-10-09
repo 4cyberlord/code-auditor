@@ -1,4 +1,4 @@
-import { routeProblem, routingGuidance, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem } from "../src/lib/problemRouting.ts";
+import { routeProblem, routingGuidance, reconcileProblemReadings, selectContractReaders, routeUnparsedProblem, rankSolversForProblem, solverEvidenceFromReports } from "../src/lib/problemRouting.ts";
 import { EMPTY_EXTRACTION, renderForReasoning, readingMarkdown, type Extraction } from "../src/lib/extraction.ts";
 
 const ex = (summary: string, changes: Partial<Extraction> = {}): Extraction =>
@@ -70,3 +70,42 @@ check("relation comparison ignores order and spacing", !sameEdges.disagreements.
 
 check("images without extraction require ambiguity review", routeUnparsedProblem("Solve this", true).path === "ambiguity_review");
 check("plain text with no screenshot retains fast path", routeUnparsedProblem("Sum an array", false).path === "standard");
+
+const existing=[{id:"solver-a"},{id:"solver-b"},{id:"solver-c"}];
+const arrayTask=routeProblem(ex("Return an array prefix sum."));
+const evidence=[
+  {model:"solver-a",families:["array" as const],executed:10,verified:5},
+  {model:"solver-b",families:["array" as const],executed:10,verified:9},
+  {model:"solver-c",families:["graph" as const],executed:30,verified:30},
+];
+check("relevant verified history outranks roster position",
+  rankSolversForProblem(existing.slice(0,2),m=>m.id,arrayTask,evidence)[0].id==="solver-b");
+check("unrelated benchmark history does not reassign solvers",
+  rankSolversForProblem(existing,m=>m.id,arrayTask,evidence.slice(2)).map(m=>m.id).join(",")==="solver-a,solver-b,solver-c");
+check("few observations are too weak to change routing",
+  rankSolversForProblem(existing.slice(0,2),m=>m.id,arrayTask,[{model:"solver-b",families:["array"],executed:1,verified:1}])[0].id==="solver-a");
+check("cannot introduce unconfigured models",
+  rankSolversForProblem(existing.slice(0,1),m=>m.id,arrayTask,evidence).length===1);
+
+const interleaved=[{id:"solver-a"},{id:"unmeasured"},{id:"solver-b"}];
+const selected=rankSolversForProblem(interleaved,m=>m.id,arrayTask,evidence);
+check("unmeasured model stays in its original slot",selected[1].id==="unmeasured");
+check("measured solver reorder is deterministic around unknown seats",selected[0].id==="solver-b" && selected[2].id==="solver-a");
+check("combined samples are used instead of best batch",
+ rankSolversForProblem(existing.slice(0,2),m=>m.id,arrayTask,[
+ {model:"solver-a",families:["array"],executed:5,verified:5},
+ {model:"solver-a",families:["array"],executed:5,verified:0},
+ {model:"solver-b",families:["array"],executed:10,verified:8}
+ ])[0].id==="solver-b");
+check("invalid sample threshold disables reranking",rankSolversForProblem(existing,m=>m.id,arrayTask,evidence,0)[0].id==="solver-a");
+
+const historical=solverEvidenceFromReports([{
+ contract:{inputs:"array of integers"},candidates:[{letter:"A",model:"solver-a"}],
+ runs:{A:{ran:true,ok:true,passed:4,failed:0}}
+},{
+ contract:{inputs:"array of integers"},candidates:[{letter:"B",model:"solver-b",revised:{}}],
+ runs:{B:{ran:true,ok:true,passed:4,failed:0}},revisedRuns:{}
+}]);
+check("only tested historical candidates count",historical.length===1 && historical[0].verified===1);
+check("stored missing revision execution is excluded",!historical.some(x=>x.model==="solver-b"));
+check("reports without a contract are not classified",solverEvidenceFromReports([{candidates:[{letter:"A",model:"a"}]}]).length===0);

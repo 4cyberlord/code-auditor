@@ -134,3 +134,68 @@ export function routeUnparsedProblem(note: string, hasImages: boolean): ProblemR
     hasImages ? ["Screenshot content has not been verified by any reader."] : [],
     confidence: hasImages ? 0 : 1, code: "", kind: "other" });
 }
+
+/** Per-model evidence from comparable completed tasks, never self-reported confidence. */
+export interface SolverEvidence {
+  model: string;
+  families: ProblemFamily[];
+  executed: number;
+  verified: number;
+}
+
+/**
+ * Rank only already-configured solvers. Sparse history never beats the user's
+ * roster order; samples must be relevant to one of the current task families.
+ * Results of generated tests are useful routing signals, not correctness proof.
+ */
+export function rankSolversForProblem<T>(
+  configured: T[], idOf: (entry: T) => string, routing: ProblemRouting,
+  history: SolverEvidence[], minimumSamples = 5,
+): T[] {
+  if (!Number.isInteger(minimumSamples) || minimumSamples < 1 || routing.families.includes("other") && routing.families.length === 1) return [...configured];
+  // Aggregate all eligible observations, rather than cherry-picking the best
+  // batch for a model. Reject invalid or contradictory records.
+  const totals = new Map<string, {executed:number;verified:number}>();
+  for (const item of history) {
+    if (!item.families.some(f=>f!=="other" && routing.families.includes(f)) ||
+        !Number.isSafeInteger(item.executed) || !Number.isSafeInteger(item.verified) ||
+        item.executed < 1 || item.verified < 0 || item.verified > item.executed) continue;
+    const prior=totals.get(item.model) ?? {executed:0,verified:0};
+    totals.set(item.model,{executed:prior.executed+item.executed,verified:prior.verified+item.verified});
+  }
+  const scores=new Map<string,number>();
+  for (const [model,total] of totals) if (total.executed>=minimumSamples) scores.set(model,total.verified/total.executed);
+  // Preserve slots without enough evidence. Reorder only the adequately
+  // measured models, making the result deterministic and avoiding a
+  // non-transitive comparator when measured and unknown seats are interleaved.
+  const known=configured.filter(entry=>scores.has(idOf(entry)))
+    .map((entry,index)=>({entry,index}))
+    .sort((a,b)=>(scores.get(idOf(b.entry)) ?? 0)-(scores.get(idOf(a.entry)) ?? 0)||a.index-b.index);
+  let next=0;
+  return configured.map(entry=>scores.has(idOf(entry)) ? known[next++].entry : entry);
+}
+
+/** Convert persisted, fully executed Council results into task-relevant evidence. */
+export function solverEvidenceFromReports(reports: Array<{
+  candidates?: Array<{letter:string;model:string;revised?:unknown}>;
+  runs?: Record<string,{ran:boolean;ok:boolean;passed:number;failed:number;state?:string;timedOut?:boolean}>;
+  revisedRuns?: Record<string,{ran:boolean;ok:boolean;passed:number;failed:number;state?:string;timedOut?:boolean}>;
+  contract?: {signature?:string;inputs?:string;outputs?:string;constraints?:string} | null;
+}>): SolverEvidence[] {
+  const result: SolverEvidence[]=[];
+  for(const report of reports) {
+    const c=report.contract;
+    if(!c) continue;
+    const families=routeProblem({kind:"other",code:"",confidence:1,ambiguities:[],
+      observations:[],problemSummary:[c.signature,c.inputs,c.outputs,c.constraints].filter(Boolean).join(" ")}).families;
+    if(families.length===1 && families[0]==="other") continue;
+    for(const candidate of report.candidates??[]) {
+      const run=candidate.revised ? report.revisedRuns?.[candidate.letter] : report.runs?.[candidate.letter];
+      if(!candidate.model || !run?.ran || run.state==="canceled" || run.state==="timed_out" || run.timedOut) continue;
+      const tested=run.passed>0 || run.failed>0;
+      if(!tested) continue;
+      result.push({model:candidate.model,families,executed:1,verified:run.ok && run.failed===0 && run.passed>0 ? 1 : 0});
+    }
+  }
+  return result;
+}
