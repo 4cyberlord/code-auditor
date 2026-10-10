@@ -32,6 +32,8 @@ jobs:
         run: npm run lint
       - name: Node tests
         run: npm test
+      - name: Release configuration preflight
+        run: npm run release:preflight
       - name: Prepare Tauri external binary placeholder for Rust tests
         run: |
           target="$(rustc -vV | sed -n 's/^host: //p')"
