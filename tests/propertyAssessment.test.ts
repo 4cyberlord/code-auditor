@@ -2,7 +2,7 @@ import type { PropertyFixture } from "../src/lib/propertyAssessment.ts";
 import { strict as assert } from "node:assert";
 import { assessPropertyFixtures } from "../src/lib/propertyAssessment.ts";
 const top: PropertyFixture={id:"dag",rule:{kind:"topological_order" as const,nodes:["a","b","c"],edges:[["a","c"],["b","c"]] as readonly (readonly [string,string])[]}};
-const permutation: PropertyFixture={id:"multiset",rule:{kind:"permutation" as const,actual:[],expected:[1,2,2]}};
+const permutation: PropertyFixture={id:"multiset",rule:{kind:"permutation" as const,expected:[1,2,2]}};
 assert.deepEqual(assessPropertyFixtures('["b","a","c"]',[top]).failed,0);
 assert.equal(assessPropertyFixtures('["c","a","b"]',[top]).failed,1);
 assert.equal(assessPropertyFixtures('[2,1,2]',[permutation]).passed,1);
