@@ -1130,6 +1130,18 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn is_usable_cloud_report(report: &Value, expected_id: &str) -> bool {
+    if report.is_null() { return false; }
+    let report_id = report.get("job_id").or_else(|| report.get("jobId"))
+        .and_then(Value::as_str);
+    if report_id.is_some_and(|id| id != expected_id) { return false; }
+    let body = report.get("report").unwrap_or(report);
+    body.get("kind").and_then(Value::as_str) == Some("mcq")
+        && body.pointer("/answer").is_some()
+        || body.get("candidates").and_then(Value::as_array).is_some()
+        || body.get("presentation").and_then(Value::as_object).is_some()
+}
+
 async fn refresh_job() -> Result<(), String> {
     let Some(mut tracked) = read_submitted_job()? else {
         return Ok(());
@@ -1175,7 +1187,7 @@ async fn refresh_job() -> Result<(), String> {
     space_api_calls().await;
 
     if let Ok(report) = api("reports.get", serde_json::json!({ "jobId": tracked.id })).await {
-        if !report.is_null() {
+        if is_usable_cloud_report(&report, &tracked.id) {
             // Auto-routed MCQs are submitted as Council jobs. Promote their
             // actual result kind before saving so the overlay picks the MCQ pane.
             let body = report.get("report").unwrap_or(&report);
@@ -2083,6 +2095,15 @@ mod tests {
         };
         assert!(mcq_from_submitted(&job).is_some());
         assert_eq!(submitted_overlay_state(&job)["mcq"]["answer"]["label"], "C");
+    }
+
+    #[test]
+    fn cloud_report_requires_matching_job_and_result() {
+        assert!(!is_usable_cloud_report(&Value::Null, "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({}), "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"job_id":"other","report":{"kind":"mcq","answer":{"label":"C"}}}), "job-1"));
+        assert!(is_usable_cloud_report(&serde_json::json!({"job_id":"job-1","report":{"kind":"mcq","answer":{"label":"C"}}}), "job-1"));
+        assert!(is_usable_cloud_report(&serde_json::json!({"report":{"candidates":[]}}), "job-1"));
     }
 
     #[test]
