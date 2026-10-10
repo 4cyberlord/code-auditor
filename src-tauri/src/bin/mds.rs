@@ -1132,10 +1132,14 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
 
 fn is_usable_cloud_report(report: &Value, expected_id: &str) -> bool {
     if report.is_null() { return false; }
-    let report_id = report.get("job_id").or_else(|| report.get("jobId"))
-        .and_then(Value::as_str);
-    if report_id.is_some_and(|id| id != expected_id) { return false; }
     let body = report.get("report").unwrap_or(report);
+    // Validate both envelope and payload IDs: an inner report can refer to
+    // another run even if the outer wrapper has the expected identifier.
+    for layer in [report, body] {
+        let report_id = layer.get("job_id").or_else(|| layer.get("jobId"))
+            .and_then(Value::as_str);
+        if report_id.is_some_and(|id| id != expected_id) { return false; }
+    }
     if body.get("kind").and_then(Value::as_str) == Some("mcq") {
         return body.pointer("/answer/label").and_then(Value::as_str)
             .is_some_and(|label| !label.trim().is_empty())
@@ -2118,6 +2122,8 @@ mod tests {
         assert!(!is_usable_cloud_report(&Value::Null, "job-1"));
         assert!(!is_usable_cloud_report(&serde_json::json!({}), "job-1"));
         assert!(!is_usable_cloud_report(&serde_json::json!({"job_id":"other","report":{"kind":"mcq","answer":{"label":"C"}}}), "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"job_id":"job-1","report":{"job_id":"other","kind":"mcq","answer":{"label":"C"}}}), "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"report":{"jobId":"other","presentation":{"code":"return 1"}}}), "job-1"));
         assert!(is_usable_cloud_report(&serde_json::json!({"job_id":"job-1","report":{"kind":"mcq","answer":{"label":"C"}}}), "job-1"));
         assert!(!is_usable_cloud_report(&serde_json::json!({"report":{"candidates":[]}}), "job-1"));
         assert!(!is_usable_cloud_report(&serde_json::json!({"report":{"presentation":{}}}), "job-1"));
