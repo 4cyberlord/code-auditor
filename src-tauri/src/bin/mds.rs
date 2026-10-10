@@ -138,6 +138,7 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_B: u32 = 0x05;
     const HID_USAGE_KEYBOARD_C: u32 = 0x06;
     const HID_USAGE_KEYBOARD_M: u32 = 0x10;
+    const HID_USAGE_KEYBOARD_L: u32 = 0x0F;
     const HID_USAGE_KEYBOARD_P: u32 = 0x13;
     const HID_USAGE_KEYBOARD_R: u32 = 0x15;
     const HID_USAGE_KEYBOARD_S: u32 = 0x16;
@@ -156,6 +157,8 @@ mod mac_shortcuts {
     pub static START_BATCH: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE_REGION: AtomicBool = AtomicBool::new(false);
+    pub static CAPTURE_LEFT: AtomicBool = AtomicBool::new(false);
+    pub static CAPTURE_RIGHT: AtomicBool = AtomicBool::new(false);
     pub static SUBMIT: AtomicBool = AtomicBool::new(false);
     pub static TOGGLE_OVERLAY: AtomicBool = AtomicBool::new(false);
     pub static SWITCH_MCQ: AtomicBool = AtomicBool::new(false);
@@ -253,6 +256,16 @@ mod mac_shortcuts {
                     _ => {}
                 }
             }
+            HID_USAGE_KEYBOARD_L | HID_USAGE_KEYBOARD_R
+                if pressed && CONTROL_DOWN.load(Ordering::SeqCst)
+                    && OPTION_DOWN.load(Ordering::SeqCst)
+                    && SHIFT_DOWN.load(Ordering::SeqCst) => {
+                match usage {
+                    HID_USAGE_KEYBOARD_L => CAPTURE_LEFT.store(true, Ordering::SeqCst),
+                    HID_USAGE_KEYBOARD_R => CAPTURE_RIGHT.store(true, Ordering::SeqCst),
+                    _ => {}
+                }
+            }
             HID_USAGE_KEYBOARD_B
             | HID_USAGE_KEYBOARD_C
             | HID_USAGE_KEYBOARD_M
@@ -304,6 +317,12 @@ mod mac_shortcuts {
     }
     pub fn take_capture_region() -> bool {
         CAPTURE_REGION.swap(false, Ordering::SeqCst)
+    }
+    pub fn take_capture_left() -> bool {
+        CAPTURE_LEFT.swap(false, Ordering::SeqCst)
+    }
+    pub fn take_capture_right() -> bool {
+        CAPTURE_RIGHT.swap(false, Ordering::SeqCst)
     }
     pub fn take_submit() -> bool {
         SUBMIT.swap(false, Ordering::SeqCst)
@@ -523,14 +542,21 @@ fn run() -> Result<(), String> {
             }
             let full_capture = mac_shortcuts::take_capture();
             let region_capture = mac_shortcuts::take_capture_region();
-            if full_capture || region_capture {
+            let left_capture = mac_shortcuts::take_capture_left();
+            let right_capture = mac_shortcuts::take_capture_right();
+            if full_capture || region_capture || left_capture || right_capture {
                 let restore = overlay_visible;
                 if overlay_visible {
                     overlay_visible = false;
                     let _ = show_overlay(&overlay, false);
                 }
                 event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
-                let result = capture_screen(region_capture && !full_capture);
+                let capture_mode = if full_capture { CaptureMode::Full }
+                    else if left_capture { CaptureMode::Left }
+                    else if right_capture { CaptureMode::Right }
+                    else if region_capture { CaptureMode::Region }
+                    else { CaptureMode::Full };
+                let result = capture_screen(capture_mode);
                 overlay_visible = restore;
                 event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
                     ActivationPolicy::Accessory
@@ -802,7 +828,29 @@ fn start_batch() -> Result<(), String> {
     Ok(())
 }
 
-fn capture_screen(interactive: bool) -> Result<(), String> {
+#[derive(Clone, Copy)]
+enum CaptureMode { Full, Region, Left, Right }
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapturePoint { x: f64, y: f64 }
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CaptureSize { width: f64, height: f64 }
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CaptureRect { origin: CapturePoint, size: CaptureSize }
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGMainDisplayID() -> u32;
+    fn CGDisplayBounds(display: u32) -> CaptureRect;
+}
+
+fn capture_screen(mode: CaptureMode) -> Result<(), String> {
     // A screenshot shortcut must work even when the main app is closed and the
     // user has not explicitly started a batch. Reuse a pending batch for
     // successive screenshots instead of silently replacing earlier captures.
@@ -828,10 +876,32 @@ fn capture_screen(interactive: bool) -> Result<(), String> {
 
     let mut command = Command::new("/usr/sbin/screencapture");
     command.arg("-x");
-    if interactive { command.arg("-i"); }
+    match mode {
+        CaptureMode::Region => { command.arg("-i"); }
+        CaptureMode::Left | CaptureMode::Right => {
+            #[cfg(target_os = "macos")]
+            {
+                let bounds = unsafe { CGDisplayBounds(CGMainDisplayID()) };
+                let x = bounds.origin.x.round() as i64;
+                let y = bounds.origin.y.round() as i64;
+                let width = bounds.size.width.round() as i64;
+                let height = bounds.size.height.round() as i64;
+                if width < 2 || height < 1 {
+                    return Err("Could not determine display bounds for half-screen capture.".into());
+                }
+                let left_width = width / 2;
+                let (start, part_width) = match mode {
+                    CaptureMode::Left => (x, left_width),
+                    _ => (x + left_width, width - left_width),
+                };
+                command.arg("-R").arg(format!("{start},{y},{part_width},{height}"));
+            }
+        }
+        CaptureMode::Full => {}
+    }
     let out = command.arg(&path).output()
         .map_err(|e| format!("Screen capture could not be started: {e}"))?;
-    if interactive && !path.exists() {
+    if matches!(mode, CaptureMode::Region) && !path.exists() {
         // Escape cancels region selection without corrupting the pending batch.
         return Ok(());
     }
