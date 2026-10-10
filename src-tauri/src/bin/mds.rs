@@ -1177,7 +1177,7 @@ fn update_overlay(webview: &WebView, active_view: &str) -> Result<(), String> {
     let state = read_overlay_state(active_view);
     webview
         .evaluate_script(&format!(
-            "window.updatePreviews({payload});window.updateOverlayState({state});"
+            "window.updateOverlayState({state});window.updatePreviews({payload});"
         ))
         .map_err(|e| format!("Could not update ghost overlay: {e}"))
 }
