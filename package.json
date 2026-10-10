@@ -33,7 +33,7 @@
     "@tauri-apps/plugin-dialog": "^2.7.3",
     "@tauri-apps/plugin-opener": "^2.2.2",
     "@upstash/qstash": "^2.11.3",
-    "next": "^16.3.4",
+    "next": "^16.3.8",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zustand": "^5.0.3"
