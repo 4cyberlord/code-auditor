@@ -62,6 +62,8 @@ import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { loadAuthenticatedBenchmarkCapabilities } from "./benchmarkFeed.ts";
 import { attachSignedBenchmarkMetrics } from "./authenticatedBenchmarkRouting.ts";
 import { captureNameOf } from "./image.ts";
+import { reviewedFixturesFor } from "./trustedPropertyFixtures.ts";
+import { assessPropertyFixtures } from "./propertyAssessment.ts";
 import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
 import * as bridge from "./bridge.ts";
 import * as db from "./sessions.ts";
@@ -4442,6 +4444,23 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   for (const c of fieldNow) {
     const run = c.revised ? get().council.revisedRuns[c.letter] : get().council.runs[c.letter];
     if (run) gateRuns[c.letter] = run;
+  }
+  // Reviewed fixtures may verify structured JSON answers independently.
+  // Model votes and generated test expectations cannot populate this registry.
+  const reviewedFixtures = reviewedFixturesFor(s0.note);
+  if (reviewedFixtures.length) {
+    for (const candidate of fieldNow) {
+      const final = candidate.revised ?? candidate.final;
+      if (final?.kind === "code") continue; // Compiled code uses sandbox execution.
+      const assessment = assessPropertyFixtures(final?.answer ?? "", reviewedFixtures);
+      gateRuns[candidate.letter] = {
+        letter: candidate.letter, ran: true,
+        ok: assessment.failed === 0 && assessment.checked > 0,
+        passed: assessment.passed, failed: assessment.failed,
+        durationMs: 0, runtime: "trusted-property-validator",
+        note: assessment.errors.join("; ") || "Reviewed structural properties checked",
+      };
+    }
   }
   const ruling = enforceWinnerGate(claimedWinner, gateRuns);
   // The same deterministic layer the cloud worker runs: the gate decides what
