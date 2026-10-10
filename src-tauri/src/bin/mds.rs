@@ -966,11 +966,18 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
             log(&format!("Settings could not be loaded: {e}"));
             Value::Null
         });
-    let user_settings = sanitize_settings(if user_settings.is_null() {
+    let mut user_settings = sanitize_settings(if user_settings.is_null() {
         Value::Object(Default::default())
     } else {
         user_settings
     });
+    // Cloud auto-detection checks the serialized settings snapshot. Supplying
+    // a Council mode alone is insufficient when overlayMode is missing.
+    if !matches!(user_settings.get("overlayMode").and_then(Value::as_str), Some("auto" | "coding" | "mcq")) {
+        if let Some(settings) = user_settings.as_object_mut() {
+            settings.insert("overlayMode".to_string(), Value::from("auto"));
+        }
+    }
     space_api_calls().await;
 
     let session_title = format!(
