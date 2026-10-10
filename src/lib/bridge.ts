@@ -786,6 +786,8 @@ export async function uploadScreenshot(args: {
   fileName: string;
   mime: string;
   data: string;
+  submissionId?: string;
+  position?: number;
 }): Promise<Uploaded> {
   if (!inTauri()) throw new Error(NOT_TAURI);
   // Spelled out rather than spread: tests/bridge.test.ts reads the argument
@@ -796,6 +798,8 @@ export async function uploadScreenshot(args: {
     fileName: args.fileName,
     mime: args.mime,
     data: args.data,
+    submissionId: args.submissionId ?? null,
+    position: args.position ?? null,
   });
 }
 

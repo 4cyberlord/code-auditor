@@ -181,6 +181,7 @@ export default function BackgroundJobsPanel() {
           const uploaded = await uploadScreenshot({
             sessionId: submission.sessionId, fileName: image.name,
             mime: image.mime, data: image.base64,
+            submissionId: submission.submissionId, position,
           });
           submission.images[position] = {
             position, storageBucket: uploaded.bucket, storagePath: uploaded.path,
