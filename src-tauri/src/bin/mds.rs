@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::os::fd::AsRawFd;
 use std::{
     fs::{self, File, OpenOptions},
-    io::Read,
+    io::{Read, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
     process::Command,
@@ -138,7 +138,10 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_B: u32 = 0x05;
     const HID_USAGE_KEYBOARD_C: u32 = 0x06;
     const HID_USAGE_KEYBOARD_M: u32 = 0x10;
+    const HID_USAGE_KEYBOARD_L: u32 = 0x0F;
     const HID_USAGE_KEYBOARD_P: u32 = 0x13;
+    const HID_USAGE_KEYBOARD_R: u32 = 0x15;
+    const HID_USAGE_KEYBOARD_S: u32 = 0x16;
     const HID_USAGE_KEYBOARD_RETURN: u32 = 0x28;
     const HID_USAGE_KEYBOARD_RIGHT_ARROW: u32 = 0x4F;
     const HID_USAGE_KEYBOARD_LEFT_ARROW: u32 = 0x50;
@@ -153,6 +156,9 @@ mod mac_shortcuts {
 
     pub static START_BATCH: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE: AtomicBool = AtomicBool::new(false);
+    pub static CAPTURE_REGION: AtomicBool = AtomicBool::new(false);
+    pub static CAPTURE_LEFT: AtomicBool = AtomicBool::new(false);
+    pub static CAPTURE_RIGHT: AtomicBool = AtomicBool::new(false);
     pub static SUBMIT: AtomicBool = AtomicBool::new(false);
     pub static TOGGLE_OVERLAY: AtomicBool = AtomicBool::new(false);
     pub static SWITCH_MCQ: AtomicBool = AtomicBool::new(false);
@@ -250,10 +256,22 @@ mod mac_shortcuts {
                     _ => {}
                 }
             }
+            HID_USAGE_KEYBOARD_L | HID_USAGE_KEYBOARD_R
+                if pressed && CONTROL_DOWN.load(Ordering::SeqCst)
+                    && OPTION_DOWN.load(Ordering::SeqCst)
+                    && SHIFT_DOWN.load(Ordering::SeqCst) => {
+                match usage {
+                    HID_USAGE_KEYBOARD_L => CAPTURE_LEFT.store(true, Ordering::SeqCst),
+                    HID_USAGE_KEYBOARD_R => CAPTURE_RIGHT.store(true, Ordering::SeqCst),
+                    _ => {}
+                }
+            }
             HID_USAGE_KEYBOARD_B
             | HID_USAGE_KEYBOARD_C
             | HID_USAGE_KEYBOARD_M
             | HID_USAGE_KEYBOARD_P
+            | HID_USAGE_KEYBOARD_R
+            | HID_USAGE_KEYBOARD_S
             | HID_USAGE_KEYBOARD_RETURN
                 if pressed
                     && CONTROL_DOWN.load(Ordering::SeqCst)
@@ -263,7 +281,8 @@ mod mac_shortcuts {
                     HID_USAGE_KEYBOARD_B => START_BATCH.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_C => TOGGLE_OVERLAY.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_M => SWITCH_MCQ.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_P => CAPTURE.store(true, Ordering::SeqCst),
+                    HID_USAGE_KEYBOARD_P | HID_USAGE_KEYBOARD_S => CAPTURE.store(true, Ordering::SeqCst),
+                    HID_USAGE_KEYBOARD_R => CAPTURE_REGION.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_RETURN => SUBMIT.store(true, Ordering::SeqCst),
                     _ => {}
                 }
@@ -290,11 +309,21 @@ mod mac_shortcuts {
         Ok(())
     }
 
+    pub fn hotkeys_ready() -> bool { MONITOR.lock().ok().and_then(|guard| *guard).is_some() }
     pub fn take_start_batch() -> bool {
         START_BATCH.swap(false, Ordering::SeqCst)
     }
     pub fn take_capture() -> bool {
         CAPTURE.swap(false, Ordering::SeqCst)
+    }
+    pub fn take_capture_region() -> bool {
+        CAPTURE_REGION.swap(false, Ordering::SeqCst)
+    }
+    pub fn take_capture_left() -> bool {
+        CAPTURE_LEFT.swap(false, Ordering::SeqCst)
+    }
+    pub fn take_capture_right() -> bool {
+        CAPTURE_RIGHT.swap(false, Ordering::SeqCst)
     }
     pub fn take_submit() -> bool {
         SUBMIT.swap(false, Ordering::SeqCst)
@@ -347,6 +376,16 @@ struct PendingBatch {
     id: String,
     status: String,
     started_at: String,
+    #[serde(default)]
+    submission_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    owner_id: Option<String>,
+    #[serde(default)]
+    settings_snapshot: Option<Value>,
+    #[serde(default)]
+    mode: Option<String>,
     #[serde(default)]
     images: Vec<PendingImage>,
     #[serde(default)]
@@ -414,6 +453,29 @@ async fn api(op: &str, args: Value) -> Result<Value, String> {
     Ok(parsed["data"].clone())
 }
 
+#[cfg(target_os = "macos")]
+fn drain_capture_commands() {
+    let Ok(dir) = support_root_dir().map(|path| path.join("cache/capture-commands")) else { return; };
+    let Ok(entries) = fs::read_dir(dir) else { return; };
+    for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+        if path.extension().and_then(|v| v.to_str()) != Some("json") { continue; }
+        let claimed = path.with_extension("processing");
+        if fs::rename(&path, &claimed).is_err() { continue; }
+        let raw = fs::read_to_string(&claimed).unwrap_or_default();
+        let _ = fs::remove_file(&claimed);
+        let Ok(command) = serde_json::from_str::<Value>(&raw) else { continue; };
+        if command["pid"].as_u64() != Some(std::process::id() as u64) { continue; }
+        let _ = write_private(&path.with_extension("ack"), b"accepted");
+        use std::sync::atomic::Ordering;
+        match command["mode"].as_str().unwrap_or_default() {
+            "region" => mac_shortcuts::CAPTURE_REGION.store(true, Ordering::SeqCst),
+            "screen" => mac_shortcuts::CAPTURE.store(true, Ordering::SeqCst),
+            "left" => mac_shortcuts::CAPTURE_LEFT.store(true, Ordering::SeqCst),
+            "right" => mac_shortcuts::CAPTURE_RIGHT.store(true, Ordering::SeqCst),
+            _ => {}
+        }
+    }
+}
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -454,29 +516,91 @@ fn run() -> Result<(), String> {
     let mut overlay_position = overlay_position(&event_loop);
     let (overlay, webview) = overlay_window(&event_loop, overlay_position)?;
     let mut active_view = "coding".to_string();
-    update_overlay(&webview, &active_view)?;
+    let mut overlay_refresh = OverlayRefresh::default();
+    update_overlay(&webview, &active_view, &mut overlay_refresh)?;
     let mut overlay_visible = false;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
+    let mut last_heartbeat = Instant::now();
+    let mut last_capture_cleanup = Instant::now() - Duration::from_secs(3600);
+    #[cfg(target_os = "macos")]
+    let helper_hotkeys_ready = mac_shortcuts::hotkeys_ready();
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    // Keep blocking HTTP/upload work off the macOS event loop. Serialize
+    // submissions with polling so a stale refresh cannot overwrite a new job.
+    let cloud_gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let mut refresh_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut submit_task: Option<tokio::task::JoinHandle<()>> = None;
+    // macOS interactive region selection can take as long as the user needs.
+    // Run screencapture on a blocking worker instead of freezing event handling.
+    #[cfg(target_os = "macos")]
+    let mut capture_task: Option<tokio::task::JoinHandle<Result<(), String>>> = None;
+    #[cfg(target_os = "macos")]
+    let mut restore_overlay_after_capture = false;
 
     event_loop.run(move |_event, event_loop_target, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
+        #[cfg(target_os = "macos")]
+        drain_capture_commands();
+        if last_capture_cleanup.elapsed() >= Duration::from_secs(3600) {
+            if let Err(error) = clean_expired_capture_dirs() {
+                log(&format!("Capture cleanup skipped: {error}"));
+            }
+            last_capture_cleanup = Instant::now();
+        }
+        if last_heartbeat.elapsed() >= Duration::from_secs(4) {
+            #[cfg(target_os = "macos")]
+            write_helper_status(helper_hotkeys_ready, if helper_hotkeys_ready { None } else { Some("Input Monitoring permission unavailable") });
+            last_heartbeat = Instant::now();
+        }
 
-        if last_job_poll.elapsed() >= Duration::from_secs(5) {
+        #[cfg(target_os = "macos")]
+        if capture_task.as_ref().is_some_and(|task| task.is_finished()) {
+            if let Some(task) = capture_task.take() {
+                // The task has already finished. Awaiting its result here does
+                // not wait on interactive selection or a running subprocess.
+                let result = rt.block_on(task)
+                    .map_err(|e| format!("Screenshot capture worker failed: {e}"))
+                    .and_then(|result| result);
+                overlay_visible = restore_overlay_after_capture;
+                event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
+                    ActivationPolicy::Accessory
+                } else {
+                    ActivationPolicy::Prohibited
+                });
+                let _ = show_overlay(&overlay, overlay_visible);
+                if let Err(error) = result {
+                    eprintln!("capture failed: {error}");
+                    let _ = update_pending_error(&error);
+                }
+                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+            }
+        }
+
+        if last_job_poll.elapsed() >= Duration::from_secs(5)
+            && refresh_task.as_ref().is_none_or(|task| task.is_finished())
+        {
             last_job_poll = Instant::now();
-            let _ = rt.block_on(refresh_job());
+            let gate = std::sync::Arc::clone(&cloud_gate);
+            refresh_task = Some(rt.spawn(async move {
+                let _lock = gate.lock().await;
+                if let Err(error) = refresh_job().await {
+                    log(&format!("Cloud job refresh failed: {error}"));
+                }
+            }));
         }
 
         if overlay_visible && last_overlay_refresh.elapsed() >= Duration::from_millis(500) {
             last_overlay_refresh = Instant::now();
-            let _ = update_overlay(&webview, &active_view);
+            let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
         }
 
         #[cfg(target_os = "macos")]
         {
-            if mac_shortcuts::take_toggle_overlay() {
+            if mac_shortcuts::take_toggle_overlay()
+                && capture_task.as_ref().is_none_or(|task| task.is_finished())
+            {
                 if active_view != "coding" {
                     active_view = "coding".to_string();
                     overlay_visible = true;
@@ -489,9 +613,11 @@ fn run() -> Result<(), String> {
                     ActivationPolicy::Prohibited
                 });
                 let _ = show_overlay(&overlay, overlay_visible);
-                let _ = update_overlay(&webview, &active_view);
+                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
             }
-            if mac_shortcuts::take_switch_mcq() {
+            if mac_shortcuts::take_switch_mcq()
+                && capture_task.as_ref().is_none_or(|task| task.is_finished())
+            {
                 if active_view != "mcq" {
                     active_view = "mcq".to_string();
                     overlay_visible = true;
@@ -504,40 +630,57 @@ fn run() -> Result<(), String> {
                     ActivationPolicy::Prohibited
                 });
                 let _ = show_overlay(&overlay, overlay_visible);
-                let _ = update_overlay(&webview, &active_view);
+                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
             }
             if mac_shortcuts::take_start_batch() {
-                if let Err(e) = start_batch() {
+                if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                    eprintln!("start batch unavailable during screenshot selection");
+                } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                    eprintln!("start batch unavailable during cloud submission");
+                } else if let Err(e) = start_batch() {
                     eprintln!("start batch failed: {e}");
                 }
-                let _ = update_overlay(&webview, &active_view);
+                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
             }
-            if mac_shortcuts::take_capture() {
-                let restore = overlay_visible;
-                if overlay_visible {
+            let full_capture = mac_shortcuts::take_capture();
+            let region_capture = mac_shortcuts::take_capture_region();
+            let left_capture = mac_shortcuts::take_capture_left();
+            let right_capture = mac_shortcuts::take_capture_right();
+            if full_capture || region_capture || left_capture || right_capture {
+                if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                    eprintln!("screenshot capture already in progress");
+                } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                    eprintln!("screenshot capture unavailable during cloud submission");
+                } else {
+                    let capture_mode = if full_capture { CaptureMode::Full }
+                        else if left_capture { CaptureMode::Left }
+                        else if right_capture { CaptureMode::Right }
+                        else if region_capture { CaptureMode::Region }
+                        else { CaptureMode::Full };
+                    restore_overlay_after_capture = overlay_visible;
                     overlay_visible = false;
                     let _ = show_overlay(&overlay, false);
+                    event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                    capture_task = Some(rt.spawn_blocking(move || capture_screen(capture_mode)));
                 }
-                event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
-                let result = capture_screen();
-                overlay_visible = restore;
-                event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
-                    ActivationPolicy::Accessory
-                } else {
-                    ActivationPolicy::Prohibited
-                });
-                let _ = show_overlay(&overlay, overlay_visible);
-                if let Err(e) = result {
-                    eprintln!("capture failed: {e}");
-                }
-                let _ = update_overlay(&webview, &active_view);
             }
             if mac_shortcuts::take_submit() {
-                if let Err(e) = rt.block_on(submit_batch(&active_view)) {
-                    eprintln!("submit failed: {e}");
-                    let _ = update_pending_error(&e);
+                if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                    eprintln!("finish the screenshot selection before submitting");
+                } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                    eprintln!("cloud submission already running");
+                } else {
+                    let gate = std::sync::Arc::clone(&cloud_gate);
+                    let view = active_view.clone();
+                    submit_task = Some(rt.spawn(async move {
+                        let _lock = gate.lock().await;
+                        if let Err(error) = submit_batch(&view).await {
+                            eprintln!("submit failed: {error}");
+                            let _ = update_pending_error(&error);
+                        }
+                    }));
                 }
-                let _ = update_overlay(&webview, &active_view);
+                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
             }
             if overlay_visible && mac_shortcuts::take_move_left() {
                 overlay_position.x -= 80.0;
@@ -688,19 +831,79 @@ fn pending_path() -> Result<PathBuf, String> {
 fn submitted_job_path() -> Result<PathBuf, String> {
     Ok(cache_dir()?.join("submitted-job.json"))
 }
+fn archive_job(job: &SubmittedJob) -> Result<(), String> {
+    let dir = cache_dir()?.join("job-history");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    write_private(&dir.join(format!("{}.json", job.id)), serde_json::to_vec(job).map_err(|e| e.to_string())?)
+       .map_err(|e| e.to_string())
+}
+fn last_good_settings_path() -> Result<PathBuf, String> {
+    Ok(cache_dir()?.join("last-good-settings.json"))
+}
+
+fn clean_expired_capture_dirs() -> Result<(), String> {
+    let root = cache_dir()?.join("captures");
+    let Ok(entries) = fs::read_dir(&root) else { return Ok(()); };
+    let mut protected = std::collections::HashSet::new();
+    if let Some(pending) = read_pending()? { protected.insert(pending.id); }
+    let mut jobs = Vec::new();
+    if let Some(current) = read_submitted_job()? { jobs.push(current); }
+    if let Ok(history) = fs::read_dir(cache_dir()?.join("job-history")) {
+        for file in history.flatten() {
+            if let Ok(raw) = fs::read_to_string(file.path()) {
+                if let Ok(job) = serde_json::from_str::<SubmittedJob>(&raw) {
+                    jobs.push(job);
+                }
+            }
+        }
+    }
+    for job in jobs {
+        for preview in job.previews {
+            if let Ok(relative) = std::path::Path::new(&preview).strip_prefix(&root) {
+                if let Some(first) = relative.components().next() {
+                    protected.insert(first.as_os_str().to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || protected.contains(&entry.file_name().to_string_lossy().to_string()) { continue; }
+        let expired = entry.metadata().ok().and_then(|m| m.modified().ok())
+            .and_then(|date| std::time::SystemTime::now().duration_since(date).ok())
+            .is_some_and(|age| age >= Duration::from_secs(7 * 24 * 3600));
+        if expired { let _ = fs::remove_dir_all(path); }
+    }
+    Ok(())
+}
 
 fn captures_dir(batch_id: &str) -> Result<PathBuf, String> {
     Ok(cache_dir()?.join("captures").join(batch_id))
 }
 
 fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
-    fs::write(path, contents)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    // The UI reads these files while background tasks persist them. Write a
+    // private temporary file, then atomically replace the complete snapshot.
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
+    let temporary = path.with_file_name(format!(".{name}-{}.tmp", Uuid::new_v4()));
+    let result = (|| -> std::io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(contents.as_ref())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
     }
-    Ok(())
+    result
 }
 
 fn log(message: &str) {
@@ -768,6 +971,7 @@ fn clear_submitted_job() -> Result<(), String> {
 
 fn update_pending_error(message: &str) -> Result<(), String> {
     if let Some(mut batch) = read_pending()? {
+        batch.status = "ready".to_string();
         batch.error = Some(message.to_string());
         save_pending(&batch)?;
     }
@@ -775,12 +979,24 @@ fn update_pending_error(message: &str) -> Result<(), String> {
 }
 
 fn start_batch() -> Result<(), String> {
+    // Do not orphan screenshots when the start shortcut is pressed twice.
+    // The existing ordered batch remains available until it is submitted.
+    if let Some(existing) = read_pending()? {
+        if !existing.images.is_empty() {
+            return Err(format!("Batch {} already contains {} screenshot(s). Submit it before starting another.", existing.id, existing.images.len()));
+        }
+    }
     let id = format!("batch-{}", Uuid::new_v4());
-    clear_submitted_job()?;
+    // Keep the previous submitted job visible while collecting the next batch.
     let batch = PendingBatch {
         id: id.clone(),
         status: "collecting".to_string(),
         started_at: now(),
+        submission_id: Some(Uuid::new_v4().to_string()),
+        session_id: None,
+        owner_id: None,
+        settings_snapshot: None,
+        mode: None,
         images: vec![],
         error: None,
     };
@@ -791,8 +1007,36 @@ fn start_batch() -> Result<(), String> {
     Ok(())
 }
 
-fn capture_screen() -> Result<(), String> {
-    let mut batch = read_pending()?.ok_or("Start a helper batch before capturing.".to_string())?;
+#[derive(Clone, Copy)]
+enum CaptureMode { Full, Region, Left, Right }
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapturePoint { x: f64, y: f64 }
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CaptureSize { width: f64, height: f64 }
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CaptureRect { origin: CapturePoint, size: CaptureSize }
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGMainDisplayID() -> u32;
+    fn CGDisplayBounds(display: u32) -> CaptureRect;
+}
+
+fn capture_screen(mode: CaptureMode) -> Result<(), String> {
+    // A screenshot shortcut must work even when the main app is closed and the
+    // user has not explicitly started a batch. Reuse a pending batch for
+    // successive screenshots instead of silently replacing earlier captures.
+    if read_pending()?.is_none() {
+        start_batch()?;
+    }
+    let mut batch = read_pending()?.ok_or("Could not initialize screenshot batch.".to_string())?;
     if batch.images.len() >= MAX_IMAGES {
         batch.status = "ready".to_string();
         batch.error = Some(format!("A helper batch can hold {MAX_IMAGES} screenshots."));
@@ -809,11 +1053,37 @@ fn capture_screen() -> Result<(), String> {
     );
     let path = dir.join(&file_name);
 
-    let out = Command::new("/usr/sbin/screencapture")
-        .arg("-x")
-        .arg(&path)
-        .output()
+    let mut command = Command::new("/usr/sbin/screencapture");
+    command.arg("-x");
+    match mode {
+        CaptureMode::Region => { command.arg("-i"); }
+        CaptureMode::Left | CaptureMode::Right => {
+            #[cfg(target_os = "macos")]
+            {
+                let bounds = unsafe { CGDisplayBounds(CGMainDisplayID()) };
+                let x = bounds.origin.x.round() as i64;
+                let y = bounds.origin.y.round() as i64;
+                let width = bounds.size.width.round() as i64;
+                let height = bounds.size.height.round() as i64;
+                if width < 2 || height < 1 {
+                    return Err("Could not determine display bounds for half-screen capture.".into());
+                }
+                let left_width = width / 2;
+                let (start, part_width) = match mode {
+                    CaptureMode::Left => (x, left_width),
+                    _ => (x + left_width, width - left_width),
+                };
+                command.arg("-R").arg(format!("{start},{y},{part_width},{height}"));
+            }
+        }
+        CaptureMode::Full => {}
+    }
+    let out = command.arg(&path).output()
         .map_err(|e| format!("Screen capture could not be started: {e}"))?;
+    if matches!(mode, CaptureMode::Region) && !path.exists() {
+        // Escape cancels region selection without corrupting the pending batch.
+        return Ok(());
+    }
     if !out.status.success() {
         let _ = fs::remove_file(&path);
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -851,78 +1121,99 @@ fn capture_screen() -> Result<(), String> {
 }
 
 async fn submit_batch(active_view: &str) -> Result<(), String> {
-    let batch = read_pending()?.ok_or("No helper batch is waiting to submit.".to_string())?;
+    // New submissions never depend on downloading an older job's report.
+    let mut batch = read_pending()?.ok_or("No helper batch is waiting to submit.".to_string())?;
     if batch.images.is_empty() {
         return Err("The helper batch has no screenshots.".to_string());
     }
-    let user_settings = api("settings.load", serde_json::json!({ "key": SETTINGS_KEY }))
-        .await
-        .unwrap_or_else(|e| {
-            log(&format!("Settings could not be loaded: {e}"));
-            Value::Null
-        });
-    let user_settings = sanitize_settings(if user_settings.is_null() {
-        Value::Object(Default::default())
-    } else {
-        user_settings
-    });
-    space_api_calls().await;
+    // Do not upload a batch with missing or empty local files. Validate every
+    // entry before creating a remote session or uploading partial screenshots.
+    for image in &batch.images {
+        let metadata = fs::metadata(&image.local_path)
+            .map_err(|e| format!("Screenshot {} is unavailable: {e}", image.file_name))?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err(format!("Screenshot {} is missing or empty; batch retained.", image.file_name));
+        }
+    }
+    if batch.submission_id.is_none() {
+        batch.submission_id = Some(Uuid::new_v4().to_string());
+    }
+    batch.status = "submitting".into();
+    batch.error = None;
+    save_pending(&batch)?;
 
-    let session_title = format!(
-        "Background capture batch {}",
-        chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
-    );
-    let session = api(
-        "sessions.create",
-        serde_json::json!({ "title": session_title }),
-    )
-    .await?;
-    space_api_calls().await;
-    let session_id = session["id"]
-        .as_str()
-        .ok_or("The server did not return a session id.")?
-        .to_string();
-
+    // Never continue a saved submission with another user's credentials.
     let owner = api("auth.whoami", serde_json::json!({})).await?;
-    space_api_calls().await;
-    let owner_id = owner["userId"]
-        .as_str()
-        .ok_or("The server did not say who the helper is.")?
-        .to_string();
+    let owner_id = owner["userId"].as_str().ok_or("Account identity unavailable.")?.to_string();
+    if batch.owner_id.as_deref().is_some_and(|saved| saved != owner_id) {
+        return Err("Account changed; this batch belongs to a different account.".into());
+    }
+    batch.owner_id = Some(owner_id.clone());
+    save_pending(&batch)?;
 
-    let mode = if active_view == "mcq" {
-        "mcq".to_string()
+    let user_settings = if let Some(snapshot) = batch.settings_snapshot.clone() {
+        snapshot
     } else {
-        job_mode_for_settings(&user_settings)
+        let loaded = api("settings.load", serde_json::json!({ "key": SETTINGS_KEY })).await;
+        let settings = match loaded {
+            Ok(value) if value.is_object() => {
+                let sanitized = sanitize_settings(value);
+                let cached = serde_json::json!({
+                    "version": 1, "ownerId": owner_id, "settings": sanitized, "savedAt": now()
+                });
+                let path = last_good_settings_path()?;
+                write_private(&path, serde_json::to_vec(&cached).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+                sanitized
+            }
+            _ => {
+                let raw = fs::read_to_string(last_good_settings_path()?).ok();
+                let cached = raw.and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .filter(|value| value["version"] == 1 && value["ownerId"].as_str() == Some(owner_id.as_str()));
+                let Some(value) = cached.and_then(|value| value.get("settings").cloned())
+                    .filter(|value| value.is_object()) else {
+                    return Err("Settings unavailable. No verified cached settings for this account; batch retained.".into());
+                };
+                log("Settings load failed; using last successfully loaded settings for this account.");
+                value
+            }
+        };
+        batch.settings_snapshot = Some(settings.clone());
+        save_pending(&batch)?;
+        settings
     };
+    let mode = batch.mode.clone().unwrap_or_else(|| {
+        if user_settings.get("overlayMode").and_then(Value::as_str) == Some("mcq") {
+            "mcq".to_string()
+        } else { "council".to_string() }
+    });
+    batch.mode = Some(mode.clone());
+    save_pending(&batch)?;
     let mcq_model = if mode == "mcq" {
-        user_settings
-            .get("mcqModel")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .map(str::to_string)
+        user_settings.get("mcqModel").and_then(Value::as_str).map(str::trim)
+           .filter(|s| !s.is_empty()).map(str::to_string)
+    } else { None };
+    let session_id = if let Some(id) = batch.session_id.clone() {
+        id
     } else {
-        None
+        let session = api("sessions.create", serde_json::json!({
+            "title": format!("Background capture batch {}", batch.id)
+        })).await?;
+        let id = session["id"].as_str().ok_or("Missing session ID")?.to_string();
+        batch.session_id = Some(id.clone());
+        save_pending(&batch)?;
+        id
     };
     let mut images = vec![];
     let mut previews = vec![];
     for image in &batch.images {
         let bytes = fs::read(&image.local_path)
             .map_err(|e| format!("Could not read {}: {e}", image.file_name))?;
-        previews.push(format!(
-            "data:{};base64,{}",
-            if image.mime.is_empty() {
-                "image/png"
-            } else {
-                &image.mime
-            },
-            base64::engine::general_purpose::STANDARD.encode(&bytes)
-        ));
-        let path = format!("{owner_id}/{session_id}/{}", safe_segment(&image.file_name));
+        previews.push(image.local_path.clone());
+        let path = format!("{owner_id}/{session_id}/{}/{}-{}", batch.submission_id.as_deref().unwrap_or_default(), image.position, safe_segment(&image.file_name));
         let signed = api(
             "storage.uploadUrl",
-            serde_json::json!({ "path": path, "bucket": BUCKET }),
+            serde_json::json!({ "path": path, "bucket": BUCKET, "idempotent": true }),
         )
         .await?;
         space_api_calls().await;
@@ -971,6 +1262,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
         "jobs.create",
         serde_json::json!({
             "sessionId": session_id,
+            "submissionId": batch.submission_id,
             "mode": mode,
             "settingsSnapshot": user_settings,
             "images": images,
@@ -978,6 +1270,12 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
     )
     .await?;
     let job_id = job["id"].as_str().unwrap_or_default().to_string();
+    if job_id.trim().is_empty() {
+        return Err("Cloud job was not assigned an ID; screenshots retained for retry.".into());
+    }
+    if let Some(previous) = read_submitted_job()? {
+        if previous.id != job_id { archive_job(&previous)?; }
+    }
     save_submitted_job(&SubmittedJob {
         id: job_id.clone(),
         mode,
@@ -991,32 +1289,121 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
         events: vec![],
     })?;
 
-    for image in &batch.images {
-        let _ = fs::remove_file(&image.local_path);
-    }
+    // Retain referenced preview files until recovery/retention cleanup.
     let _ = fs::remove_file(pending_path()?);
     log(&format!("submitted {} as job {job_id}", batch.id));
     Ok(())
 }
 
+fn is_usable_cloud_report(report: &Value, expected_id: &str) -> bool {
+    if report.is_null() { return false; }
+    let body = report.get("report").unwrap_or(report);
+    // Validate both envelope and payload IDs: an inner report can refer to
+    // another run even if the outer wrapper has the expected identifier.
+    for layer in [report, body] {
+        let report_id = layer.get("job_id").or_else(|| layer.get("jobId"))
+            .and_then(Value::as_str);
+        if report_id.is_some_and(|id| id != expected_id) { return false; }
+    }
+    if body.get("kind").and_then(Value::as_str) == Some("mcq") {
+        return body.pointer("/answer/label").and_then(Value::as_str)
+            .is_some_and(|label| !label.trim().is_empty())
+            || body.pointer("/answer/text").and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty());
+    }
+    let candidates_have_result = body.get("candidates")
+        .and_then(Value::as_array)
+        .is_some_and(|candidates| candidates.iter().any(|candidate| {
+            candidate.pointer("/final/code").and_then(Value::as_str)
+                .is_some_and(|code| !code.trim().is_empty())
+                || candidate.get("text").and_then(Value::as_str)
+                    .is_some_and(|text| !text.trim().is_empty())
+        }));
+    let presentation_has_result = body.pointer("/presentation/code")
+        .and_then(Value::as_str)
+        .is_some_and(|code| !code.trim().is_empty());
+    // A failed candidate's diagnostic text is not a solution; the council
+    // response must contain an answer, not just logs from an aborted run.
+    candidates_have_result || presentation_has_result
+        || body.get("synthesis").and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+}
+
+fn tracked_job_row<'a>(data: &'a Value, expected_id: &str) -> Option<&'a Value> {
+    // jobs.get returns one object; older server versions only support jobs.list.
+    if data.get("id").and_then(Value::as_str) == Some(expected_id) {
+        return Some(data);
+    }
+    data.as_array()
+        .or_else(|| data.get("jobs").and_then(Value::as_array))
+        .or_else(|| data.get("items").and_then(Value::as_array))
+        .and_then(|items| items.iter().find(|item| item.get("id").and_then(Value::as_str) == Some(expected_id)))
+}
+
 async fn refresh_job() -> Result<(), String> {
-    let Some(mut tracked) = read_submitted_job()? else {
-        return Ok(());
-    };
+    if let Some(job) = read_submitted_job()? {
+        save_submitted_job(&refresh_one_job(job).await?)?;
+    }
+    // Poll two older unfinished jobs per tick. Preserve their reports separately.
+    let dir = cache_dir()?.join("job-history");
+    if let Ok(entries) = fs::read_dir(dir) {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        static NEXT_ARCHIVED: AtomicUsize = AtomicUsize::new(0);
+        let mut paths: Vec<_> = entries.filter_map(Result::ok).map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|v| v.to_str()) == Some("json")).collect();
+        paths.sort();
+        let total = paths.len();
+        let start = if total == 0 { 0 } else { NEXT_ARCHIVED.fetch_add(2, AtomicOrdering::Relaxed) % total };
+        let mut count = 0;
+        for index in 0..total {
+            let path = &paths[(start + index) % total];
+            if count >= 2 { break; }
+            if path.extension().and_then(|v| v.to_str()) != Some("json") { continue; }
+            let Ok(raw) = fs::read_to_string(&path) else { continue; };
+            let Ok(job) = serde_json::from_str::<SubmittedJob>(&raw) else { continue; };
+            if matches!(job.status.as_str(), "failed" | "needs_attention" | "cancelled")
+                || (job.status == "completed" && job.report.is_some()) { continue; }
+            let result = refresh_one_job(job).await?;
+            write_private(&path, serde_json::to_vec(&result).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            count += 1;
+        }
+    }
+    Ok(())
+}
+async fn refresh_one_job(mut tracked: SubmittedJob) -> Result<SubmittedJob, String> {
+    if tracked.id.trim().is_empty() {
+        return Err("Submitted background job has no cloud ID.".into());
+    }
     if matches!(
         tracked.status.as_str(),
         "completed" | "failed" | "needs_attention" | "cancelled"
-    ) && tracked.report.is_some()
+    ) && (tracked.report.is_some() || tracked.status != "completed")
     {
-        return Ok(());
+        return Ok(tracked);
     }
 
-    let jobs = api("jobs.list", serde_json::json!({ "status": "all" })).await?;
-    if let Some(job) = jobs.as_array().and_then(|items| {
-        items
-            .iter()
-            .find(|job| job["id"].as_str() == Some(tracked.id.as_str()))
-    }) {
+    // Read the exact job by ID. Browsing is capped at 50 rows and cannot
+    // reliably track a long-running solve. Older API deployments are supported
+    // through a bounded fallback until the new operation is deployed.
+    let status_data = if tracked.status == "completed" {
+        Value::Null
+    } else {
+        match api("jobs.get", serde_json::json!({ "jobId": tracked.id })).await {
+            Ok(job) => job,
+            Err(error) => {
+                log(&format!("Exact job lookup unavailable for {}: {error}", tracked.id));
+                match api("jobs.list", serde_json::json!({ "status": "all" })).await {
+                    Ok(rows) => rows,
+                    Err(list_error) => {
+                        log(&format!("Fallback job lookup unavailable for {}: {list_error}", tracked.id));
+                        Value::Null
+                    }
+                }
+            }
+        }
+    };
+    if let Some(job) = tracked_job_row(&status_data, &tracked.id) {
         tracked.status = job["status"]
             .as_str()
             .unwrap_or(&tracked.status)
@@ -1030,52 +1417,214 @@ async fn refresh_job() -> Result<(), String> {
     space_api_calls().await;
 
     if let Ok(events) = api("jobs.events", serde_json::json!({ "jobId": tracked.id })).await {
-        tracked.events = events.as_array().cloned().unwrap_or_default();
+        let rows = events.as_array()
+            .or_else(|| events.get("events").and_then(Value::as_array))
+            .or_else(|| events.get("items").and_then(Value::as_array));
+        if let Some(rows) = rows {
+            tracked.events = rows.clone();
+        }
     }
     space_api_calls().await;
 
+    // Only a terminal success is a final report. Intermediate report rows may
+    // be partial and must not become the permanently cached answer.
+    if tracked.status == "completed" {
+    let retry_path = cache_dir()?.join(format!("report-retry-{}.json", tracked.id));
+    let retry: Value = fs::read_to_string(&retry_path).ok()
+       .and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or(Value::Null);
+    let current = chrono::Utc::now().timestamp_millis();
+    if current < retry["nextAt"].as_i64().unwrap_or(0) { return Ok(tracked); }
     if let Ok(report) = api("reports.get", serde_json::json!({ "jobId": tracked.id })).await {
-        if !report.is_null() {
+        if is_usable_cloud_report(&report, &tracked.id) {
+            // Auto-routed MCQs are submitted as Council jobs. Promote their
+            // actual result kind before saving so the overlay picks the MCQ pane.
+            let body = report.get("report").unwrap_or(&report);
+            if body.get("kind").and_then(Value::as_str) == Some("mcq") {
+                tracked.mode = "mcq".to_string();
+                if let Some(model) = body.get("model").and_then(Value::as_str) {
+                    tracked.mcq_model = Some(model.to_string());
+                }
+            }
             tracked.report = Some(report);
-            tracked.status = "completed".to_string();
-            tracked.progress_phase = "completed".to_string();
+            let _ = fs::remove_file(&retry_path);
+            // A report may be partial or accompany a failed job. Trust the job status.
+            if tracked.status == "completed" {
+                tracked.progress_phase = "completed".to_string();
+            }
         }
     }
-    save_submitted_job(&tracked)
+    if tracked.report.is_none() {
+        let attempts = retry["attempts"].as_u64().unwrap_or(0).saturating_add(1).min(20);
+        let delay = (5_u64.saturating_mul(1_u64 << attempts.min(6))).min(300);
+        let value = serde_json::json!({
+            "attempts": attempts, "nextAt": current + (delay as i64 * 1000)
+        });
+        write_private(&retry_path, serde_json::to_vec(&value).map_err(|e| e.to_string())?)
+           .map_err(|e| e.to_string())?;
+        tracked.progress_phase = "report_pending".into();
+    }
+    }
+    Ok(tracked)
 }
 
-fn update_overlay(webview: &WebView, active_view: &str) -> Result<(), String> {
-    let sources: Vec<String> = if let Some(batch) = read_pending()? {
-        batch
-            .images
-            .iter()
-            .filter_map(|image| fs::read(&image.local_path).ok())
-            .map(|bytes| {
-                format!(
-                    "data:image/png;base64,{}",
-                    base64::engine::general_purpose::STANDARD.encode(bytes)
-                )
-            })
-            .collect()
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreviewFileKey {
+    path: String,
+    // Missing files have no identity and are retried on the next refresh.
+    identity: Option<(u64, std::time::SystemTime)>,
+}
+
+fn preview_file_key(path: &str) -> PreviewFileKey {
+    PreviewFileKey {
+        path: path.to_string(),
+        identity: fs::metadata(path).ok()
+            .and_then(|metadata| metadata.modified().ok().map(|modified| (metadata.len(), modified))),
+    }
+}
+
+#[derive(Default)]
+struct OverlayRefresh {
+    pending_keys: Vec<PreviewFileKey>,
+    pending_sources: Vec<String>,
+    preview_origin: String,
+    submitted_sources: Vec<String>,
+    sent_state: Option<String>,
+    sent_previews: Option<String>,
+}
+
+impl OverlayRefresh {
+    fn pending_sources(&mut self, paths: &[String]) -> &[String] {
+        let keys: Vec<_> = paths.iter().map(|path| preview_file_key(path)).collect();
+        if keys != self.pending_keys || keys.iter().any(|key| key.identity.is_none())
+            || self.pending_sources.iter().any(|source| source.is_empty()) {
+            // Reuse unchanged captures, including when a screenshot is appended.
+            let sources = keys.iter().map(|key| {
+                if key.identity.is_some() {
+                    if let Some(index) = self.pending_keys.iter().position(|old| old == key) {
+                        if let Some(source) = self.pending_sources.get(index) {
+                            if !source.is_empty() { return source.clone(); }
+                        }
+                    }
+                }
+                fs::metadata(&key.path).ok()
+                    .filter(|m| m.is_file() && m.len() <= 15 * 1024 * 1024)
+                    .and_then(|_| fs::read(&key.path).ok())
+                    .map(|bytes| format!("data:image/png;base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(bytes)))
+                    .unwrap_or_default()
+            }).collect();
+            self.pending_keys = keys;
+            self.pending_sources = sources;
+        }
+        &self.pending_sources
+    }
+
+    fn state_key(state: &str) -> String {
+        // Projection timestamps describe refresh time, not a content change.
+        if let Ok(mut value) = serde_json::from_str::<Value>(state) {
+            if let Some(object) = value.as_object_mut() { object.remove("updatedAt"); }
+            return value.to_string();
+        }
+        state.to_string()
+    }
+
+    fn script(&self, state: &str, previews: Option<&str>) -> String {
+        let mut script = String::new();
+        if self.sent_state.as_deref() != Some(Self::state_key(state).as_str()) {
+            script.push_str(&format!("window.updateOverlayState({state});"));
+        }
+        if let Some(previews) = previews {
+            if self.sent_previews.as_deref() != Some(previews) {
+                script.push_str(&format!("window.updatePreviews({previews});"));
+            }
+        }
+        script
+    }
+}
+
+fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRefresh) -> Result<(), String> {
+    let submitted = read_submitted_job()?;
+    let running = submitted.as_ref().is_some_and(|job| {
+        !matches!(job.status.as_str(), "completed" | "failed" | "needs_attention" | "cancelled")
+    });
+    // The overlay is showing the running job's solution, so show its input
+    // screenshots too, not screenshots staged for the following job.
+    let pending = read_pending()?;
+    let pending_has_images = pending.as_ref().is_some_and(|batch| !batch.images.is_empty());
+    let payload = if running || !pending_has_images {
+        let paths = submitted.as_ref().map(|job| job.previews.as_slice()).unwrap_or_default();
+        let sources = if paths.iter().all(|path| path.starts_with("data:")) {
+            paths.to_vec() // legacy job preview format
+        } else { refresh.pending_sources(paths).to_vec() };
+        if refresh.preview_origin != "submitted" || refresh.submitted_sources != sources {
+            refresh.preview_origin = "submitted".into();
+            refresh.submitted_sources = sources.clone();
+            Some(serde_json::to_string(&sources).map_err(|e| e.to_string())?)
+        } else { None }
     } else {
-        read_submitted_job()?
-            .map(|job| job.previews)
-            .unwrap_or_default()
+        let paths: Vec<_> = pending.as_ref().unwrap().images.iter()
+            .map(|image| image.local_path.clone()).collect();
+        let previous_keys = refresh.pending_keys.clone();
+        let retrying_preview = refresh.pending_sources.iter().any(|source| source.is_empty());
+        let origin_changed = refresh.preview_origin != "pending";
+        refresh.pending_sources(&paths);
+        refresh.preview_origin = "pending".into();
+        if origin_changed || retrying_preview || previous_keys != refresh.pending_keys
+            || refresh.pending_keys.iter().any(|key| key.identity.is_none())
+            || refresh.pending_sources.iter().any(|source| source.is_empty())
+        {
+            let sources: Vec<_> = refresh.pending_sources.iter()
+                .filter(|source| !source.is_empty()).collect();
+            Some(serde_json::to_string(&sources).map_err(|e| e.to_string())?)
+        } else {
+            None
+        }
     };
-    let payload = serde_json::to_string(&sources).map_err(|e| e.to_string())?;
-    let state = read_overlay_state(active_view);
-    webview
-        .evaluate_script(&format!(
-            "window.updatePreviews({payload});window.updateOverlayState({state});"
-        ))
-        .map_err(|e| format!("Could not update ghost overlay: {e}"))
+    // Keep the displayed state paired with the displayed screenshots.
+    // A completed job remains available in the job cache while a subsequent
+    // batch is being collected. Show pending state with pending thumbnails.
+    let state = if !running {
+        if let Some(batch) = pending.as_ref() {
+            if pending_has_images {
+                let pending_state = if active_view == "mcq" {
+                    mcq_pending_state(&batch)
+                } else {
+                    coding_pending_state(&batch)
+                };
+                serde_json::to_string(&pending_state)
+                    .unwrap_or_else(|_| read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref()))
+            } else {
+                read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
+            }
+        } else {
+            read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
+        }
+    } else {
+        read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
+    };
+    let script = refresh.script(&state, payload.as_deref());
+    if script.is_empty() { return Ok(()); }
+    if let Err(error) = webview.evaluate_script(&script) {
+        refresh.preview_origin.clear();
+        return Err(format!("Could not update ghost overlay: {error}"));
+    }
+    // Commit only after dispatch succeeds, so a failed update is retried.
+    refresh.sent_state = Some(OverlayRefresh::state_key(&state));
+    if let Some(payload) = payload { refresh.sent_previews = Some(payload); }
+    Ok(())
 }
 
 fn read_overlay_state(active_view: &str) -> String {
+    let submitted = read_submitted_job().ok().flatten();
+    let pending = read_pending().ok().flatten();
+    read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
+}
+
+fn read_overlay_state_snapshot(active_view: &str, submitted: Option<&SubmittedJob>, pending: Option<&PendingBatch>) -> String {
     let fallback =
         r#"{"runId":null,"updatedAt":"","phase":"idle","agents":[],"solution":null,"tests":[]}"#;
 
-    if let Ok(Some(job)) = read_submitted_job() {
+    if let Some(job) = submitted {
         let is_mcq = job.mode == "mcq" || mcq_from_submitted(&job).is_some();
         if active_view == "mcq" && is_mcq {
             return serde_json::to_string(&submitted_overlay_state(&job))
@@ -1096,7 +1645,7 @@ fn read_overlay_state(active_view: &str) -> String {
     }
 
     if active_view == "mcq" {
-        if let Ok(Some(batch)) = read_pending() {
+        if let Some(batch) = pending {
             if batch.error.is_some() || !batch.images.is_empty() {
                 return serde_json::to_string(&mcq_pending_state(&batch))
                     .unwrap_or_else(|_| fallback.to_string());
@@ -1106,7 +1655,7 @@ fn read_overlay_state(active_view: &str) -> String {
             .unwrap_or_else(|_| fallback.to_string());
     }
 
-    if let Ok(Some(batch)) = read_pending() {
+    if let Some(batch) = pending {
         if batch.error.is_some() || !batch.images.is_empty() {
             return serde_json::to_string(&coding_pending_state(&batch))
                 .unwrap_or_else(|_| fallback.to_string());
@@ -1179,6 +1728,8 @@ fn mcq_placeholder_state() -> Value {
 fn mcq_pending_state(batch: &PendingBatch) -> Value {
     let progress = if let Some(error) = batch.error.as_deref() {
         error.to_string()
+    } else if batch.status == "submitting" {
+        "Uploading screenshots and creating the cloud job...".to_string()
     } else if batch.images.is_empty() {
         "MCQ batch started. Capture screenshots, then submit.".to_string()
     } else {
@@ -1210,6 +1761,8 @@ fn mcq_pending_state(batch: &PendingBatch) -> Value {
 fn coding_pending_state(batch: &PendingBatch) -> Value {
     let waiting = if let Some(error) = batch.error.as_deref() {
         error.to_string()
+    } else if batch.status == "submitting" {
+        "Uploading screenshots and creating the cloud job...".to_string()
     } else if batch.images.is_empty() {
         "Batch started. Capture screenshots, then submit.".to_string()
     } else {
@@ -1337,7 +1890,11 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
     serde_json::json!({
         "runId": job.id,
         "updatedAt": now(),
-        "phase": if job.error.is_some() { "error" } else { "done" },
+        "phase": match job.status.as_str() {
+            "failed" | "needs_attention" | "cancelled" => "error",
+            "completed" => "done",
+            _ => "running",
+        },
         "agents": agents,
         "solution": solution,
         "tests": tests,
@@ -1794,17 +2351,61 @@ fn overlay_html() -> &'static str {
 		            function detectedFunctionNames(code){const found=[];String(code||'').replace(/\b([A-Za-z_]\w*)\s*\(/g,(_,name)=>{if(!found.includes(name)&&!['if','for','while','switch','return','def','function'].includes(name))found.push(name);return _;});return found;}
 		            function renderFunctionNotes(code){const target=document.getElementById('function-notes');if(!target)return;const meanings={set:'stores unique values for quick membership checks',sum:'adds numeric values together',max:'returns the largest value',min:'returns the smallest value',len:'counts items',range:'creates a numeric loop sequence',enumerate:'loops with index and value',append:'adds an item to a list',sort:'orders a list in place',sorted:'returns ordered values',print:'writes debug output',useState:'stores React component state',useEffect:'runs React side effects',fetch:'requests network data',map:'transforms each item',filter:'keeps matching items',reduce:'combines items into one result'};const found=detectedFunctionNames(code);target.innerHTML='';found.slice(0,5).forEach((name)=>{const row=document.createElement('div');row.textContent=name+': '+(meanings[name]||'function call used by the solution');target.appendChild(row);});if(!target.children.length){const row=document.createElement('div');row.textContent='No function calls detected yet.';target.appendChild(row);}}
 		            function functionExample(name){const examples={sum:'sum([18, 9]) -> 27',set:'set([18, 9, 18]) -> {18, 9}',max:'max([18, 9]) -> 18',min:'min([18, 9]) -> 9',len:'len([18, 9]) -> 2',range:'range(0, 5) -> 0..4',enumerate:'enumerate(items) -> index + value',append:'outliers.append(18) -> adds 18',sort:'values.sort() -> in-place order',sorted:'sorted(values) -> ordered copy',print:'print(result) -> console output',useState:'useState(false) -> state + setter',useEffect:'useEffect(fn, []) -> run side effect',fetch:'fetch(url) -> request data',map:'items.map(fn) -> transformed items',filter:'items.filter(fn) -> matching items',reduce:'items.reduce(fn, seed) -> one value'};return examples[name]||name+'(exampleInput) -> expected output';}
-		            function renderSmartTests(target,count,code,stateTests){const names=detectedFunctionNames(code).filter((name)=>!/^greatest|^solve|^main$/i.test(name));target.innerHTML='';const picked=names.length?names.slice(0,4):(stateTests||[]).map((t)=>t.name||'solution').slice(0,4);count.textContent=picked.length?picked.length+' function':'none yet';if(!picked.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No callable functions detected yet';target.appendChild(empty);return;}picked.forEach((fn)=>{const card=document.createElement('div');card.className='case';const name=document.createElement('b');name.textContent=fn;const body=document.createElement('code');body.textContent=functionExample(fn);card.appendChild(name);card.appendChild(body);target.appendChild(card);});}
-            window.updatePreviews=function(images){window.__lastPreviews=images||[];const pictures=document.getElementById('pictures');if(!pictures)return;pictures.innerHTML='';if(!images.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Captured images will appear here';pictures.appendChild(empty);return;}images.forEach((src,i)=>{const pill=document.createElement('div');pill.className='picture-pill';const img=document.createElement('img');img.src=src;img.alt='Capture '+(i+1);const count=document.createElement('span');count.className='picture-count';count.textContent=(i+1)+'/10';pill.appendChild(img);pill.appendChild(count);pictures.appendChild(pill);});};
-                function renderMcq(state){const left=document.querySelector('.pictures-pane');const right=document.querySelector('.thought-pane');const m=state.mcq||{};const picked=(m.answer&&m.answer.label)||'';const selectedModel=(m.model&&String(m.model).trim())?String(m.model).trim():'none';const hasModel=selectedModel.toLowerCase()!=='none';left.innerHTML='<div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title-row"><div class="title">Question</div><div class="mcq-model-pill" data-enabled="'+(hasModel?'true':'false')+'">'+esc(hasModel?selectedModel:'No Model')+'</div></div><div class="mcq-box mcq-question"></div><div class="title">Answer</div><div class="mcq-box mcq-answer"></div>';right.innerHTML='<div class="title">Question history</div><div class="mcq-history"></div>';document.querySelector('.mcq-question').textContent=m.question||state.progress||'Reading the captured question...';document.querySelector('.mcq-answer').innerHTML='<b>'+esc(picked||'Answer')+'</b>'+(m.answer&&m.answer.text?' — '+esc(m.answer.text):'')+'<br><br>'+esc(m.reason||state.error||state.progress||'Waiting for the MCQ worker result...');const hist=document.querySelector('.mcq-history');const add=(title,body,level,meta)=>{const row=document.createElement('div');row.className='mcq-history-row';row.dataset.level=level||'info';const h=document.createElement('b');h.textContent=title;const p=document.createElement('div');p.textContent=body||'';row.appendChild(h);row.appendChild(p);if(meta&&meta.length){const mrow=document.createElement('div');mrow.className='mcq-history-meta';meta.forEach((x)=>{const s=document.createElement('span');s.textContent=x;mrow.appendChild(s);});row.appendChild(mrow);}hist.appendChild(row);};add('AI selected',selectedModel,'info',[state.status||'',state.phase||''].filter(Boolean));add('Captured question',m.question||'Waiting for the screenshot reading.',state.error?'error':'info',[state.status||'',state.phase||''].filter(Boolean));if(m.options&&m.options.length){add('Choices found',(m.options||[]).map((o)=>(o.label?o.label+'. ':'')+(o.text||'')).join('\\n'),'info',[]);}if(m.knowledgeUsed!==undefined){add('Local knowledge check',m.knowledgeUsed?'A local knowledge match or guidance was included before the model answer.':'The local knowledge pack was checked before the model answer, but no direct match was used.','info',[selectedModel]);}if(picked||m.reason){add('Selected answer',(picked?picked+': ':'')+(m.answer&&m.answer.text?m.answer.text:'')+'\\n'+(m.reason||''),'info',[selectedModel]);}(m.whyNot||[]).forEach((x)=>add('Rejected choice '+(x.label||''),x.reason||'Not selected.','info',[]));(state.history||[]).forEach((e)=>add(e.phase||'worker event',e.message||'',e.level||'info',[e.createdAt||''].filter(Boolean)));if(!hist.children.length)add('Waiting','The helper is waiting for the worker history.','info',[]);window.updatePreviews(window.__lastPreviews||[]);}
+		            function renderSmartTests(target,count,code,stateTests){target.innerHTML='';const cases=Array.isArray(stateTests)?stateTests:[];count.textContent=cases.length?cases.length+' evidence row'+(cases.length===1?'':'s'):'no execution evidence';if(!cases.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No verified execution evidence available yet.';target.appendChild(empty);return;}cases.slice(0,8).forEach((item)=>{const card=document.createElement('div');card.className='case';const name=document.createElement('b');name.textContent=item.name||'Execution result';const detail=document.createElement('code');detail.textContent=[item.status,item.expected!==undefined?'expected: '+String(item.expected):'',item.actual!==undefined?'actual: '+String(item.actual):'',item.input!==undefined?'input: '+String(item.input):''].filter(Boolean).join(' · ');card.appendChild(name);card.appendChild(detail);target.appendChild(card);});}
+            function renderCouncilInsights(presentation){const p=presentation||{};const root=document.querySelector('.thought-list');if(!root)return;const items=root.querySelectorAll('.thought-item');const set=(index,value)=>{const el=items[index]&&items[index].querySelector('.thought-space');if(el)el.textContent=value||'Not reported by Council.';};set(0,p.approach);set(2,p.dataStructures);const complexity=String(p.complexity||'');const timeMatch=complexity.match(/(?:time|runtime)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);const spaceMatch=complexity.match(/(?:space|memory)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);set(3,p.timeComplexity||(timeMatch&&timeMatch[1])||complexity);set(4,p.spaceComplexity||(spaceMatch&&spaceMatch[1]));set(5,Array.isArray(p.dissent)?p.dissent.join('\n'):p.dissent);set(6,Array.isArray(p.evidence)?p.evidence.map(e=>[e.letter,e.gate,e.passed!==undefined?'passed: '+e.passed:'',e.failed!==undefined?'failed: '+e.failed:'',Number.isFinite(e.elapsedMs)?'elapsed: '+e.elapsedMs+' ms':'',Number.isFinite(e.peakMemoryKb)?'peak memory: '+e.peakMemoryKb+' KB':'',e.runtime||''].filter(Boolean).join(' · ')).join('\n'):'');set(7,Array.isArray(p.rejected)?p.rejected.join('\n'):p.rejected);}
+                        window.updatePreviews=function(images){window.__lastPreviews=images||[];const pictures=document.getElementById('pictures');if(!pictures)return;if(pictures.__sources&&pictures.__sources.length===images.length&&images.every((src,i)=>src===pictures.__sources[i]))return;pictures.__sources=images.slice();pictures.innerHTML='';if(!images.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Captured images will appear here';pictures.appendChild(empty);return;}images.forEach((src,i)=>{const pill=document.createElement('div');pill.className='picture-pill';const img=document.createElement('img');img.src=src;img.alt='Capture '+(i+1);const count=document.createElement('span');count.className='picture-count';count.textContent=(i+1)+'/10';pill.appendChild(img);pill.appendChild(count);pictures.appendChild(pill);});};
+                function renderMcq(state){const savedPictures=document.getElementById('pictures');const left=document.querySelector('.pictures-pane');const right=document.querySelector('.thought-pane');const m=state.mcq||{};const picked=(m.answer&&m.answer.label)||'';const found=Array.isArray(m.options)?m.options:[];const position=found.findIndex((o)=>o.label===picked);const ordinal=(n)=>n%100>=11&&n%100<=13?'th':n%10===1?'st':n%10===2?'nd':n%10===3?'rd':'th';const formatted=m.answerVerified===true&&position>=0?'✅ '+picked+' ('+(position+1)+ordinal(position+1)+' Option) - '+String((m.answer&&m.answer.text)||found[position].text||''):'';const displayAnswer=formatted||String(m.displayAnswer||'');const selectedModel=(m.model&&String(m.model).trim())?String(m.model).trim():'none';const hasModel=selectedModel.toLowerCase()!=='none';left.innerHTML='<div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title-row"><div class="title">Question</div><div class="mcq-model-pill" data-enabled="'+(hasModel?'true':'false')+'">'+esc(hasModel?selectedModel:'No Model')+'</div></div><div class="mcq-box mcq-question"></div><div class="title">Answer</div><div class="mcq-box mcq-answer"></div>';if(savedPictures)document.getElementById('pictures').replaceWith(savedPictures);right.innerHTML='<div class="title">Question history</div><div class="mcq-history"></div>';document.querySelector('.mcq-question').textContent=m.question||state.progress||'Reading the captured question...';document.querySelector('.mcq-answer').innerHTML='<b>'+esc(displayAnswer||(picked||'Answer'))+'</b>'+(displayAnswer?'':(m.answer&&m.answer.text?' — '+esc(m.answer.text):''))+'<br><br>'+esc(m.reason||state.error||state.progress||'Waiting for the MCQ worker result...');const hist=document.querySelector('.mcq-history');const add=(title,body,level,meta)=>{const row=document.createElement('div');row.className='mcq-history-row';row.dataset.level=level||'info';const h=document.createElement('b');h.textContent=title;const p=document.createElement('div');p.textContent=body||'';row.appendChild(h);row.appendChild(p);if(meta&&meta.length){const mrow=document.createElement('div');mrow.className='mcq-history-meta';meta.forEach((x)=>{const s=document.createElement('span');s.textContent=x;mrow.appendChild(s);});row.appendChild(mrow);}hist.appendChild(row);};add('AI selected',selectedModel,'info',[state.status||'',state.phase||''].filter(Boolean));add('Captured question',m.question||'Waiting for the screenshot reading.',state.error?'error':'info',[state.status||'',state.phase||''].filter(Boolean));if(m.options&&m.options.length){add('Choices found',(m.options||[]).map((o)=>(o.label?o.label+'. ':'')+(o.text||'')).join('\\n'),'info',[]);}if(m.knowledgeUsed!==undefined){add('Local knowledge check',m.knowledgeUsed?'A local knowledge match or guidance was included before the model answer.':'The local knowledge pack was checked before the model answer, but no direct match was used.','info',[selectedModel]);}if(picked||m.reason){add('Selected answer',(picked?picked+': ':'')+(m.answer&&m.answer.text?m.answer.text:'')+'\\n'+(m.reason||''),'info',[selectedModel]);}(m.whyNot||[]).forEach((x)=>add('Rejected choice '+(x.label||''),x.reason||'Not selected.','info',[]));(state.history||[]).forEach((e)=>add(e.phase||'worker event',e.message||'',e.level||'info',[e.createdAt||''].filter(Boolean)));if(!hist.children.length)add('Waiting','The helper is waiting for the worker history.','info',[]);window.updatePreviews(window.__lastPreviews||[]);}
 			            function restoreCodingShell(){if(document.getElementById('agents'))return;document.getElementById('panel').innerHTML='<div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span id="solution-source">waiting</span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div>';window.updatePreviews(window.__lastPreviews||[]);}
-			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'reviewed':('candidate · '+(state.solution.source||''));renderCodeLines(code,state.solution.code,state.solution.language);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);}};
+			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'reviewed':('candidate · '+(state.solution.source||''));renderCodeLines(code,state.solution.code,state.solution.language);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation);}};
     </script></body></html>"#
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_without_jobs_is_self_contained() {
+        let value = read_overlay_state_snapshot("mcq", None, None);
+        assert!(value.contains("mcq") || value.contains("question"));
+    }
+    #[test]
+    fn overlay_refresh_sends_only_changed_channels() {
+        let mut refresh = OverlayRefresh::default();
+        assert!(refresh.script("{}", Some("[]")).contains("updateOverlayState"));
+        refresh.sent_state = Some("{}".into());
+        refresh.sent_previews = Some("[]".into());
+        assert!(refresh.script("{}", None).is_empty());
+        assert!(refresh.script(r#"{"updatedAt":"new refresh"}"#, None).is_empty());
+        assert!(refresh.script("{}", Some("[]")).is_empty());
+        assert_eq!(refresh.script("{\"phase\":\"running\"}", None),
+            "window.updateOverlayState({\"phase\":\"running\"});");
+        assert_eq!(refresh.script("{}", Some("[\"new\"]")),
+            "window.updatePreviews([\"new\"]);");
+    }
+
+    #[test]
+    fn preview_cache_reuses_appended_and_invalidates_changed_files() {
+        let first = std::env::temp_dir().join(format!("preview-{}.png", Uuid::new_v4()));
+        let second = std::env::temp_dir().join(format!("preview-{}.png", Uuid::new_v4()));
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+        let paths = vec![first.to_string_lossy().into_owned(), second.to_string_lossy().into_owned()];
+        let mut refresh = OverlayRefresh::default();
+        let initial = refresh.pending_sources(&paths[..1])[0].clone();
+        assert_eq!(refresh.pending_sources(&paths)[0], initial);
+        let stable = refresh.pending_sources(&paths).to_vec();
+        assert_eq!(refresh.pending_sources(&paths), stable.as_slice());
+        fs::write(&first, b"replacement with different length").unwrap();
+        assert_ne!(refresh.pending_sources(&paths)[0], initial);
+        fs::remove_file(&second).unwrap();
+        assert!(refresh.pending_sources(&paths)[1].is_empty());
+        fs::write(&second, b"restored").unwrap();
+        assert!(!refresh.pending_sources(&paths)[1].is_empty());
+        let _ = fs::remove_file(first);
+        let _ = fs::remove_file(second);
+    }
+
 
     #[test]
     fn coding_overlay_maps_winner_code_from_report() {
@@ -1851,6 +2452,29 @@ mod tests {
     }
 
     #[test]
+    fn coding_overlay_with_early_report_stays_running() {
+        let job = SubmittedJob {
+            id: "early-report".into(), mode: "council".into(),
+            mcq_model: None, status: "running".into(),
+            progress_phase: "reviewing".into(), submitted_at: now(),
+            previews: vec![], error: None,
+            report: Some(serde_json::json!({
+                "report": {
+                    "winner": "A",
+                    "candidates": [{
+                        "letter": "A", "model": "model-a",
+                        "final": {"kind": "code", "language": "python", "code": "print(42)"}
+                    }]
+                }
+            })),
+            events: vec![],
+        };
+        let state = coding_overlay_state(&job);
+        assert_eq!(state["phase"], "running");
+        assert_eq!(state["solution"]["code"], "print(42)");
+    }
+
+    #[test]
     fn coding_overlay_shows_progress_before_report() {
         let job = SubmittedJob {
             id: "job-2".into(),
@@ -1894,6 +2518,66 @@ mod tests {
         assert_eq!(state["kind"], "mcq");
         assert_eq!(state["mcq"]["model"], "anthropic/claude");
         assert_eq!(state["status"], "running");
+    }
+
+    #[test]
+    fn auto_routed_mcq_report_selects_mcq_overlay() {
+        let job = SubmittedJob {
+            id: "auto-mcq".into(), mode: "council".into(), mcq_model: None,
+            status: "completed".into(), progress_phase: "completed".into(),
+            submitted_at: now(), previews: vec![], error: None,
+            report: Some(serde_json::json!({"report": {"kind": "mcq", "model": "vision-reader", "question": "Which?", "answer": {"label": "C", "text": "Queue"}, "options": [{"label":"C","text":"Queue"}]}})),
+            events: vec![],
+        };
+        assert!(mcq_from_submitted(&job).is_some());
+        assert_eq!(submitted_overlay_state(&job)["mcq"]["answer"]["label"], "C");
+    }
+
+    #[test]
+    fn exact_job_and_legacy_list_resolve_only_the_tracked_id() {
+        let single = serde_json::json!({"id":"job-1","status":"completed"});
+        assert_eq!(tracked_job_row(&single, "job-1").unwrap()["status"], "completed");
+        assert!(tracked_job_row(&single, "job-2").is_none());
+        let list = serde_json::json!({"jobs":[{"id":"job-2","status":"running"},{"id":"job-1","status":"completed"}]});
+        assert_eq!(tracked_job_row(&list, "job-1").unwrap()["status"], "completed");
+        assert!(tracked_job_row(&Value::Null, "job-1").is_none());
+        assert!(tracked_job_row(&serde_json::json!({"jobs":[]}), "job-1").is_none());
+    }
+
+    #[test]
+    fn cloud_report_requires_matching_job_and_result() {
+        assert!(!is_usable_cloud_report(&Value::Null, "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({}), "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"job_id":"other","report":{"kind":"mcq","answer":{"label":"C"}}}), "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"job_id":"job-1","report":{"job_id":"other","kind":"mcq","answer":{"label":"C"}}}), "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"report":{"jobId":"other","presentation":{"code":"return 1"}}}), "job-1"));
+        assert!(is_usable_cloud_report(&serde_json::json!({"job_id":"job-1","report":{"kind":"mcq","answer":{"label":"C"}}}), "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"report":{"candidates":[]}}), "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"report":{"presentation":{}}}), "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"report":{"kind":"mcq","answer":{}}}), "job-1"));
+        assert!(is_usable_cloud_report(&serde_json::json!({"report":{"presentation":{"code":"return 42"}}}), "job-1"));
+        assert!(is_usable_cloud_report(&serde_json::json!({"report":{"candidates":[{"final":{"code":"print(42)"}}]}}), "job-1"));
+    }
+
+    #[test]
+    fn private_snapshots_replace_complete_files() {
+        let path = std::env::temp_dir().join(format!("mds-cache-{}.json", Uuid::new_v4()));
+        write_private(&path, br#"{"stage":"old"}"#).expect("write old snapshot");
+        write_private(&path, br#"{"stage":"new"}"#).expect("replace snapshot");
+        assert_eq!(fs::read_to_string(&path).expect("read snapshot"), r#"{"stage":"new"}"#);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_state_reports_upload_without_changing_overlay_layout() {
+        let batch = PendingBatch {
+            id: "pending-upload".into(), status: "submitting".into(),
+            started_at: now(), submission_id: None, session_id: None,
+            owner_id: None, settings_snapshot: None, mode: None,
+            images: vec![], error: None,
+        };
+        assert!(mcq_pending_state(&batch)["progress"].as_str().unwrap_or("").contains("Uploading"));
+        assert!(coding_pending_state(&batch)["solution"]["code"].as_str().unwrap_or("").contains("Uploading"));
     }
 
     #[test]

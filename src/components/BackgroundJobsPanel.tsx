@@ -146,34 +146,58 @@ export default function BackgroundJobsPanel() {
       const sessionId = await ensureSession();
       if (!sessionId) throw new Error("Set up the Supabase database connection before queuing cloud jobs.");
 
+      // Durable submission journal. A lost jobs.create reply MUST NOT create a new job.
+      const journalKey = "council-editor.pending-solve.v1";
+      // Content hashes avoid placing multi-megabyte base64 images in localStorage.
+      const signatures = await Promise.all(workspaceImages.map(async (image) => {
+        const bytes = new TextEncoder().encode(image.base64);
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+        return [image.name, image.mime, hash, image.localPath ?? ""];
+      }));
+      const signature = JSON.stringify(signatures);
+      type JobImage = { position: number; storageBucket: string; storagePath: string;
+        fileName: string; bytes: number; mime: string; width: number | null; height: number | null };
+      type Journal = { submissionId: string; sessionId: string; signature: string;
+        settingsSnapshot: Record<string, unknown>; images: JobImage[] };
+      let prior: Journal | null = null;
+      try { prior = JSON.parse(localStorage.getItem(journalKey) ?? "null") as Journal | null; }
+      catch { /* bad journal is not trusted */ }
+      if (prior && prior.signature !== signature) {
+        throw new Error("An earlier submission is unresolved. Restore its screenshots and retry before starting a different batch.");
+      }
+      const submission: Journal = prior ?? {
+        submissionId: crypto.randomUUID(), sessionId, signature,
+        settingsSnapshot: sanitizedSettingsSnapshot({ ...settings }), images: [],
+      };
+      if (submission.sessionId !== sessionId) {
+        throw new Error("Submission account/session changed; recover the earlier batch instead of silently switching ownership.");
+      }
+      const persist = () => localStorage.setItem(journalKey, JSON.stringify(submission));
+      persist();
       const survived = new Map<string, boolean>();
-      const jobImages = [];
-      for (const image of workspaceImages) {
-        const uploaded = await uploadScreenshot({
-          sessionId,
-          fileName: image.name,
-          mime: image.mime,
-          data: image.base64,
-        });
-        jobImages.push({
-          position: jobImages.length,
-          storageBucket: uploaded.bucket,
-          storagePath: uploaded.path,
-          fileName: image.name,
-          bytes: uploaded.bytes,
-          mime: image.mime,
-          width: image.sourceWidth ?? null,
-          height: image.sourceHeight ?? null,
-        });
+      for (const [position, image] of workspaceImages.entries()) {
+        if (!submission.images[position]) {
+          const uploaded = await uploadScreenshot({
+            sessionId: submission.sessionId, fileName: image.name,
+            mime: image.mime, data: image.base64,
+            submissionId: submission.submissionId, position,
+          });
+          submission.images[position] = {
+            position, storageBucket: uploaded.bucket, storagePath: uploaded.path,
+            fileName: image.name, bytes: uploaded.bytes, mime: image.mime,
+            width: image.sourceWidth ?? null, height: image.sourceHeight ?? null,
+          };
+          persist();
+        }
         if (image.localPath && !survived.has(image.localPath)) survived.set(image.localPath, true);
       }
-
       const jobId = await createSolveJob({
-        sessionId,
-        settingsSnapshot: sanitizedSettingsSnapshot({ ...settings }),
-        images: jobImages,
+        submissionId: submission.submissionId, sessionId: submission.sessionId,
+        settingsSnapshot: submission.settingsSnapshot, images: submission.images,
       });
-      devLog("cloud-jobs", "job created", { jobId, images: jobImages.length });
+      localStorage.removeItem(journalKey);
+      devLog("cloud-jobs", "job created", { jobId, images: submission.images.length });
       for (const [path, ok] of survived) {
         if (ok) void forgetLocalFile(path);
       }

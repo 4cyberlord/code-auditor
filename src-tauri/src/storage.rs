@@ -49,6 +49,8 @@ pub async fn storage_upload(
     file_name: String,
     mime: String,
     data: String,
+    submission_id: Option<String>,
+    position: Option<usize>,
 ) -> Result<Uploaded, String> {
     let bytes = unbase64(&data).ok_or("That image is not valid base64.")?;
     if bytes.is_empty() {
@@ -58,7 +60,15 @@ pub async fn storage_upload(
     // Ownership lives in the path, because at upload time there is no row to
     // check it against — the screenshot record is written afterwards.
     let owner = crate::auth::current().ok_or(crate::auth::LOCKED)?.user_id;
-    let path = format!("{owner}/{session_id}/{}", safe_name(&file_name));
+    let (path, idempotent) = if let Some(submission) = submission_id {
+        let parsed = uuid::Uuid::parse_str(&submission)
+            .map_err(|_| "Invalid submission identity.")?;
+        let index = position.ok_or("Screenshot position required for a durable submission.")?;
+        if index >= 10 { return Err("Screenshot position is out of range.".into()); }
+        (format!("{owner}/{session_id}/{parsed}/{index}-{}", safe_name(&file_name)), true)
+    } else {
+        (format!("{owner}/{session_id}/{}", safe_name(&file_name)), false)
+    };
 
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -68,7 +78,7 @@ pub async fn storage_upload(
     let signed: Signed = crate::server_api::call(
         db.inner(),
         "storage.uploadUrl",
-        serde_json::json!({ "path": path, "bucket": BUCKET }),
+        serde_json::json!({ "path": path, "bucket": BUCKET, "idempotent": idempotent }),
     )
     .await?;
 

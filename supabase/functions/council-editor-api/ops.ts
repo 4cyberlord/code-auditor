@@ -708,11 +708,13 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
       p_mode: mode,
       p_settings: args.settingsSnapshot ?? {},
       p_images: Array.isArray(args.images) ? args.images : [],
+      p_submission: uuid(args.submissionId, "submissionId"),
     });
     if (error) {
       if (String(error.code) === "P0002" || /no such session/.test(error.message ?? "")) {
         throw new HttpError(404, "That session no longer exists.");
       }
+      if (String(error.code) === "23505") throw new HttpError(409, "Submission identity reused with different data.");
       console.error("solve_job_create:", error.message ?? error);
       throw new HttpError(500, "Could not queue the job.");
     }
@@ -732,6 +734,18 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
       throw new HttpError(500, "Could not save the new order.");
     }
     return { ordered: ids.length };
+  },
+
+  /** Fetch one tracked solve job directly; the newest-50 listing is for browsing. */
+  "jobs.get": async ({ admin, principal }, args) => {
+    const row = ok(
+      await admin.from("solve_jobs").select("*")
+        .eq("id", uuid(args.jobId, "jobId"))
+        .eq("owner_id", principal.userId)
+        .maybeSingle(),
+      "get cloud job"
+    );
+    return row ? solveJobRow(row) : null;
   },
 
   "jobs.list": async ({ admin, principal }, args) => {
@@ -1085,7 +1099,7 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
     const bucket = typeof args.bucket === "string" && args.bucket.trim() ? args.bucket.trim() : "screenshots";
     if (!/^[a-z0-9][a-z0-9._-]*$/i.test(bucket)) throw new HttpError(400, "That is not a bucket.");
 
-    const { data, error } = await admin.storage.from(bucket).createSignedUploadUrl(path);
+    const { data, error } = await admin.storage.from(bucket).createSignedUploadUrl(path, { upsert: args.idempotent === true });
     if (error) {
       console.error("signed upload url:", error.message ?? error);
       throw new HttpError(500, "Could not start that upload.");
