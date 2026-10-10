@@ -1069,6 +1069,9 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
     )
     .await?;
     let job_id = job["id"].as_str().unwrap_or_default().to_string();
+    if job_id.trim().is_empty() {
+        return Err("Cloud job was not assigned an ID; screenshots retained for retry.".into());
+    }
     save_submitted_job(&SubmittedJob {
         id: job_id.clone(),
         mode,
@@ -1128,8 +1131,10 @@ async fn refresh_job() -> Result<(), String> {
     if let Ok(report) = api("reports.get", serde_json::json!({ "jobId": tracked.id })).await {
         if !report.is_null() {
             tracked.report = Some(report);
-            tracked.status = "completed".to_string();
-            tracked.progress_phase = "completed".to_string();
+            // A report may be partial or accompany a failed job. Trust the job status.
+            if tracked.status == "completed" {
+                tracked.progress_phase = "completed".to_string();
+            }
         }
     }
     save_submitted_job(&tracked)
