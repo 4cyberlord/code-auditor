@@ -56,7 +56,7 @@ import {
   type Extraction,
   type ExtractionAgreement,
 } from "./extraction.ts";
-import { routeProblem, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
+import { routeProblem, routingGuidance, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders, type ModelCapability } from "./adaptiveModelRouting.ts";
 import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { loadAuthenticatedBenchmarkCapabilities } from "./benchmarkFeed.ts";
@@ -4168,7 +4168,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
         provider: settings.gatewayId,
         model: specModel,
         systemPrompt: testSpecSystemPrompt(),
-        userText: testSpecUserPrompt({ question: problem, docket: candidateDocket(field), languages, knowledge }),
+        userText: testSpecUserPrompt({ question: `${problem}\n\n${routingGuidance(route)}`, docket: candidateDocket(field), languages, knowledge }),
         images: [],
         maxTokens: settings.maxTokens,
         temperature: 0,
