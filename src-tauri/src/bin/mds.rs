@@ -493,9 +493,38 @@ fn run() -> Result<(), String> {
     let cloud_gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let mut refresh_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut submit_task: Option<tokio::task::JoinHandle<()>> = None;
+    // macOS interactive region selection can take as long as the user needs.
+    // Run screencapture on a blocking worker instead of freezing event handling.
+    #[cfg(target_os = "macos")]
+    let mut capture_task: Option<tokio::task::JoinHandle<Result<(), String>>> = None;
+    #[cfg(target_os = "macos")]
+    let mut restore_overlay_after_capture = false;
 
     event_loop.run(move |_event, event_loop_target, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
+
+        #[cfg(target_os = "macos")]
+        if capture_task.as_ref().is_some_and(|task| task.is_finished()) {
+            if let Some(task) = capture_task.take() {
+                // The task has already finished. Awaiting its result here does
+                // not wait on interactive selection or a running subprocess.
+                let result = rt.block_on(task)
+                    .map_err(|e| format!("Screenshot capture worker failed: {e}"))
+                    .and_then(|result| result);
+                overlay_visible = restore_overlay_after_capture;
+                event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
+                    ActivationPolicy::Accessory
+                } else {
+                    ActivationPolicy::Prohibited
+                });
+                let _ = show_overlay(&overlay, overlay_visible);
+                if let Err(error) = result {
+                    eprintln!("capture failed: {error}");
+                    let _ = update_pending_error(&error);
+                }
+                let _ = update_overlay(&webview, &active_view);
+            }
+        }
 
         if last_job_poll.elapsed() >= Duration::from_secs(5)
             && refresh_task.as_ref().is_none_or(|task| task.is_finished())
@@ -517,7 +546,9 @@ fn run() -> Result<(), String> {
 
         #[cfg(target_os = "macos")]
         {
-            if mac_shortcuts::take_toggle_overlay() {
+            if mac_shortcuts::take_toggle_overlay()
+                && capture_task.as_ref().is_none_or(|task| task.is_finished())
+            {
                 if active_view != "coding" {
                     active_view = "coding".to_string();
                     overlay_visible = true;
@@ -532,7 +563,9 @@ fn run() -> Result<(), String> {
                 let _ = show_overlay(&overlay, overlay_visible);
                 let _ = update_overlay(&webview, &active_view);
             }
-            if mac_shortcuts::take_switch_mcq() {
+            if mac_shortcuts::take_switch_mcq()
+                && capture_task.as_ref().is_none_or(|task| task.is_finished())
+            {
                 if active_view != "mcq" {
                     active_view = "mcq".to_string();
                     overlay_visible = true;
@@ -548,7 +581,9 @@ fn run() -> Result<(), String> {
                 let _ = update_overlay(&webview, &active_view);
             }
             if mac_shortcuts::take_start_batch() {
-                if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                    eprintln!("start batch unavailable during screenshot selection");
+                } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
                     eprintln!("start batch unavailable during cloud submission");
                 } else if let Err(e) = start_batch() {
                     eprintln!("start batch failed: {e}");
@@ -560,36 +595,27 @@ fn run() -> Result<(), String> {
             let left_capture = mac_shortcuts::take_capture_left();
             let right_capture = mac_shortcuts::take_capture_right();
             if full_capture || region_capture || left_capture || right_capture {
-                let restore = overlay_visible;
-                if overlay_visible {
+                if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                    eprintln!("screenshot capture already in progress");
+                } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                    eprintln!("screenshot capture unavailable during cloud submission");
+                } else {
+                    let capture_mode = if full_capture { CaptureMode::Full }
+                        else if left_capture { CaptureMode::Left }
+                        else if right_capture { CaptureMode::Right }
+                        else if region_capture { CaptureMode::Region }
+                        else { CaptureMode::Full };
+                    restore_overlay_after_capture = overlay_visible;
                     overlay_visible = false;
                     let _ = show_overlay(&overlay, false);
+                    event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                    capture_task = Some(rt.spawn_blocking(move || capture_screen(capture_mode)));
                 }
-                event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
-                let capture_mode = if full_capture { CaptureMode::Full }
-                    else if left_capture { CaptureMode::Left }
-                    else if right_capture { CaptureMode::Right }
-                    else if region_capture { CaptureMode::Region }
-                    else { CaptureMode::Full };
-                let result = if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
-                    Err("Capture unavailable while the current batch is uploading.".to_string())
-                } else {
-                    capture_screen(capture_mode)
-                };
-                overlay_visible = restore;
-                event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
-                    ActivationPolicy::Accessory
-                } else {
-                    ActivationPolicy::Prohibited
-                });
-                let _ = show_overlay(&overlay, overlay_visible);
-                if let Err(e) = result {
-                    eprintln!("capture failed: {e}");
-                }
-                let _ = update_overlay(&webview, &active_view);
             }
             if mac_shortcuts::take_submit() {
-                if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                    eprintln!("finish the screenshot selection before submitting");
+                } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
                     eprintln!("cloud submission already running");
                 } else {
                     let gate = std::sync::Arc::clone(&cloud_gate);
