@@ -77,6 +77,31 @@ export function detectMcq(text: string): McqDetection {
   };
 }
 
+
+/** Resolve model output against the question's independently extracted options. */
+export function resolveMcqSelection(answer: McqAnswer, detected: McqDetection): McqAnswer | null {
+  if (!detected.isMcq || !detected.options.length) return null;
+  const label = answer.answer.label.trim().toUpperCase();
+  const byLabel = detected.options.find(o => o.label === label);
+  const rawText = answer.answer.text.trim();
+  const norm = (v: string) => v.trim().replace(/\s+/g, " ").toLowerCase();
+  const byText = rawText && norm(rawText) !== norm(label)
+    ? detected.options.filter(o => norm(o.text) === norm(rawText)) : [];
+  if (byLabel && byText.length && byText[0].label !== byLabel.label) return null;
+  const selected = byLabel ?? (byText.length === 1 ? byText[0] : null);
+  if (!selected) return null;
+  return { ...answer, question: detected.question, options: detected.options, answer: selected };
+}
+
+export function formatMcqSelection(answer: McqAnswer): string {
+  const index = answer.options.findIndex(o => o.label === answer.answer.label);
+  if (index < 0) return "Answer needs verification";
+  const n = index + 1;
+  const suffix = n % 100 >= 11 && n % 100 <= 13 ? "th" :
+    n % 10 === 1 ? "st" : n % 10 === 2 ? "nd" : n % 10 === 3 ? "rd" : "th";
+  return `✅ ${answer.answer.label} (${n}${suffix} Option) - ${answer.answer.text}`;
+}
+
 export function normalizeOverlayMode(value: unknown): OverlayMode {
   return value === "coding" || value === "mcq" || value === "auto" ? value : "auto";
 }

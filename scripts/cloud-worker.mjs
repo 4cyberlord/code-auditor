@@ -123,7 +123,7 @@ const [
   import("../src/lib/mcq.ts"),
 ]);
 
-const { detectMcq, parseMcqAnswer } = mcq;
+const { detectMcq, parseMcqAnswer, resolveMcqSelection, formatMcqSelection } = mcq;
 const { loadKnowledgeLibrary } = knowledgeLibrary;
 
 /**
@@ -1779,6 +1779,9 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
   if (!parsed?.answer?.label && !parsed?.answer?.text) {
     throw new Error("The MCQ model answered, but no selected answer could be parsed.");
   }
+  const verified = detection.isMcq ? resolveMcqSelection(parsed, detection) : parsed;
+  if (!verified) throw new Error("MCQ answer does not match the extracted options.");
+  if (verified !== parsed) Object.assign(parsed, verified);
   parsed.model = parsed.model || model;
   parsed.knowledgeUsed = Boolean(parsed.knowledgeUsed || knowledge.trim());
   const markdown = await saveMcqReport(job, parsed, mcqReading, raw);
@@ -1787,7 +1790,7 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
     progress_phase: "completed",
     mode: "mcq",
     error: null,
-    result_summary: `${parsed.answer.label ? `${parsed.answer.label}: ` : ""}${parsed.answer.text || parsed.reason}`.slice(0, 500),
+    result_summary: (detection.isMcq ? formatMcqSelection(parsed) : `${parsed.answer.label}: ${parsed.answer.text || parsed.reason}`).slice(0, 500),
     finished_at: new Date().toISOString(),
   });
   await addEvent(job.id, "info", "completed", "MCQ job completed.", { markdownBytes: Buffer.byteLength(markdown, "utf8"), model });
