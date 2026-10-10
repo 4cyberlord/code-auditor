@@ -792,7 +792,13 @@ fn start_batch() -> Result<(), String> {
 }
 
 fn capture_screen() -> Result<(), String> {
-    let mut batch = read_pending()?.ok_or("Start a helper batch before capturing.".to_string())?;
+    // A screenshot shortcut must work even when the main app is closed and the
+    // user has not explicitly started a batch. Reuse a pending batch for
+    // successive screenshots instead of silently replacing earlier captures.
+    if read_pending()?.is_none() {
+        start_batch()?;
+    }
+    let mut batch = read_pending()?.ok_or("Could not initialize screenshot batch.".to_string())?;
     if batch.images.len() >= MAX_IMAGES {
         batch.status = "ready".to_string();
         batch.error = Some(format!("A helper batch can hold {MAX_IMAGES} screenshots."));
