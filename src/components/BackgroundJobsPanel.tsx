@@ -196,7 +196,7 @@ export default function BackgroundJobsPanel() {
         settingsSnapshot: submission.settingsSnapshot, images: submission.images,
       });
       localStorage.removeItem(journalKey);
-      devLog("cloud-jobs", "job created", { jobId, images: jobImages.length });
+      devLog("cloud-jobs", "job created", { jobId, images: submission.images.length });
       for (const [path, ok] of survived) {
         if (ok) void forgetLocalFile(path);
       }
