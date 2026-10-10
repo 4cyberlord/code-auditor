@@ -1210,7 +1210,12 @@ async fn refresh_job() -> Result<(), String> {
     space_api_calls().await;
 
     if let Ok(events) = api("jobs.events", serde_json::json!({ "jobId": tracked.id })).await {
-        tracked.events = events.as_array().cloned().unwrap_or_default();
+        let rows = events.as_array()
+            .or_else(|| events.get("events").and_then(Value::as_array))
+            .or_else(|| events.get("items").and_then(Value::as_array));
+        if let Some(rows) = rows {
+            tracked.events = rows.clone();
+        }
     }
     space_api_calls().await;
 
