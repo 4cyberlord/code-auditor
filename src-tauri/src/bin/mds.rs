@@ -1136,10 +1136,26 @@ fn is_usable_cloud_report(report: &Value, expected_id: &str) -> bool {
         .and_then(Value::as_str);
     if report_id.is_some_and(|id| id != expected_id) { return false; }
     let body = report.get("report").unwrap_or(report);
-    body.get("kind").and_then(Value::as_str) == Some("mcq")
-        && body.pointer("/answer").is_some()
-        || body.get("candidates").and_then(Value::as_array).is_some()
-        || body.get("presentation").and_then(Value::as_object).is_some()
+    if body.get("kind").and_then(Value::as_str) == Some("mcq") {
+        return body.pointer("/answer/label").and_then(Value::as_str)
+            .is_some_and(|label| !label.trim().is_empty())
+            || body.pointer("/answer/text").and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty());
+    }
+    let candidates_have_result = body.get("candidates")
+        .and_then(Value::as_array)
+        .is_some_and(|candidates| candidates.iter().any(|candidate| {
+            candidate.pointer("/final/code").and_then(Value::as_str)
+                .is_some_and(|code| !code.trim().is_empty())
+                || candidate.get("text").and_then(Value::as_str)
+                    .is_some_and(|text| !text.trim().is_empty())
+        }));
+    let presentation_has_result = body.pointer("/presentation/code")
+        .and_then(Value::as_str)
+        .is_some_and(|code| !code.trim().is_empty());
+    candidates_have_result || presentation_has_result
+        || body.get("synthesis").and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
 }
 
 async fn refresh_job() -> Result<(), String> {
@@ -2103,7 +2119,11 @@ mod tests {
         assert!(!is_usable_cloud_report(&serde_json::json!({}), "job-1"));
         assert!(!is_usable_cloud_report(&serde_json::json!({"job_id":"other","report":{"kind":"mcq","answer":{"label":"C"}}}), "job-1"));
         assert!(is_usable_cloud_report(&serde_json::json!({"job_id":"job-1","report":{"kind":"mcq","answer":{"label":"C"}}}), "job-1"));
-        assert!(is_usable_cloud_report(&serde_json::json!({"report":{"candidates":[]}}), "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"report":{"candidates":[]}}), "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"report":{"presentation":{}}}), "job-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"report":{"kind":"mcq","answer":{}}}), "job-1"));
+        assert!(is_usable_cloud_report(&serde_json::json!({"report":{"presentation":{"code":"return 42"}}}), "job-1"));
+        assert!(is_usable_cloud_report(&serde_json::json!({"report":{"candidates":[{"final":{"code":"print(42)"}}]}}), "job-1"));
     }
 
     #[test]
