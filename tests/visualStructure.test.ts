@@ -1,0 +1,10 @@
+import { strict as assert } from "node:assert";
+import { extractVisualFacts, compareVisualFacts } from "../src/lib/visualStructure.ts";
+const a=["RELATION: A -> B","SYMBOL: x ≤ 3","TABLE: row 1 col 2 = 8","AXIS: x seconds"];
+const b=["symbol: x ≤ 3","axis: x seconds","relation: a -> b","table: row 1 col 2 = 8"];
+assert.equal(compareVisualFacts([a,b]).length,0);
+assert.equal(extractVisualFacts(a).length,4);
+assert.ok(compareVisualFacts([a,["RELATION: A -> C","SYMBOL: x ≥ 3"]]).some(x=>x.includes("symbol")));
+assert.ok(compareVisualFacts([a,["RELATION: A -> C"]]).some(x=>x.includes("relation")));
+assert.ok(compareVisualFacts([a,["RELATION: A -> B","TABLE: row 1 col 2 = 9"]]).some(x=>x.includes("table")));
+console.log("PASS: structural fact comparison");

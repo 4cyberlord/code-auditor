@@ -1,0 +1,11 @@
+import type { PropertyFixture } from "../src/lib/propertyAssessment.ts";
+import { strict as assert } from "node:assert";
+import { REVIEWED_PROPERTY_CASES, reviewedFixturesFor } from "../src/lib/trustedPropertyFixtures.ts";
+import { assessPropertyFixtures } from "../src/lib/propertyAssessment.ts";
+assert.equal(REVIEWED_PROPERTY_CASES.length,0);
+assert.deepEqual(reviewedFixturesFor("random unseen problem"),[]);
+const reviewed: PropertyFixture[]=[{id:"order",rule:{kind:"topological_order" as const,nodes:["a","b"],edges:[["a","b"]] as readonly (readonly [string,string])[]}}];
+assert.equal(assessPropertyFixtures('["a","b"]',reviewed).passed,1);
+assert.equal(assessPropertyFixtures('["b","a"]',reviewed).failed,1);
+assert.equal(assessPropertyFixtures("not json",reviewed).failed,1);
+console.log("PASS: trusted fixture gate fails closed");

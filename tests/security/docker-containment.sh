@@ -22,7 +22,7 @@ args=(
   --user 1000:1000
   --mount "type=bind,source=$ROOT/workspace,target=/workspace"
   --workdir /workspace
-  public.ecr.aws/docker/library/alpine:3.20 /bin/sh -ec
+  "${CONTAINMENT_IMAGE:-public.ecr.aws/docker/library/alpine:3.20}" /bin/sh -ec
 )
 echo "Checking denied network, read-only root, confined host mounts, writable project, and tmpfs"
 docker "${args[@]}" '
