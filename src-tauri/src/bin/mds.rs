@@ -1214,6 +1214,9 @@ async fn refresh_job() -> Result<(), String> {
     }
     space_api_calls().await;
 
+    // Only a terminal success is a final report. Intermediate report rows may
+    // be partial and must not become the permanently cached answer.
+    if tracked.status == "completed" {
     if let Ok(report) = api("reports.get", serde_json::json!({ "jobId": tracked.id })).await {
         if is_usable_cloud_report(&report, &tracked.id) {
             // Auto-routed MCQs are submitted as Council jobs. Promote their
@@ -1231,6 +1234,7 @@ async fn refresh_job() -> Result<(), String> {
                 tracked.progress_phase = "completed".to_string();
             }
         }
+    }
     }
     save_submitted_job(&tracked)
 }
