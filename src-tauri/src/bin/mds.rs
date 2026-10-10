@@ -820,7 +820,7 @@ fn start_batch() -> Result<(), String> {
         }
     }
     let id = format!("batch-{}", Uuid::new_v4());
-    clear_submitted_job()?;
+    // Keep the previous submitted job visible while collecting the next batch.
     let batch = PendingBatch {
         id: id.clone(),
         status: "collecting".to_string(),
@@ -949,6 +949,13 @@ fn capture_screen(mode: CaptureMode) -> Result<(), String> {
 }
 
 async fn submit_batch(active_view: &str) -> Result<(), String> {
+    // A second submission must not replace the tracked ID of a running job.
+    // Keep the new screenshots staged until the previous solve terminates.
+    if let Some(previous) = read_submitted_job()? {
+        if !matches!(previous.status.as_str(), "completed" | "failed" | "needs_attention" | "cancelled") {
+            return Err(format!("Cloud job {} is still {}. Screenshots retained for later submission.", previous.id, previous.status));
+        }
+    }
     let batch = read_pending()?.ok_or("No helper batch is waiting to submit.".to_string())?;
     if batch.images.is_empty() {
         return Err("The helper batch has no screenshots.".to_string());
