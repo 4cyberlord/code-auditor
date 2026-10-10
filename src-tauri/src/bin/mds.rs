@@ -482,7 +482,8 @@ fn run() -> Result<(), String> {
     let mut overlay_position = overlay_position(&event_loop);
     let (overlay, webview) = overlay_window(&event_loop, overlay_position)?;
     let mut active_view = "coding".to_string();
-    update_overlay(&webview, &active_view)?;
+    let mut overlay_refresh = OverlayRefresh::default();
+    update_overlay(&webview, &active_view, &mut overlay_refresh)?;
     let mut overlay_visible = false;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
@@ -522,7 +523,7 @@ fn run() -> Result<(), String> {
                     eprintln!("capture failed: {error}");
                     let _ = update_pending_error(&error);
                 }
-                let _ = update_overlay(&webview, &active_view);
+                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
             }
         }
 
@@ -541,7 +542,7 @@ fn run() -> Result<(), String> {
 
         if overlay_visible && last_overlay_refresh.elapsed() >= Duration::from_millis(500) {
             last_overlay_refresh = Instant::now();
-            let _ = update_overlay(&webview, &active_view);
+            let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
         }
 
         #[cfg(target_os = "macos")]
@@ -561,7 +562,7 @@ fn run() -> Result<(), String> {
                     ActivationPolicy::Prohibited
                 });
                 let _ = show_overlay(&overlay, overlay_visible);
-                let _ = update_overlay(&webview, &active_view);
+                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
             }
             if mac_shortcuts::take_switch_mcq()
                 && capture_task.as_ref().is_none_or(|task| task.is_finished())
@@ -578,7 +579,7 @@ fn run() -> Result<(), String> {
                     ActivationPolicy::Prohibited
                 });
                 let _ = show_overlay(&overlay, overlay_visible);
-                let _ = update_overlay(&webview, &active_view);
+                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
             }
             if mac_shortcuts::take_start_batch() {
                 if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -588,7 +589,7 @@ fn run() -> Result<(), String> {
                 } else if let Err(e) = start_batch() {
                     eprintln!("start batch failed: {e}");
                 }
-                let _ = update_overlay(&webview, &active_view);
+                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
             }
             let full_capture = mac_shortcuts::take_capture();
             let region_capture = mac_shortcuts::take_capture_region();
@@ -628,7 +629,7 @@ fn run() -> Result<(), String> {
                         }
                     }));
                 }
-                let _ = update_overlay(&webview, &active_view);
+                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
             }
             if overlay_visible && mac_shortcuts::take_move_left() {
                 overlay_position.x -= 80.0;
@@ -1331,7 +1332,78 @@ async fn refresh_job() -> Result<(), String> {
     save_submitted_job(&tracked)
 }
 
-fn update_overlay(webview: &WebView, active_view: &str) -> Result<(), String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreviewFileKey {
+    path: String,
+    // Missing files have no identity and are retried on the next refresh.
+    identity: Option<(u64, std::time::SystemTime)>,
+}
+
+fn preview_file_key(path: &str) -> PreviewFileKey {
+    PreviewFileKey {
+        path: path.to_string(),
+        identity: fs::metadata(path).ok()
+            .and_then(|metadata| metadata.modified().ok().map(|modified| (metadata.len(), modified))),
+    }
+}
+
+#[derive(Default)]
+struct OverlayRefresh {
+    pending_keys: Vec<PreviewFileKey>,
+    pending_sources: Vec<String>,
+    preview_origin: String,
+    submitted_sources: Vec<String>,
+    sent_state: Option<String>,
+    sent_previews: Option<String>,
+}
+
+impl OverlayRefresh {
+    fn pending_sources(&mut self, paths: &[String]) -> &[String] {
+        let keys: Vec<_> = paths.iter().map(|path| preview_file_key(path)).collect();
+        if keys != self.pending_keys || keys.iter().any(|key| key.identity.is_none())
+            || self.pending_sources.iter().any(|source| source.is_empty()) {
+            // Reuse unchanged captures, including when a screenshot is appended.
+            let sources = keys.iter().map(|key| {
+                if key.identity.is_some() {
+                    if let Some(index) = self.pending_keys.iter().position(|old| old == key) {
+                        if let Some(source) = self.pending_sources.get(index) {
+                            if !source.is_empty() { return source.clone(); }
+                        }
+                    }
+                }
+                fs::read(&key.path).map(|bytes| format!("data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes))).unwrap_or_default()
+            }).collect();
+            self.pending_keys = keys;
+            self.pending_sources = sources;
+        }
+        &self.pending_sources
+    }
+
+    fn state_key(state: &str) -> String {
+        // Projection timestamps describe refresh time, not a content change.
+        if let Ok(mut value) = serde_json::from_str::<Value>(state) {
+            if let Some(object) = value.as_object_mut() { object.remove("updatedAt"); }
+            return value.to_string();
+        }
+        state.to_string()
+    }
+
+    fn script(&self, state: &str, previews: Option<&str>) -> String {
+        let mut script = String::new();
+        if self.sent_state.as_deref() != Some(Self::state_key(state).as_str()) {
+            script.push_str(&format!("window.updateOverlayState({state});"));
+        }
+        if let Some(previews) = previews {
+            if self.sent_previews.as_deref() != Some(previews) {
+                script.push_str(&format!("window.updatePreviews({previews});"));
+            }
+        }
+        script
+    }
+}
+
+fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRefresh) -> Result<(), String> {
     let submitted = read_submitted_job()?;
     let running = submitted.as_ref().is_some_and(|job| {
         !matches!(job.status.as_str(), "completed" | "failed" | "needs_attention" | "cancelled")
@@ -1340,16 +1412,34 @@ fn update_overlay(webview: &WebView, active_view: &str) -> Result<(), String> {
     // screenshots too, not screenshots staged for the following job.
     let pending = read_pending()?;
     let pending_has_images = pending.as_ref().is_some_and(|batch| !batch.images.is_empty());
-    let sources: Vec<String> = if running || !pending_has_images {
-        submitted.as_ref().map(|job| job.previews.clone()).unwrap_or_default()
+    let payload = if running || !pending_has_images {
+        let sources = submitted.as_ref().map(|job| job.previews.as_slice()).unwrap_or_default();
+        if refresh.preview_origin != "submitted" || refresh.submitted_sources != sources {
+            refresh.preview_origin = "submitted".into();
+            refresh.submitted_sources = sources.to_vec();
+            Some(serde_json::to_string(sources).map_err(|e| e.to_string())?)
+        } else {
+            None
+        }
     } else {
-        pending.as_ref().map(|batch| batch.images.iter()
-            .filter_map(|image| fs::read(&image.local_path).ok())
-            .map(|bytes| format!("data:image/png;base64,{}",
-                base64::engine::general_purpose::STANDARD.encode(bytes)))
-            .collect()).unwrap_or_default()
+        let paths: Vec<_> = pending.as_ref().unwrap().images.iter()
+            .map(|image| image.local_path.clone()).collect();
+        let previous_keys = refresh.pending_keys.clone();
+        let retrying_preview = refresh.pending_sources.iter().any(|source| source.is_empty());
+        let origin_changed = refresh.preview_origin != "pending";
+        refresh.pending_sources(&paths);
+        refresh.preview_origin = "pending".into();
+        if origin_changed || retrying_preview || previous_keys != refresh.pending_keys
+            || refresh.pending_keys.iter().any(|key| key.identity.is_none())
+            || refresh.pending_sources.iter().any(|source| source.is_empty())
+        {
+            let sources: Vec<_> = refresh.pending_sources.iter()
+                .filter(|source| !source.is_empty()).collect();
+            Some(serde_json::to_string(&sources).map_err(|e| e.to_string())?)
+        } else {
+            None
+        }
     };
-    let payload = serde_json::to_string(&sources).map_err(|e| e.to_string())?;
     // Keep the displayed state paired with the displayed screenshots.
     // A completed job remains available in the job cache while a subsequent
     // batch is being collected. Show pending state with pending thumbnails.
@@ -1372,11 +1462,16 @@ fn update_overlay(webview: &WebView, active_view: &str) -> Result<(), String> {
     } else {
         read_overlay_state(active_view)
     };
-    webview
-        .evaluate_script(&format!(
-            "window.updateOverlayState({state});window.updatePreviews({payload});"
-        ))
-        .map_err(|e| format!("Could not update ghost overlay: {e}"))
+    let script = refresh.script(&state, payload.as_deref());
+    if script.is_empty() { return Ok(()); }
+    if let Err(error) = webview.evaluate_script(&script) {
+        refresh.preview_origin.clear();
+        return Err(format!("Could not update ghost overlay: {error}"));
+    }
+    // Commit only after dispatch succeeds, so a failed update is retried.
+    refresh.sent_state = Some(OverlayRefresh::state_key(&state));
+    if let Some(payload) = payload { refresh.sent_previews = Some(payload); }
+    Ok(())
 }
 
 fn read_overlay_state(active_view: &str) -> String {
@@ -2112,8 +2207,8 @@ fn overlay_html() -> &'static str {
 		            function functionExample(name){const examples={sum:'sum([18, 9]) -> 27',set:'set([18, 9, 18]) -> {18, 9}',max:'max([18, 9]) -> 18',min:'min([18, 9]) -> 9',len:'len([18, 9]) -> 2',range:'range(0, 5) -> 0..4',enumerate:'enumerate(items) -> index + value',append:'outliers.append(18) -> adds 18',sort:'values.sort() -> in-place order',sorted:'sorted(values) -> ordered copy',print:'print(result) -> console output',useState:'useState(false) -> state + setter',useEffect:'useEffect(fn, []) -> run side effect',fetch:'fetch(url) -> request data',map:'items.map(fn) -> transformed items',filter:'items.filter(fn) -> matching items',reduce:'items.reduce(fn, seed) -> one value'};return examples[name]||name+'(exampleInput) -> expected output';}
 		            function renderSmartTests(target,count,code,stateTests){target.innerHTML='';const cases=Array.isArray(stateTests)?stateTests:[];count.textContent=cases.length?cases.length+' evidence row'+(cases.length===1?'':'s'):'no execution evidence';if(!cases.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No verified execution evidence available yet.';target.appendChild(empty);return;}cases.slice(0,8).forEach((item)=>{const card=document.createElement('div');card.className='case';const name=document.createElement('b');name.textContent=item.name||'Execution result';const detail=document.createElement('code');detail.textContent=[item.status,item.expected!==undefined?'expected: '+String(item.expected):'',item.actual!==undefined?'actual: '+String(item.actual):'',item.input!==undefined?'input: '+String(item.input):''].filter(Boolean).join(' · ');card.appendChild(name);card.appendChild(detail);target.appendChild(card);});}
             function renderCouncilInsights(presentation){const p=presentation||{};const root=document.querySelector('.thought-list');if(!root)return;const items=root.querySelectorAll('.thought-item');const set=(index,value)=>{const el=items[index]&&items[index].querySelector('.thought-space');if(el)el.textContent=value||'Not reported by Council.';};set(0,p.approach);set(2,p.dataStructures);const complexity=String(p.complexity||'');const timeMatch=complexity.match(/(?:time|runtime)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);const spaceMatch=complexity.match(/(?:space|memory)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);set(3,p.timeComplexity||(timeMatch&&timeMatch[1])||complexity);set(4,p.spaceComplexity||(spaceMatch&&spaceMatch[1]));set(5,Array.isArray(p.dissent)?p.dissent.join('\n'):p.dissent);set(6,Array.isArray(p.evidence)?p.evidence.map(e=>[e.letter,e.gate,e.passed!==undefined?'passed: '+e.passed:'',e.failed!==undefined?'failed: '+e.failed:'',Number.isFinite(e.elapsedMs)?'elapsed: '+e.elapsedMs+' ms':'',Number.isFinite(e.peakMemoryKb)?'peak memory: '+e.peakMemoryKb+' KB':'',e.runtime||''].filter(Boolean).join(' · ')).join('\n'):'');set(7,Array.isArray(p.rejected)?p.rejected.join('\n'):p.rejected);}
-                        window.updatePreviews=function(images){window.__lastPreviews=images||[];const pictures=document.getElementById('pictures');if(!pictures)return;pictures.innerHTML='';if(!images.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Captured images will appear here';pictures.appendChild(empty);return;}images.forEach((src,i)=>{const pill=document.createElement('div');pill.className='picture-pill';const img=document.createElement('img');img.src=src;img.alt='Capture '+(i+1);const count=document.createElement('span');count.className='picture-count';count.textContent=(i+1)+'/10';pill.appendChild(img);pill.appendChild(count);pictures.appendChild(pill);});};
-                function renderMcq(state){const left=document.querySelector('.pictures-pane');const right=document.querySelector('.thought-pane');const m=state.mcq||{};const picked=(m.answer&&m.answer.label)||'';const found=Array.isArray(m.options)?m.options:[];const position=found.findIndex((o)=>o.label===picked);const ordinal=(n)=>n%100>=11&&n%100<=13?'th':n%10===1?'st':n%10===2?'nd':n%10===3?'rd':'th';const formatted=m.answerVerified===true&&position>=0?'✅ '+picked+' ('+(position+1)+ordinal(position+1)+' Option) - '+String((m.answer&&m.answer.text)||found[position].text||''):'';const displayAnswer=formatted||String(m.displayAnswer||'');const selectedModel=(m.model&&String(m.model).trim())?String(m.model).trim():'none';const hasModel=selectedModel.toLowerCase()!=='none';left.innerHTML='<div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title-row"><div class="title">Question</div><div class="mcq-model-pill" data-enabled="'+(hasModel?'true':'false')+'">'+esc(hasModel?selectedModel:'No Model')+'</div></div><div class="mcq-box mcq-question"></div><div class="title">Answer</div><div class="mcq-box mcq-answer"></div>';right.innerHTML='<div class="title">Question history</div><div class="mcq-history"></div>';document.querySelector('.mcq-question').textContent=m.question||state.progress||'Reading the captured question...';document.querySelector('.mcq-answer').innerHTML='<b>'+esc(displayAnswer||(picked||'Answer'))+'</b>'+(displayAnswer?'':(m.answer&&m.answer.text?' — '+esc(m.answer.text):''))+'<br><br>'+esc(m.reason||state.error||state.progress||'Waiting for the MCQ worker result...');const hist=document.querySelector('.mcq-history');const add=(title,body,level,meta)=>{const row=document.createElement('div');row.className='mcq-history-row';row.dataset.level=level||'info';const h=document.createElement('b');h.textContent=title;const p=document.createElement('div');p.textContent=body||'';row.appendChild(h);row.appendChild(p);if(meta&&meta.length){const mrow=document.createElement('div');mrow.className='mcq-history-meta';meta.forEach((x)=>{const s=document.createElement('span');s.textContent=x;mrow.appendChild(s);});row.appendChild(mrow);}hist.appendChild(row);};add('AI selected',selectedModel,'info',[state.status||'',state.phase||''].filter(Boolean));add('Captured question',m.question||'Waiting for the screenshot reading.',state.error?'error':'info',[state.status||'',state.phase||''].filter(Boolean));if(m.options&&m.options.length){add('Choices found',(m.options||[]).map((o)=>(o.label?o.label+'. ':'')+(o.text||'')).join('\\n'),'info',[]);}if(m.knowledgeUsed!==undefined){add('Local knowledge check',m.knowledgeUsed?'A local knowledge match or guidance was included before the model answer.':'The local knowledge pack was checked before the model answer, but no direct match was used.','info',[selectedModel]);}if(picked||m.reason){add('Selected answer',(picked?picked+': ':'')+(m.answer&&m.answer.text?m.answer.text:'')+'\\n'+(m.reason||''),'info',[selectedModel]);}(m.whyNot||[]).forEach((x)=>add('Rejected choice '+(x.label||''),x.reason||'Not selected.','info',[]));(state.history||[]).forEach((e)=>add(e.phase||'worker event',e.message||'',e.level||'info',[e.createdAt||''].filter(Boolean)));if(!hist.children.length)add('Waiting','The helper is waiting for the worker history.','info',[]);window.updatePreviews(window.__lastPreviews||[]);}
+                        window.updatePreviews=function(images){window.__lastPreviews=images||[];const pictures=document.getElementById('pictures');if(!pictures)return;if(pictures.__sources&&pictures.__sources.length===images.length&&images.every((src,i)=>src===pictures.__sources[i]))return;pictures.__sources=images.slice();pictures.innerHTML='';if(!images.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Captured images will appear here';pictures.appendChild(empty);return;}images.forEach((src,i)=>{const pill=document.createElement('div');pill.className='picture-pill';const img=document.createElement('img');img.src=src;img.alt='Capture '+(i+1);const count=document.createElement('span');count.className='picture-count';count.textContent=(i+1)+'/10';pill.appendChild(img);pill.appendChild(count);pictures.appendChild(pill);});};
+                function renderMcq(state){const savedPictures=document.getElementById('pictures');const left=document.querySelector('.pictures-pane');const right=document.querySelector('.thought-pane');const m=state.mcq||{};const picked=(m.answer&&m.answer.label)||'';const found=Array.isArray(m.options)?m.options:[];const position=found.findIndex((o)=>o.label===picked);const ordinal=(n)=>n%100>=11&&n%100<=13?'th':n%10===1?'st':n%10===2?'nd':n%10===3?'rd':'th';const formatted=m.answerVerified===true&&position>=0?'✅ '+picked+' ('+(position+1)+ordinal(position+1)+' Option) - '+String((m.answer&&m.answer.text)||found[position].text||''):'';const displayAnswer=formatted||String(m.displayAnswer||'');const selectedModel=(m.model&&String(m.model).trim())?String(m.model).trim():'none';const hasModel=selectedModel.toLowerCase()!=='none';left.innerHTML='<div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title-row"><div class="title">Question</div><div class="mcq-model-pill" data-enabled="'+(hasModel?'true':'false')+'">'+esc(hasModel?selectedModel:'No Model')+'</div></div><div class="mcq-box mcq-question"></div><div class="title">Answer</div><div class="mcq-box mcq-answer"></div>';if(savedPictures)document.getElementById('pictures').replaceWith(savedPictures);right.innerHTML='<div class="title">Question history</div><div class="mcq-history"></div>';document.querySelector('.mcq-question').textContent=m.question||state.progress||'Reading the captured question...';document.querySelector('.mcq-answer').innerHTML='<b>'+esc(displayAnswer||(picked||'Answer'))+'</b>'+(displayAnswer?'':(m.answer&&m.answer.text?' — '+esc(m.answer.text):''))+'<br><br>'+esc(m.reason||state.error||state.progress||'Waiting for the MCQ worker result...');const hist=document.querySelector('.mcq-history');const add=(title,body,level,meta)=>{const row=document.createElement('div');row.className='mcq-history-row';row.dataset.level=level||'info';const h=document.createElement('b');h.textContent=title;const p=document.createElement('div');p.textContent=body||'';row.appendChild(h);row.appendChild(p);if(meta&&meta.length){const mrow=document.createElement('div');mrow.className='mcq-history-meta';meta.forEach((x)=>{const s=document.createElement('span');s.textContent=x;mrow.appendChild(s);});row.appendChild(mrow);}hist.appendChild(row);};add('AI selected',selectedModel,'info',[state.status||'',state.phase||''].filter(Boolean));add('Captured question',m.question||'Waiting for the screenshot reading.',state.error?'error':'info',[state.status||'',state.phase||''].filter(Boolean));if(m.options&&m.options.length){add('Choices found',(m.options||[]).map((o)=>(o.label?o.label+'. ':'')+(o.text||'')).join('\\n'),'info',[]);}if(m.knowledgeUsed!==undefined){add('Local knowledge check',m.knowledgeUsed?'A local knowledge match or guidance was included before the model answer.':'The local knowledge pack was checked before the model answer, but no direct match was used.','info',[selectedModel]);}if(picked||m.reason){add('Selected answer',(picked?picked+': ':'')+(m.answer&&m.answer.text?m.answer.text:'')+'\\n'+(m.reason||''),'info',[selectedModel]);}(m.whyNot||[]).forEach((x)=>add('Rejected choice '+(x.label||''),x.reason||'Not selected.','info',[]));(state.history||[]).forEach((e)=>add(e.phase||'worker event',e.message||'',e.level||'info',[e.createdAt||''].filter(Boolean)));if(!hist.children.length)add('Waiting','The helper is waiting for the worker history.','info',[]);window.updatePreviews(window.__lastPreviews||[]);}
 			            function restoreCodingShell(){if(document.getElementById('agents'))return;document.getElementById('panel').innerHTML='<div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span id="solution-source">waiting</span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div>';window.updatePreviews(window.__lastPreviews||[]);}
 			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'reviewed':('candidate · '+(state.solution.source||''));renderCodeLines(code,state.solution.code,state.solution.language);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation);}};
     </script></body></html>"#
@@ -2122,6 +2217,44 @@ fn overlay_html() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_refresh_sends_only_changed_channels() {
+        let mut refresh = OverlayRefresh::default();
+        assert!(refresh.script("{}", Some("[]")).contains("updateOverlayState"));
+        refresh.sent_state = Some("{}".into());
+        refresh.sent_previews = Some("[]".into());
+        assert!(refresh.script("{}", None).is_empty());
+        assert!(refresh.script(r#"{"updatedAt":"new refresh"}"#, None).is_empty());
+        assert!(refresh.script("{}", Some("[]")).is_empty());
+        assert_eq!(refresh.script("{\"phase\":\"running\"}", None),
+            "window.updateOverlayState({\"phase\":\"running\"});");
+        assert_eq!(refresh.script("{}", Some("[\"new\"]")),
+            "window.updatePreviews([\"new\"]);");
+    }
+
+    #[test]
+    fn preview_cache_reuses_appended_and_invalidates_changed_files() {
+        let first = std::env::temp_dir().join(format!("preview-{}.png", Uuid::new_v4()));
+        let second = std::env::temp_dir().join(format!("preview-{}.png", Uuid::new_v4()));
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+        let paths = vec![first.to_string_lossy().into_owned(), second.to_string_lossy().into_owned()];
+        let mut refresh = OverlayRefresh::default();
+        let initial = refresh.pending_sources(&paths[..1])[0].clone();
+        assert_eq!(refresh.pending_sources(&paths)[0], initial);
+        let stable = refresh.pending_sources(&paths).to_vec();
+        assert_eq!(refresh.pending_sources(&paths), stable.as_slice());
+        fs::write(&first, b"replacement with different length").unwrap();
+        assert_ne!(refresh.pending_sources(&paths)[0], initial);
+        fs::remove_file(&second).unwrap();
+        assert!(refresh.pending_sources(&paths)[1].is_empty());
+        fs::write(&second, b"restored").unwrap();
+        assert!(!refresh.pending_sources(&paths)[1].is_empty());
+        let _ = fs::remove_file(first);
+        let _ = fs::remove_file(second);
+    }
+
 
     #[test]
     fn coding_overlay_maps_winner_code_from_report() {
