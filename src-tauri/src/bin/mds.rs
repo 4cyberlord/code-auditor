@@ -1100,7 +1100,7 @@ async fn refresh_job() -> Result<(), String> {
     if matches!(
         tracked.status.as_str(),
         "completed" | "failed" | "needs_attention" | "cancelled"
-    ) && tracked.report.is_some()
+    ) && (tracked.report.is_some() || tracked.status != "completed")
     {
         return Ok(());
     }
