@@ -1170,22 +1170,25 @@ async fn refresh_job() -> Result<(), String> {
 }
 
 fn update_overlay(webview: &WebView, active_view: &str) -> Result<(), String> {
-    let sources: Vec<String> = if let Some(batch) = read_pending()? {
-        batch
-            .images
-            .iter()
-            .filter_map(|image| fs::read(&image.local_path).ok())
-            .map(|bytes| {
-                format!(
-                    "data:image/png;base64,{}",
-                    base64::engine::general_purpose::STANDARD.encode(bytes)
-                )
-            })
-            .collect()
+    let submitted = read_submitted_job()?;
+    let running = submitted.as_ref().is_some_and(|job| {
+        !matches!(job.status.as_str(), "completed" | "failed" | "needs_attention" | "cancelled")
+    });
+    // The overlay is showing the running job's solution, so show its input
+    // screenshots too, not screenshots staged for the following job.
+    let pending = read_pending()?;
+    let sources: Vec<String> = if running {
+        submitted.as_ref().map(|job| job.previews.clone()).unwrap_or_default()
+    } else if let Some(batch) = pending {
+        if batch.images.is_empty() {
+            submitted.as_ref().map(|job| job.previews.clone()).unwrap_or_default()
+        } else {
+            batch.images.iter().filter_map(|image| fs::read(&image.local_path).ok())
+                .map(|bytes| format!("data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes))).collect()
+        }
     } else {
-        read_submitted_job()?
-            .map(|job| job.previews)
-            .unwrap_or_default()
+        submitted.map(|job| job.previews).unwrap_or_default()
     };
     let payload = serde_json::to_string(&sources).map_err(|e| e.to_string())?;
     let state = read_overlay_state(active_view);
