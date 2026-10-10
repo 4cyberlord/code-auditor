@@ -1157,6 +1157,8 @@ fn is_usable_cloud_report(report: &Value, expected_id: &str) -> bool {
     let presentation_has_result = body.pointer("/presentation/code")
         .and_then(Value::as_str)
         .is_some_and(|code| !code.trim().is_empty());
+    // A failed candidate's diagnostic text is not a solution; the council
+    // response must contain an answer, not just logs from an aborted run.
     candidates_have_result || presentation_has_result
         || body.get("synthesis").and_then(Value::as_str)
             .is_some_and(|text| !text.trim().is_empty())
@@ -1252,18 +1254,15 @@ fn update_overlay(webview: &WebView, active_view: &str) -> Result<(), String> {
     // The overlay is showing the running job's solution, so show its input
     // screenshots too, not screenshots staged for the following job.
     let pending = read_pending()?;
-    let sources: Vec<String> = if running {
+    let pending_has_images = pending.as_ref().is_some_and(|batch| !batch.images.is_empty());
+    let sources: Vec<String> = if running || !pending_has_images {
         submitted.as_ref().map(|job| job.previews.clone()).unwrap_or_default()
-    } else if let Some(batch) = pending.as_ref() {
-        if batch.images.is_empty() {
-            submitted.as_ref().map(|job| job.previews.clone()).unwrap_or_default()
-        } else {
-            batch.images.iter().filter_map(|image| fs::read(&image.local_path).ok())
-                .map(|bytes| format!("data:image/png;base64,{}",
-                    base64::engine::general_purpose::STANDARD.encode(bytes))).collect()
-        }
     } else {
-        submitted.map(|job| job.previews).unwrap_or_default()
+        pending.as_ref().map(|batch| batch.images.iter()
+            .filter_map(|image| fs::read(&image.local_path).ok())
+            .map(|bytes| format!("data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes)))
+            .collect()).unwrap_or_default()
     };
     let payload = serde_json::to_string(&sources).map_err(|e| e.to_string())?;
     // Keep the displayed state paired with the displayed screenshots.
@@ -1271,7 +1270,7 @@ fn update_overlay(webview: &WebView, active_view: &str) -> Result<(), String> {
     // batch is being collected. Show pending state with pending thumbnails.
     let state = if !running {
         if let Some(batch) = pending.as_ref() {
-            if !batch.images.is_empty() {
+            if pending_has_images {
                 let pending_state = if active_view == "mcq" {
                     mcq_pending_state(&batch)
                 } else {
