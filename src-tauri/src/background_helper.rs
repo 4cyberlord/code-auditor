@@ -614,10 +614,25 @@ pub(crate) fn forward_capture(mode: &str) -> bool {
     let id = uuid::Uuid::new_v4().to_string();
     let temp = dir.join(format!(".{id}.tmp"));
     let target = dir.join(format!("{id}.json"));
+    let ack = dir.join(format!("{id}.ack"));
     if std::fs::write(&temp, serde_json::json!({"pid":pid,"mode":mode}).to_string()).is_err() { return false; }
-    if std::fs::rename(&temp,&target).is_err() {
-       let _ = std::fs::remove_file(&temp);
-       return false;
+    if std::fs::rename(&temp, &target).is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return false;
     }
+    for _ in 0..20 {
+        if ack.exists() {
+            let _ = std::fs::remove_file(&ack);
+            return true;
+        }
+        if capture_owner_pid() != Some(pid) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    // Fallback is safe only when the still-unclaimed inbox file was removed.
+    if std::fs::remove_file(&target).is_ok() {
+        let _ = std::fs::remove_file(&ack);
+        return false;
+    }
+    let _ = std::fs::remove_file(&ack);
     true
 }

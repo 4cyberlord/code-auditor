@@ -459,10 +459,13 @@ fn drain_capture_commands() {
     let Ok(entries) = fs::read_dir(dir) else { return; };
     for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
         if path.extension().and_then(|v| v.to_str()) != Some("json") { continue; }
-        let raw = fs::read_to_string(&path).unwrap_or_default();
-        let _ = fs::remove_file(&path);
+        let claimed = path.with_extension("processing");
+        if fs::rename(&path, &claimed).is_err() { continue; }
+        let raw = fs::read_to_string(&claimed).unwrap_or_default();
+        let _ = fs::remove_file(&claimed);
         let Ok(command) = serde_json::from_str::<Value>(&raw) else { continue; };
         if command["pid"].as_u64() != Some(std::process::id() as u64) { continue; }
+        let _ = write_private(&path.with_extension("ack"), b"accepted");
         use std::sync::atomic::Ordering;
         match command["mode"].as_str().unwrap_or_default() {
             "region" => mac_shortcuts::CAPTURE_REGION.store(true, Ordering::SeqCst),
