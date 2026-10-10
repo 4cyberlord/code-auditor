@@ -960,6 +960,15 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
     if batch.images.is_empty() {
         return Err("The helper batch has no screenshots.".to_string());
     }
+    // Do not upload a batch with missing or empty local files. Validate every
+    // entry before creating a remote session or uploading partial screenshots.
+    for image in &batch.images {
+        let metadata = fs::metadata(&image.local_path)
+            .map_err(|e| format!("Screenshot {} is unavailable: {e}", image.file_name))?;
+        if !metadata.is_file() || metadata.len() == 0 {
+            return Err(format!("Screenshot {} is missing or empty; batch retained.", image.file_name));
+        }
+    }
     let user_settings = api("settings.load", serde_json::json!({ "key": SETTINGS_KEY }))
         .await
         .unwrap_or_else(|e| {
