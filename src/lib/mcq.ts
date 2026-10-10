@@ -75,6 +75,7 @@ export function resolveMcqSelection(answer: McqAnswer, detected: McqDetection): 
   const norm=(x:string)=>x.trim().replace(/\s+/g," ").toLowerCase();
   const text=answer.answer.text.trim();
   const textMatch=text&&norm(text)!==norm(label)?detected.options.filter(x=>norm(x.text)===norm(text)):[];
+  if(text&&norm(text)!==norm(label)&&textMatch.length!==1)return null;
   if(match&&textMatch.length&&match.label!==textMatch[0].label)return null;
   const chosen=match??(textMatch.length===1?textMatch[0]:null);
   return chosen?{...answer,question:detected.question,options:detected.options,answer:chosen}:null;

@@ -59,5 +59,12 @@ console.log("\n2. MCQ answer parsing and normalization");
  check("coding steps not MCQ",!falsePositive.isMcq);
 }
 
+{
+  const detected=detectMcq("Q4. Choose the right answer?\\nA. Red\\nB. Blue\\nC. Green");
+  const wrong=parseMcqAnswer('{"answer":{"label":"B","text":"an invented blue option"}}')!;
+  check("reject label paired with invented option text",resolveMcqSelection(wrong,detected)===null);
+  const labelOnly=parseMcqAnswer('{"answer":{"label":"B","text":"B"}}')!;
+  check("permit label-only answer matching real option",resolveMcqSelection(labelOnly,detected)?.answer.text==="Blue");
+}
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall MCQ checks passed\n");
 process.exit(fail ? 1 : 0);

@@ -1633,7 +1633,7 @@ async function saveMcqReport(job, answer, reading, raw = "") {
   const markdown = [
     `# MCQ Answer`,
     "",
-    `**Answer:** ${answer.answer?.label || ""}${answer.answer?.text ? ` — ${answer.answer.text}` : ""}`,
+    `**Answer:** ${answer.options?.length ? formatMcqSelection(answer) : `${answer.answer?.label || ""} — ${answer.answer?.text || ""}`}`,
     "",
     answer.reason || "",
     "",
@@ -1643,6 +1643,7 @@ async function saveMcqReport(job, answer, reading, raw = "") {
   const report = {
     kind: "mcq",
     ...answer,
+    displayAnswer: answer.options?.length ? formatMcqSelection(answer) : null,
     reading: {
       readers: reading?.readers || [],
       agree: reading?.agreement?.agree ?? null,
