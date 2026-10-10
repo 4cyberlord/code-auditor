@@ -139,6 +139,8 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_C: u32 = 0x06;
     const HID_USAGE_KEYBOARD_M: u32 = 0x10;
     const HID_USAGE_KEYBOARD_P: u32 = 0x13;
+    const HID_USAGE_KEYBOARD_R: u32 = 0x15;
+    const HID_USAGE_KEYBOARD_S: u32 = 0x16;
     const HID_USAGE_KEYBOARD_RETURN: u32 = 0x28;
     const HID_USAGE_KEYBOARD_RIGHT_ARROW: u32 = 0x4F;
     const HID_USAGE_KEYBOARD_LEFT_ARROW: u32 = 0x50;
@@ -153,6 +155,7 @@ mod mac_shortcuts {
 
     pub static START_BATCH: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE: AtomicBool = AtomicBool::new(false);
+    pub static CAPTURE_REGION: AtomicBool = AtomicBool::new(false);
     pub static SUBMIT: AtomicBool = AtomicBool::new(false);
     pub static TOGGLE_OVERLAY: AtomicBool = AtomicBool::new(false);
     pub static SWITCH_MCQ: AtomicBool = AtomicBool::new(false);
@@ -254,6 +257,8 @@ mod mac_shortcuts {
             | HID_USAGE_KEYBOARD_C
             | HID_USAGE_KEYBOARD_M
             | HID_USAGE_KEYBOARD_P
+            | HID_USAGE_KEYBOARD_R
+            | HID_USAGE_KEYBOARD_S
             | HID_USAGE_KEYBOARD_RETURN
                 if pressed
                     && CONTROL_DOWN.load(Ordering::SeqCst)
@@ -263,7 +268,8 @@ mod mac_shortcuts {
                     HID_USAGE_KEYBOARD_B => START_BATCH.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_C => TOGGLE_OVERLAY.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_M => SWITCH_MCQ.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_P => CAPTURE.store(true, Ordering::SeqCst),
+                    HID_USAGE_KEYBOARD_P | HID_USAGE_KEYBOARD_S => CAPTURE.store(true, Ordering::SeqCst),
+                    HID_USAGE_KEYBOARD_R => CAPTURE_REGION.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_RETURN => SUBMIT.store(true, Ordering::SeqCst),
                     _ => {}
                 }
@@ -295,6 +301,9 @@ mod mac_shortcuts {
     }
     pub fn take_capture() -> bool {
         CAPTURE.swap(false, Ordering::SeqCst)
+    }
+    pub fn take_capture_region() -> bool {
+        CAPTURE_REGION.swap(false, Ordering::SeqCst)
     }
     pub fn take_submit() -> bool {
         SUBMIT.swap(false, Ordering::SeqCst)
@@ -512,14 +521,16 @@ fn run() -> Result<(), String> {
                 }
                 let _ = update_overlay(&webview, &active_view);
             }
-            if mac_shortcuts::take_capture() {
+            let full_capture = mac_shortcuts::take_capture();
+            let region_capture = mac_shortcuts::take_capture_region();
+            if full_capture || region_capture {
                 let restore = overlay_visible;
                 if overlay_visible {
                     overlay_visible = false;
                     let _ = show_overlay(&overlay, false);
                 }
                 event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
-                let result = capture_screen();
+                let result = capture_screen(region_capture && !full_capture);
                 overlay_visible = restore;
                 event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
                     ActivationPolicy::Accessory
@@ -791,7 +802,7 @@ fn start_batch() -> Result<(), String> {
     Ok(())
 }
 
-fn capture_screen() -> Result<(), String> {
+fn capture_screen(interactive: bool) -> Result<(), String> {
     // A screenshot shortcut must work even when the main app is closed and the
     // user has not explicitly started a batch. Reuse a pending batch for
     // successive screenshots instead of silently replacing earlier captures.
@@ -815,11 +826,15 @@ fn capture_screen() -> Result<(), String> {
     );
     let path = dir.join(&file_name);
 
-    let out = Command::new("/usr/sbin/screencapture")
-        .arg("-x")
-        .arg(&path)
-        .output()
+    let mut command = Command::new("/usr/sbin/screencapture");
+    command.arg("-x");
+    if interactive { command.arg("-i"); }
+    let out = command.arg(&path).output()
         .map_err(|e| format!("Screen capture could not be started: {e}"))?;
+    if interactive && !path.exists() {
+        // Escape cancels region selection without corrupting the pending batch.
+        return Ok(());
+    }
     if !out.status.success() {
         let _ = fs::remove_file(&path);
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
