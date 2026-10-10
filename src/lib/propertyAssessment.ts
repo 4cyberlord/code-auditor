@@ -1,10 +1,10 @@
-import { validateProperty, type PropertyRule } from "./propertyVerification.ts";
+import { validateProperty } from "./propertyVerification.ts";
 
 /** Trusted fixtures are configured independently of council-produced answers. */
 export interface PropertyFixture {
   id: string;
   /** A reviewed rule containing independently established constraints. */
-  rule: PropertyRule;
+  rule: { kind: "unique" } | { kind: "permutation"; expected: readonly (string | number)[] } |\n    { kind: "topological_order"; nodes: readonly string[]; edges: readonly (readonly [string, string])[] };
   /** Candidate output must parse as JSON (not arbitrary prose or code). */
   outputPath?: string;
 }
