@@ -981,10 +981,13 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
         .ok_or("The server did not say who the helper is.")?
         .to_string();
 
-    let mode = if active_view == "mcq" {
-        "mcq".to_string()
-    } else {
-        job_mode_for_settings(&user_settings)
+    // The pane being viewed is not the classification of the screenshots.
+    // Keep auto mode in the cloud Council pipeline so its vision reading can
+    // distinguish a coding problem from MCQ before choosing a solver.
+    let mode = match user_settings.get("overlayMode").and_then(Value::as_str) {
+        Some("mcq") => "mcq".to_string(),
+        Some("coding") | Some("auto") => "council".to_string(),
+        _ => if active_view == "mcq" { "mcq".to_string() } else { "council".to_string() },
     };
     let mcq_model = if mode == "mcq" {
         user_settings
@@ -1097,6 +1100,9 @@ async fn refresh_job() -> Result<(), String> {
     let Some(mut tracked) = read_submitted_job()? else {
         return Ok(());
     };
+    if tracked.id.trim().is_empty() {
+        return Err("Submitted background job has no cloud ID.".into());
+    }
     if matches!(
         tracked.status.as_str(),
         "completed" | "failed" | "needs_attention" | "cancelled"
