@@ -1301,8 +1301,16 @@ async fn refresh_job() -> Result<(), String> {
     // Poll two older unfinished jobs per tick. Preserve their reports separately.
     let dir = cache_dir()?.join("job-history");
     if let Ok(entries) = fs::read_dir(dir) {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+        static NEXT_ARCHIVED: AtomicUsize = AtomicUsize::new(0);
+        let mut paths: Vec<_> = entries.filter_map(Result::ok).map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|v| v.to_str()) == Some("json")).collect();
+        paths.sort();
+        let total = paths.len();
+        let start = if total == 0 { 0 } else { NEXT_ARCHIVED.fetch_add(2, AtomicOrdering::Relaxed) % total };
         let mut count = 0;
-        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+        for index in 0..total {
+            let path = &paths[(start + index) % total];
             if count >= 2 { break; }
             if path.extension().and_then(|v| v.to_str()) != Some("json") { continue; }
             let Ok(raw) = fs::read_to_string(&path) else { continue; };
@@ -1452,8 +1460,12 @@ impl OverlayRefresh {
                         }
                     }
                 }
-                fs::read(&key.path).map(|bytes| format!("data:image/png;base64,{}",
-                    base64::engine::general_purpose::STANDARD.encode(bytes))).unwrap_or_default()
+                fs::metadata(&key.path).ok()
+                    .filter(|m| m.is_file() && m.len() <= 15 * 1024 * 1024)
+                    .and_then(|_| fs::read(&key.path).ok())
+                    .map(|bytes| format!("data:image/png;base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(bytes)))
+                    .unwrap_or_default()
             }).collect();
             self.pending_keys = keys;
             self.pending_sources = sources;
@@ -1534,15 +1546,15 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
                     coding_pending_state(&batch)
                 };
                 serde_json::to_string(&pending_state)
-                    .unwrap_or_else(|_| read_overlay_state(active_view))
+                    .unwrap_or_else(|_| read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref()))
             } else {
-                read_overlay_state(active_view)
+                read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
             }
         } else {
-            read_overlay_state(active_view)
+            read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
         }
     } else {
-        read_overlay_state(active_view)
+        read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
     };
     let script = refresh.script(&state, payload.as_deref());
     if script.is_empty() { return Ok(()); }
@@ -1557,10 +1569,16 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
 }
 
 fn read_overlay_state(active_view: &str) -> String {
+    let submitted = read_submitted_job().ok().flatten();
+    let pending = read_pending().ok().flatten();
+    read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
+}
+
+fn read_overlay_state_snapshot(active_view: &str, submitted: Option<&SubmittedJob>, pending: Option<&PendingBatch>) -> String {
     let fallback =
         r#"{"runId":null,"updatedAt":"","phase":"idle","agents":[],"solution":null,"tests":[]}"#;
 
-    if let Ok(Some(job)) = read_submitted_job() {
+    if let Some(job) = submitted {
         let is_mcq = job.mode == "mcq" || mcq_from_submitted(&job).is_some();
         if active_view == "mcq" && is_mcq {
             return serde_json::to_string(&submitted_overlay_state(&job))
@@ -1581,7 +1599,7 @@ fn read_overlay_state(active_view: &str) -> String {
     }
 
     if active_view == "mcq" {
-        if let Ok(Some(batch)) = read_pending() {
+        if let Some(batch) = pending {
             if batch.error.is_some() || !batch.images.is_empty() {
                 return serde_json::to_string(&mcq_pending_state(&batch))
                     .unwrap_or_else(|_| fallback.to_string());
@@ -1591,7 +1609,7 @@ fn read_overlay_state(active_view: &str) -> String {
             .unwrap_or_else(|_| fallback.to_string());
     }
 
-    if let Ok(Some(batch)) = read_pending() {
+    if let Some(batch) = pending {
         if batch.error.is_some() || !batch.images.is_empty() {
             return serde_json::to_string(&coding_pending_state(&batch))
                 .unwrap_or_else(|_| fallback.to_string());
@@ -2300,6 +2318,11 @@ fn overlay_html() -> &'static str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn snapshot_without_jobs_is_self_contained() {
+        let value = read_overlay_state_snapshot("mcq", None, None);
+        assert!(value.contains("mcq") || value.contains("question"));
+    }
     #[test]
     fn overlay_refresh_sends_only_changed_channels() {
         let mut refresh = OverlayRefresh::default();
