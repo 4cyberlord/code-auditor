@@ -519,6 +519,7 @@ fn run() -> Result<(), String> {
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
     let mut last_heartbeat = Instant::now();
+    let mut last_capture_cleanup = Instant::now() - Duration::from_secs(3600);
     #[cfg(target_os = "macos")]
     let helper_hotkeys_ready = mac_shortcuts::hotkeys_ready();
 
@@ -539,6 +540,12 @@ fn run() -> Result<(), String> {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
         #[cfg(target_os = "macos")]
         drain_capture_commands();
+        if last_capture_cleanup.elapsed() >= Duration::from_secs(3600) {
+            if let Err(error) = clean_expired_capture_dirs() {
+                log(&format!("Capture cleanup skipped: {error}"));
+            }
+            last_capture_cleanup = Instant::now();
+        }
         if last_heartbeat.elapsed() >= Duration::from_secs(4) {
             #[cfg(target_os = "macos")]
             write_helper_status(helper_hotkeys_ready, if helper_hotkeys_ready { None } else { Some("Input Monitoring permission unavailable") });
@@ -829,6 +836,42 @@ fn archive_job(job: &SubmittedJob) -> Result<(), String> {
 }
 fn last_good_settings_path() -> Result<PathBuf, String> {
     Ok(cache_dir()?.join("last-good-settings.json"))
+}
+
+fn clean_expired_capture_dirs() -> Result<(), String> {
+    let root = cache_dir()?.join("captures");
+    let Ok(entries) = fs::read_dir(&root) else { return Ok(()); };
+    let mut protected = std::collections::HashSet::new();
+    if let Some(pending) = read_pending()? { protected.insert(pending.id); }
+    let mut jobs = Vec::new();
+    if let Some(current) = read_submitted_job()? { jobs.push(current); }
+    if let Ok(history) = fs::read_dir(cache_dir()?.join("job-history")) {
+        for file in history.flatten() {
+            if let Ok(raw) = fs::read_to_string(file.path()) {
+                if let Ok(job) = serde_json::from_str::<SubmittedJob>(&raw) {
+                    jobs.push(job);
+                }
+            }
+        }
+    }
+    for job in jobs {
+        for preview in job.previews {
+            if let Ok(relative) = std::path::Path::new(&preview).strip_prefix(&root) {
+                if let Some(first) = relative.components().next() {
+                    protected.insert(first.as_os_str().to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || protected.contains(&entry.file_name().to_string_lossy().to_string()) { continue; }
+        let expired = entry.metadata().ok().and_then(|m| m.modified().ok())
+            .and_then(|date| std::time::SystemTime::now().duration_since(date).ok())
+            .is_some_and(|age| age >= Duration::from_secs(7 * 24 * 3600));
+        if expired { let _ = fs::remove_dir_all(path); }
+    }
+    Ok(())
 }
 
 fn captures_dir(batch_id: &str) -> Result<PathBuf, String> {
