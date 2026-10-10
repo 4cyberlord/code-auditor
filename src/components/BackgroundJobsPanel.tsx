@@ -148,8 +148,14 @@ export default function BackgroundJobsPanel() {
 
       // Durable submission journal. A lost jobs.create reply MUST NOT create a new job.
       const journalKey = "council-editor.pending-solve.v1";
-      const signature = JSON.stringify(workspaceImages.map((image) =>
-        [image.name, image.mime, image.base64, image.localPath ?? ""]));
+      // Content hashes avoid placing multi-megabyte base64 images in localStorage.
+      const signatures = await Promise.all(workspaceImages.map(async (image) => {
+        const bytes = new TextEncoder().encode(image.base64);
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        const hash = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+        return [image.name, image.mime, hash, image.localPath ?? ""];
+      }));
+      const signature = JSON.stringify(signatures);
       type JobImage = { position: number; storageBucket: string; storagePath: string;
         fileName: string; bytes: number; mime: string; width: number | null; height: number | null };
       type Journal = { submissionId: string; sessionId: string; signature: string;

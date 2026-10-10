@@ -309,6 +309,7 @@ mod mac_shortcuts {
         Ok(())
     }
 
+    pub fn hotkeys_ready() -> bool { MONITOR.lock().ok().and_then(|guard| *guard).is_some() }
     pub fn take_start_batch() -> bool {
         START_BATCH.swap(false, Ordering::SeqCst)
     }
@@ -518,6 +519,8 @@ fn run() -> Result<(), String> {
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
     let mut last_heartbeat = Instant::now();
+    #[cfg(target_os = "macos")]
+    let helper_hotkeys_ready = mac_shortcuts::hotkeys_ready();
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     // Keep blocking HTTP/upload work off the macOS event loop. Serialize
@@ -537,7 +540,8 @@ fn run() -> Result<(), String> {
         #[cfg(target_os = "macos")]
         drain_capture_commands();
         if last_heartbeat.elapsed() >= Duration::from_secs(4) {
-            write_helper_status(true, None);
+            #[cfg(target_os = "macos")]
+            write_helper_status(helper_hotkeys_ready, if helper_hotkeys_ready { None } else { Some("Input Monitoring permission unavailable") });
             last_heartbeat = Instant::now();
         }
 
@@ -1371,6 +1375,11 @@ async fn refresh_one_job(mut tracked: SubmittedJob) -> Result<SubmittedJob, Stri
     // Only a terminal success is a final report. Intermediate report rows may
     // be partial and must not become the permanently cached answer.
     if tracked.status == "completed" {
+    let retry_path = cache_dir()?.join(format!("report-retry-{}.json", tracked.id));
+    let retry: Value = fs::read_to_string(&retry_path).ok()
+       .and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or(Value::Null);
+    let current = chrono::Utc::now().timestamp_millis();
+    if current < retry["nextAt"].as_i64().unwrap_or(0) { return Ok(tracked); }
     if let Ok(report) = api("reports.get", serde_json::json!({ "jobId": tracked.id })).await {
         if is_usable_cloud_report(&report, &tracked.id) {
             // Auto-routed MCQs are submitted as Council jobs. Promote their
@@ -1383,11 +1392,22 @@ async fn refresh_one_job(mut tracked: SubmittedJob) -> Result<SubmittedJob, Stri
                 }
             }
             tracked.report = Some(report);
+            let _ = fs::remove_file(&retry_path);
             // A report may be partial or accompany a failed job. Trust the job status.
             if tracked.status == "completed" {
                 tracked.progress_phase = "completed".to_string();
             }
         }
+    }
+    if tracked.report.is_none() {
+        let attempts = retry["attempts"].as_u64().unwrap_or(0).saturating_add(1).min(20);
+        let delay = (5_u64.saturating_mul(1_u64 << attempts.min(6))).min(300);
+        let value = serde_json::json!({
+            "attempts": attempts, "nextAt": current + (delay as i64 * 1000)
+        });
+        write_private(&retry_path, serde_json::to_vec(&value).map_err(|e| e.to_string())?)
+           .map_err(|e| e.to_string())?;
+        tracked.progress_phase = "report_pending".into();
     }
     }
     Ok(tracked)
