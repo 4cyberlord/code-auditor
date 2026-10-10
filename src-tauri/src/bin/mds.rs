@@ -1145,7 +1145,13 @@ async fn refresh_job() -> Result<(), String> {
         return Ok(());
     }
 
-    let jobs = api("jobs.list", serde_json::json!({ "status": "all" })).await?;
+    // A completed job only needs its report; avoid a listing failure blocking
+    // retrieval of a finished solve.
+    let jobs = if tracked.status == "completed" {
+        Value::Null
+    } else {
+        api("jobs.list", serde_json::json!({ "status": "all" })).await?
+    };
     if let Some(job) = jobs.as_array().and_then(|items| {
         items
             .iter()
