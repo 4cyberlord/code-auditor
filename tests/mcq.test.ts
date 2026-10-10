@@ -48,5 +48,16 @@ console.log("\n2. MCQ answer parsing and normalization");
   check("reject conflicting option text",resolveMcqSelection({...original,answer:{label:"C",text:"Stack"}},detected)===null);
   check("reject fabricated option",resolveMcqSelection({...original,answer:{label:"H",text:"fake"}},detected)===null);
 }
+
+{
+ const wrapped=detectMcq("Q1. Which structure follows FIFO?\nA) Stack\nB) Tree\nC) Queue\n   stores items in arrival order\nD) Graph");
+ check("question numbering not an option",wrapped.isMcq&&wrapped.options.length===4&&wrapped.question.startsWith("Q1."));
+ check("wrapped option joined",wrapped.options[2]?.text==="Queue stores items in arrival order");
+ const numbered=detectMcq("Question 2: Which is correct?\n1) alpha\n2) beta\n3) gamma");
+ check("numbered question retained",numbered.isMcq&&numbered.question.startsWith("Question 2:"));
+ const falsePositive=detectMcq("Implement a queue with operations:\n1. enqueue\n2. dequeue\n3. peek");
+ check("coding steps not MCQ",!falsePositive.isMcq);
+}
+
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall MCQ checks passed\n");
 process.exit(fail ? 1 : 0);
