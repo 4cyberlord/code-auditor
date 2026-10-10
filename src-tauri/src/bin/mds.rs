@@ -955,6 +955,9 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
         if !matches!(previous.status.as_str(), "completed" | "failed" | "needs_attention" | "cancelled") {
             return Err(format!("Cloud job {} is still {}. Screenshots retained for later submission.", previous.id, previous.status));
         }
+        if previous.status == "completed" && previous.report.is_none() {
+            return Err(format!("Cloud job {} completed but its final report is not yet downloaded. Screenshots retained; retry once the report arrives.", previous.id));
+        }
     }
     let batch = read_pending()?.ok_or("No helper batch is waiting to submit.".to_string())?;
     if batch.images.is_empty() {
