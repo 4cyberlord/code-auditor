@@ -1001,7 +1001,8 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
     let mode = match user_settings.get("overlayMode").and_then(Value::as_str) {
         Some("mcq") => "mcq".to_string(),
         Some("coding") | Some("auto") => "council".to_string(),
-        _ => if active_view == "mcq" { "mcq".to_string() } else { "council".to_string() },
+        // Missing/unknown settings are Auto, not a forced solver selected by UI.
+        _ => "council".to_string(),
     };
     let mcq_model = if mode == "mcq" {
         user_settings
@@ -1179,7 +1180,7 @@ fn update_overlay(webview: &WebView, active_view: &str) -> Result<(), String> {
     let pending = read_pending()?;
     let sources: Vec<String> = if running {
         submitted.as_ref().map(|job| job.previews.clone()).unwrap_or_default()
-    } else if let Some(batch) = pending {
+    } else if let Some(batch) = pending.as_ref() {
         if batch.images.is_empty() {
             submitted.as_ref().map(|job| job.previews.clone()).unwrap_or_default()
         } else {
@@ -1195,7 +1196,7 @@ fn update_overlay(webview: &WebView, active_view: &str) -> Result<(), String> {
     // A completed job remains available in the job cache while a subsequent
     // batch is being collected. Show pending state with pending thumbnails.
     let state = if !running {
-        if let Ok(Some(batch)) = read_pending() {
+        if let Some(batch) = pending.as_ref() {
             if !batch.images.is_empty() {
                 let pending_state = if active_view == "mcq" {
                     mcq_pending_state(&batch)
