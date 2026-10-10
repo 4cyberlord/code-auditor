@@ -1544,7 +1544,11 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
     serde_json::json!({
         "runId": job.id,
         "updatedAt": now(),
-        "phase": if job.error.is_some() { "error" } else { "done" },
+        "phase": match job.status.as_str() {
+            "failed" | "needs_attention" | "cancelled" => "error",
+            "completed" => "done",
+            _ => "running",
+        },
         "agents": agents,
         "solution": solution,
         "tests": tests,
@@ -2056,6 +2060,29 @@ mod tests {
             .contains("return 42"));
         assert_eq!(state["agents"].as_array().map(|a| a.len()), Some(2));
         assert_eq!(state["tests"].as_array().map(|a| a.len()), Some(1));
+    }
+
+    #[test]
+    fn coding_overlay_with_early_report_stays_running() {
+        let job = SubmittedJob {
+            id: "early-report".into(), mode: "council".into(),
+            mcq_model: None, status: "running".into(),
+            progress_phase: "reviewing".into(), submitted_at: now(),
+            previews: vec![], error: None,
+            report: Some(serde_json::json!({
+                "report": {
+                    "winner": "A",
+                    "candidates": [{
+                        "letter": "A", "model": "model-a",
+                        "final": {"kind": "code", "language": "python", "code": "print(42)"}
+                    }]
+                }
+            })),
+            events: vec![],
+        };
+        let state = coding_overlay_state(&job);
+        assert_eq!(state["phase"], "running");
+        assert_eq!(state["solution"]["code"], "print(42)");
     }
 
     #[test]
