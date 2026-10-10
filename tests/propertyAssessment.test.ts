@@ -1,0 +1,11 @@
+import { strict as assert } from "node:assert";
+import { assessPropertyFixtures } from "../src/lib/propertyAssessment.ts";
+const top={id:"dag",rule:{kind:"topological_order" as const,nodes:["a","b","c"],edges:[["a","c"],["b","c"]] as [string,string][]}};
+const permutation={id:"multiset",rule:{kind:"permutation" as const,actual:[],expected:[1,2,2]}};
+assert.deepEqual(assessPropertyFixtures('["b","a","c"]',[top]).failed,0);
+assert.equal(assessPropertyFixtures('["c","a","b"]',[top]).failed,1);
+assert.equal(assessPropertyFixtures('[2,1,2]',[permutation]).passed,1);
+assert.equal(assessPropertyFixtures('[2,1]',[permutation]).failed,1);
+assert.equal(assessPropertyFixtures("garbled",[top]).failed,1);
+assert.equal(assessPropertyFixtures('{"answer":[1,2,2]}',[{...permutation,outputPath:"answer"}]).passed,1);
+console.log("PASS: independently configured property assessment");
