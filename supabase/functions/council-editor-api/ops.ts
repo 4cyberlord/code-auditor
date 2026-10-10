@@ -708,11 +708,13 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
       p_mode: mode,
       p_settings: args.settingsSnapshot ?? {},
       p_images: Array.isArray(args.images) ? args.images : [],
+      p_submission: uuid(args.submissionId, "submissionId"),
     });
     if (error) {
       if (String(error.code) === "P0002" || /no such session/.test(error.message ?? "")) {
         throw new HttpError(404, "That session no longer exists.");
       }
+      if (String(error.code) === "23505") throw new HttpError(409, "Submission identity reused with different data.");
       console.error("solve_job_create:", error.message ?? error);
       throw new HttpError(500, "Could not queue the job.");
     }

@@ -42,6 +42,8 @@ jobs:
           chmod +x "src-tauri/binaries/mds-${target}"
       - name: Rust security regression tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib coding_tools::security_tests -- --nocapture
+      - name: Helper regression tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --bin mds
       - name: Rust compile check
         run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
       - name: Prepare real sidecar and frontend

@@ -311,6 +311,7 @@ export async function getRun(runId: string): Promise<RunDetail> {
 }
 
 export async function createSolveJob(job: {
+  submissionId: string;
   sessionId: string;
   settingsSnapshot: Record<string, unknown>;
   images: NewSolveJobImage[];
