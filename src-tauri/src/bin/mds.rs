@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::os::fd::AsRawFd;
 use std::{
     fs::{self, File, OpenOptions},
-    io::Read,
+    io::{Read, Write},
     os::unix::net::UnixStream,
     path::PathBuf,
     process::Command,
@@ -488,13 +488,26 @@ fn run() -> Result<(), String> {
     let mut last_overlay_refresh = Instant::now();
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    // Keep blocking HTTP/upload work off the macOS event loop. Serialize
+    // submissions with polling so a stale refresh cannot overwrite a new job.
+    let cloud_gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    let mut refresh_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut submit_task: Option<tokio::task::JoinHandle<()>> = None;
 
     event_loop.run(move |_event, event_loop_target, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
 
-        if last_job_poll.elapsed() >= Duration::from_secs(5) {
+        if last_job_poll.elapsed() >= Duration::from_secs(5)
+            && refresh_task.as_ref().is_none_or(|task| task.is_finished())
+        {
             last_job_poll = Instant::now();
-            let _ = rt.block_on(refresh_job());
+            let gate = std::sync::Arc::clone(&cloud_gate);
+            refresh_task = Some(rt.spawn(async move {
+                let _lock = gate.lock().await;
+                if let Err(error) = refresh_job().await {
+                    log(&format!("Cloud job refresh failed: {error}"));
+                }
+            }));
         }
 
         if overlay_visible && last_overlay_refresh.elapsed() >= Duration::from_millis(500) {
@@ -535,7 +548,9 @@ fn run() -> Result<(), String> {
                 let _ = update_overlay(&webview, &active_view);
             }
             if mac_shortcuts::take_start_batch() {
-                if let Err(e) = start_batch() {
+                if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                    eprintln!("start batch unavailable during cloud submission");
+                } else if let Err(e) = start_batch() {
                     eprintln!("start batch failed: {e}");
                 }
                 let _ = update_overlay(&webview, &active_view);
@@ -556,7 +571,11 @@ fn run() -> Result<(), String> {
                     else if right_capture { CaptureMode::Right }
                     else if region_capture { CaptureMode::Region }
                     else { CaptureMode::Full };
-                let result = capture_screen(capture_mode);
+                let result = if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                    Err("Capture unavailable while the current batch is uploading.".to_string())
+                } else {
+                    capture_screen(capture_mode)
+                };
                 overlay_visible = restore;
                 event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
                     ActivationPolicy::Accessory
@@ -570,9 +589,18 @@ fn run() -> Result<(), String> {
                 let _ = update_overlay(&webview, &active_view);
             }
             if mac_shortcuts::take_submit() {
-                if let Err(e) = rt.block_on(submit_batch(&active_view)) {
-                    eprintln!("submit failed: {e}");
-                    let _ = update_pending_error(&e);
+                if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                    eprintln!("cloud submission already running");
+                } else {
+                    let gate = std::sync::Arc::clone(&cloud_gate);
+                    let view = active_view.clone();
+                    submit_task = Some(rt.spawn(async move {
+                        let _lock = gate.lock().await;
+                        if let Err(error) = submit_batch(&view).await {
+                            eprintln!("submit failed: {error}");
+                            let _ = update_pending_error(&error);
+                        }
+                    }));
                 }
                 let _ = update_overlay(&webview, &active_view);
             }
@@ -731,13 +759,28 @@ fn captures_dir(batch_id: &str) -> Result<PathBuf, String> {
 }
 
 fn write_private(path: &std::path::Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
-    fs::write(path, contents)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    // The UI reads these files while background tasks persist them. Write a
+    // private temporary file, then atomically replace the complete snapshot.
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("state");
+    let temporary = path.with_file_name(format!(".{name}-{}.tmp", Uuid::new_v4()));
+    let result = (|| -> std::io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(contents.as_ref())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
     }
-    Ok(())
+    result
 }
 
 fn log(message: &str) {
@@ -805,6 +848,7 @@ fn clear_submitted_job() -> Result<(), String> {
 
 fn update_pending_error(message: &str) -> Result<(), String> {
     if let Some(mut batch) = read_pending()? {
+        batch.status = "ready".to_string();
         batch.error = Some(message.to_string());
         save_pending(&batch)?;
     }
@@ -959,7 +1003,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
             return Err(format!("Cloud job {} completed but its final report is not yet downloaded. Screenshots retained; retry once the report arrives.", previous.id));
         }
     }
-    let batch = read_pending()?.ok_or("No helper batch is waiting to submit.".to_string())?;
+    let mut batch = read_pending()?.ok_or("No helper batch is waiting to submit.".to_string())?;
     if batch.images.is_empty() {
         return Err("The helper batch has no screenshots.".to_string());
     }
@@ -972,6 +1016,9 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
             return Err(format!("Screenshot {} is missing or empty; batch retained.", image.file_name));
         }
     }
+    batch.status = "submitting".to_string();
+    batch.error = None;
+    save_pending(&batch)?;
     let user_settings = api("settings.load", serde_json::json!({ "key": SETTINGS_KEY }))
         .await
         .unwrap_or_else(|e| {
@@ -1402,6 +1449,8 @@ fn mcq_placeholder_state() -> Value {
 fn mcq_pending_state(batch: &PendingBatch) -> Value {
     let progress = if let Some(error) = batch.error.as_deref() {
         error.to_string()
+    } else if batch.status == "submitting" {
+        "Uploading screenshots and creating the cloud job...".to_string()
     } else if batch.images.is_empty() {
         "MCQ batch started. Capture screenshots, then submit.".to_string()
     } else {
@@ -1433,6 +1482,8 @@ fn mcq_pending_state(batch: &PendingBatch) -> Value {
 fn coding_pending_state(batch: &PendingBatch) -> Value {
     let waiting = if let Some(error) = batch.error.as_deref() {
         error.to_string()
+    } else if batch.status == "submitting" {
+        "Uploading screenshots and creating the cloud job...".to_string()
     } else if batch.images.is_empty() {
         "Batch started. Capture screenshots, then submit.".to_string()
     } else {
@@ -2173,6 +2224,25 @@ mod tests {
         assert!(!is_usable_cloud_report(&serde_json::json!({"report":{"kind":"mcq","answer":{}}}), "job-1"));
         assert!(is_usable_cloud_report(&serde_json::json!({"report":{"presentation":{"code":"return 42"}}}), "job-1"));
         assert!(is_usable_cloud_report(&serde_json::json!({"report":{"candidates":[{"final":{"code":"print(42)"}}]}}), "job-1"));
+    }
+
+    #[test]
+    fn private_snapshots_replace_complete_files() {
+        let path = std::env::temp_dir().join(format!("mds-cache-{}.json", Uuid::new_v4()));
+        write_private(&path, br#"{"stage":"old"}"#).expect("write old snapshot");
+        write_private(&path, br#"{"stage":"new"}"#).expect("replace snapshot");
+        assert_eq!(fs::read_to_string(&path).expect("read snapshot"), r#"{"stage":"new"}"#);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_state_reports_upload_without_changing_overlay_layout() {
+        let batch = PendingBatch {
+            id: "pending-upload".into(), status: "submitting".into(),
+            started_at: now(), images: vec![], error: None,
+        };
+        assert!(mcq_pending_state(&batch)["progress"].as_str().unwrap_or("").contains("Uploading"));
+        assert!(coding_pending_state(&batch)["solution"]["code"].as_str().unwrap_or("").contains("Uploading"));
     }
 
     #[test]
