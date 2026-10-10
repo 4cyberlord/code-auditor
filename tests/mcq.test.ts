@@ -60,7 +60,7 @@ console.log("\n2. MCQ answer parsing and normalization");
 }
 
 {
-  const detected=detectMcq("Q4. Choose the right answer?\\nA. Red\\nB. Blue\\nC. Green");
+  const detected=detectMcq("Q4. Choose the right answer?\nA. Red\nB. Blue\nC. Green");
   const wrong=parseMcqAnswer('{"answer":{"label":"B","text":"an invented blue option"}}')!;
   check("reject label paired with invented option text",resolveMcqSelection(wrong,detected)===null);
   const labelOnly=parseMcqAnswer('{"answer":{"label":"B","text":"B"}}')!;
