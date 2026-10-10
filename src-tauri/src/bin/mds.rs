@@ -2503,7 +2503,9 @@ mod tests {
     fn pending_state_reports_upload_without_changing_overlay_layout() {
         let batch = PendingBatch {
             id: "pending-upload".into(), status: "submitting".into(),
-            started_at: now(), images: vec![], error: None,
+            started_at: now(), submission_id: None, session_id: None,
+            owner_id: None, settings_snapshot: None, mode: None,
+            images: vec![], error: None,
         };
         assert!(mcq_pending_state(&batch)["progress"].as_str().unwrap_or("").contains("Uploading"));
         assert!(coding_pending_state(&batch)["solution"]["code"].as_str().unwrap_or("").contains("Uploading"));
