@@ -1629,11 +1629,15 @@ async function saveCouncilReport(job, report) {
   return markdown;
 }
 
-async function saveMcqReport(job, answer, reading, raw = "") {
+async function saveMcqReport(job, answer, reading, raw = "", answerVerified = false) {
+  const display = answerVerified && answer.options?.length
+    ? formatMcqSelection(answer)
+    : `${answer.answer?.label || ""} — ${answer.answer?.text || ""}`.trim();
   const markdown = [
     `# MCQ Answer`,
     "",
-    `**Answer:** ${answer.options?.length ? formatMcqSelection(answer) : `${answer.answer?.label || ""} — ${answer.answer?.text || ""}`}`,
+    `**Answer:** ${display}`,
+    ...(!answerVerified ? ["", "**Verification:** Choices could not be independently matched to the screenshot reading."] : []),
     "",
     answer.reason || "",
     "",
@@ -1643,7 +1647,8 @@ async function saveMcqReport(job, answer, reading, raw = "") {
   const report = {
     kind: "mcq",
     ...answer,
-    displayAnswer: answer.options?.length ? formatMcqSelection(answer) : null,
+    answerVerified,
+    displayAnswer: answerVerified && answer.options?.length ? formatMcqSelection(answer) : null,
     reading: {
       readers: reading?.readers || [],
       agree: reading?.agreement?.agree ?? null,
@@ -1785,13 +1790,16 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
   if (verified !== parsed) Object.assign(parsed, verified);
   parsed.model = parsed.model || model;
   parsed.knowledgeUsed = Boolean(parsed.knowledgeUsed || knowledge.trim());
-  const markdown = await saveMcqReport(job, parsed, mcqReading, raw);
+  if (!detection.isMcq) {
+    await addEvent(job.id, "warn", "options_unverified", "The screenshot reading did not yield independently verifiable choices. Displaying the model's answer without a verified-option mark.");
+  }
+  const markdown = await saveMcqReport(job, parsed, mcqReading, raw, detection.isMcq);
   await patchJob(job.id, {
     status: "completed",
     progress_phase: "completed",
     mode: "mcq",
     error: null,
-    result_summary: (detection.isMcq ? formatMcqSelection(parsed) : `${parsed.answer.label}: ${parsed.answer.text || parsed.reason}`).slice(0, 500),
+    result_summary: (detection.isMcq ? formatMcqSelection(parsed) : `Unverified choices: ${parsed.answer.label}: ${parsed.answer.text || parsed.reason}`).slice(0, 500),
     finished_at: new Date().toISOString(),
   });
   await addEvent(job.id, "info", "completed", "MCQ job completed.", { markdownBytes: Buffer.byteLength(markdown, "utf8"), model });

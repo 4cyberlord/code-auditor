@@ -734,6 +734,18 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
     return { ordered: ids.length };
   },
 
+  /** Fetch one tracked solve job directly; the newest-50 listing is for browsing. */
+  "jobs.get": async ({ admin, principal }, args) => {
+    const row = ok(
+      await admin.from("solve_jobs").select("*")
+        .eq("id", uuid(args.jobId, "jobId"))
+        .eq("owner_id", principal.userId)
+        .maybeSingle(),
+      "get cloud job"
+    );
+    return row ? solveJobRow(row) : null;
+  },
+
   "jobs.list": async ({ admin, principal }, args) => {
     let q = admin
       .from("solve_jobs")
