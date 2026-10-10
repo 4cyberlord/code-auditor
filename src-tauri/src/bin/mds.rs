@@ -1136,6 +1136,15 @@ async fn refresh_job() -> Result<(), String> {
 
     if let Ok(report) = api("reports.get", serde_json::json!({ "jobId": tracked.id })).await {
         if !report.is_null() {
+            // Auto-routed MCQs are submitted as Council jobs. Promote their
+            // actual result kind before saving so the overlay picks the MCQ pane.
+            let body = report.get("report").unwrap_or(&report);
+            if body.get("kind").and_then(Value::as_str) == Some("mcq") {
+                tracked.mode = "mcq".to_string();
+                if let Some(model) = body.get("model").and_then(Value::as_str) {
+                    tracked.mcq_model = Some(model.to_string());
+                }
+            }
             tracked.report = Some(report);
             // A report may be partial or accompany a failed job. Trust the job status.
             if tracked.status == "completed" {
@@ -1997,6 +2006,19 @@ mod tests {
         assert_eq!(state["kind"], "mcq");
         assert_eq!(state["mcq"]["model"], "anthropic/claude");
         assert_eq!(state["status"], "running");
+    }
+
+    #[test]
+    fn auto_routed_mcq_report_selects_mcq_overlay() {
+        let job = SubmittedJob {
+            id: "auto-mcq".into(), mode: "council".into(), mcq_model: None,
+            status: "completed".into(), progress_phase: "completed".into(),
+            submitted_at: now(), previews: vec![], error: None,
+            report: Some(serde_json::json!({"report": {"kind": "mcq", "model": "vision-reader", "question": "Which?", "answer": {"label": "C", "text": "Queue"}, "options": [{"label":"C","text":"Queue"}]}})),
+            events: vec![],
+        };
+        assert!(mcq_from_submitted(&job).is_some());
+        assert_eq!(submitted_overlay_state(&job)["mcq"]["answer"]["label"], "C");
     }
 
     #[test]
