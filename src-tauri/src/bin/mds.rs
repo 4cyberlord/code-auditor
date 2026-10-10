@@ -812,6 +812,13 @@ fn update_pending_error(message: &str) -> Result<(), String> {
 }
 
 fn start_batch() -> Result<(), String> {
+    // Do not orphan screenshots when the start shortcut is pressed twice.
+    // The existing ordered batch remains available until it is submitted.
+    if let Some(existing) = read_pending()? {
+        if !existing.images.is_empty() {
+            return Err(format!("Batch {} already contains {} screenshot(s). Submit it before starting another.", existing.id, existing.images.len()));
+        }
+    }
     let id = format!("batch-{}", Uuid::new_v4());
     clear_submitted_job()?;
     let batch = PendingBatch {
