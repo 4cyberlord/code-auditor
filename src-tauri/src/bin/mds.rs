@@ -1192,10 +1192,10 @@ async fn refresh_job() -> Result<(), String> {
             }
         }
     };
-    if let Some(job) = jobs.as_array().and_then(|items| {
-        items
-            .iter()
-            .find(|job| job["id"].as_str() == Some(tracked.id.as_str()))
+    let listed_jobs = jobs.as_array().or_else(|| jobs.get("jobs").and_then(Value::as_array))
+        .or_else(|| jobs.get("items").and_then(Value::as_array));
+    if let Some(job) = listed_jobs.and_then(|items| {
+        items.iter().find(|job| job["id"].as_str() == Some(tracked.id.as_str()))
     }) {
         tracked.status = job["status"]
             .as_str()
