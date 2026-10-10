@@ -376,6 +376,16 @@ struct PendingBatch {
     status: String,
     started_at: String,
     #[serde(default)]
+    submission_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    owner_id: Option<String>,
+    #[serde(default)]
+    settings_snapshot: Option<Value>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
     images: Vec<PendingImage>,
     #[serde(default)]
     error: Option<String>,
@@ -442,6 +452,26 @@ async fn api(op: &str, args: Value) -> Result<Value, String> {
     Ok(parsed["data"].clone())
 }
 
+#[cfg(target_os = "macos")]
+fn drain_capture_commands() {
+    let Ok(dir) = support_root_dir().map(|path| path.join("cache/capture-commands")) else { return; };
+    let Ok(entries) = fs::read_dir(dir) else { return; };
+    for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+        if path.extension().and_then(|v| v.to_str()) != Some("json") { continue; }
+        let raw = fs::read_to_string(&path).unwrap_or_default();
+        let _ = fs::remove_file(&path);
+        let Ok(command) = serde_json::from_str::<Value>(&raw) else { continue; };
+        if command["pid"].as_u64() != Some(std::process::id() as u64) { continue; }
+        use std::sync::atomic::Ordering;
+        match command["mode"].as_str().unwrap_or_default() {
+            "region" => mac_shortcuts::CAPTURE_REGION.store(true, Ordering::SeqCst),
+            "screen" => mac_shortcuts::CAPTURE.store(true, Ordering::SeqCst),
+            "left" => mac_shortcuts::CAPTURE_LEFT.store(true, Ordering::SeqCst),
+            "right" => mac_shortcuts::CAPTURE_RIGHT.store(true, Ordering::SeqCst),
+            _ => {}
+        }
+    }
+}
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -487,6 +517,7 @@ fn run() -> Result<(), String> {
     let mut overlay_visible = false;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
+    let mut last_heartbeat = Instant::now();
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     // Keep blocking HTTP/upload work off the macOS event loop. Serialize
@@ -503,6 +534,12 @@ fn run() -> Result<(), String> {
 
     event_loop.run(move |_event, event_loop_target, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
+        #[cfg(target_os = "macos")]
+        drain_capture_commands();
+        if last_heartbeat.elapsed() >= Duration::from_secs(4) {
+            write_helper_status(true, None);
+            last_heartbeat = Instant::now();
+        }
 
         #[cfg(target_os = "macos")]
         if capture_task.as_ref().is_some_and(|task| task.is_finished()) {
@@ -780,6 +817,15 @@ fn pending_path() -> Result<PathBuf, String> {
 fn submitted_job_path() -> Result<PathBuf, String> {
     Ok(cache_dir()?.join("submitted-job.json"))
 }
+fn archive_job(job: &SubmittedJob) -> Result<(), String> {
+    let dir = cache_dir()?.join("job-history");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    write_private(&dir.join(format!("{}.json", job.id)), serde_json::to_vec(job).map_err(|e| e.to_string())?)
+       .map_err(|e| e.to_string())
+}
+fn last_good_settings_path() -> Result<PathBuf, String> {
+    Ok(cache_dir()?.join("last-good-settings.json"))
+}
 
 fn captures_dir(batch_id: &str) -> Result<PathBuf, String> {
     Ok(cache_dir()?.join("captures").join(batch_id))
@@ -896,6 +942,11 @@ fn start_batch() -> Result<(), String> {
         id: id.clone(),
         status: "collecting".to_string(),
         started_at: now(),
+        submission_id: Some(Uuid::new_v4().to_string()),
+        session_id: None,
+        owner_id: None,
+        settings_snapshot: None,
+        mode: None,
         images: vec![],
         error: None,
     };
@@ -1020,16 +1071,7 @@ fn capture_screen(mode: CaptureMode) -> Result<(), String> {
 }
 
 async fn submit_batch(active_view: &str) -> Result<(), String> {
-    // A second submission must not replace the tracked ID of a running job.
-    // Keep the new screenshots staged until the previous solve terminates.
-    if let Some(previous) = read_submitted_job()? {
-        if !matches!(previous.status.as_str(), "completed" | "failed" | "needs_attention" | "cancelled") {
-            return Err(format!("Cloud job {} is still {}. Screenshots retained for later submission.", previous.id, previous.status));
-        }
-        if previous.status == "completed" && previous.report.is_none() {
-            return Err(format!("Cloud job {} completed but its final report is not yet downloaded. Screenshots retained; retry once the report arrives.", previous.id));
-        }
-    }
+    // New submissions never depend on downloading an older job's report.
     let mut batch = read_pending()?.ok_or("No helper batch is waiting to submit.".to_string())?;
     if batch.images.is_empty() {
         return Err("The helper batch has no screenshots.".to_string());
@@ -1043,88 +1085,85 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
             return Err(format!("Screenshot {} is missing or empty; batch retained.", image.file_name));
         }
     }
-    batch.status = "submitting".to_string();
+    if batch.submission_id.is_none() {
+        batch.submission_id = Some(Uuid::new_v4().to_string());
+    }
+    batch.status = "submitting".into();
     batch.error = None;
     save_pending(&batch)?;
-    let user_settings = api("settings.load", serde_json::json!({ "key": SETTINGS_KEY }))
-        .await
-        .unwrap_or_else(|e| {
-            log(&format!("Settings could not be loaded: {e}"));
-            Value::Null
-        });
-    let mut user_settings = sanitize_settings(if user_settings.is_null() {
-        Value::Object(Default::default())
-    } else {
-        user_settings
-    });
-    // Cloud auto-detection checks the serialized settings snapshot. Supplying
-    // a Council mode alone is insufficient when overlayMode is missing.
-    if !matches!(user_settings.get("overlayMode").and_then(Value::as_str), Some("auto" | "coding" | "mcq")) {
-        if let Some(settings) = user_settings.as_object_mut() {
-            settings.insert("overlayMode".to_string(), Value::from("auto"));
-        }
-    }
-    space_api_calls().await;
 
-    let session_title = format!(
-        "Background capture batch {}",
-        chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")
-    );
-    let session = api(
-        "sessions.create",
-        serde_json::json!({ "title": session_title }),
-    )
-    .await?;
-    space_api_calls().await;
-    let session_id = session["id"]
-        .as_str()
-        .ok_or("The server did not return a session id.")?
-        .to_string();
-
+    // Never continue a saved submission with another user's credentials.
     let owner = api("auth.whoami", serde_json::json!({})).await?;
-    space_api_calls().await;
-    let owner_id = owner["userId"]
-        .as_str()
-        .ok_or("The server did not say who the helper is.")?
-        .to_string();
+    let owner_id = owner["userId"].as_str().ok_or("Account identity unavailable.")?.to_string();
+    if batch.owner_id.as_deref().is_some_and(|saved| saved != owner_id) {
+        return Err("Account changed; this batch belongs to a different account.".into());
+    }
+    batch.owner_id = Some(owner_id.clone());
+    save_pending(&batch)?;
 
-    // The pane being viewed is not the classification of the screenshots.
-    // Keep auto mode in the cloud Council pipeline so its vision reading can
-    // distinguish a coding problem from MCQ before choosing a solver.
-    let mode = match user_settings.get("overlayMode").and_then(Value::as_str) {
-        Some("mcq") => "mcq".to_string(),
-        Some("coding") | Some("auto") => "council".to_string(),
-        // Missing/unknown settings are Auto, not a forced solver selected by UI.
-        _ => "council".to_string(),
-    };
-    let mcq_model = if mode == "mcq" {
-        user_settings
-            .get("mcqModel")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .map(str::to_string)
+    let user_settings = if let Some(snapshot) = batch.settings_snapshot.clone() {
+        snapshot
     } else {
-        None
+        let loaded = api("settings.load", serde_json::json!({ "key": SETTINGS_KEY })).await;
+        let settings = match loaded {
+            Ok(value) if value.is_object() => {
+                let sanitized = sanitize_settings(value);
+                let cached = serde_json::json!({
+                    "version": 1, "ownerId": owner_id, "settings": sanitized, "savedAt": now()
+                });
+                let path = last_good_settings_path()?;
+                write_private(&path, serde_json::to_vec(&cached).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+                sanitized
+            }
+            _ => {
+                let raw = fs::read_to_string(last_good_settings_path()?).ok();
+                let cached = raw.and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .filter(|value| value["version"] == 1 && value["ownerId"].as_str() == Some(owner_id.as_str()));
+                let Some(value) = cached.and_then(|value| value.get("settings").cloned())
+                    .filter(|value| value.is_object()) else {
+                    return Err("Settings unavailable. No verified cached settings for this account; batch retained.".into());
+                };
+                log("Settings load failed; using last successfully loaded settings for this account.");
+                value
+            }
+        };
+        batch.settings_snapshot = Some(settings.clone());
+        save_pending(&batch)?;
+        settings
+    };
+    let mode = batch.mode.clone().unwrap_or_else(|| {
+        if user_settings.get("overlayMode").and_then(Value::as_str) == Some("mcq") {
+            "mcq".to_string()
+        } else { "council".to_string() }
+    });
+    batch.mode = Some(mode.clone());
+    save_pending(&batch)?;
+    let mcq_model = if mode == "mcq" {
+        user_settings.get("mcqModel").and_then(Value::as_str).map(str::trim)
+           .filter(|s| !s.is_empty()).map(str::to_string)
+    } else { None };
+    let session_id = if let Some(id) = batch.session_id.clone() {
+        id
+    } else {
+        let session = api("sessions.create", serde_json::json!({
+            "title": format!("Background capture batch {}", batch.id)
+        })).await?;
+        let id = session["id"].as_str().ok_or("Missing session ID")?.to_string();
+        batch.session_id = Some(id.clone());
+        save_pending(&batch)?;
+        id
     };
     let mut images = vec![];
     let mut previews = vec![];
     for image in &batch.images {
         let bytes = fs::read(&image.local_path)
             .map_err(|e| format!("Could not read {}: {e}", image.file_name))?;
-        previews.push(format!(
-            "data:{};base64,{}",
-            if image.mime.is_empty() {
-                "image/png"
-            } else {
-                &image.mime
-            },
-            base64::engine::general_purpose::STANDARD.encode(&bytes)
-        ));
-        let path = format!("{owner_id}/{session_id}/{}", safe_segment(&image.file_name));
+        previews.push(image.local_path.clone());
+        let path = format!("{owner_id}/{session_id}/{}/{}-{}", batch.submission_id.as_deref().unwrap_or_default(), image.position, safe_segment(&image.file_name));
         let signed = api(
             "storage.uploadUrl",
-            serde_json::json!({ "path": path, "bucket": BUCKET }),
+            serde_json::json!({ "path": path, "bucket": BUCKET, "idempotent": true }),
         )
         .await?;
         space_api_calls().await;
@@ -1173,6 +1212,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
         "jobs.create",
         serde_json::json!({
             "sessionId": session_id,
+            "submissionId": batch.submission_id,
             "mode": mode,
             "settingsSnapshot": user_settings,
             "images": images,
@@ -1182,6 +1222,9 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
     let job_id = job["id"].as_str().unwrap_or_default().to_string();
     if job_id.trim().is_empty() {
         return Err("Cloud job was not assigned an ID; screenshots retained for retry.".into());
+    }
+    if let Some(previous) = read_submitted_job()? {
+        if previous.id != job_id { archive_job(&previous)?; }
     }
     save_submitted_job(&SubmittedJob {
         id: job_id.clone(),
@@ -1196,9 +1239,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
         events: vec![],
     })?;
 
-    for image in &batch.images {
-        let _ = fs::remove_file(&image.local_path);
-    }
+    // Retain referenced preview files until recovery/retention cleanup.
     let _ = fs::remove_file(pending_path()?);
     log(&format!("submitted {} as job {job_id}", batch.id));
     Ok(())
@@ -1250,9 +1291,29 @@ fn tracked_job_row<'a>(data: &'a Value, expected_id: &str) -> Option<&'a Value> 
 }
 
 async fn refresh_job() -> Result<(), String> {
-    let Some(mut tracked) = read_submitted_job()? else {
-        return Ok(());
-    };
+    if let Some(job) = read_submitted_job()? {
+        save_submitted_job(&refresh_one_job(job).await?)?;
+    }
+    // Poll two older unfinished jobs per tick. Preserve their reports separately.
+    let dir = cache_dir()?.join("job-history");
+    if let Ok(entries) = fs::read_dir(dir) {
+        let mut count = 0;
+        for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            if count >= 2 { break; }
+            if path.extension().and_then(|v| v.to_str()) != Some("json") { continue; }
+            let Ok(raw) = fs::read_to_string(&path) else { continue; };
+            let Ok(job) = serde_json::from_str::<SubmittedJob>(&raw) else { continue; };
+            if matches!(job.status.as_str(), "failed" | "needs_attention" | "cancelled")
+                || (job.status == "completed" && job.report.is_some()) { continue; }
+            let result = refresh_one_job(job).await?;
+            write_private(&path, serde_json::to_vec(&result).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            count += 1;
+        }
+    }
+    Ok(())
+}
+async fn refresh_one_job(mut tracked: SubmittedJob) -> Result<SubmittedJob, String> {
     if tracked.id.trim().is_empty() {
         return Err("Submitted background job has no cloud ID.".into());
     }
@@ -1261,7 +1322,7 @@ async fn refresh_job() -> Result<(), String> {
         "completed" | "failed" | "needs_attention" | "cancelled"
     ) && (tracked.report.is_some() || tracked.status != "completed")
     {
-        return Ok(());
+        return Ok(tracked);
     }
 
     // Read the exact job by ID. Browsing is capped at 50 rows and cannot
@@ -1329,7 +1390,7 @@ async fn refresh_job() -> Result<(), String> {
         }
     }
     }
-    save_submitted_job(&tracked)
+    Ok(tracked)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1413,14 +1474,15 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
     let pending = read_pending()?;
     let pending_has_images = pending.as_ref().is_some_and(|batch| !batch.images.is_empty());
     let payload = if running || !pending_has_images {
-        let sources = submitted.as_ref().map(|job| job.previews.as_slice()).unwrap_or_default();
+        let paths = submitted.as_ref().map(|job| job.previews.as_slice()).unwrap_or_default();
+        let sources = if paths.iter().all(|path| path.starts_with("data:")) {
+            paths.to_vec() // legacy job preview format
+        } else { refresh.pending_sources(paths).to_vec() };
         if refresh.preview_origin != "submitted" || refresh.submitted_sources != sources {
             refresh.preview_origin = "submitted".into();
-            refresh.submitted_sources = sources.to_vec();
-            Some(serde_json::to_string(sources).map_err(|e| e.to_string())?)
-        } else {
-            None
-        }
+            refresh.submitted_sources = sources.clone();
+            Some(serde_json::to_string(&sources).map_err(|e| e.to_string())?)
+        } else { None }
     } else {
         let paths: Vec<_> = pending.as_ref().unwrap().images.iter()
             .map(|image| image.local_path.clone()).collect();

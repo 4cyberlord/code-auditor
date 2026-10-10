@@ -1099,7 +1099,7 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
     const bucket = typeof args.bucket === "string" && args.bucket.trim() ? args.bucket.trim() : "screenshots";
     if (!/^[a-z0-9][a-z0-9._-]*$/i.test(bucket)) throw new HttpError(400, "That is not a bucket.");
 
-    const { data, error } = await admin.storage.from(bucket).createSignedUploadUrl(path);
+    const { data, error } = await admin.storage.from(bucket).createSignedUploadUrl(path, { upsert: args.idempotent === true });
     if (error) {
       console.error("signed upload url:", error.message ?? error);
       throw new HttpError(500, "Could not start that upload.");

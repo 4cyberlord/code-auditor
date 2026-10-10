@@ -588,3 +588,36 @@ pub async fn background_helper_uninstall() -> Result<GhostModeStatus, String> {
     }
     background_helper_status().await
 }
+
+pub(crate) fn capture_owner_pid() -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        let value: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(helper_status_path().ok()?).ok()?
+        ).ok()?;
+        if value["hotkeysAvailable"] != true { return None; }
+        let pid = value["pid"].as_u64()?;
+        let stamp = chrono::DateTime::parse_from_rfc3339(value["updatedAt"].as_str()?).ok()?;
+        let age = chrono::Utc::now().signed_duration_since(stamp).num_seconds();
+        if !(0..=12).contains(&age) || pid == 0 || pid > i32::MAX as u64 { return None; }
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 { return None; }
+        Some(pid as u32)
+    }
+    #[cfg(not(target_os = "macos"))]
+    { None }
+}
+pub(crate) fn forward_capture(mode: &str) -> bool {
+    let Some(pid) = capture_owner_pid() else { return false; };
+    if !matches!(mode, "region" | "screen" | "left" | "right") { return false; }
+    let Ok(dir) = support_dir().map(|p| p.join("cache/capture-commands")) else { return false; };
+    if std::fs::create_dir_all(&dir).is_err() { return false; }
+    let id = uuid::Uuid::new_v4().to_string();
+    let temp = dir.join(format!(".{id}.tmp"));
+    let target = dir.join(format!("{id}.json"));
+    if std::fs::write(&temp, serde_json::json!({"pid":pid,"mode":mode}).to_string()).is_err() { return false; }
+    if std::fs::rename(&temp,&target).is_err() {
+       let _ = std::fs::remove_file(&temp);
+       return false;
+    }
+    true
+}
