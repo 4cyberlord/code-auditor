@@ -179,7 +179,7 @@ pub struct NewSolveJobImage {
 #[serde(rename_all = "camelCase")]
 pub struct NewSolveJob {
     pub submission_id: String,
-    pub session_id: String;
+    pub session_id: String,
     pub settings_snapshot: serde_json::Value,
     pub images: Vec<NewSolveJobImage>,
 }
