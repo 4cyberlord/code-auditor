@@ -1191,7 +1191,28 @@ fn update_overlay(webview: &WebView, active_view: &str) -> Result<(), String> {
         submitted.map(|job| job.previews).unwrap_or_default()
     };
     let payload = serde_json::to_string(&sources).map_err(|e| e.to_string())?;
-    let state = read_overlay_state(active_view);
+    // Keep the displayed state paired with the displayed screenshots.
+    // A completed job remains available in the job cache while a subsequent
+    // batch is being collected. Show pending state with pending thumbnails.
+    let state = if !running {
+        if let Ok(Some(batch)) = read_pending() {
+            if !batch.images.is_empty() {
+                let pending_state = if active_view == "mcq" {
+                    mcq_pending_state(&batch)
+                } else {
+                    coding_pending_state(&batch)
+                };
+                serde_json::to_string(&pending_state)
+                    .unwrap_or_else(|_| read_overlay_state(active_view))
+            } else {
+                read_overlay_state(active_view)
+            }
+        } else {
+            read_overlay_state(active_view)
+        }
+    } else {
+        read_overlay_state(active_view)
+    };
     webview
         .evaluate_script(&format!(
             "window.updateOverlayState({state});window.updatePreviews({payload});"
