@@ -1182,7 +1182,15 @@ async fn refresh_job() -> Result<(), String> {
     let jobs = if tracked.status == "completed" {
         Value::Null
     } else {
-        api("jobs.list", serde_json::json!({ "status": "all" })).await?
+        match api("jobs.list", serde_json::json!({ "status": "all" })).await {
+            Ok(jobs) => jobs,
+            Err(error) => {
+                // A temporary listing outage must not block reports.get. The
+                // report remains associated with the tracked ID, not the list.
+                log(&format!("Job list unavailable for {}: {error}", tracked.id));
+                Value::Null
+            }
+        }
     };
     if let Some(job) = jobs.as_array().and_then(|items| {
         items
