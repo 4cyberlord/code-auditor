@@ -441,47 +441,6 @@ export async function captureRightHalf(): Promise<Capture[] | null> {
   return invoke<Capture[] | null>("capture_right_half");
 }
 
-export async function showCaptureExemptOverlay(): Promise<void> {
-  if (!inTauri()) throw new Error(NOT_TAURI);
-  await invoke("overlay_show");
-}
-
-export async function showOverlay(text: string): Promise<void> {
-  if (!inTauri()) throw new Error(NOT_TAURI);
-  await invoke("show_overlay", { text });
-}
-
-export async function hideCaptureExemptOverlay(): Promise<void> {
-  if (!inTauri()) return;
-  await invoke("overlay_hide");
-}
-
-export async function hideOverlay(): Promise<void> {
-  if (!inTauri()) return;
-  await invoke("hide_overlay");
-}
-
-export interface OverlayVisibilityStatus {
-  sharingType: number;
-  windowLevel: number;
-  collectionBehavior: number;
-  isVisible: boolean;
-  sharingDisabled: boolean;
-  allSpaces: boolean;
-  fullscreenAuxiliary: boolean;
-  ignoresCycle: boolean;
-}
-
-export async function overlayVisibilityStatus(): Promise<OverlayVisibilityStatus> {
-  if (!inTauri()) throw new Error(NOT_TAURI);
-  return invoke<OverlayVisibilityStatus>("overlay_visibility_status");
-}
-
-export async function toggleCaptureExemptOverlay(): Promise<boolean> {
-  if (!inTauri()) throw new Error(NOT_TAURI);
-  return invoke<boolean>("overlay_toggle");
-}
-
 export async function cancelRun(runId: string): Promise<void> {
   if (!inTauri()) return;
   await invoke("cancel_run", { runId });
