@@ -13,6 +13,7 @@
  */
 
 import { fingerprint, HttpError, signIn, verifyPin, type Principal } from "./auth.ts";
+import { SCREENSHOT_BUCKET, validateScreenshotUploadKey } from "./storagePolicy.ts";
 
 // deno-lint-ignore no-explicit-any
 type Admin = any;
@@ -1098,6 +1099,9 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
     }
     const bucket = typeof args.bucket === "string" && args.bucket.trim() ? args.bucket.trim() : "screenshots";
     if (!/^[a-z0-9][a-z0-9._-]*$/i.test(bucket)) throw new HttpError(400, "That is not a bucket.");
+
+    const policyError = validateScreenshotUploadKey(principal.userId, path, bucket);
+    if (policyError) throw new HttpError(400, policyError);
 
     const { data, error } = await admin.storage.from(bucket).createSignedUploadUrl(path, { upsert: args.idempotent === true });
     if (error) {
