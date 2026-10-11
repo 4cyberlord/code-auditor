@@ -377,7 +377,7 @@ const parsed = reports[0]?.report?.parsed;
 check("the synthesis parsed", parsed?.synthesis?.winner === "A", JSON.stringify(parsed?.synthesis?.winner));
 check("the approach is a field now", parsed?.synthesis?.approach === "direct", String(parsed?.synthesis?.approach));
 check("the judge's ranking was counted", parsed?.tally?.[0]?.letter === "A", JSON.stringify(parsed?.tally));
-check("the winner came from the synthesis, uncontested", parsed?.winnerSource === "synthesis", String(parsed?.winnerSource));
+check("measured execution evidence determines the winner", parsed?.winnerSource === "evidence", String(parsed?.winnerSource));
 
 // --- the presentation the overlay renders ----------------------------------
 const presentation = reports[0]?.report?.presentation;
