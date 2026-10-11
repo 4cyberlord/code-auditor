@@ -2360,10 +2360,28 @@ fn mcq_history(job: &SubmittedJob) -> Vec<Value> {
 fn mcq_from_submitted(job: &SubmittedJob) -> Option<Value> {
     let report = job.report.as_ref()?;
     let body = report.get("report").unwrap_or(report);
-    if body.get("kind").and_then(Value::as_str) == Some("mcq") {
-        return Some(body.clone());
+    // A completed MCQ report is the intelligence result, not a raw worker
+    // event. Accept the nested form only when it is explicitly an MCQ result.
+    let result = if body.get("kind").and_then(Value::as_str) == Some("mcq") {
+        body
+    } else {
+        let nested = body.get("mcq")?;
+        if nested.get("kind").and_then(Value::as_str) != Some("mcq") {
+            return None;
+        }
+        nested
+    };
+    let mut data = result.clone();
+    // Display the real worker's chosen model even when older reports omit it.
+    if data.get("model").and_then(Value::as_str).is_none_or(|value| value.trim().is_empty()) {
+        data["model"] = Value::from(job.mcq_model.as_deref().unwrap_or("none"));
     }
-    None
+    // Never display an answer as verified if the report lacks verification.
+    // The template already exposes explanation and option provenance.
+    if data.get("answerVerified").is_none() {
+        data["answerVerified"] = Value::Bool(false);
+    }
+    Some(data)
 }
 
 fn job_mode_for_settings(settings: &Value) -> String {
@@ -2520,6 +2538,25 @@ fn overlay_html() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcq_report_intelligence_requires_explicit_kind() {
+        let mut job = SubmittedJob {
+            id: "test-job".into(), mode: "mcq".into(), mcq_model: Some("vision-model".into()),
+            status: "completed".into(), progress_phase: "completed".into(),
+            submitted_at: now(), previews: vec![], error: None, report: None, events: vec![],
+        };
+        job.report = Some(serde_json::json!({"report": {"mcq": {
+            "kind": "mcq", "question": "Choose one", "options": [],
+            "answer": {"label": "B", "text": "Second"}, "reason": "Verified reasoning"
+        }}}));
+        let mcq = mcq_from_submitted(&job).expect("nested MCQ intelligence");
+        assert_eq!(mcq["question"], "Choose one");
+        assert_eq!(mcq["model"], "vision-model");
+        assert_eq!(mcq["answerVerified"], false);
+        job.report = Some(serde_json::json!({"report": {"mcq": {"answer": "B"}}}));
+        assert!(mcq_from_submitted(&job).is_none());
+    }
 
     #[test]
     fn number_pairs_route_to_the_requested_workflow_and_capture_shape() {
