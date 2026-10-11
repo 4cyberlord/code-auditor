@@ -43,7 +43,8 @@ export const SHORTCUT_LABELS = {
   solve: "⌃⌥A",
 } as const;
 
-// Focused-app quick captures: "01" = screen, "55" = selected region.
+// Focused-app quick captures: "01" = screen, "55" = selected region,
+// "11" = left half, "22" = right half.
 // Sequences are intentionally ignored when typing into editable controls.
 type CaptureKind = "region" | "screen" | "left" | "right";
 
@@ -138,10 +139,10 @@ export function useGlobalShortcuts() {
       const pair = now - previousAt <= 650 ? previousDigit + event.key : "";
       previousDigit = event.key;
       previousAt = now;
-      if (pair === "01" || pair === "55") {
+      if (["01", "55", "11", "22"].includes(pair)) {
         previousDigit = "";
         event.preventDefault();
-        void captureIntoApp(pair === "01" ? "screen" : "region");
+        void captureIntoApp(pair === "01" ? "screen" : pair === "55" ? "region" : pair === "11" ? "left" : "right");
       }
     };
     window.addEventListener("keydown", onDigitCapture);
