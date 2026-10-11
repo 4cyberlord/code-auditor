@@ -82,6 +82,7 @@ pub async fn storage_upload(
     )
     .await?;
 
+    let uploaded_bytes = bytes.len();
     let started = std::time::Instant::now();
     let resp = client()?
         .put(&signed.url)
@@ -89,7 +90,7 @@ pub async fn storage_upload(
             "Content-Type",
             if mime.is_empty() { "image/png" } else { &mime },
         )
-        .body(bytes.clone())
+        .body(bytes)
         .send()
         .await
         .map_err(|e| format!("Could not upload the screenshot: {e}"))?;
@@ -102,13 +103,13 @@ pub async fn storage_upload(
 
     crate::trace(&format!(
         "screenshot uploaded {path} ({} bytes, {}ms)",
-        bytes.len(),
+        uploaded_bytes,
         started.elapsed().as_millis()
     ));
     Ok(Uploaded {
         bucket: BUCKET.to_string(),
         path,
-        bytes: bytes.len(),
+        bytes: uploaded_bytes,
     })
 }
 
