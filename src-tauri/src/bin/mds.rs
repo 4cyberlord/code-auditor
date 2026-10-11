@@ -1799,14 +1799,10 @@ fn read_overlay_state_snapshot(active_view: &str, submitted: Option<&SubmittedJo
             return serde_json::to_string(&coding_overlay_state(&job))
                 .unwrap_or_else(|_| fallback.to_string());
         }
-        // Job mode and overlay view disagree: still prefer the job so the
-        // helper never falls back to a hollow idle shell mid-run.
-        if is_mcq {
-            return serde_json::to_string(&submitted_overlay_state(&job))
-                .unwrap_or_else(|_| fallback.to_string());
-        }
-        return serde_json::to_string(&coding_overlay_state(&job))
-            .unwrap_or_else(|_| fallback.to_string());
+        // A historical or mismatched job may be present in a saved slot.
+        // Never render its result in the other workflow: continue below to
+        // this view's pending batch or its normal placeholder instead.
+        // The original overlay renderer and window behavior are unchanged.
     }
 
     if active_view == "mcq" {
@@ -2585,6 +2581,73 @@ mod tests {
         assert_eq!(mcq["answerVerified"], false);
         job.report = Some(serde_json::json!({"report": {"mcq": {"answer": "B"}}}));
         assert!(mcq_from_submitted(&job).is_none());
+    }
+
+
+    #[test]
+    fn original_overlay_views_do_not_display_another_workflows_result() {
+        let mcq = SubmittedJob {
+            id: "mcq-only-job".into(), mode: "mcq".into(),
+            mcq_model: Some("vision-model".into()),
+            status: "completed".into(), progress_phase: "completed".into(),
+            submitted_at: now(), previews: vec![], error: None,
+            report: Some(serde_json::json!({"report": {
+                "kind": "mcq", "question": "What is 2 + 2?",
+                "options": [{"label": "A", "text": "3"}, {"label": "B", "text": "4"}],
+                "answer": {"label": "B", "text": "4"}, "reason": "2 + 2 = 4",
+                "model": "vision-model", "answerVerified": true
+            }})),
+            events: vec![serde_json::json!({"phase": "completed", "message": "MCQ solved"})],
+        };
+        let shown_mcq: Value =
+            serde_json::from_str(&read_overlay_state_snapshot("mcq", Some(&mcq), None)).unwrap();
+        assert_eq!(shown_mcq["kind"], "mcq");
+        assert_eq!(shown_mcq["mcq"]["question"], "What is 2 + 2?");
+        assert_eq!(shown_mcq["mcq"]["answer"]["label"], "B");
+        assert_eq!(shown_mcq["mcq"]["model"], "vision-model");
+        assert_eq!(shown_mcq["mcq"]["answerVerified"], true);
+        assert_eq!(shown_mcq["history"][0]["phase"], "completed");
+
+        // The Coding overlay must not show the MCQ report, even if an old
+        // version incorrectly wrote it to the Coding job slot.
+        let coding_view: Value =
+            serde_json::from_str(&read_overlay_state_snapshot("coding", Some(&mcq), None)).unwrap();
+        assert_ne!(coding_view["runId"], "mcq-only-job");
+        assert!(coding_view.pointer("/mcq/answer").is_none());
+
+        let coding = SubmittedJob {
+            id: "coding-only-job".into(), mode: "council".into(),
+            mcq_model: None, status: "completed".into(),
+            progress_phase: "completed".into(), submitted_at: now(),
+            previews: vec![], error: None,
+            report: Some(serde_json::json!({"report": {
+                "winner": "A",
+                "candidates": [{"letter": "A", "model": "solver-a",
+                    "final": {"kind": "code", "language": "python", "code": "def solve(): return 4"}}],
+                "presentation": {
+                    "standing": "verified", "code": "def solve(): return 4",
+                    "language": "python", "provenance": "Candidate A — solver-a",
+                    "approach": "constant return", "edgeCases": "no input",
+                    "timeComplexity": "O(1)", "spaceComplexity": "O(1)",
+                    "evidence": [{"letter": "A", "model": "solver-a",
+                        "gate": "pass", "passed": 2, "failed": 0,
+                        "revised": false, "runtime": "python3"}]
+                }
+            }})), events: vec![],
+        };
+        let shown_coding: Value =
+            serde_json::from_str(&read_overlay_state_snapshot("coding", Some(&coding), None)).unwrap();
+        assert_eq!(shown_coding["runId"], "coding-only-job");
+        assert_eq!(shown_coding["solution"]["code"], "def solve(): return 4");
+        assert_eq!(shown_coding["solution"]["status"], "reviewed");
+        assert_eq!(shown_coding["presentation"]["edgeCases"], "no input");
+        assert_eq!(shown_coding["presentation"]["timeComplexity"], "O(1)");
+        assert_eq!(shown_coding["tests"][0]["status"], "passed");
+
+        let mcq_view: Value =
+            serde_json::from_str(&read_overlay_state_snapshot("mcq", Some(&coding), None)).unwrap();
+        assert_ne!(mcq_view["runId"], "coding-only-job");
+        assert!(mcq_view.pointer("/solution/code").is_none());
     }
 
     #[test]
