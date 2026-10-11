@@ -43,6 +43,8 @@ export const SHORTCUT_LABELS = {
   solve: "⌃⌥A",
 } as const;
 
+// Focused-app quick captures: "01" = screen, "55" = selected region.
+// Sequences are intentionally ignored when typing into editable controls.
 type CaptureKind = "region" | "screen" | "left" | "right";
 
 async function captureIntoApp(kind: CaptureKind) {
@@ -121,7 +123,31 @@ export function useGlobalShortcuts() {
         /* no event bus outside the shell */
       });
 
+    // Deliberately scoped to the focused Council Editor window. Global
+    // unmodified digit monitoring would observe unrelated typing and can
+    // take screenshots accidentally in other applications.
+    let previousDigit = "";
+    let previousAt = 0;
+    const onDigitCapture = (event: KeyboardEvent) => {
+      if (event.repeat || event.isComposing || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+      if (!/^[0-9]$/.test(event.key)) return;
+      const target = event.target;
+      if (target instanceof HTMLElement &&
+          (target.isContentEditable || target.closest("input, textarea, select, [contenteditable]"))) return;
+      const now = Date.now();
+      const pair = now - previousAt <= 650 ? previousDigit + event.key : "";
+      previousDigit = event.key;
+      previousAt = now;
+      if (pair === "01" || pair === "55") {
+        previousDigit = "";
+        event.preventDefault();
+        void captureIntoApp(pair === "01" ? "screen" : "region");
+      }
+    };
+    window.addEventListener("keydown", onDigitCapture);
+
     return () => {
+      window.removeEventListener("keydown", onDigitCapture);
       disposed = true;
       listeners.forEach((f) => f());
     };
