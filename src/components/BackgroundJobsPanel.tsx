@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { forgetLocalFile, pokeWorker, signedUrl, uploadScreenshot } from "@/lib/bridge";
 import { CLOUD_SOLVER_MAX_IMAGES, sanitizedSettingsSnapshot } from "@/lib/cloudJobs";
 import {
@@ -48,6 +48,7 @@ export default function BackgroundJobsPanel() {
   const [images, setImages] = useState<Array<SolveJobImage & { url?: string }>>([]);
   const [report, setReport] = useState<CouncilReportSummary | null>(null);
   const [loading, setLoading] = useState(false);
+  const refreshInFlight = useRef(false);
   const [queueing, setQueueing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -105,6 +106,9 @@ export default function BackgroundJobsPanel() {
   };
 
   const refresh = async () => {
+    // A slow response must not overlap the next polling tick or manual refresh.
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
     setLoading(true);
     setError(null);
     devLog("cloud-jobs", "refresh started");
@@ -119,6 +123,7 @@ export default function BackgroundJobsPanel() {
       setError(String(err));
       devLog("cloud-jobs", "refresh failed", { error: String(err) });
     } finally {
+      refreshInFlight.current = false;
       setLoading(false);
     }
   };
@@ -132,7 +137,14 @@ export default function BackgroundJobsPanel() {
       if (!document.hidden) void refresh();
     }, 15000);
     const clockTimer = window.setInterval(() => setNow(Date.now()), 15000);
+    // A window can be hidden for hours. Reconcile immediately on return,
+    // rather than leaving a completed cloud job stale for another poll cycle.
+    const onVisibilityChange = () => {
+      if (!document.hidden) void refresh();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       window.clearInterval(refreshTimer);
       window.clearInterval(clockTimer);
     };
