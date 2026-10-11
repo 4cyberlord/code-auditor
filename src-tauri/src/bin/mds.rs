@@ -1709,15 +1709,16 @@ impl OverlayRefresh {
 
 fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRefresh) -> Result<(), String> {
     let submitted = read_submitted_job_for(active_view)?;
-    let running = submitted.as_ref().is_some_and(|job| {
-        !matches!(job.status.as_str(), "completed" | "failed" | "needs_attention" | "cancelled")
-    });
-    // The overlay is showing the running job's solution, so show its input
-    // screenshots too, not screenshots staged for the following job.
+    // Old cached jobs from a different workflow must not leak their pictures
+    // or progress into the active overlay.
+    let matching_job = submitted.as_ref().filter(|job| helper_job_matches_view(active_view, job));
+    let running = matching_job.is_some_and(|job| helper_job_in_progress(job));
+    // Keep a running job paired with its own screenshots. When it is terminal,
+    // an active next batch (including failed captures) owns the preview area.
     let pending = read_pending_for(active_view)?;
-    let pending_has_images = pending.as_ref().is_some_and(|batch| !batch.images.is_empty());
-    let payload = if running || !pending_has_images {
-        let paths = submitted.as_ref().map(|job| job.previews.as_slice()).unwrap_or_default();
+    let pending_active = pending.as_ref().is_some_and(helper_batch_active);
+    let payload = if running || !pending_active {
+        let paths = matching_job.map(|job| job.previews.as_slice()).unwrap_or_default();
         let sources = if paths.iter().all(|path| path.starts_with("data:")) {
             paths.to_vec() // legacy job preview format
         } else { refresh.pending_sources(paths).to_vec() };
@@ -1748,25 +1749,7 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
     // Keep the displayed state paired with the displayed screenshots.
     // A completed job remains available in the job cache while a subsequent
     // batch is being collected. Show pending state with pending thumbnails.
-    let state = if !running {
-        if let Some(batch) = pending.as_ref() {
-            if pending_has_images {
-                let pending_state = if active_view == "mcq" {
-                    mcq_pending_state(&batch)
-                } else {
-                    coding_pending_state(&batch)
-                };
-                serde_json::to_string(&pending_state)
-                    .unwrap_or_else(|_| read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref()))
-            } else {
-                read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
-            }
-        } else {
-            read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
-        }
-    } else {
-        read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
-    };
+    let state = read_overlay_state_snapshot(active_view, matching_job, pending.as_ref());
     let script = refresh.script(&state, payload.as_deref());
     if script.is_empty() { return Ok(()); }
     if let Err(error) = webview.evaluate_script(&script) {
@@ -1785,15 +1768,30 @@ fn read_overlay_state(active_view: &str) -> String {
     read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
 }
 
+fn helper_job_in_progress(job: &SubmittedJob) -> bool {
+    !matches!(job.status.as_str(), "completed" | "failed" | "needs_attention" | "cancelled")
+}
+
+fn helper_job_matches_view(view: &str, job: &SubmittedJob) -> bool {
+    let is_mcq = job.mode == "mcq" || mcq_from_submitted(job).is_some();
+    (view == "mcq") == is_mcq
+}
+
+fn helper_batch_active(batch: &PendingBatch) -> bool {
+    batch.error.is_some() || !batch.images.is_empty() || batch.status == "submitting"
+}
+
 fn read_overlay_state_snapshot(active_view: &str, submitted: Option<&SubmittedJob>, pending: Option<&PendingBatch>) -> String {
     let fallback =
         r#"{"runId":null,"updatedAt":"","phase":"idle","agents":[],"solution":null,"tests":[]}"#;
 
-    // A new question takes priority over the last completed job's answer.
-    // Captures and submission errors belong to the question the user is
-    // working on right now, regardless of older job history.
-    if let Some(batch) = pending {
-        if batch.error.is_some() || !batch.images.is_empty() || batch.status == "submitting" {
+    // While an existing job is running, its state and screenshots stay
+    // paired. Once terminal, a fresh capture/error belongs to the new batch.
+    let active_job_running = submitted.is_some_and(|job| {
+        helper_job_matches_view(active_view, job) && helper_job_in_progress(job)
+    });
+    if !active_job_running {
+        if let Some(batch) = pending.filter(|batch| helper_batch_active(batch)) {
             let current = if active_view == "mcq" {
                 mcq_pending_state(batch)
             } else {
@@ -1805,13 +1803,13 @@ fn read_overlay_state_snapshot(active_view: &str, submitted: Option<&SubmittedJo
     }
 
     if let Some(job) = submitted {
-        let is_mcq = job.mode == "mcq" || mcq_from_submitted(&job).is_some();
-        if active_view == "mcq" && is_mcq {
-            return serde_json::to_string(&submitted_overlay_state(&job))
-                .unwrap_or_else(|_| fallback.to_string());
-        }
-        if active_view != "mcq" && !is_mcq {
-            return serde_json::to_string(&coding_overlay_state(&job))
+        if helper_job_matches_view(active_view, job) {
+            let state = if active_view == "mcq" {
+                submitted_overlay_state(job)
+            } else {
+                coding_overlay_state(job)
+            };
+            return serde_json::to_string(&state)
                 .unwrap_or_else(|_| fallback.to_string());
         }
         // A historical or mismatched job may be present in a saved slot.
@@ -2622,6 +2620,20 @@ mod tests {
             }],
             error: None,
         };
+        let mut working = old.clone();
+        working.status = "running".into();
+        working.progress_phase = "solving".into();
+        // A new capture cannot displace the still-running job's state while
+        // the preview area is intentionally showing that job's pictures.
+        let running_state: Value = serde_json::from_str(
+            &read_overlay_state_snapshot("coding", Some(&working), Some(&fresh))
+        ).unwrap();
+        assert_eq!(running_state["runId"], "previous-job");
+        assert_eq!(running_state["phase"], "running");
+        assert!(helper_batch_active(&fresh));
+        assert!(helper_job_matches_view("coding", &working));
+        assert!(!helper_job_matches_view("mcq", &working));
+
         let current: Value = serde_json::from_str(
             &read_overlay_state_snapshot("coding", Some(&old), Some(&fresh))
         ).unwrap();
