@@ -76,24 +76,32 @@ pub async fn update_check() -> Result<UpdateCheck, String> {
 }
 
 fn best_macos_asset(assets: &[GithubAsset]) -> Option<String> {
-    assets
-        .iter()
+    // Never recommend an ARM build to an Intel Mac (or vice versa).
+    let arch = std::env::consts::ARCH;
+    let matching_arch = |name: &str| {
+        let arm = name.contains("arm64") || name.contains("aarch64") || name.contains("apple_silicon");
+        let intel = name.contains("x86_64") || name.contains("x64") || name.contains("intel");
+        match arch {
+            "aarch64" => !intel,
+            "x86_64" => !arm,
+            _ => !arm && !intel,
+        }
+    };
+    assets.iter()
         .filter(|asset| {
             let name = asset.name.to_ascii_lowercase();
-            (name.ends_with(".dmg") || name.ends_with(".pkg")) && name.contains("mac")
+            (name.ends_with(".dmg") || name.ends_with(".pkg"))
+                && matching_arch(&name)
         })
         .max_by_key(|asset| {
             let name = asset.name.to_ascii_lowercase();
-            (
-                name.ends_with(".pkg"),
-                name.contains("arm64") || name.contains("aarch64"),
-            )
-        })
-        .or_else(|| {
-            assets.iter().find(|asset| {
-                let name = asset.name.to_ascii_lowercase();
-                name.ends_with(".dmg") || name.ends_with(".pkg")
-            })
+            let explicit_mac = name.contains("mac") || name.contains("darwin");
+            let explicit_arch = match arch {
+                "aarch64" => name.contains("arm64") || name.contains("aarch64") || name.contains("apple_silicon"),
+                "x86_64" => name.contains("x86_64") || name.contains("x64") || name.contains("intel"),
+                _ => false,
+            };
+            (explicit_mac, explicit_arch, name.ends_with(".pkg"))
         })
         .map(|asset| asset.browser_download_url.clone())
 }
@@ -142,6 +150,19 @@ mod tests {
     }
 
     #[test]
+    fn does_not_offer_incompatible_architecture() {
+        let assets = vec![GithubAsset {
+            name: if cfg!(target_arch = "aarch64") {
+                "Council-Editor-macos-x86_64.dmg".into()
+            } else {
+                "Council-Editor-macos-arm64.dmg".into()
+            },
+            browser_download_url: "wrong-architecture".into(),
+        }];
+        assert!(best_macos_asset(&assets).is_none());
+    }
+
+    #[test]
     fn prefers_macos_installer_assets() {
         let assets = vec![
             GithubAsset {
@@ -157,6 +178,6 @@ mod tests {
                 browser_download_url: "pkg".into(),
             },
         ];
-        assert_eq!(best_macos_asset(&assets).as_deref(), Some("pkg"));
+        assert_eq!(best_macos_asset(&assets).as_deref(), if cfg!(target_arch = "aarch64") { Some("pkg") } else { None });
     }
 }
