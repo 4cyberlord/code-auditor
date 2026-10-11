@@ -77,6 +77,50 @@ export interface ErrorEvent {
 const NOT_TAURI =
   "This build is running outside the desktop shell, so it cannot reach the model APIs. Launch it with `npm run app:dev`.";
 
+export interface UpdateCheckResult {
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  releaseUrl: string | null;
+  downloadUrl: string | null;
+  publishedAt: string | null;
+  notes: string | null;
+}
+
+export interface ScreenRecordingPermission {
+  supported: boolean;
+  granted: boolean;
+}
+
+/** Read macOS Screen Recording consent without showing a system prompt. */
+export async function screenRecordingPermissionStatus(): Promise<ScreenRecordingPermission> {
+  if (!inTauri()) return { supported: false, granted: true };
+  return invoke<ScreenRecordingPermission>("screen_recording_permission_status");
+}
+
+/** Ask macOS to display its Screen Recording permission prompt. */
+export async function requestScreenRecordingPermission(): Promise<ScreenRecordingPermission> {
+  if (!inTauri()) return { supported: false, granted: true };
+  return invoke<ScreenRecordingPermission>("screen_recording_request_permission");
+}
+
+/** Open macOS directly to the Screen Recording privacy pane. */
+export async function openScreenRecordingSettings(): Promise<void> {
+  if (!inTauri()) return;
+  await invoke("screen_recording_open_settings");
+}
+
+/** Relaunch after macOS has accepted Screen Recording permission. */
+export async function restartForScreenRecordingPermission(): Promise<void> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  await invoke("screen_recording_restart");
+}
+
+export async function checkForUpdates(): Promise<UpdateCheckResult> {
+  if (!inTauri()) throw new Error("Update checks only work inside the desktop app.");
+  return invoke<UpdateCheckResult>("update_check");
+}
+
 export async function runAgent(req: RunRequest): Promise<void> {
   if (!inTauri()) throw new Error(NOT_TAURI);
   await invoke("run_agent", { req });

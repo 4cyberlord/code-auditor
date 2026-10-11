@@ -1291,6 +1291,7 @@ const TABS = [
   { id: "api" as const, label: "API" },
   { id: "council" as const, label: "Council" },
   { id: "appearance" as const, label: "Appearance" },
+  { id: "updates" as const, label: "Updates" },
   { id: "reading" as const, label: "Reading" },
   { id: "capture" as const, label: "Capture" },
   { id: "sessions" as const, label: "Sessions" },
@@ -1352,6 +1353,116 @@ function AppearanceCard() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function UpdateCard() {
+  const [result, setResult] = useState<bridge.UpdateCheckResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const check = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setResult(await bridge.checkForUpdates());
+    } catch (err) {
+      setError(String(err).replace(/^Error:\s*/, ""));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openDownload = () => {
+    const url = result?.downloadUrl || result?.releaseUrl;
+    if (!url) return;
+    void openUrl(url).catch(() => window.open(url, "_blank"));
+  };
+
+  return (
+    <div className="provider-card">
+      <div className="top">
+        <span className="name">App updates</span>
+        <span className="vendor">GitHub releases</span>
+        <span className="spacer" />
+        {result && (
+          <span className="badge" data-tone={result.updateAvailable ? "warn" : "good"}>
+            {result.updateAvailable ? "Update available" : "Up to date"}
+          </span>
+        )}
+      </div>
+
+      <div className="row">
+        <label>Current</label>
+        <span className="field mono" style={{ opacity: result ? 0.85 : 0.6 }}>
+          {result?.currentVersion ?? (bridge.inTauri() ? "Check to read version" : "Desktop app required")}
+        </span>
+      </div>
+
+      {result?.latestVersion && (
+        <div className="row">
+          <label>Latest</label>
+          <span className="field mono" style={{ opacity: 0.85 }}>
+            {result.latestVersion}
+          </span>
+        </div>
+      )}
+
+      {result?.publishedAt && (
+        <div className="row">
+          <label>Published</label>
+          <span className="vendor">
+            {new Date(result.publishedAt).toLocaleString()}
+          </span>
+        </div>
+      )}
+
+      <div className="actions">
+        <button className="btn" onClick={() => void check()} disabled={busy || !bridge.inTauri()}>
+          {busy ? "Checking..." : "Check for Updates"}
+        </button>
+        {result?.updateAvailable && (
+          <button className="btn primary" onClick={openDownload}>
+            Download Latest
+          </button>
+        )}
+        {result?.releaseUrl && (
+          <button
+            className="btn ghost"
+            onClick={() => void openUrl(result.releaseUrl!).catch(() => window.open(result.releaseUrl!, "_blank"))}
+          >
+            Open Release
+          </button>
+        )}
+      </div>
+
+      {result && !result.updateAvailable && (
+        <p className="hint" style={{ color: "var(--good)" }}>
+          You are running the latest published version.
+        </p>
+      )}
+      {result?.updateAvailable && (
+        <p className="hint">
+          A newer release is ready. Download it, quit Council Editor, and install the new build.
+          {result.downloadUrl ? " The download button opens the macOS installer asset." : " No installer asset was found, so the release page is used."}
+        </p>
+      )}
+      {result?.notes && (
+        <p className="hint" style={{ whiteSpace: "pre-wrap", maxHeight: 180, overflow: "auto" }}>
+          {result.notes}
+        </p>
+      )}
+      {error && (
+        <p className="hint" style={{ color: "var(--bad)" }}>
+          {error}
+        </p>
+      )}
+      {!bridge.inTauri() && (
+        <p className="hint">
+          Update checks run from the desktop shell so the app can use its packaged version.
+        </p>
+      )}
     </div>
   );
 }
@@ -2098,6 +2209,8 @@ export default function SettingsDialog() {
           {tab === "council" && <CouncilCard />}
 
           {tab === "appearance" && <AppearanceCard />}
+
+          {tab === "updates" && <UpdateCard />}
 
           {tab === "reading" && <ReadingCard />}
 

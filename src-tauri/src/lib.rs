@@ -14,10 +14,12 @@ mod overlay_state;
 mod platform_base;
 mod providers;
 mod runner;
+mod screen_recording;
 mod secrets;
 mod server_api;
 mod sessions;
 mod storage;
+mod updates;
 mod vision;
 
 use db::Db;
@@ -360,6 +362,10 @@ pub fn run() {
             capture::capture_left_half,
             capture::capture_right_half,
             capture::read_capture,
+            screen_recording::screen_recording_permission_status,
+            screen_recording::screen_recording_request_permission,
+            screen_recording::screen_recording_open_settings,
+            screen_recording::screen_recording_restart,
             overlay::overlay_show,
             overlay::overlay_hide,
             overlay::overlay_toggle,
@@ -367,6 +373,7 @@ pub fn run() {
             overlay::hide_overlay,
             overlay::overlay_visibility_status,
             overlay_state::overlay_state_write,
+            updates::update_check,
             capture::save_reading,
             providers::set_gateway_rate,
             vision::ocr_images,
