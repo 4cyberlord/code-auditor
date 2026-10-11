@@ -73,6 +73,7 @@ export function validateCloudSolveJobDraft(draft: CloudSolveJobDraft): string[] 
   }
 
   const positions = new Set<number>();
+  const storageObjects = new Set<string>();
   for (const image of draft.images) {
     if (!Number.isInteger(image.position) || image.position < 0) {
       errors.push("image positions must be zero-based integers");
@@ -81,9 +82,14 @@ export function validateCloudSolveJobDraft(draft: CloudSolveJobDraft): string[] 
     positions.add(image.position);
     if (!image.storageBucket.trim()) errors.push("storageBucket is required");
     if (!image.storagePath.trim()) errors.push("storagePath is required");
+    // Two positions may not reference the same uploaded object: avoid duplicate
+    // server fetches and ambiguous attachment-to-result mapping.
+    const objectId = JSON.stringify([image.storageBucket, image.storagePath]);
+    if (storageObjects.has(objectId)) errors.push(`duplicate storage object ${image.storagePath}`);
+    storageObjects.add(objectId);
     if (!image.fileName.trim()) errors.push("fileName is required");
     if (!image.mime.startsWith("image/")) errors.push(`${image.fileName} is not an image`);
-    if (!Number.isFinite(image.bytes) || image.bytes <= 0) {
+    if (!Number.isSafeInteger(image.bytes) || image.bytes <= 0) {
       errors.push(`${image.fileName} has no bytes`);
     }
   }
