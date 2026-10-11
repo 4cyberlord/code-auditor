@@ -1954,9 +1954,9 @@ export function buildPresentation(report: CouncilReport): Presentation {
     // The verified problem contract is the source of these sections.
     // Do not hallucinate complexity bounds or boundary cases from model dissent.
     timeComplexity: (report.contract?.complexity || winnerFinal?.complexity || "")
-      .match(/(?:time|runtime)\s*(?:complexity)?\s*[:=\\-]\s*([^\n;]+)/i)?.[1]?.trim() || "",
+      .match(/(?:time|runtime)\s*(?:complexity)?\s*[-:=]\s*([^\n;]+)/i)?.[1]?.trim() || "",
     spaceComplexity: (report.contract?.complexity || winnerFinal?.complexity || "")
-      .match(/(?:space|memory)\s*(?:complexity)?\s*[:=\\-]\s*([^\n;]+)/i)?.[1]?.trim() || "",
+      .match(/(?:space|memory)\s*(?:complexity)?\s*[-:=]\s*([^\n;]+)/i)?.[1]?.trim() || "",
     edgeCases: report.contract?.edgeCases || "",
     evidence,
     dissent,
