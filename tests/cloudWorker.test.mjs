@@ -8,6 +8,9 @@ process.env.CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS = "0";
 process.env.CODE_AUDITOR_TOKENROUTER_JITTER_MS = "0";
 process.env.CODE_AUDITOR_WORKER_SOLVERS = "2";
 process.env.CODE_AUDITOR_WORKER_JUDGES = "1";
+// Only deterministic, hard-coded fixture programs execute on this disposable CI runner.
+// Production still defaults to the isolated E2B execution provider.
+process.env.CODE_AUDITOR_EXECUTION_PROVIDER = "local";
 
 let fail = 0;
 const check = (name, cond, extra = "") => {
