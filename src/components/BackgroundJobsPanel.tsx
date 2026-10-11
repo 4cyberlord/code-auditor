@@ -46,6 +46,7 @@ export default function BackgroundJobsPanel() {
   const [selected, setSelected] = useState<string | null>(null);
   const [events, setEvents] = useState<SolveJobEvent[]>([]);
   const [images, setImages] = useState<Array<SolveJobImage & { url?: string }>>([]);
+  const [urlRefresh, setUrlRefresh] = useState(0);
   const [report, setReport] = useState<CouncilReportSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const refreshInFlight = useRef(false);
@@ -137,16 +138,22 @@ export default function BackgroundJobsPanel() {
       if (!document.hidden) void refresh();
     }, 15000);
     const clockTimer = window.setInterval(() => setNow(Date.now()), 15000);
+    // Signed previews expire after 15 minutes; renew them before expiry.
+    const urlTimer = window.setInterval(() => setUrlRefresh((version) => version + 1), 12 * 60_000);
     // A window can be hidden for hours. Reconcile immediately on return,
     // rather than leaving a completed cloud job stale for another poll cycle.
     const onVisibilityChange = () => {
-      if (!document.hidden) void refresh();
+      if (!document.hidden) {
+        void refresh();
+        setUrlRefresh((version) => version + 1);
+      }
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.clearInterval(refreshTimer);
       window.clearInterval(clockTimer);
+      window.clearInterval(urlTimer);
     };
   }, [open]);
 
@@ -277,7 +284,7 @@ export default function BackgroundJobsPanel() {
   // A refreshed listing creates new objects even if the job did not change.
   // Depend on its identity/version, not its object reference: this prevents
   // re-signing every image URL and reloading the report every 15 seconds.
-  }, [open, selectedJob?.id, selectedJob?.status, selectedJob?.updatedAt]);
+  }, [open, selectedJob?.id, selectedJob?.status, selectedJob?.updatedAt, urlRefresh]);
 
   return (
     <section className="background-jobs" data-open={open}>
