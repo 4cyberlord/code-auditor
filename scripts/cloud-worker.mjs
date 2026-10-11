@@ -1793,25 +1793,32 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
   });
 
   await patchJob(job.id, { progress_phase: "mcq_solving" });
+  // Never inject uncertain extracted options as an authoritative contract.
+  // When readers disagree, let the verified vision solver inspect the pixels.
+  const trustedDetection = transcriptionTrusted
+    ? detection : { ...detection, isMcq: false, options: [] };
+  const readingHint = directImage
+    ? "UNVERIFIED SCREEN READING — confirm each character and choice against the attached original screenshot.\\n\\n" + readingText
+    : readingText;
   const raw = await mcqGenerate({
     settings,
     baseUrl,
     model,
     system: mcqSystemPrompt(),
-    user: mcqUserPrompt({ readingText, knowledge, detection, model }),
+    user: mcqUserPrompt({ readingText: readingHint, knowledge, detection: trustedDetection, model }),
     images: directImage ? jobImages : [],
     maxTokens: Math.min(Number(settings.maxTokens || 4096), 4096),
   });
   const parsed = parseMcqAnswer(raw, {
-    question: detection.question,
-    options: detection.options,
+    question: trustedDetection.question,
+    options: trustedDetection.options,
     knowledgeUsed: Boolean(knowledge.trim()),
     model,
   });
   if (!parsed?.answer?.label && !parsed?.answer?.text) {
     throw new Error("The MCQ model answered, but no selected answer could be parsed.");
   }
-  const verified = detection.isMcq ? resolveMcqSelection(parsed, detection) : parsed;
+  const verified = transcriptionTrusted ? resolveMcqSelection(parsed, detection) : parsed;
   if (!verified) throw new Error("MCQ answer does not match the extracted options.");
   if (verified !== parsed) Object.assign(parsed, verified);
   parsed.model = parsed.model || model;
