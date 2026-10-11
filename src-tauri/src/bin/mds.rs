@@ -118,9 +118,10 @@ mod mac_shortcuts {
         ffi::c_void,
         ptr,
         sync::{
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicU8, Ordering},
             Mutex,
         },
+        time::{Duration, Instant},
     };
 
     type CFAllocatorRef = *const c_void;
@@ -153,6 +154,13 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_RIGHT_CONTROL: u32 = 0xE4;
     const HID_USAGE_KEYBOARD_RIGHT_SHIFT: u32 = 0xE5;
     const HID_USAGE_KEYBOARD_RIGHT_ALT: u32 = 0xE6;
+    // USB HID usages for the number row (0..9).
+    const HID_USAGE_KEYBOARD_1: u32 = 0x1E;
+    const HID_USAGE_KEYBOARD_2: u32 = 0x1F;
+    const HID_USAGE_KEYBOARD_3: u32 = 0x20;
+    const HID_USAGE_KEYBOARD_4: u32 = 0x21;
+    const HID_USAGE_KEYBOARD_5: u32 = 0x22;
+    const HID_USAGE_KEYBOARD_0: u32 = 0x27;
 
     pub static START_BATCH: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE: AtomicBool = AtomicBool::new(false);
@@ -168,10 +176,14 @@ mod mac_shortcuts {
     pub static MOVE_DOWN: AtomicBool = AtomicBool::new(false);
     pub static SCROLL_UP: AtomicBool = AtomicBool::new(false);
     pub static SCROLL_DOWN: AtomicBool = AtomicBool::new(false);
+    // Encoded capture/process pairs: 10-14 main app, 21-25 coding helper,
+    // 31-35 MCQ helper. Zero means no queued request.
+    static NUMBER_COMMAND: AtomicU8 = AtomicU8::new(0);
 
     static CONTROL_DOWN: AtomicBool = AtomicBool::new(false);
     static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
     static OPTION_DOWN: AtomicBool = AtomicBool::new(false);
+    static LAST_DIGIT: Mutex<Option<(u8, Instant)>> = Mutex::new(None);
     static MONITOR: Mutex<Option<usize>> = Mutex::new(None);
 
     #[link(name = "IOKit", kind = "framework")]
@@ -220,6 +232,37 @@ mod mac_shortcuts {
         }
         let usage = unsafe { IOHIDElementGetUsage(element) };
         let pressed = unsafe { IOHIDValueGetIntegerValue(value) } != 0;
+
+        // Number pairs route into three independent destinations. The first
+        // digit selects the workflow; the second selects its capture mode.
+        if pressed && !CONTROL_DOWN.load(Ordering::SeqCst)
+            && !SHIFT_DOWN.load(Ordering::SeqCst)
+            && !OPTION_DOWN.load(Ordering::SeqCst)
+        {
+            let digit = match usage {
+                HID_USAGE_KEYBOARD_0 => Some(0),
+                HID_USAGE_KEYBOARD_1 => Some(1),
+                HID_USAGE_KEYBOARD_2 => Some(2),
+                HID_USAGE_KEYBOARD_3 => Some(3),
+                HID_USAGE_KEYBOARD_4 => Some(4),
+                HID_USAGE_KEYBOARD_5 => Some(5),
+                _ => None,
+            };
+            if let Some(digit) = digit {
+                if let Ok(mut previous) = LAST_DIGIT.lock() {
+                    let pair = previous.take().filter(|(_, at)| at.elapsed() <= Duration::from_millis(650))
+                        .map(|(first, _)| (first, digit));
+                    *previous = Some((digit, Instant::now()));
+                    if let Some((first, second)) = pair {
+                        if let Some(command) = super::number_pair_command(first, second) {
+                            NUMBER_COMMAND.store(command, Ordering::SeqCst);
+                        }
+                    }
+                }
+            } else if usage < HID_USAGE_KEYBOARD_LEFT_CONTROL {
+                if let Ok(mut previous) = LAST_DIGIT.lock() { *previous = None; }
+            }
+        }
 
         match usage {
             HID_USAGE_KEYBOARD_LEFT_CONTROL | HID_USAGE_KEYBOARD_RIGHT_CONTROL => {
@@ -352,6 +395,7 @@ mod mac_shortcuts {
     pub fn take_scroll_down() -> bool {
         SCROLL_DOWN.swap(false, Ordering::SeqCst)
     }
+    pub fn take_number_command() -> u8 { NUMBER_COMMAND.swap(0, Ordering::SeqCst) }
 }
 
 async fn space_api_calls() {
@@ -476,6 +520,31 @@ fn drain_capture_commands() {
         }
     }
 }
+
+#[cfg(target_os = "macos")]
+fn send_capture_to_council(mode: &str) {
+    if !matches!(mode, "region" | "screen" | "left" | "right") { return; }
+    let Ok(dir) = support_root_dir().map(|path| path.join("cache/app-capture-requests")) else { return; };
+    if fs::create_dir_all(&dir).is_err() { return; }
+    let id = Uuid::new_v4().to_string();
+    let target = dir.join(format!("{id}.json"));
+    let temp = dir.join(format!(".{id}.tmp"));
+    if fs::write(&temp, serde_json::json!({"mode": mode, "createdAt": chrono::Utc::now().to_rfc3339()}).to_string()).is_ok() {
+        if fs::rename(&temp, &target).is_err() { let _ = fs::remove_file(temp); }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn send_process_to_council() {
+    let Ok(dir) = support_root_dir().map(|path| path.join("cache/app-capture-requests")) else { return; };
+    if fs::create_dir_all(&dir).is_err() { return; }
+    let id = Uuid::new_v4().to_string();
+    let target = dir.join(format!("{id}.json"));
+    let temp = dir.join(format!(".{id}.tmp"));
+    if fs::write(&temp, serde_json::json!({"mode": "process", "createdAt": chrono::Utc::now().to_rfc3339()}).to_string()).is_ok() {
+        if fs::rename(&temp, &target).is_err() { let _ = fs::remove_file(temp); }
+    }
+}
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -538,11 +607,68 @@ fn run() -> Result<(), String> {
     let mut capture_task: Option<tokio::task::JoinHandle<Result<(), String>>> = None;
     #[cfg(target_os = "macos")]
     let mut restore_overlay_after_capture = false;
+    #[cfg(target_os = "macos")]
+    let mut capture_active_view: Option<String> = None;
 
     event_loop.run(move |_event, event_loop_target, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
         #[cfg(target_os = "macos")]
         drain_capture_commands();
+        #[cfg(target_os = "macos")]
+        {
+            let command = mac_shortcuts::take_number_command();
+            match command {
+                10 => send_capture_to_council("screen"),
+                11 => send_capture_to_council("left"),
+                12 => send_capture_to_council("right"),
+                13 => send_capture_to_council("region"),
+                14 => send_process_to_council(),
+                21..=24 | 31..=34 => {
+                    let target_view = if command < 30 { "coding" } else { "mcq" };
+                    if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                        eprintln!("screenshot capture already in progress");
+                    } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                        eprintln!("screenshot capture unavailable during cloud submission");
+                    } else if let Some(mode) = helper_capture_mode(command % 10) {
+                        active_view = target_view.to_string();
+                        capture_active_view = Some(active_view.clone());
+                        // Background-route captures open their own coding/MCQ
+                        // surface after the grab so the staged images and next
+                        // action are visible without leaving the source app.
+                        restore_overlay_after_capture = true;
+                        overlay_visible = false;
+                        let _ = show_overlay(&overlay, false);
+                        event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                        let view = active_view.clone();
+                        capture_task = Some(rt.spawn_blocking(move || capture_screen(mode, &view)));
+                    }
+                }
+                25 | 35 => {
+                    let target_view = if command == 25 { "coding" } else { "mcq" };
+                    if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                        eprintln!("finish the screenshot selection before submitting");
+                    } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                        eprintln!("cloud submission already running");
+                    } else {
+                        active_view = target_view.to_string();
+                        overlay_visible = true;
+                        let _ = show_overlay(&overlay, true);
+                        event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                        let gate = std::sync::Arc::clone(&cloud_gate);
+                        let view = active_view.clone();
+                        submit_task = Some(rt.spawn(async move {
+                            let _lock = gate.lock().await;
+                            if let Err(error) = submit_batch(&view).await {
+                                eprintln!("submit failed: {error}");
+                                let _ = update_pending_error(&view, &error);
+                            }
+                        }));
+                        let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                    }
+                }
+                _ => {}
+            }
+        }
         if last_capture_cleanup.elapsed() >= Duration::from_secs(3600) {
             if let Err(error) = clean_expired_capture_dirs() {
                 log(&format!("Capture cleanup skipped: {error}"));
@@ -570,9 +696,10 @@ fn run() -> Result<(), String> {
                     ActivationPolicy::Prohibited
                 });
                 let _ = show_overlay(&overlay, overlay_visible);
+                let capture_view = capture_active_view.take().unwrap_or_else(|| active_view.clone());
                 if let Err(error) = result {
                     eprintln!("capture failed: {error}");
-                    let _ = update_pending_error(&error);
+                    let _ = update_pending_error(&capture_view, &error);
                 }
                 let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
             }
@@ -637,7 +764,7 @@ fn run() -> Result<(), String> {
                     eprintln!("start batch unavailable during screenshot selection");
                 } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
                     eprintln!("start batch unavailable during cloud submission");
-                } else if let Err(e) = start_batch() {
+                } else if let Err(e) = start_batch(&active_view) {
                     eprintln!("start batch failed: {e}");
                 }
                 let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
@@ -658,10 +785,12 @@ fn run() -> Result<(), String> {
                         else if region_capture { CaptureMode::Region }
                         else { CaptureMode::Full };
                     restore_overlay_after_capture = overlay_visible;
+                    capture_active_view = Some(active_view.clone());
                     overlay_visible = false;
                     let _ = show_overlay(&overlay, false);
                     event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
-                    capture_task = Some(rt.spawn_blocking(move || capture_screen(capture_mode)));
+                    let view = active_view.clone();
+                    capture_task = Some(rt.spawn_blocking(move || capture_screen(capture_mode, &view)));
                 }
             }
             if mac_shortcuts::take_submit() {
@@ -676,7 +805,7 @@ fn run() -> Result<(), String> {
                         let _lock = gate.lock().await;
                         if let Err(error) = submit_batch(&view).await {
                             eprintln!("submit failed: {error}");
-                            let _ = update_pending_error(&error);
+                            let _ = update_pending_error(&view, &error);
                         }
                     }));
                 }
@@ -824,12 +953,14 @@ fn log_dir() -> Result<PathBuf, String> {
     Ok(support_root_dir()?.join("logs"))
 }
 
-fn pending_path() -> Result<PathBuf, String> {
-    Ok(cache_dir()?.join("pending-batch.json"))
+fn pending_path_for(view: &str) -> Result<PathBuf, String> {
+    let name = if view == "mcq" { "pending-mcq-batch.json" } else { "pending-batch.json" };
+    Ok(cache_dir()?.join(name))
 }
 
-fn submitted_job_path() -> Result<PathBuf, String> {
-    Ok(cache_dir()?.join("submitted-job.json"))
+fn submitted_job_path_for(view: &str) -> Result<PathBuf, String> {
+    let name = if view == "mcq" { "submitted-mcq-job.json" } else { "submitted-job.json" };
+    Ok(cache_dir()?.join(name))
 }
 fn archive_job(job: &SubmittedJob) -> Result<(), String> {
     let dir = cache_dir()?.join("job-history");
@@ -845,9 +976,13 @@ fn clean_expired_capture_dirs() -> Result<(), String> {
     let root = cache_dir()?.join("captures");
     let Ok(entries) = fs::read_dir(&root) else { return Ok(()); };
     let mut protected = std::collections::HashSet::new();
-    if let Some(pending) = read_pending()? { protected.insert(pending.id); }
+    for view in ["coding", "mcq"] {
+        if let Some(pending) = read_pending_for(view)? { protected.insert(pending.id); }
+    }
     let mut jobs = Vec::new();
-    if let Some(current) = read_submitted_job()? { jobs.push(current); }
+    for view in ["coding", "mcq"] {
+        if let Some(current) = read_submitted_job_for(view)? { jobs.push(current); }
+    }
     if let Ok(history) = fs::read_dir(cache_dir()?.join("job-history")) {
         for file in history.flatten() {
             if let Ok(raw) = fs::read_to_string(file.path()) {
@@ -919,8 +1054,8 @@ fn log(message: &str) {
     }
 }
 
-fn save_pending(batch: &PendingBatch) -> Result<(), String> {
-    let path = pending_path()?;
+fn save_pending_for(view: &str, batch: &PendingBatch) -> Result<(), String> {
+    let path = pending_path_for(view)?;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)
             .map_err(|e| format!("Could not create helper state directory: {e}"))?;
@@ -929,8 +1064,8 @@ fn save_pending(batch: &PendingBatch) -> Result<(), String> {
     write_private(&path, json).map_err(|e| format!("Could not save helper batch: {e}"))
 }
 
-fn read_pending() -> Result<Option<PendingBatch>, String> {
-    let path = pending_path()?;
+fn read_pending_for(view: &str) -> Result<Option<PendingBatch>, String> {
+    let path = pending_path_for(view)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -940,8 +1075,8 @@ fn read_pending() -> Result<Option<PendingBatch>, String> {
         .map_err(|e| format!("Could not parse helper batch: {e}"))
 }
 
-fn save_submitted_job(job: &SubmittedJob) -> Result<(), String> {
-    let path = submitted_job_path()?;
+fn save_submitted_job_for(view: &str, job: &SubmittedJob) -> Result<(), String> {
+    let path = submitted_job_path_for(view)?;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)
             .map_err(|e| format!("Could not create helper state directory: {e}"))?;
@@ -950,38 +1085,39 @@ fn save_submitted_job(job: &SubmittedJob) -> Result<(), String> {
     write_private(&path, json).map_err(|e| format!("Could not save submitted job: {e}"))
 }
 
-fn read_submitted_job() -> Result<Option<SubmittedJob>, String> {
-    let path = submitted_job_path()?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = fs::read_to_string(path).map_err(|e| format!("Could not read submitted job: {e}"))?;
-    serde_json::from_str(&raw)
-        .map(Some)
-        .map_err(|e| format!("Could not parse submitted job: {e}"))
-}
-
-fn clear_submitted_job() -> Result<(), String> {
-    let path = submitted_job_path()?;
+fn read_submitted_job_for(view: &str) -> Result<Option<SubmittedJob>, String> {
+    let path = submitted_job_path_for(view)?;
     if path.exists() {
-        fs::remove_file(path).map_err(|e| format!("Could not clear submitted job: {e}"))?;
+        let raw = fs::read_to_string(path).map_err(|e| format!("Could not read submitted job: {e}"))?;
+        let job: SubmittedJob = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        return Ok((job.mode == if view == "mcq" { "mcq" } else { "council" }).then_some(job));
     }
-    Ok(())
+    // Older versions stored both workflows in one file. Recover a legacy MCQ
+    // result into its own view until the next refresh writes the separated file.
+    if view == "mcq" {
+        let legacy = cache_dir()?.join("submitted-job.json");
+        if legacy.exists() {
+            let raw = fs::read_to_string(legacy).map_err(|e| format!("Could not read legacy submitted job: {e}"))?;
+            let job: SubmittedJob = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            return Ok((job.mode == "mcq").then_some(job));
+        }
+    }
+    Ok(None)
 }
 
-fn update_pending_error(message: &str) -> Result<(), String> {
-    if let Some(mut batch) = read_pending()? {
+fn update_pending_error(view: &str, message: &str) -> Result<(), String> {
+    if let Some(mut batch) = read_pending_for(view)? {
         batch.status = "ready".to_string();
         batch.error = Some(message.to_string());
-        save_pending(&batch)?;
+        save_pending_for(view, &batch)?;
     }
     Ok(())
 }
 
-fn start_batch() -> Result<(), String> {
+fn start_batch(view: &str) -> Result<(), String> {
     // Do not orphan screenshots when the start shortcut is pressed twice.
     // The existing ordered batch remains available until it is submitted.
-    if let Some(existing) = read_pending()? {
+    if let Some(existing) = read_pending_for(view)? {
         if !existing.images.is_empty() {
             return Err(format!("Batch {} already contains {} screenshot(s). Submit it before starting another.", existing.id, existing.images.len()));
         }
@@ -996,19 +1132,37 @@ fn start_batch() -> Result<(), String> {
         session_id: None,
         owner_id: None,
         settings_snapshot: None,
-        mode: None,
+        mode: Some(if view == "mcq" { "mcq" } else { "council" }.to_string()),
         images: vec![],
         error: None,
     };
     fs::create_dir_all(captures_dir(&id)?)
         .map_err(|e| format!("Could not create capture directory: {e}"))?;
-    save_pending(&batch)?;
+    save_pending_for(view, &batch)?;
     log(&format!("started {id}"));
     Ok(())
 }
 
 #[derive(Clone, Copy)]
 enum CaptureMode { Full, Region, Left, Right }
+
+fn helper_capture_mode(digit: u8) -> Option<CaptureMode> {
+    match digit {
+        1 => Some(CaptureMode::Full),
+        2 => Some(CaptureMode::Left),
+        3 => Some(CaptureMode::Right),
+        4 => Some(CaptureMode::Region),
+        _ => None,
+    }
+}
+
+fn number_pair_command(first: u8, second: u8) -> Option<u8> {
+    match first {
+        1 if second <= 4 => Some(10 + second),
+        2 | 3 if (1..=5).contains(&second) => Some(first * 10 + second),
+        _ => None,
+    }
+}
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -1029,18 +1183,18 @@ extern "C" {
     fn CGDisplayBounds(display: u32) -> CaptureRect;
 }
 
-fn capture_screen(mode: CaptureMode) -> Result<(), String> {
+fn capture_screen(mode: CaptureMode, view: &str) -> Result<(), String> {
     // A screenshot shortcut must work even when the main app is closed and the
     // user has not explicitly started a batch. Reuse a pending batch for
     // successive screenshots instead of silently replacing earlier captures.
-    if read_pending()?.is_none() {
-        start_batch()?;
+    if read_pending_for(view)?.is_none() {
+        start_batch(view)?;
     }
-    let mut batch = read_pending()?.ok_or("Could not initialize screenshot batch.".to_string())?;
+    let mut batch = read_pending_for(view)?.ok_or("Could not initialize screenshot batch.".to_string())?;
     if batch.images.len() >= MAX_IMAGES {
         batch.status = "ready".to_string();
         batch.error = Some(format!("A helper batch can hold {MAX_IMAGES} screenshots."));
-        save_pending(&batch)?;
+        save_pending_for(view, &batch)?;
         return Err(format!("A helper batch can hold {MAX_IMAGES} screenshots."));
     }
 
@@ -1093,7 +1247,7 @@ fn capture_screen(mode: CaptureMode) -> Result<(), String> {
             format!("Screen capture failed: {stderr}")
         };
         batch.error = Some(msg.clone());
-        save_pending(&batch)?;
+        save_pending_for(view, &batch)?;
         return Err(msg);
     }
 
@@ -1102,7 +1256,7 @@ fn capture_screen(mode: CaptureMode) -> Result<(), String> {
         .len() as i64;
     if bytes <= 0 {
         batch.error = Some("Captured screenshot was empty.".to_string());
-        save_pending(&batch)?;
+        save_pending_for(view, &batch)?;
         return Err("Captured screenshot was empty.".to_string());
     }
     batch.images.push(PendingImage {
@@ -1115,14 +1269,15 @@ fn capture_screen(mode: CaptureMode) -> Result<(), String> {
     });
     batch.status = "ready".to_string();
     batch.error = None;
-    save_pending(&batch)?;
+    save_pending_for(view, &batch)?;
     log(&format!("captured image {} for {}", position + 1, batch.id));
     Ok(())
 }
 
 async fn submit_batch(active_view: &str) -> Result<(), String> {
     // New submissions never depend on downloading an older job's report.
-    let mut batch = read_pending()?.ok_or("No helper batch is waiting to submit.".to_string())?;
+    let mut batch = read_pending_for(active_view)?
+        .ok_or("No helper batch is waiting to submit.".to_string())?;
     if batch.images.is_empty() {
         return Err("The helper batch has no screenshots.".to_string());
     }
@@ -1140,7 +1295,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
     }
     batch.status = "submitting".into();
     batch.error = None;
-    save_pending(&batch)?;
+    save_pending_for(active_view, &batch)?;
 
     // Never continue a saved submission with another user's credentials.
     let owner = api("auth.whoami", serde_json::json!({})).await?;
@@ -1149,7 +1304,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
         return Err("Account changed; this batch belongs to a different account.".into());
     }
     batch.owner_id = Some(owner_id.clone());
-    save_pending(&batch)?;
+    save_pending_for(active_view, &batch)?;
 
     let user_settings = if let Some(snapshot) = batch.settings_snapshot.clone() {
         snapshot
@@ -1179,7 +1334,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
             }
         };
         batch.settings_snapshot = Some(settings.clone());
-        save_pending(&batch)?;
+        save_pending_for(active_view, &batch)?;
         settings
     };
     let mode = batch.mode.clone().unwrap_or_else(|| {
@@ -1188,7 +1343,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
         } else { "council".to_string() }
     });
     batch.mode = Some(mode.clone());
-    save_pending(&batch)?;
+    save_pending_for(active_view, &batch)?;
     let mcq_model = if mode == "mcq" {
         user_settings.get("mcqModel").and_then(Value::as_str).map(str::trim)
            .filter(|s| !s.is_empty()).map(str::to_string)
@@ -1201,7 +1356,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
         })).await?;
         let id = session["id"].as_str().ok_or("Missing session ID")?.to_string();
         batch.session_id = Some(id.clone());
-        save_pending(&batch)?;
+        save_pending_for(active_view, &batch)?;
         id
     };
     let mut images = vec![];
@@ -1273,10 +1428,10 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
     if job_id.trim().is_empty() {
         return Err("Cloud job was not assigned an ID; screenshots retained for retry.".into());
     }
-    if let Some(previous) = read_submitted_job()? {
+    if let Some(previous) = read_submitted_job_for(active_view)? {
         if previous.id != job_id { archive_job(&previous)?; }
     }
-    save_submitted_job(&SubmittedJob {
+    save_submitted_job_for(active_view, &SubmittedJob {
         id: job_id.clone(),
         mode,
         mcq_model,
@@ -1290,7 +1445,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
     })?;
 
     // Retain referenced preview files until recovery/retention cleanup.
-    let _ = fs::remove_file(pending_path()?);
+    let _ = fs::remove_file(pending_path_for(active_view)?);
     log(&format!("submitted {} as job {job_id}", batch.id));
     Ok(())
 }
@@ -1341,8 +1496,10 @@ fn tracked_job_row<'a>(data: &'a Value, expected_id: &str) -> Option<&'a Value> 
 }
 
 async fn refresh_job() -> Result<(), String> {
-    if let Some(job) = read_submitted_job()? {
-        save_submitted_job(&refresh_one_job(job).await?)?;
+    for view in ["coding", "mcq"] {
+        if let Some(job) = read_submitted_job_for(view)? {
+            save_submitted_job_for(view, &refresh_one_job(job).await?)?;
+        }
     }
     // Poll two older unfinished jobs per tick. Preserve their reports separately.
     let dir = cache_dir()?.join("job-history");
@@ -1543,13 +1700,13 @@ impl OverlayRefresh {
 }
 
 fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRefresh) -> Result<(), String> {
-    let submitted = read_submitted_job()?;
+    let submitted = read_submitted_job_for(active_view)?;
     let running = submitted.as_ref().is_some_and(|job| {
         !matches!(job.status.as_str(), "completed" | "failed" | "needs_attention" | "cancelled")
     });
     // The overlay is showing the running job's solution, so show its input
     // screenshots too, not screenshots staged for the following job.
-    let pending = read_pending()?;
+    let pending = read_pending_for(active_view)?;
     let pending_has_images = pending.as_ref().is_some_and(|batch| !batch.images.is_empty());
     let payload = if running || !pending_has_images {
         let paths = submitted.as_ref().map(|job| job.previews.as_slice()).unwrap_or_default();
@@ -1615,8 +1772,8 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
 }
 
 fn read_overlay_state(active_view: &str) -> String {
-    let submitted = read_submitted_job().ok().flatten();
-    let pending = read_pending().ok().flatten();
+    let submitted = read_submitted_job_for(active_view).ok().flatten();
+    let pending = read_pending_for(active_view).ok().flatten();
     read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
 }
 
@@ -2363,6 +2520,28 @@ fn overlay_html() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn number_pairs_route_to_the_requested_workflow_and_capture_shape() {
+        let expected = [
+            (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13),
+            (2, 1, 21), (2, 2, 22), (2, 3, 23), (2, 4, 24),
+            (3, 1, 31), (3, 2, 32), (3, 3, 33), (3, 4, 34),
+            (1, 4, 14), (2, 5, 25), (3, 5, 35),
+        ];
+        for (prefix, shape, command) in expected {
+            assert_eq!(number_pair_command(prefix, shape), Some(command));
+        }
+        for invalid in [(1, 5), (2, 0), (3, 0), (4, 1)] {
+            assert_eq!(number_pair_command(invalid.0, invalid.1), None);
+        }
+    }
+
+    #[test]
+    fn background_workflow_batches_and_results_are_isolated() {
+        assert_ne!(pending_path_for("coding").unwrap(), pending_path_for("mcq").unwrap());
+        assert_ne!(submitted_job_path_for("coding").unwrap(), submitted_job_path_for("mcq").unwrap());
+    }
 
     #[test]
     fn snapshot_without_jobs_is_self_contained() {

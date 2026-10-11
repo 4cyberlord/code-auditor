@@ -21,7 +21,7 @@
     "knowledge:publish": "node scripts/seed-knowledge.mjs",
     "check": "npm run typecheck && npm run lint && npm test && npm run check:rust",
     "tauri": "tauri",
-    "app:dev": "npm run helper:sidecar:dev && tauri dev",
+    "app:dev": "npm run helper:sidecar:dev && tauri dev --config src-tauri/tauri.dev.conf.json",
     "app:build": "tauri build --bundles app && node scripts/package-dmg.mjs",
     "app:build:signed": "node scripts/build-signed.mjs",
     "release:preflight": "node scripts/release-preflight.mjs"

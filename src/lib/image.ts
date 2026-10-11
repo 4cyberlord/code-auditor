@@ -58,6 +58,51 @@ export interface TilePlan {
   scale: number;
 }
 
+type DecodedImage = {
+  source: CanvasImageSource;
+  width: number;
+  height: number;
+  dispose: () => void;
+};
+
+/**
+ * WebKit occasionally rejects a valid PNG Blob in `createImageBitmap()` with
+ * just `TypeError: Load failed`. An object URL loaded through `<img>` uses the
+ * same decoded pixels but a different WebKit path, so it is a dependable
+ * fallback for screenshots returned by the native capture command.
+ */
+async function decodeImage(file: Blob): Promise<DecodedImage> {
+  try {
+    const bitmap = await createImageBitmap(file);
+    return {
+      source: bitmap,
+      width: bitmap.width,
+      height: bitmap.height,
+      dispose: () => bitmap.close?.(),
+    };
+  } catch (bitmapError) {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.decoding = "async";
+    try {
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(bitmapError);
+        image.src = url;
+      });
+      return {
+        source: image,
+        width: image.naturalWidth,
+        height: image.naturalHeight,
+        dispose: () => URL.revokeObjectURL(url),
+      };
+    } catch {
+      URL.revokeObjectURL(url);
+      throw bitmapError;
+    }
+  }
+}
+
 /**
  * Chooses the smallest grid that keeps the picture readable.
  *
@@ -120,8 +165,8 @@ export async function assetsFromBlob(
     );
   }
 
-  const bitmap = await createImageBitmap(file);
-  const plan = planTiles(bitmap.width, bitmap.height);
+  const image = await decodeImage(file);
+  const plan = planTiles(image.width, image.height);
   const count = plan.cols * plan.rows;
 
   // One id shared by every piece of this picture. It is what lets the app count
@@ -130,17 +175,17 @@ export async function assetsFromBlob(
   const group = `g${Date.now().toString(36)}-${(groupSeq++).toString(36)}`;
 
   if (count === 1) {
-    const only = renderTile(bitmap, 0, 0, bitmap.width, bitmap.height, plan.scale, name);
-    bitmap.close?.();
+    const only = renderTile(image.source, 0, 0, image.width, image.height, plan.scale, name);
+    image.dispose();
     return [
-      { ...only, group, scale: plan.scale, sourceWidth: bitmap.width, sourceHeight: bitmap.height },
+      { ...only, group, scale: plan.scale, sourceWidth: image.width, sourceHeight: image.height },
     ];
   }
 
   // Overlap in pixels, so a line of code sitting on a seam is whole in at least
   // one tile rather than cut in half in both.
-  const tileW = bitmap.width / plan.cols;
-  const tileH = bitmap.height / plan.rows;
+  const tileW = image.width / plan.cols;
+  const tileH = image.height / plan.rows;
   const padX = tileW * OVERLAP;
   const padY = tileH * OVERLAP;
 
@@ -150,27 +195,27 @@ export async function assetsFromBlob(
     for (let c = 0; c < plan.cols; c++) {
       const x = Math.max(0, Math.round(c * tileW - padX));
       const y = Math.max(0, Math.round(r * tileH - padY));
-      const w = Math.min(bitmap.width - x, Math.round(tileW + padX * 2));
-      const h = Math.min(bitmap.height - y, Math.round(tileH + padY * 2));
+      const w = Math.min(image.width - x, Math.round(tileW + padX * 2));
+      const h = Math.min(image.height - y, Math.round(tileH + padY * 2));
       i += 1;
-      const asset = renderTile(bitmap, x, y, w, h, plan.scale, `${name} (${i} of ${count})`);
+      const asset = renderTile(image.source, x, y, w, h, plan.scale, `${name} (${i} of ${count})`);
       out.push({
         ...asset,
         group,
         scale: plan.scale,
-        sourceWidth: bitmap.width,
-        sourceHeight: bitmap.height,
+        sourceWidth: image.width,
+        sourceHeight: image.height,
         tile: { index: i, count, where: tileWhere(c, r, plan.cols, plan.rows) },
       });
     }
   }
-  bitmap.close?.();
+  image.dispose();
   return out;
 }
 
 /** Draws one region of the source onto a canvas and encodes it. */
 function renderTile(
-  bitmap: ImageBitmap,
+  image: CanvasImageSource,
   sx: number,
   sy: number,
   sw: number,
@@ -189,7 +234,7 @@ function renderTile(
   ctx.imageSmoothingQuality = "high";
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, w, h);
-  ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, w, h);
+  ctx.drawImage(image, sx, sy, sw, sh, 0, 0, w, h);
 
   const dataUrl = canvas.toDataURL("image/png");
   const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
@@ -213,11 +258,11 @@ export async function fileToAsset(file: File | Blob, fallbackName = "pasted-imag
     );
   }
 
-  const bitmap = await createImageBitmap(file);
+  const image = await decodeImage(file);
 
-  const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height));
-  const w = Math.max(1, Math.round(bitmap.width * scale));
-  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const scale = Math.min(1, MAX_EDGE / Math.max(image.width, image.height));
+  const w = Math.max(1, Math.round(image.width * scale));
+  const h = Math.max(1, Math.round(image.height * scale));
 
   const canvas = document.createElement("canvas");
   canvas.width = w;
@@ -229,10 +274,10 @@ export async function fileToAsset(file: File | Blob, fallbackName = "pasted-imag
   // rendering dark-on-dark once alpha is flattened by the provider.
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, w, h);
-  ctx.drawImage(bitmap, 0, 0, w, h);
-  const sourceW = bitmap.width;
-  const sourceH = bitmap.height;
-  bitmap.close?.();
+  ctx.drawImage(image.source, 0, 0, w, h);
+  const sourceW = image.width;
+  const sourceH = image.height;
+  image.dispose();
 
   // PNG for text-heavy images: JPEG artefacts around glyphs cost more in OCR
   // errors than the extra bytes cost in tokens.

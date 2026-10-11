@@ -43,12 +43,37 @@ export const SHORTCUT_LABELS = {
   solve: "⌃⌥A",
 } as const;
 
-// Focused-app quick captures: "01" = screen, "55" = selected region,
-// "11" = left half, "22" = right half.
-// Sequences are intentionally ignored when typing into editable controls.
 type CaptureKind = "region" | "screen" | "left" | "right";
 
-async function captureIntoApp(kind: CaptureKind) {
+/**
+ * Turn the Rust-side data URL into a Blob without asking WKWebView to fetch a
+ * `data:` URL. WebKit can reject those loads with the unhelpful "Load failed"
+ * error even though `screencapture` has already written a perfectly good PNG.
+ */
+function captureBlob(dataUrl: string): Blob {
+  const match = /^data:([^;,]+);base64,([A-Za-z0-9+/]+={0,2})$/.exec(dataUrl);
+  if (!match) throw new Error("Council Editor received an invalid captured image.");
+
+  let binary: string;
+  try {
+    binary = atob(match[2]);
+  } catch {
+    throw new Error("Council Editor could not decode the captured image.");
+  }
+
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type: match[1] });
+}
+
+/**
+ * Capture through the same ingestion path used by global shortcuts. Exported so
+ * the visible capture controls can remain useful when macOS declines a global
+ * shortcut or another utility has already claimed it.
+ */
+export async function captureIntoApp(kind: CaptureKind) {
   const store = useStore.getState();
   try {
     const captures =
@@ -68,7 +93,7 @@ async function captureIntoApp(kind: CaptureKind) {
     // what makes the code inside a screenshot unreadable.
     const assets = [];
     for (const capture of captures) {
-      const blob = await (await fetch(capture.dataUrl)).blob();
+      const blob = captureBlob(capture.dataUrl);
       // Named after the file on disk, so what is on screen and what is in
       // ~/Library/Application Support/.com.apple.mds/cache/captures can be matched up by eye.
       const name = capture.path.split("/").pop() || "capture.png";
@@ -124,31 +149,7 @@ export function useGlobalShortcuts() {
         /* no event bus outside the shell */
       });
 
-    // Deliberately scoped to the focused Council Editor window. Global
-    // unmodified digit monitoring would observe unrelated typing and can
-    // take screenshots accidentally in other applications.
-    let previousDigit = "";
-    let previousAt = 0;
-    const onDigitCapture = (event: KeyboardEvent) => {
-      if (event.repeat || event.isComposing || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
-      if (!/^[0-9]$/.test(event.key)) return;
-      const target = event.target;
-      if (target instanceof HTMLElement &&
-          (target.isContentEditable || target.closest("input, textarea, select, [contenteditable]"))) return;
-      const now = Date.now();
-      const pair = now - previousAt <= 650 ? previousDigit + event.key : "";
-      previousDigit = event.key;
-      previousAt = now;
-      if (["01", "55", "11", "22"].includes(pair)) {
-        previousDigit = "";
-        event.preventDefault();
-        void captureIntoApp(pair === "01" ? "screen" : pair === "55" ? "region" : pair === "11" ? "left" : "right");
-      }
-    };
-    window.addEventListener("keydown", onDigitCapture);
-
     return () => {
-      window.removeEventListener("keydown", onDigitCapture);
       disposed = true;
       listeners.forEach((f) => f());
     };

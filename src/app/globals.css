@@ -742,6 +742,22 @@ textarea.field {
   display: none;
 }
 
+/* Explicit buttons stay available when macOS refuses a global shortcut or
+   another utility has already claimed it. They live outside the file-picker
+   drop zone so a click always means capture, never opens the picker. */
+.capture-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: center;
+  gap: 5px;
+  flex: none;
+  width: 104px;
+}
+.capture-controls .btn {
+  min-width: 0;
+  padding-inline: 7px;
+}
+
 /* Images with their storage status directly beneath: the "3 saved to your
    project" line describes the pictures, so it lives in the same column as the
    strip instead of floating at the top of the question field. Column width

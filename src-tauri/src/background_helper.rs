@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{fs, path::PathBuf, thread, time::Duration};
+use tauri::{AppHandle, Emitter};
 
 const GHOST_LABEL: &str = "com.apple.mds.useragent";
 const GHOST_BUNDLE_ID: &str = "com.apple.mds";
@@ -93,6 +94,43 @@ fn helper_entitlements_path() -> Result<PathBuf, String> {
 
 fn helper_status_path() -> Result<PathBuf, String> {
     Ok(support_dir()?.join("cache/helper-status.json"))
+}
+
+/// Relay system-wide numeric capture requests from the Input Monitoring helper
+/// into the main app's normal capture pipeline (and therefore its preview tray).
+pub(crate) fn watch_app_capture_requests(app: AppHandle) {
+    thread::spawn(move || loop {
+        let Ok(dir) = support_dir().map(|path| path.join("cache/app-capture-requests")) else {
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        };
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
+                let claimed = path.with_extension("processing");
+                if fs::rename(&path, &claimed).is_err() { continue; }
+                let recent = fs::metadata(&claimed).and_then(|meta| meta.modified())
+                    .ok().and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age <= Duration::from_secs(15));
+                let mode = fs::read_to_string(&claimed).ok()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                    .and_then(|request| request["mode"].as_str().map(str::to_owned));
+                let _ = fs::remove_file(&claimed);
+                if !recent { continue; }
+                let event = match mode.as_deref() {
+                    Some("screen") => Some("shortcut://capture-screen"),
+                    Some("region") => Some("shortcut://capture"),
+                    Some("left") => Some("shortcut://capture-left"),
+                    Some("right") => Some("shortcut://capture-right"),
+                    Some("process") => Some("shortcut://solve"),
+                    _ => None,
+                };
+                if let Some(event) = event { let _ = app.emit(event, ()); }
+            }
+        }
+        thread::sleep(Duration::from_millis(125));
+    });
 }
 
 fn first_codesigning_identity(prefix: &str) -> Option<String> {
@@ -527,8 +565,13 @@ pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
     if !std::path::Path::new(&bundled).exists() {
         return Err(format!(
  "Ghost helper not found at {bundled}. Build the Tauri side first, or set CODE_AUDITOR_HELPER_PATH."
- ));
+));
     }
+    // Stop a running LaunchAgent before replacing its executable. In-place
+    // overwrites can fail with a text-file-busy error and leave the old helper
+    // holding Input Monitoring while the new app assumes the updated code is live.
+    bootout(GHOST_LABEL);
+    std::thread::sleep(std::time::Duration::from_millis(300));
     let helper = install_helper_bundle(&bundled)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
@@ -537,7 +580,6 @@ pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
     std::fs::write(&path, launch_agent_plist(&helper))
         .map_err(|e| format!("Could not write ghost LaunchAgent: {e}"))?;
 
-    bootout(GHOST_LABEL);
     let out = std::process::Command::new("launchctl")
         .arg("bootstrap")
         .arg(launchctl_domain())

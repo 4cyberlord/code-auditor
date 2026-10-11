@@ -1958,8 +1958,9 @@ function CaptureCard() {
           <span className="vendor">{helper?.installed ? "installed" : "not installed"}</span>
         </div>
         <p className="hint" style={{ marginTop: 0 }}>
-          Keeps start, capture, and submit shortcuts working after the window closes. It needs
-          macOS Screen Recording permission and remains visible to system and security tools.
+          Keeps the background workflows available from any app. The first digit routes the
+          screenshot, and the second picks its shape. It needs Input Monitoring; the helper needs
+          Screen Recording permission.
         </p>
         <div className="row">
           <label>State</label>
@@ -1993,10 +1994,10 @@ function CaptureCard() {
         <div className="actions">
           <button
             className="btn"
-            disabled={helperBusy || helper?.loaded === true}
+            disabled={helperBusy}
             onClick={() => void setInstalled(true)}
           >
-            {helper?.installed && !helper?.loaded ? "Reinstall" : "Install"}
+            {helper?.loaded ? "Update & Restart" : helper?.installed ? "Reinstall" : "Install"}
           </button>
           <button
             className="btn ghost"
@@ -2121,8 +2122,23 @@ function CaptureCard() {
             <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{s.what}</span>
           </div>
         ))}
+        {[
+          { keys: "10 · 11 · 12 · 13", route: "Main app: full screen · left · right · region" },
+          { keys: "21 · 22 · 23 · 24", route: "Background coding: full screen · left · right · region" },
+          { keys: "31 · 32 · 33 · 34", route: "Background MCQ: full screen · left · right · region" },
+          { keys: "14", route: "Main app: process captured image(s) with enabled models" },
+          { keys: "25", route: "Background coding: submit captured images for processing" },
+          { keys: "35", route: "Background MCQ: submit captured images for processing" },
+        ].map((route) => (
+          <div className="row" key={route.keys}>
+            <label><span style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>{route.keys}</span></label>
+            <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{route.route}</span>
+          </div>
+        ))}
         <p className="hint">
-          These work when the window is closed because the Rust process owns them. To change one,
+          Enter each two-digit code quickly. Capture codes stage an image in that workflow; 14, 25,
+          and 35 send that workflow’s staged images for processing. These work when the window is closed
+          because the Rust helper owns them. To change a regular shortcut,
           set its environment variable before launch, for example{" "}
           <span style={{ fontFamily: "var(--font-mono)" }}>
             CODE_AUDITOR_SOLVE_KEY=&quot;Control+Alt+J&quot;

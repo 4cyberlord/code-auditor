@@ -420,6 +420,7 @@ pub fn run() {
             install_native_menu(app)?;
 
             center_main_window(app.handle());
+            background_helper::watch_app_capture_requests(app.handle().clone());
 
             let config = app.state::<Arc<GhostModeConfig>>().clone();
             let app_pid = std::process::id();
