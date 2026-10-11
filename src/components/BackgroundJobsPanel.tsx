@@ -250,14 +250,19 @@ export default function BackgroundJobsPanel() {
     let live = true;
     queueMicrotask(() => setError(null));
     devLog("cloud-jobs", "detail load started", { jobId: selectedJob.id });
-    void Promise.all([
+    // Each detail endpoint recovers independently: a temporary report failure
+    // must not hide available screenshots, and a signing error must not hide events.
+    void Promise.allSettled([
       listSolveJobEvents(selectedJob.id),
       listSolveJobImages(selectedJob.id),
       getCouncilReport(selectedJob.id),
-    ])
-      .then(async ([nextEvents, nextImages, nextReport]) => {
+    ]).then(async ([eventResult, imageResult, reportResult]) => {
+      if (!live) return;
+      if (eventResult.status === "fulfilled") setEvents(eventResult.value);
+      if (reportResult.status === "fulfilled") setReport(reportResult.value);
+      if (imageResult.status === "fulfilled") {
         const withUrls = await Promise.all(
-          nextImages.map(async (image) => {
+          imageResult.value.map(async (image) => {
             try {
               return { ...image, url: await signedUrl(image.storagePath, 900) };
             } catch {
@@ -265,21 +270,18 @@ export default function BackgroundJobsPanel() {
             }
           })
         );
-        if (!live) return;
-        setEvents(nextEvents);
-        setImages(withUrls);
-        setReport(nextReport);
-        devLog("cloud-jobs", "detail load completed", {
-          jobId: selectedJob.id,
-          events: nextEvents.length,
-          images: withUrls.length,
-          hasReport: Boolean(nextReport),
-        });
-      })
-      .catch((err) => {
-        if (live) setError(String(err));
-        devLog("cloud-jobs", "detail load failed", { jobId: selectedJob.id, error: String(err) });
+        if (live) setImages(withUrls);
+      }
+      if (!live) return;
+      const failures = [eventResult, imageResult, reportResult]
+        .filter((result) => result.status === "rejected")
+        .map((result) => String((result as PromiseRejectedResult).reason));
+      if (failures.length) setError(`Could not load all cloud job details: ${failures.join("; ")}`);
+      devLog("cloud-jobs", "detail load settled", {
+        jobId: selectedJob.id,
+        failedRequests: failures.length,
       });
+    });
     return () => {
       live = false;
     };
