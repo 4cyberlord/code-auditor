@@ -58,8 +58,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "minimumSystemVersion": "11.0",
-      "signingIdentity": "Developer ID Application: Charles Adu Boakye (H3TAHA3LL7)"
+      "minimumSystemVersion": "11.0"
     }
   }
 }
