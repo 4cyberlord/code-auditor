@@ -50,6 +50,8 @@ export default function BackgroundJobsPanel() {
   const [report, setReport] = useState<CouncilReportSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const refreshInFlight = useRef(false);
+  const failedPreviewUrls = useRef(new Set<string>());
+  const lastPreviewRecovery = useRef(0);
   const [queueing, setQueueing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -402,7 +404,22 @@ export default function BackgroundJobsPanel() {
                   {images.map((image) =>
                     image.url ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img key={image.id} src={image.url} alt={image.fileName} />
+                      <img
+                        key={image.id}
+                        src={image.url}
+                        alt={image.fileName}
+                        onError={() => {
+                          // An expired or revoked signed URL can fail before its
+                          // scheduled renewal. Refresh once per failed URL and
+                          // throttle repeated failures to avoid retry storms.
+                          if (!image.url || failedPreviewUrls.current.has(image.url)) return;
+                          failedPreviewUrls.current.add(image.url);
+                          const now = Date.now();
+                          if (now - lastPreviewRecovery.current < 30_000) return;
+                          lastPreviewRecovery.current = now;
+                          setUrlRefresh((version) => version + 1);
+                        }}
+                      />
                     ) : (
                       <div key={image.id} className="job-image-missing">
                         {image.position + 1}
