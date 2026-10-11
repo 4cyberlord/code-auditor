@@ -298,7 +298,6 @@ pub fn run() {
                         EV_CAPTURE_RIGHT
                     } else if *shortcut == solve_key {
                         EV_SOLVE
- 
                     } else {
                         trace("hotkey fired for an accelerator we do not own; ignored");
                         return;
