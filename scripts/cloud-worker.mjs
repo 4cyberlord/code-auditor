@@ -1782,11 +1782,14 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
     settings.probes,
     settings.councilModels
   ).seeing.filter((m) => !localBench.isBlind(m.id));
+  if (!reading && readerPool.length === 0) {
+    throw new Error("No verified vision-capable reader is available for the MCQ screenshot. Run model image probes before submitting.");
+  }
   const mcqReading = reading || await readScreenshots({
     job,
     settings,
     baseUrl,
-    models: readerPool.length ? readerPool : [{ id: model }],
+    models: readerPool,
     images: jobImages,
     imageRefs,
     bench: localBench,
@@ -1795,11 +1798,17 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
   const detection = detectMcq(readingText);
   // The image reader and answer solver are separate capabilities. An MCQ
   // with a trusted transcription can be answered by a text-only specialist.
-  const mcqRank = routeCloudModels(settings, models, mcqReading, false);
-  if (mcqRank.selection.selected.length) {
-    const preferred = mcqRank.selection.selected.find(m => m.id === model);
-    model = preferred?.id || mcqRank.selection.selected[0].id;
+  // Only an independently extracted options contract permits a text-only
+  // answer. Otherwise the answer model receives pixels and must be probed.
+  const directImage = !detection.isMcq;
+  const mcqRank = routeCloudModels(settings, models, mcqReading, directImage);
+  if (!mcqRank.selection.selected.length) {
+    throw new Error(directImage
+      ? "No verified vision-capable MCQ answer model is available for this screenshot."
+      : "No configured MCQ answer model is available.");
   }
+  const preferred = mcqRank.selection.selected.find(m => m.id === model);
+  model = preferred?.id || mcqRank.selection.selected[0].id;
   await addEvent(job.id, "info", "adaptive_routing",
     `MCQ answer model: ${model}; reading path: ${mcqRank.route.path}.`, {
       model, readingPath: mcqRank.route.path, families: mcqRank.route.families,
