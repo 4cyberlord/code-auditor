@@ -1867,6 +1867,10 @@ export interface Presentation {
   provenance: string;
   approach: string;
   complexity: string;
+  /** Only independently parsed contract fields, never guesses from code. */
+  timeComplexity?: string;
+  spaceComplexity?: string;
+  edgeCases?: string;
   evidence: EvidenceRow[];
   /** Where the bench did not agree, in one line each. */
   dissent: string[];
@@ -1947,6 +1951,13 @@ export function buildPresentation(report: CouncilReport): Presentation {
     provenance: winnerCandidate ? `Candidate ${winnerCandidate.letter} — ${winnerCandidate.model}` : "",
     approach: synth?.approach || "",
     complexity: report.contract?.complexity || winnerFinal?.complexity || "",
+    // The verified problem contract is the source of these sections.
+    // Do not hallucinate complexity bounds or boundary cases from model dissent.
+    timeComplexity: (report.contract?.complexity || winnerFinal?.complexity || "")
+      .match(/(?:time|runtime)\\s*(?:complexity)?\\s*[:=\\-]\\s*([^\\n;]+)/i)?.[1]?.trim() || "",
+    spaceComplexity: (report.contract?.complexity || winnerFinal?.complexity || "")
+      .match(/(?:space|memory)\\s*(?:complexity)?\\s*[:=\\-]\\s*([^\\n;]+)/i)?.[1]?.trim() || "",
+    edgeCases: report.contract?.edgeCases || "",
     evidence,
     dissent,
     rejected: bullets(synth?.rejected || ""),
