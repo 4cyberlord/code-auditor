@@ -124,14 +124,19 @@ export default function BackgroundJobsPanel() {
   };
 
   useEffect(() => {
+    // The collapsed rail needs no background network polling. Opening it
+    // revalidates the list; the independent helper continues cloud work.
+    if (!open) return;
     void refresh();
-    const refreshTimer = window.setInterval(() => void refresh(), 15000);
+    const refreshTimer = window.setInterval(() => {
+      if (!document.hidden) void refresh();
+    }, 15000);
     const clockTimer = window.setInterval(() => setNow(Date.now()), 15000);
     return () => {
       window.clearInterval(refreshTimer);
       window.clearInterval(clockTimer);
     };
-  }, []);
+  }, [open]);
 
   const queueCurrent = async () => {
     setQueueing(true);
@@ -212,6 +217,7 @@ export default function BackgroundJobsPanel() {
   };
 
   useEffect(() => {
+    if (!open) return;
     if (!selectedJob) {
       queueMicrotask(() => {
         setEvents([]);
@@ -256,7 +262,10 @@ export default function BackgroundJobsPanel() {
     return () => {
       live = false;
     };
-  }, [selectedJob]);
+  // A refreshed listing creates new objects even if the job did not change.
+  // Depend on its identity/version, not its object reference: this prevents
+  // re-signing every image URL and reloading the report every 15 seconds.
+  }, [open, selectedJob?.id, selectedJob?.status, selectedJob?.updatedAt]);
 
   return (
     <section className="background-jobs" data-open={open}>
