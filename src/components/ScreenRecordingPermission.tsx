@@ -20,10 +20,7 @@ export default function ScreenRecordingPermission() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!inTauri()) {
-      setStep("hidden");
-      return;
-    }
+    if (!inTauri()) return;
 
     void screenRecordingPermissionStatus()
       .then((permission) => setStep(permission.granted ? "hidden" : "needs-permission"))

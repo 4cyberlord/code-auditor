@@ -2,7 +2,7 @@
 //! Every operation starts from a pinned project directory fd and never follows
 //! a symlink in any path component. No path-based recursive std::fs operations.
 use super::{destination_arg, directory_arg, path_arg, safe_join, source_arg, string_arg, truncate_line,
-    MAX_LIST_ENTRIES, MAX_MATCH_LINE_CHARS, MAX_READ_BYTES};
+    MAX_LIST_ENTRIES, MAX_READ_BYTES};
 use serde_json::{Map, Value};
 use std::ffi::{CStr, CString, OsString};
 use std::fs::File;

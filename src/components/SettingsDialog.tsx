@@ -7,7 +7,6 @@ import {
   ALL_AGENTS,
   EXTRA_AGENTS,
   FREE_ROUTER_MODELS,
-  GATEWAY,
   KNOWN_GATEWAYS,
   gatewayPreset,
   agentSpec,
@@ -1505,7 +1504,7 @@ function CouncilCard() {
     } finally {
       setListing(false);
     }
-  }, [settings.gatewayBaseUrl]);
+  }, [settings.gatewayBaseUrl, settings.gatewayId]);
 
   const commitSolvers = () => {
     if (solversDraft === null) return;

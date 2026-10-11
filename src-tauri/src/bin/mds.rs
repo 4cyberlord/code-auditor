@@ -1762,11 +1762,6 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
     Ok(())
 }
 
-fn read_overlay_state(active_view: &str) -> String {
-    let submitted = read_submitted_job_for(active_view).ok().flatten();
-    let pending = read_pending_for(active_view).ok().flatten();
-    read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
-}
 
 fn helper_job_in_progress(job: &SubmittedJob) -> bool {
     !matches!(job.status.as_str(), "completed" | "failed" | "needs_attention" | "cancelled")
@@ -2401,16 +2396,6 @@ fn mcq_from_submitted(job: &SubmittedJob) -> Option<Value> {
     Some(data)
 }
 
-fn job_mode_for_settings(settings: &Value) -> String {
-    match settings
-        .get("overlayMode")
-        .and_then(Value::as_str)
-        .unwrap_or("auto")
-    {
-        "mcq" => "mcq".to_string(),
-        _ => "council".to_string(),
-    }
-}
 
 fn read_keychain(account: &str) -> Result<String, String> {
     let entry = keyring::Entry::new(SERVICE, account).map_err(|e| e.to_string())?;

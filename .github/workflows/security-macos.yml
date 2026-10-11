@@ -12,10 +12,10 @@ jobs:
   macos-validation:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - name: Cache Rust build artifacts
@@ -55,10 +55,45 @@ jobs:
           CODE_AUDITOR_ALLOW_ADHOC: '1'
         run: npm run app:build
 
-  docker-runtime-containment:
-    runs-on: ubuntu-latest
+  dependency-audit:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+      - name: Run npm audit fix and report outstanding lockfile changes
+        run: |
+          set +e
+          npm audit fix --package-lock-only --ignore-scripts --no-fund > audit-fix.log 2>&1
+          status=$?
+          set -e
+          tail -n 80 audit-fix.log
+          echo "npm audit fix exit code: $status"
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import { execFileSync } from "node:child_process";
+          const original = JSON.parse(execFileSync("git", ["show", "HEAD:package-lock.json"], { encoding: "utf8" }));
+          const changed = JSON.parse(fs.readFileSync("package-lock.json", "utf8"));
+          const delta = Object.fromEntries(Object.entries(changed.packages)
+            .filter(([key, value]) => JSON.stringify(value) !== JSON.stringify(original.packages?.[key])));
+          const removed = Object.keys(original.packages).filter(key => !(key in changed.packages));
+          console.log("AUDIT_FIX_DELTA_JSON=" + JSON.stringify({ packages: delta, removed, root: changed.packages[""] }));
+          NODE
+      - name: Audit all installed dependencies, including development packages
+        run: npm audit --audit-level=high
+      - name: Confirm npm audit fixes are committed to the lockfile
+        run: git diff --exit-code -- package-lock.json
+
+  docker-runtime-containment:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
       - name: Pull test image (CI only; app never pulls implicitly)
         run: |
           if docker pull public.ecr.aws/docker/library/alpine:3.20; then
@@ -77,13 +112,13 @@ jobs:
   e2b-live-smoke:
     # Secrets never enter pull-request builds. Run explicitly on the trusted branch.
     if: ${{ github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
       - run: npm ci
       - name: Live E2B smoke test
