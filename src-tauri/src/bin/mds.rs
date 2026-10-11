@@ -1789,6 +1789,21 @@ fn read_overlay_state_snapshot(active_view: &str, submitted: Option<&SubmittedJo
     let fallback =
         r#"{"runId":null,"updatedAt":"","phase":"idle","agents":[],"solution":null,"tests":[]}"#;
 
+    // A new question takes priority over the last completed job's answer.
+    // Captures and submission errors belong to the question the user is
+    // working on right now, regardless of older job history.
+    if let Some(batch) = pending {
+        if batch.error.is_some() || !batch.images.is_empty() || batch.status == "submitting" {
+            let current = if active_view == "mcq" {
+                mcq_pending_state(batch)
+            } else {
+                coding_pending_state(batch)
+            };
+            return serde_json::to_string(&current)
+                .unwrap_or_else(|_| fallback.to_string());
+        }
+    }
+
     if let Some(job) = submitted {
         let is_mcq = job.mode == "mcq" || mcq_from_submitted(&job).is_some();
         if active_view == "mcq" && is_mcq {
@@ -2583,6 +2598,53 @@ mod tests {
         assert!(mcq_from_submitted(&job).is_none());
     }
 
+
+    #[test]
+    fn new_screenshot_batch_overrides_older_completed_answer() {
+        let old = SubmittedJob {
+            id: "previous-job".into(), mode: "council".into(), mcq_model: None,
+            status: "completed".into(), progress_phase: "completed".into(),
+            submitted_at: now(), previews: vec![], error: None,
+            report: Some(serde_json::json!({"report": {
+                "winner": "A", "synthesis": "old answer", "presentation": {
+                    "code": "old_result()", "standing": "verified", "language": "python"
+                }
+            }})), events: vec![],
+        };
+        let fresh = PendingBatch {
+            id: "fresh-batch".into(), status: "ready".into(),
+            started_at: now(), submission_id: None, session_id: None,
+            owner_id: None, settings_snapshot: None, mode: Some("council".into()),
+            images: vec![PendingImage {
+                position: 0, local_path: "/tmp/new-question.png".into(),
+                file_name: "new-question.png".into(), bytes: 123,
+                mime: "image/png".into(), captured_at: now(),
+            }],
+            error: None,
+        };
+        let current: Value = serde_json::from_str(
+            &read_overlay_state_snapshot("coding", Some(&old), Some(&fresh))
+        ).unwrap();
+        assert_eq!(current["runId"], "fresh-batch");
+        assert!(current["solution"]["code"].as_str().unwrap().contains("1 screenshot"));
+        assert!(!current.to_string().contains("old_result()"));
+
+        let mut mcq = fresh.clone();
+        mcq.mode = Some("mcq".into());
+        let current_mcq: Value = serde_json::from_str(
+            &read_overlay_state_snapshot("mcq", None, Some(&mcq))
+        ).unwrap();
+        assert_eq!(current_mcq["kind"], "mcq");
+        assert_eq!(current_mcq["phase"], "collecting");
+        assert!(current_mcq["progress"].as_str().unwrap().contains("1 screenshot"));
+
+        mcq.error = Some("Capture permission required".into());
+        let errored: Value = serde_json::from_str(
+            &read_overlay_state_snapshot("mcq", None, Some(&mcq))
+        ).unwrap();
+        assert_eq!(errored["phase"], "error");
+        assert!(errored["progress"].as_str().unwrap().contains("permission"));
+    }
 
     #[test]
     fn original_overlay_views_do_not_display_another_workflows_result() {
