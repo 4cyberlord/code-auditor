@@ -1746,7 +1746,7 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
     (m) => m.id,
     settings.probes,
     settings.councilModels
-  ).seeing.filter((m) => !localBench.isBlind(m.id));
+  ).seeing.filter((m) => settings.probes?.[m.id]?.vision === true && !localBench.isBlind(m.id));
   if (!reading && readerPool.length === 0) {
     throw new Error("No verified vision-capable reader is available for the MCQ screenshot. Run model image probes before submitting.");
   }
@@ -1798,7 +1798,7 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
   const trustedDetection = transcriptionTrusted
     ? detection : { ...detection, isMcq: false, options: [] };
   const readingHint = directImage
-    ? "UNVERIFIED SCREEN READING — confirm each character and choice against the attached original screenshot.\\n\\n" + readingText
+    ? "UNVERIFIED SCREEN READING — confirm each character and choice against the attached original screenshot.\n\n" + readingText
     : readingText;
   const raw = await mcqGenerate({
     settings,
@@ -2064,7 +2064,7 @@ export async function runCouncilJob(job) {
   // the route, not the model, so a measured probe outranks every table.
   const available = bench.keep(models, (m) => m.id);
   const partitioned = partitionByVision(available, (m) => m.id, settings.probes, settings.councilModels);
-  const seeing = partitioned.seeing.filter((m) => !bench.isBlind(m.id));
+  const seeing = partitioned.seeing.filter((m) => settings.probes?.[m.id]?.vision === true && !bench.isBlind(m.id));
   const resting = [...partitioned.resting, ...partitioned.seeing.filter((m) => bench.isBlind(m.id))];
   if (resting.length) {
     await addEvent(
@@ -2116,7 +2116,7 @@ export async function runCouncilJob(job) {
     (m) => m.id,
     settings.probes,
     settings.councilModels
-  ).seeing.filter((m) => !bench.isBlind(m.id));
+  ).seeing.filter((m) => settings.probes?.[m.id]?.vision === true && !bench.isBlind(m.id));
 
   if (mustTranscribe) {
     if (!readerPool.length) {
