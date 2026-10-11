@@ -14,10 +14,12 @@ mod overlay_state;
 mod platform_base;
 mod providers;
 mod runner;
+mod screen_recording;
 mod secrets;
 mod server_api;
 mod sessions;
 mod storage;
+mod updates;
 mod vision;
 
 use db::Db;
@@ -313,6 +315,10 @@ pub fn run() {
                         trace("hotkey fired for an accelerator we do not own; ignored");
                         return;
                     };
+                    if matches!(ev, EV_CAPTURE | EV_CAPTURE_SCREEN | EV_CAPTURE_LEFT | EV_CAPTURE_RIGHT)
+                        && background_helper::capture_owner_pid().is_some() {
+                        return; // Helper's IOHID callback already handled the physical press.
+                    }
                     trace(&format!("hotkey fired -> {ev}"));
                     let _ = app.emit(ev, ());
                 })
@@ -356,6 +362,10 @@ pub fn run() {
             capture::capture_left_half,
             capture::capture_right_half,
             capture::read_capture,
+            screen_recording::screen_recording_permission_status,
+            screen_recording::screen_recording_request_permission,
+            screen_recording::screen_recording_open_settings,
+            screen_recording::screen_recording_restart,
             overlay::overlay_show,
             overlay::overlay_hide,
             overlay::overlay_toggle,
@@ -363,6 +373,7 @@ pub fn run() {
             overlay::hide_overlay,
             overlay::overlay_visibility_status,
             overlay_state::overlay_state_write,
+            updates::update_check,
             capture::save_reading,
             providers::set_gateway_rate,
             vision::ocr_images,
@@ -409,6 +420,7 @@ pub fn run() {
             install_native_menu(app)?;
 
             center_main_window(app.handle());
+            background_helper::watch_app_capture_requests(app.handle().clone());
 
             let config = app.state::<Arc<GhostModeConfig>>().clone();
             let app_pid = std::process::id();
@@ -476,16 +488,24 @@ pub fn run() {
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "show" => reveal(app),
                         "capture" => {
-                            let _ = app.emit(EV_CAPTURE, ());
+                            if !background_helper::forward_capture("region") {
+                                let _ = app.emit(EV_CAPTURE, ());
+                            }
                         }
                         "capture-screen" => {
-                            let _ = app.emit(EV_CAPTURE_SCREEN, ());
+                            if !background_helper::forward_capture("screen") {
+                                let _ = app.emit(EV_CAPTURE_SCREEN, ());
+                            }
                         }
                         "capture-left" => {
-                            let _ = app.emit(EV_CAPTURE_LEFT, ());
+                            if !background_helper::forward_capture("left") {
+                                let _ = app.emit(EV_CAPTURE_LEFT, ());
+                            }
                         }
                         "capture-right" => {
-                            let _ = app.emit(EV_CAPTURE_RIGHT, ());
+                            if !background_helper::forward_capture("right") {
+                                let _ = app.emit(EV_CAPTURE_RIGHT, ());
+                            }
                         }
                         "solve" => {
                             let _ = app.emit(EV_SOLVE, ());

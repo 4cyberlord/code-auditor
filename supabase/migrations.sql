@@ -1019,3 +1019,73 @@ end;
 $$;
 
 revoke all on function screenshots_reorder(uuid, uuid, uuid[]) from public, anon, authenticated;
+
+
+-- Submission idempotency: uniqueness is scoped to the signed-in account.
+alter table if exists solve_jobs add column if not exists submission_id uuid;
+create unique index if not exists solve_jobs_owner_submission_unique
+on solve_jobs(owner_id, submission_id) where submission_id is not null;
+
+create or replace function solve_job_create(
+  p_owner uuid, p_session uuid, p_mode text, p_settings jsonb,
+  p_images jsonb, p_submission uuid
+) returns uuid language plpgsql security definer set search_path = public as $$
+declare
+  v_job uuid;
+  v_existing solve_jobs%rowtype;
+  img jsonb;
+  pos integer := 0;
+begin
+  if p_submission is null then raise exception 'missing submission identity' using errcode='22023'; end if;
+  if not exists (select 1 from sessions where id=p_session and owner_id=p_owner) then
+    raise exception 'no such session' using errcode='P0002';
+  end if;
+  if coalesce(p_mode,'council') not in ('council','mcq') then
+    raise exception 'unsupported mode' using errcode='22023';
+  end if;
+  if jsonb_typeof(coalesce(p_images,'[]'::jsonb)) <> 'array'
+     or jsonb_array_length(coalesce(p_images,'[]'::jsonb)) not between 1 and 10 then
+    raise exception 'invalid screenshot count' using errcode='22023';
+  end if;
+  insert into solve_jobs(owner_id,session_id,mode,status,progress_phase,settings_snapshot,submission_id)
+  values(p_owner,p_session,coalesce(p_mode,'council'),'queued','queued',
+         coalesce(p_settings,'{}'::jsonb),p_submission)
+  on conflict(owner_id,submission_id) where submission_id is not null do nothing
+  returning id into v_job;
+  if v_job is null then
+    select * into v_existing from solve_jobs where owner_id=p_owner and submission_id=p_submission;
+    if not found then raise exception 'submission conflict' using errcode='23505'; end if;
+    if v_existing.session_id is distinct from p_session
+      or v_existing.mode is distinct from coalesce(p_mode,'council')
+      or v_existing.settings_snapshot is distinct from coalesce(p_settings,'{}'::jsonb)
+      or (select coalesce(jsonb_agg(jsonb_build_object(
+         'storageBucket', storage_bucket, 'storagePath', storage_path,
+         'fileName',file_name,'bytes',bytes,'mime',mime,
+         'width',width,'height',height) order by position),'[]'::jsonb)
+         from solve_job_images where job_id=v_existing.id)
+         is distinct from
+         (select coalesce(jsonb_agg(jsonb_build_object(
+         'storageBucket',x->>'storageBucket','storagePath',x->>'storagePath',
+         'fileName',x->>'fileName','bytes',(x->>'bytes')::integer,'mime',x->>'mime',
+         'width',(x->>'width')::integer,'height',(x->>'height')::integer)
+         order by ordinal),'[]'::jsonb)
+         from jsonb_array_elements(p_images) with ordinality as e(x,ordinal))
+    then raise exception 'submission identity reused with different data' using errcode='23505'; end if;
+    return v_existing.id;
+  end if;
+  for img in select * from jsonb_array_elements(p_images) loop
+    insert into solve_job_images(job_id,session_id,owner_id,position,storage_bucket,
+      storage_path,file_name,bytes,mime,width,height)
+    values(v_job,p_session,p_owner,pos,img->>'storageBucket',img->>'storagePath',
+      img->>'fileName',(img->>'bytes')::integer,img->>'mime',
+      (img->>'width')::integer,(img->>'height')::integer);
+    pos:=pos+1;
+  end loop;
+  insert into solve_job_events(job_id,owner_id,level,phase,message,payload)
+  values(v_job,p_owner,'info','queued','Background solve job queued.',
+    jsonb_build_object('imageCount',pos,'mode',p_mode));
+  return v_job;
+end;
+$$;
+revoke all on function solve_job_create(uuid,uuid,text,jsonb,jsonb,uuid)
+  from public,anon,authenticated;

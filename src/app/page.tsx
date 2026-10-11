@@ -17,6 +17,7 @@ import SettingsDialog from "@/components/SettingsDialog";
 import SessionSidebar from "@/components/SessionSidebar";
 import StartupLoader from "@/components/StartupLoader";
 import Splitter from "@/components/Splitter";
+import ScreenRecordingPermission from "@/components/ScreenRecordingPermission";
 import { useAgentEvents } from "@/lib/useAgentEvents";
 import { useGlobalShortcuts } from "@/lib/shortcuts";
 import { useWindowChrome } from "@/lib/windowChrome";
@@ -76,7 +77,12 @@ export default function Page() {
   if (gate === "login") {
     return <LoginScreen gate={gate} status={status} onChanged={apply} />;
   }
-  return <Workbench />;
+  return (
+    <>
+      <Workbench />
+      <ScreenRecordingPermission />
+    </>
+  );
 }
 
 function Workbench() {

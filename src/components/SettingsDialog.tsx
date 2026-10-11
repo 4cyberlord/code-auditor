@@ -1291,6 +1291,7 @@ const TABS = [
   { id: "api" as const, label: "API" },
   { id: "council" as const, label: "Council" },
   { id: "appearance" as const, label: "Appearance" },
+  { id: "updates" as const, label: "Updates" },
   { id: "reading" as const, label: "Reading" },
   { id: "capture" as const, label: "Capture" },
   { id: "sessions" as const, label: "Sessions" },
@@ -1352,6 +1353,116 @@ function AppearanceCard() {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function UpdateCard() {
+  const [result, setResult] = useState<bridge.UpdateCheckResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const check = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setResult(await bridge.checkForUpdates());
+    } catch (err) {
+      setError(String(err).replace(/^Error:\s*/, ""));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openDownload = () => {
+    const url = result?.downloadUrl || result?.releaseUrl;
+    if (!url) return;
+    void openUrl(url).catch(() => window.open(url, "_blank"));
+  };
+
+  return (
+    <div className="provider-card">
+      <div className="top">
+        <span className="name">App updates</span>
+        <span className="vendor">GitHub releases</span>
+        <span className="spacer" />
+        {result && (
+          <span className="badge" data-tone={result.updateAvailable ? "warn" : "good"}>
+            {result.updateAvailable ? "Update available" : "Up to date"}
+          </span>
+        )}
+      </div>
+
+      <div className="row">
+        <label>Current</label>
+        <span className="field mono" style={{ opacity: result ? 0.85 : 0.6 }}>
+          {result?.currentVersion ?? (bridge.inTauri() ? "Check to read version" : "Desktop app required")}
+        </span>
+      </div>
+
+      {result?.latestVersion && (
+        <div className="row">
+          <label>Latest</label>
+          <span className="field mono" style={{ opacity: 0.85 }}>
+            {result.latestVersion}
+          </span>
+        </div>
+      )}
+
+      {result?.publishedAt && (
+        <div className="row">
+          <label>Published</label>
+          <span className="vendor">
+            {new Date(result.publishedAt).toLocaleString()}
+          </span>
+        </div>
+      )}
+
+      <div className="actions">
+        <button className="btn" onClick={() => void check()} disabled={busy || !bridge.inTauri()}>
+          {busy ? "Checking..." : "Check for Updates"}
+        </button>
+        {result?.updateAvailable && (
+          <button className="btn primary" onClick={openDownload}>
+            Download Latest
+          </button>
+        )}
+        {result?.releaseUrl && (
+          <button
+            className="btn ghost"
+            onClick={() => void openUrl(result.releaseUrl!).catch(() => window.open(result.releaseUrl!, "_blank"))}
+          >
+            Open Release
+          </button>
+        )}
+      </div>
+
+      {result && !result.updateAvailable && (
+        <p className="hint" style={{ color: "var(--good)" }}>
+          You are running the latest published version.
+        </p>
+      )}
+      {result?.updateAvailable && (
+        <p className="hint">
+          A newer release is ready. Download it, quit Council Editor, and install the new build.
+          {result.downloadUrl ? " The download button opens the macOS installer asset." : " No installer asset was found, so the release page is used."}
+        </p>
+      )}
+      {result?.notes && (
+        <p className="hint" style={{ whiteSpace: "pre-wrap", maxHeight: 180, overflow: "auto" }}>
+          {result.notes}
+        </p>
+      )}
+      {error && (
+        <p className="hint" style={{ color: "var(--bad)" }}>
+          {error}
+        </p>
+      )}
+      {!bridge.inTauri() && (
+        <p className="hint">
+          Update checks run from the desktop shell so the app can use its packaged version.
+        </p>
+      )}
     </div>
   );
 }
@@ -1847,8 +1958,9 @@ function CaptureCard() {
           <span className="vendor">{helper?.installed ? "installed" : "not installed"}</span>
         </div>
         <p className="hint" style={{ marginTop: 0 }}>
-          Keeps start, capture, and submit shortcuts working after the window closes. It needs
-          macOS Screen Recording permission and remains visible to system and security tools.
+          Keeps the background workflows available from any app. The first digit routes the
+          screenshot, and the second picks its shape. It needs Input Monitoring; the helper needs
+          Screen Recording permission.
         </p>
         <div className="row">
           <label>State</label>
@@ -1882,10 +1994,10 @@ function CaptureCard() {
         <div className="actions">
           <button
             className="btn"
-            disabled={helperBusy || helper?.loaded === true}
+            disabled={helperBusy}
             onClick={() => void setInstalled(true)}
           >
-            {helper?.installed && !helper?.loaded ? "Reinstall" : "Install"}
+            {helper?.loaded ? "Update & Restart" : helper?.installed ? "Reinstall" : "Install"}
           </button>
           <button
             className="btn ghost"
@@ -2010,8 +2122,23 @@ function CaptureCard() {
             <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{s.what}</span>
           </div>
         ))}
+        {[
+          { keys: "10 · 11 · 12 · 13", route: "Main app: full screen · left · right · region" },
+          { keys: "21 · 22 · 23 · 24", route: "Background coding: full screen · left · right · region" },
+          { keys: "31 · 32 · 33 · 34", route: "Background MCQ: full screen · left · right · region" },
+          { keys: "14", route: "Main app: process captured image(s) with enabled models" },
+          { keys: "25", route: "Background coding: submit captured images for processing" },
+          { keys: "35", route: "Background MCQ: submit captured images for processing" },
+        ].map((route) => (
+          <div className="row" key={route.keys}>
+            <label><span style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>{route.keys}</span></label>
+            <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{route.route}</span>
+          </div>
+        ))}
         <p className="hint">
-          These work when the window is closed because the Rust process owns them. To change one,
+          Enter each two-digit code quickly. Capture codes stage an image in that workflow; 14, 25,
+          and 35 send that workflow’s staged images for processing. These work when the window is closed
+          because the Rust helper owns them. To change a regular shortcut,
           set its environment variable before launch, for example{" "}
           <span style={{ fontFamily: "var(--font-mono)" }}>
             CODE_AUDITOR_SOLVE_KEY=&quot;Control+Alt+J&quot;
@@ -2098,6 +2225,8 @@ export default function SettingsDialog() {
           {tab === "council" && <CouncilCard />}
 
           {tab === "appearance" && <AppearanceCard />}
+
+          {tab === "updates" && <UpdateCard />}
 
           {tab === "reading" && <ReadingCard />}
 

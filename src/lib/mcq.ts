@@ -32,49 +32,60 @@ export interface McqDetection {
   options: McqOption[];
 }
 
-const OPTION_LINE =
-  /^\s*(?:[-*]\s*)?(?:[\(\[]?([A-Ha-h]|[1-9][0-9]?)[\)\].:-])\s+(.+?)\s*$/gm;
+
+const OPTION_LINE = /^\s*(?:[-*]\s*)?(?:[\(\[]?([A-Ha-h]|[1-9][0-9]?)[\)\].:-])\s*(\S.*?)\s*$/;
+const QUESTION_START = /^\s*(?:Q(?:uestion)?\s*\d+\s*[.)\]:-]?|\d+\s*[.)]\s+(?=[A-Z]))/i;
 
 export function detectMcq(text: string): McqDetection {
   const source = String(text || "");
+  const lines = source.split(/\r?\n/);
   const options: McqOption[] = [];
   const seen = new Set<string>();
-  let match: RegExpExecArray | null;
-  OPTION_LINE.lastIndex = 0;
-  while ((match = OPTION_LINE.exec(source))) {
-    const label = match[1].toUpperCase();
-    const body = match[2].trim();
-    if (!body || seen.has(label)) continue;
-    seen.add(label);
-    options.push({ label, text: body });
+  let start = -1;
+  let current: McqOption | null = null;
+  let family: "letter" | "number" | null = null;
+  for (let i=0;i<lines.length;i++) {
+    const line=lines[i];
+    const match=OPTION_LINE.exec(line);
+    const question=QUESTION_START.test(line) && (line.includes("?") || /^\s*Q/i.test(line));
+    if(match && !question) {
+      const label=match[1].toUpperCase();
+      const next=/^[A-H]$/.test(label)?"letter":"number";
+      if((family && family!==next)||seen.has(label)){current=null;continue;}
+      if(start<0) start=i;
+      family=next;
+      current={label,text:match[2].trim()};
+      options.push(current);seen.add(label);
+    } else if(current && line.trim() && !QUESTION_START.test(line)) {
+      current.text+=" "+line.trim();
+    } else if(!line.trim() || question) current=null;
   }
+  const question=(start<0?source:lines.slice(0,start).join("\n")).replace(/\s+/g," ").trim();
+  const cue=/\b(which|what|choose|select|correct|incorrect|except|following|answer|true|false|best)\b/i.test(question)||question.includes("?");
+  const coding=/`{3}|\b(write|implement|function|class|def|input|output|constraints?)\b/i.test(question);
+  const confidence=Math.max(0,Math.min(1,(options.length>=2?.55:0)+(options.length>=3?.2:0)+(cue?.2:0)-(coding?.2:0)));
+  return {isMcq:options.length>=2&&confidence>=.7,confidence,question,options};
+}
 
-  const lower = source.toLowerCase();
-  const questionCue =
-    /\b(which|what|choose|select|correct|best|following|answer)\b/.test(lower) ||
-    source.includes("?");
-  const codingCue =
-    /```|\b(write|implement|return|function|class|def|input|output|constraints?)\b/i.test(source);
-  let confidence = 0;
-  if (options.length >= 2) confidence += 0.55;
-  if (options.length >= 3) confidence += 0.2;
-  if (questionCue) confidence += 0.2;
-  if (codingCue) confidence -= 0.2;
-  confidence = Math.max(0, Math.min(1, confidence));
-
-  const firstOptionIndex = options.length
-    ? source.search(/^\s*(?:[\(\[]?[A-Ha-h1-9][0-9]?[\)\].:-])\s+/m)
-    : -1;
-  const question = (firstOptionIndex > 0 ? source.slice(0, firstOptionIndex) : source)
-    .replace(/\s+/g, " ")
-    .trim();
-
-  return {
-    isMcq: confidence >= 0.7 && options.length >= 2,
-    confidence,
-    question,
-    options,
-  };
+/** Source-provenance validation; model-generated choices cannot overwrite captured options. */
+export function resolveMcqSelection(answer: McqAnswer, detected: McqDetection): McqAnswer | null {
+  if(!detected.isMcq||!detected.options.length)return null;
+  const label=answer.answer.label.trim().toUpperCase();
+  const match=detected.options.find(x=>x.label===label);
+  const norm=(x:string)=>x.trim().replace(/\s+/g," ").toLowerCase();
+  const text=answer.answer.text.trim();
+  const textMatch=text&&norm(text)!==norm(label)?detected.options.filter(x=>norm(x.text)===norm(text)):[];
+  if(text&&norm(text)!==norm(label)&&textMatch.length!==1)return null;
+  if(match&&textMatch.length&&match.label!==textMatch[0].label)return null;
+  const chosen=match??(textMatch.length===1?textMatch[0]:null);
+  return chosen?{...answer,question:detected.question,options:detected.options,answer:chosen}:null;
+}
+export function formatMcqSelection(answer:McqAnswer):string {
+  const index=answer.options.findIndex(x=>x.label===answer.answer.label);
+  if(index<0)return "Answer needs verification";
+  const n=index+1;
+  const suffix=n%100>=11&&n%100<=13?"th":n%10===1?"st":n%10===2?"nd":n%10===3?"rd":"th";
+  return "✅ "+answer.answer.label+" ("+n+suffix+" Option) - "+answer.answer.text;
 }
 
 export function normalizeOverlayMode(value: unknown): OverlayMode {

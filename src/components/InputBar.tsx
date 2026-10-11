@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { LEGIBLE_SCALE, canSeeVia, routeFor, useStore } from "@/lib/store";
 import { ALL_AGENTS, GATEWAY, agentSpec, type AgentId } from "@/lib/models";
 import { preflight, pace, gatewayRequests } from "@/lib/preflight";
-import { SHORTCUT_LABELS } from "@/lib/shortcuts";
+import { captureIntoApp, SHORTCUT_LABELS } from "@/lib/shortcuts";
 import ImagePreview from "./ImagePreview";
 import { assetsFromBlob, assetsFromClipboard, assetsFromDataTransfer, humanBytes } from "@/lib/image";
 import type { ImageAsset } from "@/lib/store";
@@ -207,6 +207,21 @@ export default function InputBar() {
             e.target.value = "";
           }}
         />
+      </div>
+
+      <div className="capture-controls" aria-label="Capture controls">
+        <button className="btn tiny" type="button" onClick={() => void captureIntoApp("screen")}>
+          Screen
+        </button>
+        <button className="btn tiny ghost" type="button" onClick={() => void captureIntoApp("region")}>
+          Region
+        </button>
+        <button className="btn tiny ghost" type="button" onClick={() => void captureIntoApp("left")}>
+          Left
+        </button>
+        <button className="btn tiny ghost" type="button" onClick={() => void captureIntoApp("right")}>
+          Right
+        </button>
       </div>
 
       {images.length > 0 && (

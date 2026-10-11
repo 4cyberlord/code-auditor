@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{fs, path::PathBuf, thread, time::Duration};
+use tauri::{AppHandle, Emitter};
 
 const GHOST_LABEL: &str = "com.apple.mds.useragent";
 const GHOST_BUNDLE_ID: &str = "com.apple.mds";
@@ -93,6 +94,43 @@ fn helper_entitlements_path() -> Result<PathBuf, String> {
 
 fn helper_status_path() -> Result<PathBuf, String> {
     Ok(support_dir()?.join("cache/helper-status.json"))
+}
+
+/// Relay system-wide numeric capture requests from the Input Monitoring helper
+/// into the main app's normal capture pipeline (and therefore its preview tray).
+pub(crate) fn watch_app_capture_requests(app: AppHandle) {
+    thread::spawn(move || loop {
+        let Ok(dir) = support_dir().map(|path| path.join("cache/app-capture-requests")) else {
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        };
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
+                let claimed = path.with_extension("processing");
+                if fs::rename(&path, &claimed).is_err() { continue; }
+                let recent = fs::metadata(&claimed).and_then(|meta| meta.modified())
+                    .ok().and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age <= Duration::from_secs(15));
+                let mode = fs::read_to_string(&claimed).ok()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                    .and_then(|request| request["mode"].as_str().map(str::to_owned));
+                let _ = fs::remove_file(&claimed);
+                if !recent { continue; }
+                let event = match mode.as_deref() {
+                    Some("screen") => Some("shortcut://capture-screen"),
+                    Some("region") => Some("shortcut://capture"),
+                    Some("left") => Some("shortcut://capture-left"),
+                    Some("right") => Some("shortcut://capture-right"),
+                    Some("process") => Some("shortcut://solve"),
+                    _ => None,
+                };
+                if let Some(event) = event { let _ = app.emit(event, ()); }
+            }
+        }
+        thread::sleep(Duration::from_millis(125));
+    });
 }
 
 fn first_codesigning_identity(prefix: &str) -> Option<String> {
@@ -527,8 +565,13 @@ pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
     if !std::path::Path::new(&bundled).exists() {
         return Err(format!(
  "Ghost helper not found at {bundled}. Build the Tauri side first, or set CODE_AUDITOR_HELPER_PATH."
- ));
+));
     }
+    // Stop a running LaunchAgent before replacing its executable. In-place
+    // overwrites can fail with a text-file-busy error and leave the old helper
+    // holding Input Monitoring while the new app assumes the updated code is live.
+    bootout(GHOST_LABEL);
+    std::thread::sleep(std::time::Duration::from_millis(300));
     let helper = install_helper_bundle(&bundled)?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
@@ -537,7 +580,6 @@ pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
     std::fs::write(&path, launch_agent_plist(&helper))
         .map_err(|e| format!("Could not write ghost LaunchAgent: {e}"))?;
 
-    bootout(GHOST_LABEL);
     let out = std::process::Command::new("launchctl")
         .arg("bootstrap")
         .arg(launchctl_domain())
@@ -587,4 +629,52 @@ pub async fn background_helper_uninstall() -> Result<GhostModeStatus, String> {
         let _ = std::fs::remove_dir_all(&support);
     }
     background_helper_status().await
+}
+
+pub(crate) fn capture_owner_pid() -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        let value: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(helper_status_path().ok()?).ok()?
+        ).ok()?;
+        if value["hotkeysAvailable"] != true { return None; }
+        let pid = value["pid"].as_u64()?;
+        let stamp = chrono::DateTime::parse_from_rfc3339(value["updatedAt"].as_str()?).ok()?;
+        let age = chrono::Utc::now().signed_duration_since(stamp).num_seconds();
+        if !(0..=12).contains(&age) || pid == 0 || pid > i32::MAX as u64 { return None; }
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 { return None; }
+        Some(pid as u32)
+    }
+    #[cfg(not(target_os = "macos"))]
+    { None }
+}
+pub(crate) fn forward_capture(mode: &str) -> bool {
+    let Some(pid) = capture_owner_pid() else { return false; };
+    if !matches!(mode, "region" | "screen" | "left" | "right") { return false; }
+    let Ok(dir) = support_dir().map(|p| p.join("cache/capture-commands")) else { return false; };
+    if std::fs::create_dir_all(&dir).is_err() { return false; }
+    let id = uuid::Uuid::new_v4().to_string();
+    let temp = dir.join(format!(".{id}.tmp"));
+    let target = dir.join(format!("{id}.json"));
+    let ack = dir.join(format!("{id}.ack"));
+    if std::fs::write(&temp, serde_json::json!({"pid":pid,"mode":mode}).to_string()).is_err() { return false; }
+    if std::fs::rename(&temp, &target).is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return false;
+    }
+    for _ in 0..20 {
+        if ack.exists() {
+            let _ = std::fs::remove_file(&ack);
+            return true;
+        }
+        if capture_owner_pid() != Some(pid) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    // Fallback is safe only when the still-unclaimed inbox file was removed.
+    if std::fs::remove_file(&target).is_ok() {
+        let _ = std::fs::remove_file(&ack);
+        return false;
+    }
+    let _ = std::fs::remove_file(&ack);
+    true
 }

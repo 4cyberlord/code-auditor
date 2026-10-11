@@ -178,6 +178,7 @@ pub struct NewSolveJobImage {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewSolveJob {
+    pub submission_id: String,
     pub session_id: String,
     pub settings_snapshot: serde_json::Value,
     pub images: Vec<NewSolveJobImage>,
@@ -532,6 +533,7 @@ pub async fn solve_job_create(
         return Err("A solve job needs at least one screenshot.".into());
     }
     let sid = parse_id(&job.session_id, "session")?;
+    let submission = parse_id(&job.submission_id, "submission")?;
     #[derive(serde::Deserialize)]
     struct Queued {
         id: String,
@@ -541,6 +543,7 @@ pub async fn solve_job_create(
         "jobs.create",
         serde_json::json!({
             "sessionId": sid.to_string(),
+            "submissionId": submission.to_string(),
             "settingsSnapshot": job.settings_snapshot,
             "images": job.images,
         }),

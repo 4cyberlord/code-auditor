@@ -1,0 +1,19 @@
+{
+  "identifier": "com.charles.councileditor.dev",
+  "productName": "Council Editor Dev",
+  "app": {
+    "windows": [
+      {
+        "title": "Council Editor Dev",
+        "width": 1500,
+        "height": 980,
+        "minWidth": 1080,
+        "minHeight": 680,
+        "center": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "dragDropEnabled": false
+      }
+    ]
+  }
+}
