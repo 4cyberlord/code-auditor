@@ -111,8 +111,7 @@ const [
   { knowledgePackFor },
   knowledgeLibrary,
   mcq,
-  problemRouting,
-  adaptiveModelRouting,
+  backgroundIntelligence,
 ] = await Promise.all([
   import("../src/lib/prompts.ts"),
   import("../src/lib/parse.ts"),
@@ -123,46 +122,12 @@ const [
   import("../src/lib/knowledge.ts"),
   import("../src/lib/knowledgeLibrary.ts"),
   import("../src/lib/mcq.ts"),
-  import("../src/lib/problemRouting.ts"),
-  import("../src/lib/adaptiveModelRouting.ts"),
+  import("../src/lib/backgroundIntelligence.ts"),
 ]);
 
 const { detectMcq, parseMcqAnswer, resolveMcqSelection, formatMcqSelection } = mcq;
 
-// These are exactly the desktop's pure classification and model-selection
-// rules. Keep orchestration in the worker; the original helper is a renderer.
-const { routeProblem, routeUnparsedProblem } = problemRouting;
-const { selectAdaptiveModels } = adaptiveModelRouting;
-
-/** Capability evidence comes from the configured roster and measured probes. */
-function cloudCapabilities(settings, roster) {
-  return roster.map((entry) => {
-    const probe = settings.probes?.[entry.id];
-    return {
-      id: entry.id,
-      families: entry.expertise,
-      vision: typeof probe?.vision === "boolean" ? probe.vision : entry.vision,
-      verifiedVisual: probe?.vision === true,
-      availability: probe && !probe.ok ? "unknown" : "available",
-      latencyMs: probe?.ok && Number.isFinite(probe.ms) ? probe.ms : entry.latencyMs,
-      costPerMillion: entry.costPerMillion,
-    };
-  });
-}
-
-/** Apply the desktop's ranking without silently changing the trusted roster. */
-function routeCloudModels(settings, configured, reading, passImages) {
-  const extraction = reading?.extraction;
-  const route = extraction && extraction.problemSummary
-    ? routeProblem(extraction)
-    : routeUnparsedProblem(reading?.context || "", Boolean(passImages));
-  const selection = selectAdaptiveModels(
-    configured, (entry) => entry.id, route,
-    cloudCapabilities(settings, configured),
-    configured.length, { passesImages: Boolean(passImages) },
-  );
-  return { route, selection };
-}
+const { routeCloudModels, trustedCloudReading } = backgroundIntelligence;
 
 const { loadKnowledgeLibrary } = knowledgeLibrary;
 
@@ -1470,7 +1435,7 @@ async function readScreenshots({ job, settings, baseUrl, models, images, imageRe
     markdownBytes: Buffer.byteLength(markdown, "utf8"),
   });
 
-  return { extraction: merged, context: renderForReasoning(merged), markdown, readers: readerNames, agreement };
+  return { extraction: merged, context: renderForReasoning(merged), markdown, readers: readerNames, readerEvidence: done.map(item => item.extraction), agreement };
 }
 
 /**
@@ -1800,7 +1765,8 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
   // with a trusted transcription can be answered by a text-only specialist.
   // Only an independently extracted options contract permits a text-only
   // answer. Otherwise the answer model receives pixels and must be probed.
-  const directImage = !detection.isMcq;
+  const transcriptionTrusted = detection.isMcq && trustedCloudReading(mcqReading);
+  const directImage = !transcriptionTrusted;
   const mcqRank = routeCloudModels(settings, models, mcqReading, directImage);
   if (!mcqRank.selection.selected.length) {
     throw new Error(directImage
@@ -1833,7 +1799,7 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
     model,
     system: mcqSystemPrompt(),
     user: mcqUserPrompt({ readingText, knowledge, detection, model }),
-    images: detection.isMcq ? [] : jobImages,
+    images: directImage ? jobImages : [],
     maxTokens: Math.min(Number(settings.maxTokens || 4096), 4096),
   });
   const parsed = parseMcqAnswer(raw, {
@@ -1850,16 +1816,17 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
   if (verified !== parsed) Object.assign(parsed, verified);
   parsed.model = parsed.model || model;
   parsed.knowledgeUsed = Boolean(parsed.knowledgeUsed || knowledge.trim());
-  if (!detection.isMcq) {
-    await addEvent(job.id, "warn", "options_unverified", "The screenshot reading did not yield independently verifiable choices. Displaying the model's answer without a verified-option mark.");
+  if (!transcriptionTrusted) {
+    await addEvent(job.id, "warn", "options_unverified", "The screenshot reading was not independently reliable enough to verify the answer choice. Image evidence was retained for the answering model.");
   }
-  const markdown = await saveMcqReport(job, parsed, mcqReading, raw, detection.isMcq);
+  const answerOptionsMatched = transcriptionTrusted && detection.isMcq;
+  const markdown = await saveMcqReport(job, parsed, mcqReading, raw, answerOptionsMatched);
   await patchJob(job.id, {
     status: "completed",
     progress_phase: "completed",
     mode: "mcq",
     error: null,
-    result_summary: (detection.isMcq ? formatMcqSelection(parsed) : `Unverified choices: ${parsed.answer.label}: ${parsed.answer.text || parsed.reason}`).slice(0, 500),
+    result_summary: (answerOptionsMatched ? formatMcqSelection(parsed) : `Unverified choices: ${parsed.answer.label}: ${parsed.answer.text || parsed.reason}`).slice(0, 500),
     finished_at: new Date().toISOString(),
   });
   await addEvent(job.id, "info", "completed", "MCQ job completed.", { markdownBytes: Buffer.byteLength(markdown, "utf8"), model });
@@ -2178,21 +2145,24 @@ export async function runCouncilJob(job) {
   //
   // Only when two readers looked and did not disagree — or disagreed and a
   // third settled it — and the reading is not hedging about its own confidence.
-  const readingTrusted =
-    Boolean(reading.extraction) &&
-    (reading.readers?.length ?? 0) >= 2 &&
-    reading.agreement?.agree !== false &&
-    Number(reading.extraction?.confidence ?? 0) >= Number(settings.readingConfidenceFloor ?? 0.7);
-
-  const showPicture =
-    solveFrom === "image" ? true : solveFrom === "reading" ? false : !readingTrusted;
+  const readingTrusted = trustedCloudReading(reading);
+  // A request to use only OCR/text cannot override the visual-verification
+  // guard. Uncertain screenshots stay with vision-capable solvers.
+  const showPicture = solveFrom === "image" || !readingTrusted;
+  if (solveFrom === "reading" && !readingTrusted) {
+    await addEvent(job.id, "warn", "reading_untrusted",
+      "The screenshot reading is not independently verified; retaining image evidence.");
+  }
 
   // Who actually solves. When the picture stays behind, a seat that cannot see
   // is no longer at a disadvantage, so the whole reachable bench solves rather
   // than only the models with eyes — which is the other half of separating
   // reconstruction from solving.
-  let solving = showPicture && seeing.length ? seeing : available;
-  const solveImages = showPicture && seeing.length ? images : [];
+  if (showPicture && !seeing.length) {
+    throw new Error("No vision-capable solver is available for an unverified screenshot reading.");
+  }
+  let solving = showPicture ? seeing : available;
+  const solveImages = showPicture ? images : [];
   const ranked = routeCloudModels(settings, solving, reading, solveImages.length > 0);
   if (ranked.selection.selected.length >= 2) {
     solving = ranked.selection.selected;
