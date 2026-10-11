@@ -248,7 +248,15 @@ export default function BackgroundJobsPanel() {
       return;
     }
     let live = true;
-    queueMicrotask(() => setError(null));
+    // A failed detail request must never display another selected job's data.
+    // Clear the prior job before independently loading its replacement.
+    queueMicrotask(() => {
+      if (!live) return;
+      setError(null);
+      setEvents([]);
+      setImages([]);
+      setReport(null);
+    });
     devLog("cloud-jobs", "detail load started", { jobId: selectedJob.id });
     // Each detail endpoint recovers independently: a temporary report failure
     // must not hide available screenshots, and a signing error must not hide events.
