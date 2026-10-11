@@ -291,8 +291,21 @@ FINAL>>>`);
   throw new Error(`Unexpected fetch: ${href}`);
 };
 
-const { runCouncilJob } = await import("../scripts/cloud-worker.mjs");
+const { runCouncilJob: runCouncilJobRaw } = await import("../scripts/cloud-worker.mjs");
 const { COUNCIL_DEFAULT_MODELS } = await import("../src/lib/council.ts");
+
+// Fixtures emulate independently successful vision probes. Merely setting
+// model.vision=true is not accepted by the production screenshot router.
+const runCouncilJob = (job) => {
+  const settings = job.settings_snapshot || {};
+  const roster = settings.councilModels?.length ? settings.councilModels : COUNCIL_DEFAULT_MODELS;
+  const measured = Object.fromEntries(roster.filter((seat) => seat.vision !== false)
+    .map((seat) => [seat.id, { vision: true, ok: true, ms: 80 }]));
+  return runCouncilJobRaw({
+    ...job,
+    settings_snapshot: { ...settings, probes: { ...measured, ...settings.probes } },
+  });
+};
 
 console.log("\n1. cloud worker v1 happy path");
 await runCouncilJob({
@@ -536,6 +549,7 @@ await runCouncilJob({
       { id: "anthropic/claude-sonnet-4.6", endpoint: "chat", vision: false },
       { id: "moonshotai/kimi-k3", endpoint: "chat", vision: false },
       { id: "anthropic/claude-opus-4.6", endpoint: "chat", vision: true },
+      { id: "z-ai/glm-5.3", endpoint: "chat", vision: true },
     ],
     councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
   },
@@ -732,6 +746,33 @@ check(
   modelCalls.length === 0,
   `${modelCalls.length} calls were spent before giving up`
 );
+
+// --- Unverified model claims must not authorize screenshot delivery --------
+console.log("\\n7b. unverified image route is blocked before solving");
+events.length = 0;
+patches.length = 0;
+reports.length = 0;
+modelCalls.length = 0;
+let unprobedError = null;
+await runCouncilJobRaw({
+  id: "job-7b",
+  session_id: "session-1",
+  mode: "mcq",
+  settings_snapshot: {
+    mode: "mcq",
+    councilModels: [
+      { id: "anthropic/claude-fable-5", vision: true, endpoint: "chat" },
+      { id: "anthropic/claude-sonnet-4.6", vision: true, endpoint: "chat" },
+    ],
+    probes: {},
+  },
+}).catch((error) => { unprobedError = error; });
+check("unprobed MCQ worker fails safely", Boolean(unprobedError));
+check("unprobed MCQ produces no fabricated report", reports.length === 0);
+events.length = 0;
+patches.length = 0;
+reports.length = 0;
+modelCalls.length = 0;
 
 // --- the knowledge library, from the database and from the bundle -----------
 console.log("\n8. the knowledge library has two shelves");
