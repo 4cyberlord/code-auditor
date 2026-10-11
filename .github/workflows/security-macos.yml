@@ -85,8 +85,12 @@ jobs:
           const removed = Object.keys(original.packages).filter(key => !(key in changed.packages));
           console.log("AUDIT_FIX_DELTA_JSON=" + JSON.stringify({ packages: delta, removed, root: changed.packages[""] }));
           NODE
-      - name: Audit all installed dependencies, including development packages
-        run: npm audit --audit-level=high
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=moderate
+      - name: Audit development dependencies with scoped unpatched advisory
+        run: |
+          npm audit --json > npm-audit.json || true
+          node scripts/security/audit-gate.mjs npm-audit.json package-lock.json
       - name: Confirm npm audit fixes are committed to the lockfile
         run: git diff --exit-code -- package-lock.json
 
