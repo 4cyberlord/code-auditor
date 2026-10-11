@@ -1274,6 +1274,14 @@ fn capture_screen(mode: CaptureMode, view: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Freeze the active overlay's workflow for this submitted job only.
+// Account settings remain untouched, and the helper window is unchanged.
+fn settings_for_overlay(view: &str, saved: &Value) -> Value {
+    let mut settings = if saved.is_object() { saved.clone() } else { serde_json::json!({}) };
+    settings["overlayMode"] = Value::from(if view == "mcq" { "mcq" } else { "coding" });
+    settings
+}
+
 async fn submit_batch(active_view: &str) -> Result<(), String> {
     // New submissions never depend on downloading an older job's report.
     let mut batch = read_pending_for(active_view)?
@@ -1419,7 +1427,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
             "sessionId": session_id,
             "submissionId": batch.submission_id,
             "mode": mode,
-            "settingsSnapshot": user_settings,
+            "settingsSnapshot": settings_for_overlay(active_view, &user_settings),
             "images": images,
         }),
     )
@@ -2577,6 +2585,18 @@ mod tests {
         assert_eq!(mcq["answerVerified"], false);
         job.report = Some(serde_json::json!({"report": {"mcq": {"answer": "B"}}}));
         assert!(mcq_from_submitted(&job).is_none());
+    }
+
+    #[test]
+    fn helper_jobs_keep_the_requested_overlay_mode() {
+        let saved = serde_json::json!({ "overlayMode": "auto", "mcqModel": "configured-model", "maxTokens": 8192 });
+        let coding = settings_for_overlay("coding", &saved);
+        let mcq = settings_for_overlay("mcq", &saved);
+        assert_eq!(coding["overlayMode"], "coding");
+        assert_eq!(mcq["overlayMode"], "mcq");
+        assert_eq!(coding["mcqModel"], "configured-model");
+        assert_eq!(mcq["maxTokens"], 8192);
+        assert_eq!(saved["overlayMode"], "auto");
     }
 
     #[test]
