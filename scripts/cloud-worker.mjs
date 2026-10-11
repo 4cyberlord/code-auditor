@@ -111,6 +111,8 @@ const [
   { knowledgePackFor },
   knowledgeLibrary,
   mcq,
+  problemRouting,
+  adaptiveModelRouting,
 ] = await Promise.all([
   import("../src/lib/prompts.ts"),
   import("../src/lib/parse.ts"),
@@ -121,9 +123,47 @@ const [
   import("../src/lib/knowledge.ts"),
   import("../src/lib/knowledgeLibrary.ts"),
   import("../src/lib/mcq.ts"),
+  import("../src/lib/problemRouting.ts"),
+  import("../src/lib/adaptiveModelRouting.ts"),
 ]);
 
 const { detectMcq, parseMcqAnswer, resolveMcqSelection, formatMcqSelection } = mcq;
+
+// These are exactly the desktop's pure classification and model-selection
+// rules. Keep orchestration in the worker; the original helper is a renderer.
+const { routeProblem, routeUnparsedProblem } = problemRouting;
+const { selectAdaptiveModels } = adaptiveModelRouting;
+
+/** Capability evidence comes from the configured roster and measured probes. */
+function cloudCapabilities(settings, roster) {
+  return roster.map((entry) => {
+    const probe = settings.probes?.[entry.id];
+    return {
+      id: entry.id,
+      families: entry.expertise,
+      vision: typeof probe?.vision === "boolean" ? probe.vision : entry.vision,
+      verifiedVisual: probe?.vision === true,
+      availability: probe && !probe.ok ? "unknown" : "available",
+      latencyMs: probe?.ok && Number.isFinite(probe.ms) ? probe.ms : entry.latencyMs,
+      costPerMillion: entry.costPerMillion,
+    };
+  });
+}
+
+/** Apply the desktop's ranking without silently changing the trusted roster. */
+function routeCloudModels(settings, configured, reading, passImages) {
+  const extraction = reading?.extraction;
+  const route = extraction && extraction.problemSummary
+    ? routeProblem(extraction)
+    : routeUnparsedProblem(reading?.context || "", Boolean(passImages));
+  const selection = selectAdaptiveModels(
+    configured, (entry) => entry.id, route,
+    cloudCapabilities(settings, configured),
+    configured.length, { passesImages: Boolean(passImages) },
+  );
+  return { route, selection };
+}
+
 const { loadKnowledgeLibrary } = knowledgeLibrary;
 
 /**
@@ -1730,7 +1770,7 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
     ? settings.councilModels
     : COUNCIL_DEFAULT_MODELS;
   const models = reachableSeats(roster, (m) => m?.id, settings.availableModels).reachable;
-  const model = mcqModel(settings, models);
+  let model = mcqModel(settings, models);
   const localBench = bench || createBench(job);
 
   await patchJob(job.id, { progress_phase: "mcq_reading", mode: "mcq" });
@@ -1753,6 +1793,17 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
   });
   const readingText = [mcqReading.context, mcqReading.markdown].filter(Boolean).join("\n\n");
   const detection = detectMcq(readingText);
+  // The image reader and answer solver are separate capabilities. An MCQ
+  // with a trusted transcription can be answered by a text-only specialist.
+  const mcqRank = routeCloudModels(settings, models, mcqReading, false);
+  if (mcqRank.selection.selected.length) {
+    const preferred = mcqRank.selection.selected.find(m => m.id === model);
+    model = preferred?.id || mcqRank.selection.selected[0].id;
+  }
+  await addEvent(job.id, "info", "adaptive_routing",
+    `MCQ answer model: ${model}; reading path: ${mcqRank.route.path}.`, {
+      model, readingPath: mcqRank.route.path, families: mcqRank.route.families,
+    });
   const mcqLibrary = await libraryFor(settings);
   const knowledge = knowledgePackFor(
     [detection.question, ...detection.options.map((o) => `${o.label}. ${o.text}`), readingText].filter(Boolean).join("\n"),
@@ -2133,6 +2184,22 @@ export async function runCouncilJob(job) {
   // reconstruction from solving.
   let solving = showPicture && seeing.length ? seeing : available;
   const solveImages = showPicture && seeing.length ? images : [];
+  const ranked = routeCloudModels(settings, solving, reading, solveImages.length > 0);
+  if (ranked.selection.selected.length >= 2) {
+    solving = ranked.selection.selected;
+  } else if (solveImages.length > 0) {
+    // Failing closed is safer than sending pixels to an unproven image route.
+    throw new Error("The image requires two verified vision-capable Council solvers. Run model image probes or submit a verified text reading.");
+  } else {
+    throw new Error("Fewer than two configured Council solvers are available.");
+  }
+  await addEvent(job.id, "info", "adaptive_routing",
+    `Shared intelligence routed this as ${ranked.route.families.join(", ")} (${ranked.route.path}).`, {
+      families: ranked.route.families, path: ranked.route.path,
+      verification: ranked.route.verification,
+      models: solving.map(m => m.id),
+      excluded: ranked.selection.excluded,
+    });
   if (!showPicture) {
     await addEvent(
       job.id,
