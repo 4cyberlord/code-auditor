@@ -45,24 +45,18 @@ const AUTO_LOCK_POLL_MS = 15 * 1000;
  * will refuse them.
  */
 export default function Page() {
-  const [overlayRoute] = useState(
-    () =>
-      typeof window !== "undefined" &&
-      new URLSearchParams(window.location.search).get("overlay") === "capture-exempt"
-  );
   const status = useAuth((s) => s.status);
   const ready = useAuth((s) => s.ready);
   const refresh = useAuth((s) => s.refresh);
   const apply = useAuth((s) => s.apply);
 
   useEffect(() => {
-    if (!overlayRoute) void refresh();
-  }, [overlayRoute, refresh]);
+    void refresh();
+  }, [refresh]);
 
   const gate = gateFor(status, ready);
 
   useEffect(() => {
-    if (overlayRoute) return;
     devLog("gate", "state changed", {
       gate,
       ready,
@@ -70,9 +64,8 @@ export default function Page() {
       dbConfigured: status?.dbConfigured ?? false,
       problem: status?.problem ?? null,
     });
-  }, [gate, overlayRoute, ready, status]);
+  }, [gate, ready, status]);
 
-  if (overlayRoute) return <CaptureExemptOverlay />;
   if (gate === "loading") return <StartupLoader />;
   if (gate === "login") {
     return <LoginScreen gate={gate} status={status} onChanged={apply} />;
@@ -329,101 +322,3 @@ function Workbench() {
     </div>
   );
 }
-
-function CaptureExemptOverlay() {
-  const [text, setText] = useState("");
-  const lines = withOverlayReferenceComment(overlayCodeSample).split("\n");
-
-  useEffect(() => {
-    document.documentElement.dataset.overlay = "capture-exempt";
-    return () => {
-      delete document.documentElement.dataset.overlay;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!inTauri()) return;
-    let unlisten: (() => void) | undefined;
-    void listen<string>("overlay://text", (event) => {
-      setText(event.payload);
-    }).then((dispose) => {
-      unlisten = dispose;
-    });
-    return () => {
-      unlisten?.();
-    };
-  }, []);
-
-  return (
-    <main className="coding-capture-exempt-overlay" aria-label="Capture exempt overlay">
-      <div className="capture-topbar" aria-label="Overlay controls">
-        <span className="capture-brand" aria-hidden="true">CA</span>
-        <span className="capture-pause" aria-hidden="true">||</span>
-        <span className="capture-meter" aria-hidden="true"><i /><i /><i /></span>
-        <span className="capture-action">Capture Region</span>
-        <span className="capture-key">⌃⌥</span>
-        <span className="capture-key">R</span>
-        <span className="capture-action">Capture Screen</span>
-        <span className="capture-key">⌃⌥</span>
-        <span className="capture-key">S</span>
-        <span className="capture-action">Solve</span>
-        <span className="capture-key">⌃⌥</span>
-        <span className="capture-key">A</span>
-        <span className="capture-action">Overlay</span>
-        <span className="capture-key">⌃⌥</span>
-        <span className="capture-key">O</span>
-      </div>
-
-      <div className="capture-exempt-panel">
-        <section className="capture-notes-card" aria-label="Answer notes">
-          <div className="capture-question">
-            {text || "How would you design the solution so the most relevant answer is visible quickly?"}
-          </div>
-          <div className="capture-answer">
-            <b>AI response ✨</b>
-            <p>
-              Break it into clear parts: gather the signal, rank the likely paths, then explain the final
-              choice with enough detail to act on it.
-            </p>
-          </div>
-        </section>
-
-        <section className="capture-code-card" aria-label="Numbered code notes">
-          <div className="capture-code-head">
-            <b>solution.py</b>
-            <span>visible notes</span>
-          </div>
-          <ol className="capture-code-lines">
-            {lines.map((line, index) => (
-              <li key={`${index}-${line}`}>
-                <code>{line || " "}</code>
-              </li>
-            ))}
-          </ol>
-        </section>
-      </div>
-    </main>
-  );
-}
-
-function withOverlayReferenceComment(code: string): string {
-  if (code.trimStart().startsWith("#")) return code;
-  return `# Reference: solution displayed in the capture overlay\n${code}`;
-}
-
-const overlayCodeSample = `def greatest_outlier(arr):
-    # Convert the array to a set for O(1) lookups
-    seen = set(arr)
-    total_sum = sum(arr)
-    outliers = []
-
-    for num in arr:
-        original_sum = total_sum - num
-        # Check if the original sum is in the set, and not this item
-        if original_sum in seen:
-            outliers.append(num)
-
-    if not outliers:
-        return -1
-
-    return max(outliers)`;

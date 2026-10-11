@@ -111,6 +111,7 @@ const [
   { knowledgePackFor },
   knowledgeLibrary,
   mcq,
+  { planBackgroundIntelligence },
 ] = await Promise.all([
   import("../src/lib/prompts.ts"),
   import("../src/lib/parse.ts"),
@@ -121,6 +122,7 @@ const [
   import("../src/lib/knowledge.ts"),
   import("../src/lib/knowledgeLibrary.ts"),
   import("../src/lib/mcq.ts"),
+  import("../src/lib/backgroundIntelligence.ts"),
 ]);
 
 const { detectMcq, parseMcqAnswer, resolveMcqSelection, formatMcqSelection } = mcq;
@@ -1430,7 +1432,7 @@ async function readScreenshots({ job, settings, baseUrl, models, images, imageRe
     markdownBytes: Buffer.byteLength(markdown, "utf8"),
   });
 
-  return { extraction: merged, context: renderForReasoning(merged), markdown, readers: readerNames, agreement };
+  return { extraction: merged, context: renderForReasoning(merged), markdown, readers: readerNames, readerDetails: done.map(({ extraction }) => ({ confidence: extraction.confidence, ambiguities: extraction.ambiguities })), agreement };
 }
 
 /**
@@ -1730,7 +1732,7 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
     ? settings.councilModels
     : COUNCIL_DEFAULT_MODELS;
   const models = reachableSeats(roster, (m) => m?.id, settings.availableModels).reachable;
-  const model = mcqModel(settings, models);
+  let model = mcqModel(settings, models);
   const localBench = bench || createBench(job);
 
   await patchJob(job.id, { progress_phase: "mcq_reading", mode: "mcq" });
@@ -1746,13 +1748,34 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
     job,
     settings,
     baseUrl,
-    models: readerPool.length ? readerPool : [{ id: model }],
+    models: readerPool,
     images: jobImages,
     imageRefs,
     bench: localBench,
   });
   const readingText = [mcqReading.context, mcqReading.markdown].filter(Boolean).join("\n\n");
   const detection = detectMcq(readingText);
+  const readingPlan = planBackgroundIntelligence({
+    models: [{ id: model, ...models.find(entry => entry.id === model) }, ...models],
+    probes: settings.probes, reading: mcqReading, hasImages: jobImages.length > 0, passesImages: false,
+  });
+  const sendSourceImages = !detection.isMcq || !readingPlan.safeTextOnly;
+  const routingPlan = planBackgroundIntelligence({
+    models: [{ id: model, ...models.find(entry => entry.id === model) }, ...models],
+    probes: settings.probes, reading: mcqReading, hasImages: jobImages.length > 0,
+    passesImages: sendSourceImages,
+  });
+  const selected = routingPlan.selection.selected[0];
+  if (!selected) {
+    throw new Error(sendSourceImages
+      ? "MCQ screenshot requires a model with verified vision capability; no probed route is available."
+      : "No suitable MCQ model is available.");
+  }
+  model = selected.id;
+  await addEvent(job.id, "info", "intelligence_routing",
+    `MCQ routed as ${routingPlan.route.families.join(", ")} via ${model}.`,
+    { model, family: routingPlan.route.families, path: routingPlan.route.path, images: sendSourceImages,
+      excluded: routingPlan.selection.excluded });
   const mcqLibrary = await libraryFor(settings);
   const knowledge = knowledgePackFor(
     [detection.question, ...detection.options.map((o) => `${o.label}. ${o.text}`), readingText].filter(Boolean).join("\n"),
@@ -1773,7 +1796,7 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
     model,
     system: mcqSystemPrompt(),
     user: mcqUserPrompt({ readingText, knowledge, detection, model }),
-    images: detection.isMcq ? [] : jobImages,
+    images: sendSourceImages ? jobImages : [],
     maxTokens: Math.min(Number(settings.maxTokens || 4096), 4096),
   });
   const parsed = parseMcqAnswer(raw, {
@@ -1955,7 +1978,7 @@ export async function runCouncilJob(job) {
   const settings = job.settings_snapshot || {};
   const baseUrl = gatewayBaseUrl(settings);
   const models = chatModels(settings);
-  const judges = chatJudges(settings);
+  let judges = chatJudges(settings);
 
   // A seat the key has no access to is not worth a request to discover. The
   // router's catalogue already answered that for every model at once, so the
@@ -2118,21 +2141,38 @@ export async function runCouncilJob(job) {
   //
   // Only when two readers looked and did not disagree — or disagreed and a
   // third settled it — and the reading is not hedging about its own confidence.
-  const readingTrusted =
-    Boolean(reading.extraction) &&
-    (reading.readers?.length ?? 0) >= 2 &&
-    reading.agreement?.agree !== false &&
-    Number(reading.extraction?.confidence ?? 0) >= Number(settings.readingConfidenceFloor ?? 0.7);
-
-  const showPicture =
-    solveFrom === "image" ? true : solveFrom === "reading" ? false : !readingTrusted;
-
-  // Who actually solves. When the picture stays behind, a seat that cannot see
-  // is no longer at a disadvantage, so the whole reachable bench solves rather
-  // than only the models with eyes — which is the other half of separating
-  // reconstruction from solving.
-  let solving = showPicture && seeing.length ? seeing : available;
-  const solveImages = showPicture && seeing.length ? images : [];
+  const initialPlan = planBackgroundIntelligence({
+    models: available, probes: settings.probes, reading, hasImages: images.length > 0,
+    passesImages: false,
+  });
+  const readingTrusted = initialPlan.safeTextOnly;
+  if (solveFrom === "reading" && !readingTrusted) {
+    await addEvent(job.id, "warn", "unverified_reading",
+      "Reading-only mode requested, but independent screenshot verification was insufficient.");
+  }
+  // Never silently drop uncertain source pixels or ask blind text models to
+  // answer from an incomplete reconstruction.
+  const showPicture = solveFrom === "image" || !readingTrusted;
+  const routingPlan = planBackgroundIntelligence({
+    models: available, probes: settings.probes, reading, hasImages: images.length > 0,
+    passesImages: showPicture,
+  });
+  let solving = routingPlan.selection.selected;
+  if (solving.length < 2) {
+    throw new Error(showPicture
+      ? "No two verified vision-capable Council models are available for the screenshot; run image probes in Settings."
+      : "Fewer than two suitable Council models are available.");
+  }
+  const solveImages = showPicture ? images : [];
+  const rankedJudges = planBackgroundIntelligence({
+    models: judges.map(judge => ({ ...judge, id: judge.model })),
+    probes: settings.probes, reading, hasImages: false, passesImages: false,
+  });
+  judges = rankedJudges.selection.selected.map(({ id, ...judge }) => judge);
+  await addEvent(job.id, "info", "intelligence_routing",
+    `Council routed as ${routingPlan.route.families.join(", ")} via ${routingPlan.route.path}.`,
+    { families: routingPlan.route.families, verification: routingPlan.route.verification,
+      models: solving.map(m => m.id), showPicture, excluded: routingPlan.selection.excluded });
   if (!showPicture) {
     await addEvent(
       job.id,

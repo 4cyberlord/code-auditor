@@ -1867,6 +1867,11 @@ export interface Presentation {
   provenance: string;
   approach: string;
   complexity: string;
+  /** Read from the independently reconciled pre-solve problem contract. */
+  edgeCases?: string;
+  /** Explicitly supplied complexity bounds, never guessed from code. */
+  timeComplexity?: string;
+  spaceComplexity?: string;
   evidence: EvidenceRow[];
   /** Where the bench did not agree, in one line each. */
   dissent: string[];
@@ -1947,6 +1952,9 @@ export function buildPresentation(report: CouncilReport): Presentation {
     provenance: winnerCandidate ? `Candidate ${winnerCandidate.letter} — ${winnerCandidate.model}` : "",
     approach: synth?.approach || "",
     complexity: report.contract?.complexity || winnerFinal?.complexity || "",
+    edgeCases: report.contract?.edgeCases || "",
+    timeComplexity: (report.contract?.complexity || winnerFinal?.complexity || "").match(/(?:time|runtime)\\s*(?:complexity)?\\s*[:=\\-]\\s*([^\\n;]+)/i)?.[1]?.trim() || "",
+    spaceComplexity: (report.contract?.complexity || winnerFinal?.complexity || "").match(/(?:space|memory)\\s*(?:complexity)?\\s*[:=\\-]\\s*([^\\n;]+)/i)?.[1]?.trim() || "",
     evidence,
     dissent,
     rejected: bullets(synth?.rejected || ""),
