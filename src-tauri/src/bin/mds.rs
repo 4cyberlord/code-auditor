@@ -1376,6 +1376,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
             .as_str()
             .ok_or("The server did not return an upload URL.")?;
 
+        let uploaded_bytes = bytes.len();
         let resp = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent(HELPER_USER_AGENT)
@@ -1390,7 +1391,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
                     &image.mime
                 },
             )
-            .body(bytes.clone())
+            .body(bytes)
             .send()
             .await
             .map_err(|e| format!("Could not upload {}: {e}", image.file_name))?;
@@ -1406,7 +1407,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
             "storageBucket": BUCKET,
             "storagePath": path,
             "fileName": image.file_name,
-            "bytes": bytes.len() as i64,
+            "bytes": uploaded_bytes as i64,
             "mime": image.mime,
             "width": Value::Null,
             "height": Value::Null,
