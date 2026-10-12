@@ -95,6 +95,7 @@ function Workbench() {
   const hydrate = useStore((s) => s.hydrate);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const running = useStore((s) => s.running);
+  const startAnalysis = useStore((s) => s.start);
   const signOut = useAuth((s) => s.signOut);
   const sessionsOpen = useStore((s) => s.settings.railPanel === "sessions");
   const historyOpen = useStore((s) => s.settings.railPanel === "history");
@@ -245,7 +246,11 @@ function Workbench() {
       {workspace === "council" && !intakeOpen && <ReadingPanel />}
 
       {workspace === "council" && intakeOpen && (
-        <StoryStripIntake onContinue={() => setIntakeOpen(false)} />
+        <StoryStripIntake running={running} onStartAnalysis={() => {
+          // The store chooses available routes, initializes the selected agents,
+          // and starts extraction/reasoning. The running state reveals the panes.
+          void startAnalysis();
+        }} />
       )}
       {workspace === "council" && !intakeOpen && !running && !viewingRunId && (
         <div className="story-return-bar">
