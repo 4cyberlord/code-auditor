@@ -249,7 +249,7 @@ function Workbench() {
         <StoryStripIntake running={running} onStartAnalysis={() => {
           // The store chooses available routes, initializes the selected agents,
           // and starts extraction/reasoning. The running state reveals the panes.
-          void startAnalysis();
+          void startAnalysis({ adaptivePanels: true });
         }} />
       )}
       {workspace === "council" && !intakeOpen && !running && !viewingRunId && (
