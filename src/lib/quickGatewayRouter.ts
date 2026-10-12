@@ -54,6 +54,8 @@ export function resolveGatewayCandidates<Id extends string>(input: {
   probes?: Readonly<Record<string,GatewayProbe | undefined>>;
   deniedModels?: readonly string[];
   now?: number;
+  /** A failed/empty gateway catalogue is unknown, not evidence that a configured model is absent. */
+  fallbackConfigured?: boolean;
 }): SelectedGatewayCandidate<Id>[] {
   const now=input.now ?? Date.now();
   const probes=input.probes ?? {};
@@ -70,8 +72,100 @@ export function resolveGatewayCandidates<Id extends string>(input: {
       const d=tested(bp)-tested(ap);
       return d || (ap?.ms ?? 999999)-(bp?.ms ?? 999999) || a.localeCompare(b);
     })[0];
-    return picked ? [{id:c.id,model:picked,unchanged:existing}] : [];
+    const fallback = input.fallbackConfigured && !ids.length && permitted(c.model) ? c.model : null;
+    return picked || fallback ? [{id:c.id,model:picked ?? fallback!,unchanged:existing}] : [];
   });
+}
+
+
+/** A model listing is a discovery hint, never a successful availability check.
+ * Every returned route has passed an actual request on the chosen gateway.
+ * A failed first choice can be replaced by an independently probed model from
+ * the same provider namespace; never substitute another vendor silently. */
+export interface LiveModelProbe {
+  model: string;
+  ok: boolean;
+  ms: number;
+  error: string | null;
+  vision: boolean | null;
+  visionNote?: string | null;
+}
+export async function verifyGatewayCandidates<Id extends string>(input: {
+  configured: readonly GatewayCandidate<Id>[];
+  catalogue: readonly string[];
+  deniedModels?: readonly string[];
+  /** For raw screenshot dispatch, a text-only success is insufficient. */
+  requireVision: boolean;
+  probe: (models: string[], checkVision: boolean) => Promise<LiveModelProbe[]>;
+}): Promise<{
+  routes: SelectedGatewayCandidate<Id>[];
+  probes: LiveModelProbe[];
+  rejected: {id: Id; model: string; reason: string}[];
+}> {
+  const denied = new Set(input.deniedModels ?? []);
+  const listed = [...new Set(input.catalogue.filter(m=>m.trim()))];
+  const grouped = input.configured.map(c => {
+    const family = familyFor(c.id, c.model);
+    const alternatives = listed.filter(m => compatibleFamily(family, m) && !denied.has(m));
+    // Preserve the user's configured preference, even when /models is broken
+    // or omits a model. Only a live probe can authorize its use.
+    const choices = [c.model, ...alternatives].filter(
+      (m, index, values) => m && !denied.has(m) && values.indexOf(m) === index
+    );
+    return { id:c.id, configured:c.model, choices };
+  });
+  const routes: SelectedGatewayCandidate<Id>[] = [];
+  const rejected: {id: Id; model: string; reason: string}[] = [];
+  const probes: LiveModelProbe[] = [];
+  const pending = new Set(grouped.filter(g => g.choices.length).map(g => g.id));
+  const failed = new Map<string, string>();
+  const result = new Map<string, LiveModelProbe>();
+  const last = new Map<Id, string>();
+  // Two bounded attempts per pane; preserve low latency and gateway quotas.
+  for (let round = 0; round < 2 && pending.size; round++) {
+    const choices = grouped.filter(g => pending.has(g.id)).map(g => ({
+      id:g.id, model:g.choices[round],
+    })).filter(c=>Boolean(c.model));
+    const names = [...new Set(choices.map(c=>c.model))];
+    if (!names.length) break;
+    let observed: LiveModelProbe[] = [];
+    try {
+      observed = await input.probe(names, input.requireVision);
+    } catch (err) {
+      for (const model of names) failed.set(model, String(err));
+      // A gateway/auth/transport outage is not grounds for guessing another model.
+      break;
+    }
+    for (const value of observed) {
+      if (!names.includes(value.model)) continue;
+      result.set(value.model, value);
+      probes.push(value);
+    }
+    for (const choice of choices) {
+      const status = result.get(choice.model);
+      const available = status?.ok === true &&
+        (!input.requireVision || status.vision === true);
+      if (available) {
+        routes.push({ id:choice.id, model:choice.model,
+          unchanged:choice.model === grouped.find(g=>g.id===choice.id)?.configured });
+        pending.delete(choice.id);
+      } else {
+        failed.set(choice.model, status?.error ||
+          (input.requireVision && status?.ok ? "Vision probe did not pass" : "No successful live probe"));
+        last.set(choice.id, choice.model);
+      }
+    }
+  }
+  for (const group of grouped) {
+    if (routes.some(r=>r.id===group.id)) continue;
+    const model = last.get(group.id) ?? group.configured;
+    rejected.push({
+      id:group.id, model, reason:!group.choices.length
+        ? "Model is blocked or not configured"
+        : failed.get(model) ?? "No verified live route",
+    });
+  }
+  return {routes,probes,rejected};
 }
 
 /** One available GPT router shared by both gateways. Prefer a fast GPT
