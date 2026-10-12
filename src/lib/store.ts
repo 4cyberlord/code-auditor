@@ -59,7 +59,7 @@ import {
 import { routeProblem, routingGuidance, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders, type ModelCapability } from "./adaptiveModelRouting.ts";
 import { planIntelligentPanels, loadTrustedPanelMetrics } from "./intelligentPanelSelection.ts";
-import { resolveGatewayCandidates, selectGatewayGpt, parseGatewayRouterChoice, gatewayRouterPrompt } from "./quickGatewayRouter.ts";
+import { verifyGatewayCandidates, selectGatewayGpt, parseGatewayRouterChoice, gatewayRouterPrompt } from "./quickGatewayRouter.ts";
 import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { loadAuthenticatedBenchmarkCapabilities } from "./benchmarkFeed.ts";
 import { attachSignedBenchmarkMetrics } from "./authenticatedBenchmarkRouting.ts";
@@ -2519,31 +2519,56 @@ export const useStore = create<State>((set, get) => ({
   start: async (options) => {
     const { settings, images, note, keys, gatewayKey } = get();
 
-    // Resolve against the current account's gateway catalogue before creating
-    // panes. Models missing from Wiro/TokenRouter must not appear as failures.
+    // A gateway listing can be broken or incomplete. Probe candidate routes
+    // with the ACTIVE gateway credential before submitting the real problem.
     const routes = new Map<AgentId, Route>();
     const configured = ALL_AGENTS.filter(id => settings.enabled[id]);
     let catalogue: string[] = [];
+    let verifiedGatewayModels: string[] = [];
+    let availabilityProbes = { ...settings.probes };
     if (options?.adaptivePanels && settings.useGateway && gatewayKey) {
       try {
         catalogue = await bridge.listGatewayModels(settings.gatewayBaseUrl, settings.gatewayId);
       } catch {
-        catalogue = settings.availableModels;
+        // Catalogue unavailability means UNKNOWN, not zero available models.
+        catalogue = [];
       }
-      const resolved = resolveGatewayCandidates({
-        configured: configured.map(id => ({
-          id, model: extraAgent(id)?.model ||
-            settings.routerModels[id as ProviderId] || "",
-        })),
-        catalogue, probes: settings.probes,
+      const candidates = configured.map(id => ({
+        id, model: extraAgent(id)?.model ||
+          settings.routerModels[id as ProviderId] || "",
+      }));
+      const availability = await verifyGatewayCandidates({
+        configured: candidates,
+        catalogue,
         deniedModels: settings.gatewayId === "wiro" ? ["moonshotai/kimi-k3"] : [],
+        // A solver receives the verified reading as text, not raw images.
+        requireVision: false,
+        probe: (models, vision) => bridge.probeModels(
+          models, settings.gatewayBaseUrl, settings.gatewayId, vision,
+          Object.fromEntries(models.map(model => [model, endpointForModel(settings, model)]))
+        ),
       });
-      for (const candidate of resolved) routes.set(candidate.id, {
-        provider: settings.gatewayId,
-        model: candidate.model,
+      for (const check of availability.probes) {
+        availabilityProbes[check.model] = {
+          ok: check.ok, ms: check.ms, error: check.error, at: Date.now(),
+          vision: check.vision ?? availabilityProbes[check.model]?.vision ?? null,
+          visionNote: check.visionNote ?? availabilityProbes[check.model]?.visionNote ?? null,
+        };
+      }
+      get().patchSettings({ probes: availabilityProbes });
+      for (const candidate of availability.routes) routes.set(candidate.id, {
+        provider: settings.gatewayId, model: candidate.model,
         baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
         viaGateway: true,
       });
+      verifiedGatewayModels = availability.routes.map(c=>c.model);
+      if (!availability.routes.length) {
+        get().pushToast("err", "Gateway has no verified models",
+          "The configured candidates and their compatible alternatives failed live availability checks on " +
+          settings.gatewayId + ". " +
+          availability.rejected.slice(0, 3).map(r=>r.model + ": " + r.reason).join("; "),
+          { sticky: true });
+      }
     } else {
       for (const id of configured) {
         const route = routeFor(id, settings, keys, gatewayKey);
@@ -2690,13 +2715,13 @@ export const useStore = create<State>((set, get) => ({
         hasImages: images.length > 0,
         safeTextOnly,
         trustedMetrics,
-        probes: settings.probes,
+        probes: availabilityProbes,
       });
       // A fast GPT router may refine the deterministic, safety-filtered field.
       // The gateway's catalogue, probe evidence and ID allowlist stay authoritative.
       let selectedByGpt: AgentId[] | null = null;
       const routerModel = settings.useGateway && gatewayKey
-        ? selectGatewayGpt(catalogue, settings.probes) : null;
+        ? selectGatewayGpt(verifiedGatewayModels, availabilityProbes) : null;
       if (routerModel && decision.selected.length) {
         try {
           const eligible = decision.selected.map(id => ({ id, model: routes.get(id)!.model }));
@@ -2758,8 +2783,8 @@ export const useStore = create<State>((set, get) => ({
             ? (context && get().extraction.agreement ? "extract" : "auto")
             : settings.contextMode,
           canSee: options?.adaptivePanels
-            ? (settings.probes[route.model]?.ok === true &&
-               settings.probes[route.model]?.vision === true &&
+            ? (availabilityProbes[route.model]?.ok === true &&
+               availabilityProbes[route.model]?.vision === true &&
                canSeeVia(provider, route, settings))
             : canSeeVia(provider, route, settings),
           hasImages: images.length > 0,
