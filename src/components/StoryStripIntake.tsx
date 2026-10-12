@@ -103,7 +103,7 @@ export default function StoryStripIntake({ onContinue }: Props) {
         onChange={(event) => {
           const files = Array.from(event.currentTarget.files ?? []);
           event.currentTarget.value = "";
-          void ingest(Promise.all(files.map((file) => assetsFromBlob(file))));
+          void ingest(Promise.all(files.map((file) => assetsFromBlob(file))).then((groups) => groups.flat()));
         }}
       />
       {activePreview && (
