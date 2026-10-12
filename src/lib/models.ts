@@ -415,25 +415,15 @@ export type TransportId = ProviderId | GatewayId;
  * away from `routeFor`, where it would compete with the model keys.
  */
 /**
- * Supabase Storage. Not a model — it is where screenshots live.
- *
- * A second credential rather than a second connection string, because they are
- * different secrets with different blast radii: the Postgres password reads and
- * writes rows, the `service_role` key reads and writes objects, and pasting one
- * into the other's box should fail loudly rather than half-work.
- *
- * The project URL is *not* asked for. It is derivable from the connection
- * string already in Settings, and asking someone to look up a value the app is
- * already holding is asking them to do our work.
+ * Screenshot storage metadata. Upload credentials are issued by the server API.
+ * Keep the historical key id for detecting/removing Keychain credentials that
+ * predate server-signed uploads; never request a new service-role key here.
  */
 export const STORAGE = {
   /** Also the Keychain entry id. */
   id: "supabase_storage",
   label: "Supabase Storage",
   vendor: "Supabase",
-  keyUrl: "https://supabase.com/dashboard/project/_/settings/api",
-  keyHint: "eyJhbGciOi… (service_role)",
-  requires: "the service_role key, not the anon key",
   bucket: "screenshots",
   accent: "#3ecf8e",
 } as const;
