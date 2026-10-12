@@ -1871,7 +1871,22 @@ export const useStore = create<State>((set, get) => ({
     // A locally stored Supabase service-role key is neither required nor safe.
     if (!imgs.length) return;
     const sessionId = await get().ensureSession();
-    if (!sessionId) return;
+    if (!sessionId) {
+      // A missing server session is an upload failure, not a silent success.
+      // Keep all local captures for retry and surface the problem in the tray.
+      const why = "Screenshot upload requires a signed-in server session.";
+      set((st) => ({
+        sessionsError: why,
+        uploads: {
+          ...st.uploads,
+          ...Object.fromEntries(imgs.map((img) => [
+            img.group ?? img.name,
+            { state: "failed" as const, why },
+          ])),
+        },
+      }));
+      return;
+    }
 
     const keyOf = (i: ImageAsset) => i.group ?? i.name;
     /** Local file -> whether every upload sourced from it has succeeded. */
