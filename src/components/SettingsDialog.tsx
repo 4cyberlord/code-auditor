@@ -171,34 +171,22 @@ function SensitiveSettingsGate({
  * holding is asking them to do our work. One field, one key.
  */
 function StorageCard() {
+  // Retain the legacy key's removal path, but never request a privileged
+  // service-role credential from desktop users again.
   const saved = useStore((s) => s.storageKey);
   const refreshKeys = useStore((s) => s.refreshKeys);
-  const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
-  const save = async () => {
-    if (!draft.trim()) return;
+  const removeLegacyKey = async () => {
     setBusy(true);
     setNote(null);
     try {
-      await bridge.setApiKey(STORAGE.id, draft.trim());
-      setDraft("");
-      await refreshKeys();
-      setNote("Saved. Screenshots go to the project now, and the local file is deleted.");
-    } catch (err) {
-      setNote(String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const remove = async () => {
-    setBusy(true);
-    try {
       await bridge.deleteApiKey(STORAGE.id);
       await refreshKeys();
-      setNote("Removed. Screenshots stay on this machine again.");
+      setNote("Legacy service-role credential removed from this device.");
+    } catch (err) {
+      setNote(String(err));
     } finally {
       setBusy(false);
     }
@@ -208,65 +196,28 @@ function StorageCard() {
     <div className="provider-card">
       <div className="top">
         <span className="dot" style={{ background: STORAGE.accent }} />
-        <span className="name">{STORAGE.label}</span>
-        <span className="vendor">Where screenshots live</span>
-        {saved ? (
-          <span className="badge" data-tone="good">
-            Uploading
-          </span>
-        ) : (
-          <span className="badge" data-tone="warn">
-            No key
-          </span>
-        )}
-        <span className="spacer" />
-        <a className="btn tiny ghost" href={STORAGE.keyUrl} target="_blank" rel="noreferrer">
-          Get the key
-        </a>
+        <span className="name">Screenshot Storage</span>
+        <span className="vendor">Server-authorized private uploads</span>
+        <span className="badge" data-tone="good">Server-signed URLs</span>
       </div>
-
-      {/* Label first, then the field and its buttons inside `.with-btn`. `.row` is
-          a two-column grid sized for a label, so an input placed directly in it
-          takes the 92px label column and the button takes the rest — which is
-          exactly backwards, and is what this looked like before. */}
-      <div className="row">
-        <label htmlFor="storage-key">Service Key</label>
-        <div className="with-btn">
-          <input
-            id="storage-key"
-            className="field mono"
-            type="password"
-            autoComplete="off"
-            spellCheck={false}
-            placeholder={saved ? "••••••••  saved" : STORAGE.keyHint}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void save();
-            }}
-          />
-          <button className="btn tiny" onClick={() => void save()} disabled={busy || !draft.trim()}>
-            Save
-          </button>
-          {saved && (
-            <button className="btn tiny ghost" onClick={() => void remove()} disabled={busy}>
-              Remove
-            </button>
-          )}
-        </div>
-      </div>
-
       <p className="hint">
-        Screenshots go to the private <span className="mono">{STORAGE.bucket}</span> bucket in
-        your Supabase project, then are deleted from this Mac. This lets sessions open on another
-        device. You need {STORAGE.requires}; the project URL comes from your database connection.
+        Screenshots are uploaded to the private <span className="mono">{STORAGE.bucket}</span> bucket
+        using short-lived upload URLs issued by the authenticated Council Editor server API.
+        No Supabase service-role key is required on this Mac. Uploads require a valid signed-in
+        session and a configured server connection.
       </p>
-
-      {note && (
-        <p className="hint" style={{ color: "var(--text)" }}>
-          {note}
-        </p>
+      {saved && (
+        <div className="row">
+          <span>Legacy credential</span>
+          <div className="with-btn">
+            <span className="hint">An older storage credential is still saved locally.</span>
+            <button className="btn tiny ghost" disabled={busy} onClick={() => void removeLegacyKey()}>
+              {busy ? "Removing…" : "Remove old key"}
+            </button>
+          </div>
+        </div>
       )}
+      {note && <p className="hint" style={{ color: "var(--text)" }}>{note}</p>}
     </div>
   );
 }
