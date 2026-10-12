@@ -58,6 +58,7 @@ import {
 } from "./extraction.ts";
 import { routeProblem, routingGuidance, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders, type ModelCapability } from "./adaptiveModelRouting.ts";
+import { planIntelligentPanels, loadTrustedPanelMetrics } from "./intelligentPanelSelection.ts";
 import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { loadAuthenticatedBenchmarkCapabilities } from "./benchmarkFeed.ts";
 import { attachSignedBenchmarkMetrics } from "./authenticatedBenchmarkRouting.ts";
@@ -2528,21 +2529,7 @@ export const useStore = create<State>((set, get) => ({
     }
 
     let active = [...routes.keys()];
-    // The story-strip runs are adaptive. A screenshot alone does not establish
-    // a problem family, so postpone specialist ranking until it has been read.
-    const selectRunAgents = (context: string) => {
-      if (!options?.adaptivePanels) return [...routes.keys()];
-      const verified = get().extraction.agreement?.merged;
-      const taskRoute = verified
-        ? routeProblem(verified)
-        : routeUnparsedProblem([note, context].filter(Boolean).join("\n"), images.length > 0);
-      const candidates = [...routes.keys()];
-      const evidence: ModelCapability[] = []; // No fabricated per-provider specialisms.
-      const seats = taskRoute.path !== "standard" || taskRoute.families.includes("other")
-        ? candidates.length : Math.min(3, candidates.length);
-      return selectAdaptiveModels(candidates, (id) => id, taskRoute, evidence, seats).selected;
-    };
-    active = selectRunAgents("");
+    if (get().running) return;
     if (!active.length) {
       set({ settingsOpen: true });
       return;
@@ -2576,7 +2563,7 @@ export const useStore = create<State>((set, get) => ({
       running: true,
       runPersisted: false,
       viewingRunId: null,
-      extraction: IDLE_EXTRACTION,
+      extraction: options?.adaptivePanels ? s.extraction : IDLE_EXTRACTION,
       council: IDLE_COUNCIL,
       judge: { status: "idle", provider: s.settings.judgeProvider, text: "", error: null },
       review: { status: "idle", data: null, error: null, language: s.review.language },
@@ -2616,7 +2603,7 @@ export const useStore = create<State>((set, get) => ({
     // in the panel actually cannot see the picture.
     const anyBlind = active.some((p) => !canSeeVia(p, routes.get(p) ?? null, settings));
     let context = "";
-    if (needsExtraction(settings.contextMode, images.length > 0, anyBlind)) {
+    if (options?.adaptivePanels && images.length > 0 || needsExtraction(settings.contextMode, images.length > 0, anyBlind)) {
       await get().runExtraction();
 
       // Extraction is slow enough that Stop is a real possibility during it, and
@@ -2629,18 +2616,42 @@ export const useStore = create<State>((set, get) => ({
       knowledge = knowledgePackFor(`${note}\n\n${context}`, 5);
     }
 
-    // Narrow the rendered solver field after verified screenshot extraction.
-    // The enabled property controls actual mounted panels, not just labels.
     if (options?.adaptivePanels) {
-      active = selectRunAgents(context);
+      const agreement = get().extraction.agreement;
+      const verified = agreement?.merged;
+      const taskRoute = verified
+        ? routeProblem(verified)
+        : routeUnparsedProblem(note, images.length > 0);
+      const safeTextOnly = images.length > 0 && !!agreement &&
+        verifiedTextOnlyScreenshot(images.length > 0,
+          get().extraction.readings.map(r => r.extraction), verified, taskRoute,
+          agreement.conflicts?.filter(c => c.severity === "high").map(c => c.field) ?? []);
+      const trustedMetrics = await loadTrustedPanelMetrics();
+      if (!get().running || get().runId !== runId) return;
+      const decision = planIntelligentPanels({
+        candidates: [...routes].map(([id, route]) => ({
+          id, model: route.model, canSeeImages: canSeeVia(id, route, settings),
+        })),
+        route: taskRoute,
+        hasImages: images.length > 0,
+        safeTextOnly,
+        trustedMetrics,
+        probes: settings.probes,
+      });
+      active = decision.selected;
       const selected = new Set(active);
-      set((state) => ({
-        agents: state.agents.map((agent) => ({
-          ...agent,
-          enabled: selected.has(agent.provider),
+      set(state => ({
+        agents: state.agents.map(agent => ({
+          ...agent, enabled: selected.has(agent.provider),
           status: !selected.has(agent.provider) && agent.status === "queued" ? "idle" as const : agent.status,
         })),
       }));
+      if (!active.length) {
+        set({ running: false });
+        get().pushToast("error", "No verified image-capable agents",
+          "Run a vision capability probe for an enabled model, or use verified screenshot extraction before analysis.");
+        return;
+      }
       publishOverlayState(get());
     }
     const allImages = images.map((i) => ({ mime: i.mime, data: i.base64 }));
