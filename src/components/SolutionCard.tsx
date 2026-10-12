@@ -19,7 +19,7 @@ import Markdown from "./Markdown";
  * fact only when something ran; everything else here is a model's read, however
  * confident it sounds, and the card never lets the two wear the same styling.
  */
-export default function SolutionCard() {
+export default function SolutionCard({ alwaysOpen = false }: { alwaysOpen?: boolean }) {
   const review = useStore((s) => s.review);
   const agents = useStore((s) => s.agents);
   const extraction = useStore((s) => s.extraction);
@@ -28,9 +28,9 @@ export default function SolutionCard() {
   const setLanguage = useStore((s) => s.setReviewLanguage);
   const running = useStore((s) => s.running);
   const open = useStore((s) => s.settings.railPanel === "solution");
-  const revealed = open || agents.some(a => a.enabled && a.final?.code?.trim());
+  const revealed = alwaysOpen || open || agents.some(a => a.enabled && a.final?.code?.trim());
   const toggleRail = useStore((s) => s.toggleRailPanel);
-  const toggle = () => toggleRail("solution");
+  const toggle = () => { if (!alwaysOpen) toggleRail("solution"); };
 
   /**
    * What was actually measured, if anything.
