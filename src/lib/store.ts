@@ -59,6 +59,7 @@ import {
 import { routeProblem, routingGuidance, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders, type ModelCapability } from "./adaptiveModelRouting.ts";
 import { planIntelligentPanels, loadTrustedPanelMetrics } from "./intelligentPanelSelection.ts";
+import { resolveGatewayCandidates, selectGatewayGpt, parseGatewayRouterChoice, gatewayRouterPrompt } from "./quickGatewayRouter.ts";
 import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { loadAuthenticatedBenchmarkCapabilities } from "./benchmarkFeed.ts";
 import { attachSignedBenchmarkMetrics } from "./authenticatedBenchmarkRouting.ts";
@@ -2518,16 +2519,37 @@ export const useStore = create<State>((set, get) => ({
   start: async (options) => {
     const { settings, images, note, keys, gatewayKey } = get();
 
-    // One route per pane, decided once. A pane with no route is not an error
-    // the user caused by pressing the wrong button -- it simply has no way to
-    // reach a model, and says so in the pane rather than failing mid-stream.
+    // Resolve against the current account's gateway catalogue before creating
+    // panes. Models missing from Wiro/TokenRouter must not appear as failures.
     const routes = new Map<AgentId, Route>();
-    for (const p of ALL_AGENTS) {
-      if (!settings.enabled[p]) continue;
-      const r = routeFor(p, settings, keys, gatewayKey);
-      if (r) routes.set(p, r);
+    const configured = ALL_AGENTS.filter(id => settings.enabled[id]);
+    let catalogue: string[] = [];
+    if (options?.adaptivePanels && settings.useGateway && gatewayKey) {
+      try {
+        catalogue = await bridge.listGatewayModels(settings.gatewayBaseUrl, settings.gatewayId);
+      } catch {
+        catalogue = settings.availableModels;
+      }
+      const resolved = resolveGatewayCandidates({
+        configured: configured.map(id => ({
+          id, model: extraAgent(id)?.model ||
+            settings.routerModels[id as ProviderId] || "",
+        })),
+        catalogue, probes: settings.probes,
+        deniedModels: settings.gatewayId === "wiro" ? ["moonshotai/kimi-k3"] : [],
+      });
+      for (const candidate of resolved) routes.set(candidate.id, {
+        provider: settings.gatewayId,
+        model: candidate.model,
+        baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+        viaGateway: true,
+      });
+    } else {
+      for (const id of configured) {
+        const route = routeFor(id, settings, keys, gatewayKey);
+        if (route) routes.set(id, route);
+      }
     }
-
     let active = [...routes.keys()];
     if (get().running) return;
     if (!active.length) {
@@ -2570,7 +2592,7 @@ export const useStore = create<State>((set, get) => ({
       agents: s.agents.map((a) => {
         const route = routes.get(a.provider);
         const spec = agentSpec(a.provider);
-        if (!settings.enabled[a.provider]) {
+        if (!settings.enabled[a.provider] || (options?.adaptivePanels && !route)) {
           return { ...freshAgent(a.provider, modelLabelFor(a.provider, settings), false) };
         }
         if (!route) {
@@ -2663,7 +2685,38 @@ export const useStore = create<State>((set, get) => ({
         trustedMetrics,
         probes: settings.probes,
       });
-      active = decision.selected;
+      // A fast GPT router may refine the deterministic, safety-filtered field.
+      // The gateway's catalogue, probe evidence and ID allowlist stay authoritative.
+      let selectedByGpt: AgentId[] | null = null;
+      const routerModel = settings.useGateway && gatewayKey
+        ? selectGatewayGpt(catalogue, settings.probes) : null;
+      if (routerModel && decision.selected.length) {
+        try {
+          const eligible = decision.selected.map(id => ({ id, model: routes.get(id)!.model }));
+          const prompt = gatewayRouterPrompt(
+            [note, verified?.problemSummary ?? "", context].filter(Boolean).join("\n").slice(0, 6500),
+            eligible, decision.selected);
+          const response = await Promise.race([
+            bridge.runOnce({
+              runId: `router-${runId}`, agentId: "quick-gpt-router",
+              attemptId: newAttemptId(), provider: settings.gatewayId,
+              model: routerModel, systemPrompt: prompt.systemPrompt,
+              userText: prompt.userText, images: [], maxTokens: 350,
+              temperature: 0, baseUrl: settings.gatewayBaseUrl ||
+                gatewayPreset(settings.gatewayId).defaultBaseUrl,
+              endpoint: endpointForModel(settings, routerModel),
+            }),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("Router timeout")), 8_000)),
+          ]);
+          selectedByGpt = parseGatewayRouterChoice(response, decision.selected)?.selected ?? null;
+        } catch {
+          // The verified deterministic choice remains available if GPT is slow,
+          // fails, or supplies malformed or disallowed IDs.
+        }
+      }
+      if (!get().running || get().runId !== runId) return;
+      active = selectedByGpt ?? decision.selected;
       if (active.length) {
         get().pushToast(decision.confidence === "verified" ? "ok" : "warn",
           `Selected ${active.length} AI ${active.length === 1 ? "agent" : "agents"}`,
