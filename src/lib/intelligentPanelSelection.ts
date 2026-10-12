@@ -48,7 +48,6 @@ export function planIntelligentPanels<Id extends string>(input: {
     return {
       id: c.id,
       families: signed?.families,
-      familyPerformance: signed?.familyPerformance,
       verifiedAccuracy: signed?.verifiedAccuracy,
       evaluatedSamples: signed?.evaluatedSamples,
       latencyMs: observed?.ms,
