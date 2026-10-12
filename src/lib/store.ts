@@ -2553,6 +2553,13 @@ export const useStore = create<State>((set, get) => ({
     let active = [...routes.keys()];
     if (get().running) return;
     if (!active.length) {
+      if (options?.adaptivePanels) {
+        get().pushToast("err", "No usable AI models found",
+          settings.useGateway
+            ? "The selected gateway catalog has no eligible models. Refresh the Wiro/TokenRouter catalog or switch gateways in Settings."
+            : "Enable a reachable model or connect a gateway before starting analysis.",
+          { sticky: true });
+      }
       set({ settingsOpen: true });
       return;
     }
