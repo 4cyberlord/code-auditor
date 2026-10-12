@@ -12,6 +12,7 @@ import CodingWorkspace from "@/components/CodingWorkspace";
 import BootScreen from "@/components/BootScreen";
 import HistoryPanel from "@/components/HistoryPanel";
 import InputBar from "@/components/InputBar";
+import StoryStripIntake from "@/components/StoryStripIntake";
 import ReadingPanel from "@/components/ReadingPanel";
 import SettingsDialog from "@/components/SettingsDialog";
 import SessionSidebar from "@/components/SessionSidebar";
@@ -88,6 +89,7 @@ export default function Page() {
 function Workbench() {
   type Workspace = "council" | "coding" | "knowledge";
   const [workspace, setWorkspace] = useState<Workspace>("council");
+  const [intakeOpen, setIntakeOpen] = useState(true);
   const agents = useStore((s) => s.agents);
   const hydrated = useStore((s) => s.hydrated);
   const hydrate = useStore((s) => s.hydrate);
@@ -108,6 +110,8 @@ function Workbench() {
   });
 
   const panes = agents.filter((a) => a.enabled);
+  // Any run launched via a global shortcut should reveal the live workspace.
+  useEffect(() => { if (running) setIntakeOpen(false); }, [running]);
 
   useAgentEvents();
   useGlobalShortcuts();
@@ -238,9 +242,19 @@ function Workbench() {
       {/* The reading strip is about the screenshot the council is reasoning
           from, so it belongs to that workspace rather than to the window. On
           the Knowledge tab it was describing a run nobody had started. */}
-      {workspace === "council" && <ReadingPanel />}
+      {workspace === "council" && !intakeOpen && <ReadingPanel />}
 
-      <div className="workspace-stage" data-workspace={workspace}>
+      {workspace === "council" && intakeOpen && (
+        <StoryStripIntake onContinue={() => setIntakeOpen(false)} />
+      )}
+      {workspace === "council" && !intakeOpen && !running && !viewingRunId && (
+        <div className="story-return-bar">
+          <button className="btn tiny ghost" onClick={() => setIntakeOpen(true)}>
+            ← Back to captures
+          </button>
+        </div>
+      )}
+      <div className="workspace-stage" data-workspace={workspace} style={{ display: workspace === "council" && intakeOpen ? "none" : undefined }}>
         <div
           className="workspace-panel"
           data-active={workspace === "council"}
@@ -316,9 +330,9 @@ function Workbench() {
 
       <div
         className="workspace-input"
-        data-active={workspace === "council"}
-        aria-hidden={workspace !== "council"}
-        inert={workspace !== "council"}
+        data-active={workspace === "council" && !intakeOpen}
+        aria-hidden={workspace !== "council" || intakeOpen}
+        inert={workspace !== "council" || intakeOpen}
       >
         <InputBar />
       </div>
