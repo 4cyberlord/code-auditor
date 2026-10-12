@@ -2618,7 +2618,7 @@ export const useStore = create<State>((set, get) => ({
             clearTimeout(timeout);
             resolve();
           };
-          const timeout = setTimeout(finish, 30_000);
+          const timeout = setTimeout(finish, 90_000);
           unsubscribe = useStore.subscribe(state => {
             if (!state.running || state.runId !== runId ||
                 state.extraction.status !== "running" ||
