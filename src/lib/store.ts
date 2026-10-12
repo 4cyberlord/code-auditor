@@ -883,7 +883,7 @@ interface State {
   /** Apple Vision's text, for the models to check characters against. Never the reading itself. */
   ocrHintFor: (key: string) => Promise<string>;
 
-  start: () => Promise<void>;
+  start: (options?: { adaptivePanels?: boolean }) => Promise<void>;
   cancel: () => Promise<void>;
   retry: (agentId: string) => Promise<void>;
   reset: () => void;
@@ -2514,7 +2514,7 @@ export const useStore = create<State>((set, get) => ({
     return agreement;
   },
 
-  start: async () => {
+  start: async (options) => {
     const { settings, images, note, keys, gatewayKey } = get();
 
     // One route per pane, decided once. A pane with no route is not an error
@@ -2527,7 +2527,22 @@ export const useStore = create<State>((set, get) => ({
       if (r) routes.set(p, r);
     }
 
-    const active = [...routes.keys()];
+    let active = [...routes.keys()];
+    // The story-strip runs are adaptive. A screenshot alone does not establish
+    // a problem family, so postpone specialist ranking until it has been read.
+    const selectRunAgents = (context: string) => {
+      if (!options?.adaptivePanels) return [...routes.keys()];
+      const verified = get().extraction.agreement?.merged;
+      const taskRoute = verified
+        ? routeProblem(verified)
+        : routeUnparsedProblem([note, context].filter(Boolean).join("\n"), images.length > 0);
+      const candidates = [...routes.keys()];
+      const evidence: ModelCapability[] = []; // No fabricated per-provider specialisms.
+      const seats = taskRoute.uncertain || taskRoute.families.includes("other")
+        ? candidates.length : Math.min(3, candidates.length);
+      return selectAdaptiveModels(candidates, (id) => id, taskRoute, evidence, seats).selected;
+    };
+    active = selectRunAgents("");
     if (!active.length) {
       set({ settingsOpen: true });
       return;
@@ -2614,6 +2629,20 @@ export const useStore = create<State>((set, get) => ({
       knowledge = knowledgePackFor(`${note}\n\n${context}`, 5);
     }
 
+    // Narrow the rendered solver field after verified screenshot extraction.
+    // The enabled property controls actual mounted panels, not just labels.
+    if (options?.adaptivePanels) {
+      active = selectRunAgents(context);
+      const selected = new Set(active);
+      set((state) => ({
+        agents: state.agents.map((agent) => ({
+          ...agent,
+          enabled: selected.has(agent.provider),
+          status: !selected.has(agent.provider) && agent.status === "queued" ? "idle" as const : agent.status,
+        })),
+      }));
+      publishOverlayState(get());
+    }
     const allImages = images.map((i) => ({ mime: i.mime, data: i.base64 }));
 
     // Fire all of them at once; each streams back independently.
