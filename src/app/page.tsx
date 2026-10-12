@@ -265,7 +265,7 @@ function Workbench() {
             {/* The count drives the pane layout in CSS; hard-wiring 2x2 broke the
                 moment a fifth provider joined. */}
             <div className="grid" data-count={panes.length}>
-              {panes.map((a) => (
+              {!intakeOpen && panes.map((a) => (
                 <AgentPane key={a.id} agent={a} />
               ))}
             </div>
@@ -334,7 +334,7 @@ function Workbench() {
         aria-hidden={workspace !== "council" || intakeOpen}
         inert={workspace !== "council" || intakeOpen}
       >
-        <InputBar />
+        {!intakeOpen && <InputBar />}
       </div>
 
       <SettingsDialog />
