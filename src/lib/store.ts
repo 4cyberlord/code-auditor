@@ -2538,7 +2538,7 @@ export const useStore = create<State>((set, get) => ({
         : routeUnparsedProblem([note, context].filter(Boolean).join("\n"), images.length > 0);
       const candidates = [...routes.keys()];
       const evidence: ModelCapability[] = []; // No fabricated per-provider specialisms.
-      const seats = taskRoute.uncertain || taskRoute.families.includes("other")
+      const seats = taskRoute.path !== "standard" || taskRoute.families.includes("other")
         ? candidates.length : Math.min(3, candidates.length);
       return selectAdaptiveModels(candidates, (id) => id, taskRoute, evidence, seats).selected;
     };
