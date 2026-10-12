@@ -2664,6 +2664,11 @@ export const useStore = create<State>((set, get) => ({
         probes: settings.probes,
       });
       active = decision.selected;
+      if (active.length) {
+        get().pushToast(decision.confidence === "verified" ? "ok" : "warn",
+          `Selected ${active.length} AI ${active.length === 1 ? "agent" : "agents"}`,
+          `${taskRoute.families.join(", ")} · ${active.map(id => routes.get(id)?.model ?? id).join(", ")}${decision.confidence === "limited" ? " · limited benchmark evidence" : ""}`);
+      }
       const selected = new Set(active);
       set(state => ({
         agents: state.agents.map(agent => ({
@@ -2673,7 +2678,7 @@ export const useStore = create<State>((set, get) => ({
       }));
       if (!active.length) {
         set({ running: false });
-        get().pushToast("error", "No verified image-capable agents",
+        get().pushToast("err", "No verified image-capable agents",
           "Run a vision capability probe for an enabled model, or use verified screenshot extraction before analysis.");
         return;
       }
