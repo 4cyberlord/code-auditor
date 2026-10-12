@@ -222,7 +222,7 @@ function Workbench() {
           </span>
         )}
         {storyMode && <div style={{ display: "flex", gap: 7, position: "relative" }}>
-          <button className="btn tiny ghost" onClick={() => { setTopMenu(null); setIntakeOpen(true); }} title="Return to screenshot intake">New capture</button>
+          <button className="btn tiny ghost" disabled={running} onClick={() => { setTopMenu(null); useStore.getState().reset(); useStore.getState().clearImages(); setStoryMode(false); setIntakeOpen(true); }} title="Begin a new screenshot intake">New capture</button>
           <button className="btn tiny ghost" onClick={() => { setTopMenu(topMenu === "history" ? null : "history"); void loadHistory(); }}>History</button>
           <button className="btn tiny ghost" onClick={() => setTopMenu(topMenu === "about" ? null : "about")}>About</button>
           {topMenu && <div style={{ position: "absolute", zIndex: 50, right: 0, top: 34, width: 310, maxHeight: 370, overflowY: "auto", background: "var(--panel)", border: "1px solid var(--line-strong)", borderRadius: 12, padding: 14, boxShadow: "var(--shadow)" }}>
@@ -269,7 +269,7 @@ function Workbench() {
           void startAnalysis({ adaptivePanels: true });
         }} />
       )}
-      {workspace === "council" && !intakeOpen && !running && !viewingRunId && (
+      {workspace === "council" && !storyMode && !intakeOpen && !running && !viewingRunId && (
         <div className="story-return-bar">
           <button className="btn tiny ghost" onClick={() => setIntakeOpen(true)}>
             ← Back to captures
@@ -353,11 +353,11 @@ function Workbench() {
 
       <div
         className="workspace-input"
-        data-active={workspace === "council" && !intakeOpen}
-        aria-hidden={workspace !== "council" || intakeOpen}
-        inert={workspace !== "council" || intakeOpen}
+        data-active={workspace === "council" && !intakeOpen && !storyMode}
+        aria-hidden={workspace !== "council" || intakeOpen || storyMode}
+        inert={workspace !== "council" || intakeOpen || storyMode}
       >
-        {!intakeOpen && <InputBar />}
+        {!intakeOpen && !storyMode && <InputBar />}
       </div>
 
       <SettingsDialog />
