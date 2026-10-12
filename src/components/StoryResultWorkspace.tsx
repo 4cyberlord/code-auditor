@@ -21,7 +21,7 @@ export default function StoryResultWorkspace() {
   const [language, setLanguage] = useState("original");
   const report = selectStorySolution(agents, council, consensus().representative);
   const ports = PORT_LANGUAGES.filter(lang => !!review.data?.ports[lang]);
-  const sourceCode = language === "original" ? report?.code : review.data?.ports[language as keyof typeof review.data.ports];
+  const sourceCode = language === "original" ? report?.code : review.data?.ports[language as "cpp" | "rust" | "python"];
   const code = sourceCode || report?.code || "";
   const shownLang = language === "original" ? report?.language || "text" : language;
   const functions = extractFunctionSignatures(code);
