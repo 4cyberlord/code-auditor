@@ -313,7 +313,7 @@ function Workbench() {
               {!storyMode && <div className="solution-divider" aria-hidden="true" />}
               {!storyMode && <ConsensusPanel />}
               {!storyMode && <BackgroundJobsPanel />}
-              {!storyMode && <HistoryPanel />
+              {!storyMode && <HistoryPanel />}
               {sessionsOpen && (
                 <Splitter
                   axis="row"
