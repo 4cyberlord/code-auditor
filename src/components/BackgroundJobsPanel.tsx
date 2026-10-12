@@ -52,6 +52,7 @@ export default function BackgroundJobsPanel() {
   const refreshInFlight = useRef(false);
   const failedPreviewUrls = useRef(new Set<string>());
   const lastPreviewRecovery = useRef(0);
+  const loadedDetailJobId = useRef<string | null>(null);
   const [queueing, setQueueing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -240,6 +241,7 @@ export default function BackgroundJobsPanel() {
   useEffect(() => {
     if (!open) return;
     if (!selectedJob) {
+      loadedDetailJobId.current = null;
       queueMicrotask(() => {
         setEvents([]);
         setImages([]);
@@ -248,14 +250,18 @@ export default function BackgroundJobsPanel() {
       return;
     }
     let live = true;
-    // A failed detail request must never display another selected job's data.
-    // Clear the prior job before independently loading its replacement.
+    // Only clear when the selected job changes. URL renewal and status updates
+    // should preserve valid previews/reports while fresh data is in flight.
+    const changedJob = loadedDetailJobId.current !== selectedJob.id;
+    loadedDetailJobId.current = selectedJob.id;
     queueMicrotask(() => {
       if (!live) return;
       setError(null);
-      setEvents([]);
-      setImages([]);
-      setReport(null);
+      if (changedJob) {
+        setEvents([]);
+        setImages([]);
+        setReport(null);
+      }
     });
     devLog("cloud-jobs", "detail load started", { jobId: selectedJob.id });
     // Each detail endpoint recovers independently: a temporary report failure
