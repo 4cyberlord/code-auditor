@@ -238,9 +238,13 @@ export default function BackgroundJobsPanel() {
     }
   };
 
+  const selectedDetailId = selectedJob?.id;
+  const selectedDetailStatus = selectedJob?.status;
+  const selectedDetailVersion = selectedJob?.updatedAt;
+
   useEffect(() => {
     if (!open) return;
-    if (!selectedJob) {
+    if (!selectedDetailId) {
       loadedDetailJobId.current = null;
       queueMicrotask(() => {
         setEvents([]);
@@ -252,8 +256,8 @@ export default function BackgroundJobsPanel() {
     let live = true;
     // Only clear when the selected job changes. URL renewal and status updates
     // should preserve valid previews/reports while fresh data is in flight.
-    const changedJob = loadedDetailJobId.current !== selectedJob.id;
-    loadedDetailJobId.current = selectedJob.id;
+    const changedJob = loadedDetailJobId.current !== selectedDetailId;
+    loadedDetailJobId.current = selectedDetailId;
     queueMicrotask(() => {
       if (!live) return;
       setError(null);
@@ -263,13 +267,13 @@ export default function BackgroundJobsPanel() {
         setReport(null);
       }
     });
-    devLog("cloud-jobs", "detail load started", { jobId: selectedJob.id });
+    devLog("cloud-jobs", "detail load started", { jobId: selectedDetailId });
     // Each detail endpoint recovers independently: a temporary report failure
     // must not hide available screenshots, and a signing error must not hide events.
     void Promise.allSettled([
-      listSolveJobEvents(selectedJob.id),
-      listSolveJobImages(selectedJob.id),
-      getCouncilReport(selectedJob.id),
+      listSolveJobEvents(selectedDetailId),
+      listSolveJobImages(selectedDetailId),
+      getCouncilReport(selectedDetailId),
     ]).then(async ([eventResult, imageResult, reportResult]) => {
       if (!live) return;
       if (eventResult.status === "fulfilled") setEvents(eventResult.value);
@@ -292,7 +296,7 @@ export default function BackgroundJobsPanel() {
         .map((result) => String((result as PromiseRejectedResult).reason));
       if (failures.length) setError(`Could not load all cloud job details: ${failures.join("; ")}`);
       devLog("cloud-jobs", "detail load settled", {
-        jobId: selectedJob.id,
+        jobId: selectedDetailId,
         failedRequests: failures.length,
       });
     });
@@ -302,7 +306,7 @@ export default function BackgroundJobsPanel() {
   // A refreshed listing creates new objects even if the job did not change.
   // Depend on its identity/version, not its object reference: this prevents
   // re-signing every image URL and reloading the report every 15 seconds.
-  }, [open, selectedJob?.id, selectedJob?.status, selectedJob?.updatedAt, urlRefresh]);
+  }, [open, selectedDetailId, selectedDetailStatus, selectedDetailVersion, urlRefresh]);
 
   return (
     <section className="background-jobs" data-open={open}>

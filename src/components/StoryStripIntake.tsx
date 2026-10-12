@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Image from "next/image";
 import { assetsFromBlob, assetsFromClipboard, assetsFromDataTransfer } from "@/lib/image";
 import { useStore, type ImageAsset } from "@/lib/store";
 import "./StoryStripIntake.css";
@@ -73,7 +74,7 @@ export default function StoryStripIntake({ onStartAnalysis, running }: Props) {
               {image ? (
                 <>
                   <button className="story-intake-image" type="button" onClick={() => setPreview(index)} aria-label={`Preview capture ${index + 1}`}>
-                    <img src={image.dataUrl} alt={image.name || `Capture ${index + 1}`} />
+                    <Image src={image.dataUrl} alt={image.name || `Capture ${index + 1}`} fill unoptimized sizes="(max-width: 800px) 50vw, 33vw" />
                     <span className="story-intake-number">{String(index + 1).padStart(2, "0")}</span>
                   </button>
                   <button className="story-intake-remove" type="button" aria-label={`Remove capture ${index + 1}`} onClick={() => removeImage(index)}>×</button>
@@ -109,7 +110,7 @@ export default function StoryStripIntake({ onStartAnalysis, running }: Props) {
       {activePreview && (
         <div className="story-intake-lightbox" role="dialog" aria-modal="true" aria-label="Screenshot preview" onClick={() => setPreview(null)}>
           <button type="button" onClick={() => setPreview(null)} aria-label="Close preview">Close ×</button>
-          <img src={activePreview.dataUrl} alt={activePreview.name} onClick={(event) => event.stopPropagation()} />
+          <Image src={activePreview.dataUrl} alt={activePreview.name} unoptimized width={activePreview.sourceWidth ?? 1280} height={activePreview.sourceHeight ?? 800} onClick={(event) => event.stopPropagation()} />
         </div>
       )}
     </main>
