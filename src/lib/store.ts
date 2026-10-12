@@ -2340,23 +2340,54 @@ export const useStore = create<State>((set, get) => ({
     }
     const ocrHint = await get().ocrHintFor(key);
 
-    const routes = settings.extractors
+    // Begin before verification so concurrent capture/start calls share this reading.
+    set({ extraction: { ...IDLE_EXTRACTION, status: "running", for: key } });
+    let routes = settings.extractors
       .map((p) => [p, routeFor(p, settings, keys, gatewayKey)] as const)
       .filter((pair): pair is readonly [ProviderId, Route] => pair[1] !== null);
 
+    if (settings.useGateway && gatewayKey) {
+      let readerCatalog: string[] = [];
+      try {
+        readerCatalog = await bridge.listGatewayModels(settings.gatewayBaseUrl, settings.gatewayId);
+      } catch {
+        // An absent catalogue is unknown availability, not zero access.
+      }
+      const viaGateway = routes.filter(([, route]) => route.viaGateway);
+      const verified = await verifyGatewayCandidates({
+        configured: viaGateway.map(([id, route]) => ({ id, model: route.model })),
+        catalogue: readerCatalog,
+        deniedModels: settings.gatewayId === "wiro" ? ["moonshotai/kimi-k3"] : [],
+        requireVision: true,
+        probe: (models, vision) => bridge.probeModels(
+          models, settings.gatewayBaseUrl, settings.gatewayId, vision,
+          Object.fromEntries(models.map(model => [model, endpointForModel(settings, model)]))
+        ),
+      });
+      const available = new Map(verified.routes.map(x => [x.id, x.model]));
+      routes = routes.flatMap(([id, route]) => {
+        if (!route.viaGateway) return [[id, route] as const];
+        const model = available.get(id);
+        return model ? [[id, { ...route, model }] as const] : [];
+      });
+      const probes = { ...get().settings.probes };
+      for (const p of verified.probes) probes[p.model] = {
+        ok: p.ok, ms: p.ms, at: Date.now(), error: p.error,
+        vision: p.vision, visionNote: p.visionNote ?? null,
+      };
+      get().patchSettings({ probes });
+    }
+
+    if (get().extraction.for !== key) return null;
     if (!routes.length) {
-      const names = settings.extractors.map((p) => PROVIDERS[p].vendor).join(" or ");
       set({
         extraction: {
-          ...IDLE_EXTRACTION,
-          status: "error",
-          error: `Reading the screenshot needs a route to ${names} — either a ${GATEWAY.label} key, or a key for the vendor itself. Add one in Settings, or set Context to "Images" to have each agent read the picture itself.`,
+          ...IDLE_EXTRACTION, status: "error", for: key,
+          error: "No configured image reader passed live gateway and vision checks. Check your API connection, available model IDs and screenshot support in Settings.",
         },
       });
       return null;
     }
-
-    set({ extraction: { ...IDLE_EXTRACTION, status: "running", for: key } });
 
     const payload = images.map((i) => ({ mime: i.mime, data: i.base64 }));
     const runId = `extract-${Date.now().toString(36)}`;
