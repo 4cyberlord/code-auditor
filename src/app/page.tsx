@@ -13,6 +13,7 @@ import BootScreen from "@/components/BootScreen";
 import HistoryPanel from "@/components/HistoryPanel";
 import InputBar from "@/components/InputBar";
 import StoryStripIntake from "@/components/StoryStripIntake";
+import StoryResultWorkspace from "@/components/StoryResultWorkspace";
 import ReadingPanel from "@/components/ReadingPanel";
 import SettingsDialog from "@/components/SettingsDialog";
 import SessionSidebar from "@/components/SessionSidebar";
@@ -91,6 +92,7 @@ function Workbench() {
   const [workspace, setWorkspace] = useState<Workspace>("council");
   const [intakeOpen, setIntakeOpen] = useState(true);
   const [storyMode, setStoryMode] = useState(false);
+  const [topMenu, setTopMenu] = useState<"history" | "about" | null>(null);
   const agents = useStore((s) => s.agents);
   const hydrated = useStore((s) => s.hydrated);
   const hydrate = useStore((s) => s.hydrate);
@@ -100,6 +102,9 @@ function Workbench() {
   const signOut = useAuth((s) => s.signOut);
   const sessionsOpen = useStore((s) => s.settings.railPanel === "sessions");
   const historyOpen = useStore((s) => s.settings.railPanel === "history");
+  const history = useStore(s => s.history);
+  const loadHistory = useStore(s => s.loadHistory);
+  const openRun = useStore(s => s.openRun);
 
   // Only enabled providers get a pane. With five to choose from, rendering the
   // switched-off ones as placeholders would spend half the screen on nothing --
@@ -216,6 +221,16 @@ function Workbench() {
             browser preview
           </span>
         )}
+        {storyMode && <div style={{ display: "flex", gap: 7, position: "relative" }}>
+          <button className="btn tiny ghost" onClick={() => { setTopMenu(null); setIntakeOpen(true); }} title="Return to screenshot intake">New capture</button>
+          <button className="btn tiny ghost" onClick={() => { setTopMenu(topMenu === "history" ? null : "history"); void loadHistory(); }}>History</button>
+          <button className="btn tiny ghost" onClick={() => setTopMenu(topMenu === "about" ? null : "about")}>About</button>
+          {topMenu && <div style={{ position: "absolute", zIndex: 50, right: 0, top: 34, width: 310, maxHeight: 370, overflowY: "auto", background: "var(--panel)", border: "1px solid var(--line-strong)", borderRadius: 12, padding: 14, boxShadow: "var(--shadow)" }}>
+            {topMenu === "history" ? <><strong style={{ fontSize: 13 }}>Recent analyses</strong>
+              {history.length ? history.slice(0, 15).map(item => <button key={item.id} className="btn tiny ghost" style={{ display: "block", width: "100%", textAlign: "left", height: "auto", padding: "12px 8px", marginTop: 5 }} disabled={running} onClick={() => { setIntakeOpen(false); void openRun(item.id); setTopMenu(null); }}>{item.asked?.trim().slice(0, 85) || "Untitled analysis"}</button>) : <p className="hint">No saved analyses in this session.</p>}</> :
+              <><strong>Council Editor</strong><p className="hint" style={{ lineHeight: 1.6 }}>Capture a problem, let the intelligence engine select eligible AI agents, then review one solution and its measured evidence. The solvers run behind the scenes.</p></>}
+          </div>}
+        </div>}
         <button
           className="btn tiny ghost"
           onClick={() => setSettingsOpen(true)}
@@ -244,7 +259,7 @@ function Workbench() {
       {/* The reading strip is about the screenshot the council is reasoning
           from, so it belongs to that workspace rather than to the window. On
           the Knowledge tab it was describing a run nobody had started. */}
-      {workspace === "council" && !intakeOpen && <ReadingPanel />}
+      {workspace === "council" && !intakeOpen && !storyMode && <ReadingPanel />}
 
       {workspace === "council" && intakeOpen && (
         <StoryStripIntake running={running} onStartAnalysis={() => {
@@ -261,7 +276,8 @@ function Workbench() {
           </button>
         </div>
       )}
-      <div className="workspace-stage" data-workspace={workspace} style={{ display: workspace === "council" && intakeOpen ? "none" : undefined }}>
+      {workspace === "council" && storyMode && !intakeOpen && <StoryResultWorkspace />}
+      <div className="workspace-stage" data-workspace={workspace} style={{ display: workspace === "council" && (intakeOpen || storyMode) ? "none" : undefined }}>
         <div
           className="workspace-panel"
           data-active={workspace === "council"}
