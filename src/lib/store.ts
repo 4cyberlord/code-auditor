@@ -2599,7 +2599,7 @@ export const useStore = create<State>((set, get) => ({
           };
         }
         return {
-          ...freshAgent(a.provider, route.model, true),
+          ...freshAgent(a.provider, route.model, !options?.adaptivePanels),
           status: "queued" as const,
           startedAt: Date.now(),
           attemptId: attempts[a.provider],
