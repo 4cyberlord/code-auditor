@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { highlight } from "@/lib/highlight";
 import { describeCodeLanguage } from "@/lib/solutionLanguage";
 import { useStore } from "@/lib/store";
@@ -24,8 +24,8 @@ export default function StoryResultWorkspace() {
   const sourceCode = language === "original" ? report?.code : review.data?.ports[language as "cpp" | "rust" | "python"];
   const code = sourceCode || report?.code || "";
   const syntax = describeCodeLanguage(code, language === "original" ? report?.language : language);
-  const tokens = useMemo(() => highlight(code, syntax.id), [code, syntax.id]);
-  const lineCount = useMemo(() => code ? code.split("\n").length : 0, [code]);
+  const tokens = highlight(code, syntax.id);
+  const lineCount = code ? code.split("\n").length : 0;
   const functions = extractFunctionSignatures(code);
   const run = report?.benchmark;
   const gate = run ? gateFor(run) : "untested";
