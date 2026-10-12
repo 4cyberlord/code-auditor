@@ -3,6 +3,7 @@ on:
   pull_request:
     branches:
       - main
+      - feat/cloud-thin-client-phase1
   workflow_dispatch:
 concurrency:
   group: security-macos-${{ github.event.pull_request.number || github.ref }}
