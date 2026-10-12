@@ -1867,7 +1867,9 @@ export const useStore = create<State>((set, get) => ({
   },
 
   stashImages: async (imgs) => {
-    if (!imgs.length || !get().storageKey) return;
+    // Screenshot uploads are authorized by the authenticated server API.
+    // A locally stored Supabase service-role key is neither required nor safe.
+    if (!imgs.length) return;
     const sessionId = await get().ensureSession();
     if (!sessionId) return;
 
