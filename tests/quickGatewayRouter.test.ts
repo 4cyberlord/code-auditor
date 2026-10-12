@@ -37,7 +37,11 @@ const recovered = await verifyGatewayCandidates({
     ms:20,error:null,vision:null,
   }));},
 });
-assert.deepEqual(recovered.routes.map(c=>c.id),["openai"],"broken catalogue must not erase a directly verified configured route");
+assert.deepEqual(recovered.routes.map(c=>c.id),["openai","anthropic"],
+  "broken catalogue must retain every configured route that passes an actual live probe");
+assert.deepEqual(recovered.routes.map(c=>c.model),["openai/gpt-5-6-sol","claude/opus-5"]);
+assert.equal(recovered.routes.some(c=>c.id==="moonshot"),false,"blocked Wiro model must not be selected");
+assert.equal(recovered.routes.some(c=>c.id==="gemini"),false,"failed model must not be selected");
 assert.ok(probeLog[0].includes("openai/gpt-5-6-sol"));
 const alternatives=await verifyGatewayCandidates({
   configured:candidates.slice(2),catalogue:choices,requireVision:false,
