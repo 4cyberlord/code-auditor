@@ -5,9 +5,9 @@ import { assetsFromBlob, assetsFromClipboard, assetsFromDataTransfer } from "@/l
 import { useStore, type ImageAsset } from "@/lib/store";
 import "./StoryStripIntake.css";
 
-interface Props { onContinue: () => void; }
+interface Props { onStartAnalysis: () => void; running: boolean; }
 
-export default function StoryStripIntake({ onContinue }: Props) {
+export default function StoryStripIntake({ onStartAnalysis, running }: Props) {
   const images = useStore((s) => s.images);
   const addImages = useStore((s) => s.addImages);
   const removeImage = useStore((s) => s.removeImage);
@@ -96,7 +96,7 @@ export default function StoryStripIntake({ onContinue }: Props) {
         <span>More images can be added afterward.</span>
         <div className="story-intake-actions">
           <button type="button" className="story-intake-secondary" disabled={images.length >= limit} onClick={() => picker.current?.click()}>Add images</button>
-          <button type="button" className="story-intake-primary" disabled={!images.length} onClick={onContinue}>Review these <span aria-hidden="true">→</span></button>
+          <button type="button" className="story-intake-primary" disabled={!images.length || running} onClick={onStartAnalysis}>{running ? "Starting…" : "Start analysis"} <span aria-hidden="true">→</span></button>
         </div>
       </footer>
       <input ref={picker} hidden type="file" accept="image/*" multiple
