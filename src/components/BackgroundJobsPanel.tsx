@@ -59,7 +59,6 @@ export default function BackgroundJobsPanel() {
 
   const workspaceImages = useStore((s) => s.images);
   const settings = useStore((s) => s.settings);
-  const storageKey = useStore((s) => s.storageKey);
   const ensureSession = useStore((s) => s.ensureSession);
   const zone = useStore((s) => s.settings.timeZone);
   const selectSession = useStore((s) => s.selectSession);
@@ -169,7 +168,8 @@ export default function BackgroundJobsPanel() {
       if (workspaceImages.length > CLOUD_SOLVER_MAX_IMAGES) {
         throw new Error(`A cloud job can hold at most ${CLOUD_SOLVER_MAX_IMAGES} screenshots.`);
       }
-      if (!storageKey) throw new Error("Save the Supabase Storage service-role key in Settings first.");
+      // The Rust bridge obtains a scoped signed upload URL from the authenticated server API.
+      // A service-role key must not be required on the desktop.
       const sessionId = await ensureSession();
       if (!sessionId) throw new Error("Set up the Supabase database connection before queuing cloud jobs.");
 
