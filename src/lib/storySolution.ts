@@ -29,7 +29,7 @@ export interface DisplaySolution {
 }
 const toDisplay = (final: AgentFinal, source: string, benchmark: CandidateRun | null,
   provisional: boolean): DisplaySolution => ({
-  source, code: final.code.trim(), language: final.language || "text",
+  source, code: final.code.trim(), language: final.language || final.raw.match(/```([a-zA-Z0-9+#._-]+)/)?.[1] || "",
   answer: final.answer, complexity: final.complexity,
   benchmark, provisional,
 });

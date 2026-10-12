@@ -98,6 +98,7 @@ function Workbench() {
   const hydrate = useStore((s) => s.hydrate);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const running = useStore((s) => s.running);
+  const storyRunId = useStore((s) => s.runId);
   const startAnalysis = useStore((s) => s.start);
   const signOut = useAuth((s) => s.signOut);
   const sessionsOpen = useStore((s) => s.settings.railPanel === "sessions");
@@ -118,7 +119,9 @@ function Workbench() {
 
   const panes = agents.filter((a) => a.enabled);
   // Any run launched via a global shortcut should reveal the live workspace.
-  useEffect(() => { if (running) setIntakeOpen(false); }, [running]);
+  useEffect(() => useStore.subscribe((current, previous) => {
+    if (current.running && !previous.running) setIntakeOpen(false);
+  }), []);
 
   useAgentEvents();
   useGlobalShortcuts();
@@ -276,7 +279,7 @@ function Workbench() {
           </button>
         </div>
       )}
-      {workspace === "council" && storyMode && !intakeOpen && <StoryResultWorkspace />}
+      {workspace === "council" && storyMode && !intakeOpen && <StoryResultWorkspace key={storyRunId ?? "awaiting-run"} />}
       <div className="workspace-stage" data-workspace={workspace} style={{ display: workspace === "council" && (intakeOpen || storyMode) ? "none" : undefined }}>
         <div
           className="workspace-panel"

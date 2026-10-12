@@ -2556,7 +2556,7 @@ export const useStore = create<State>((set, get) => ({
     const configured = ALL_AGENTS.filter(id => settings.enabled[id]);
     let catalogue: string[] = [];
     let verifiedGatewayModels: string[] = [];
-    let availabilityProbes = { ...settings.probes };
+    const availabilityProbes = { ...settings.probes };
     if (options?.adaptivePanels && settings.useGateway && gatewayKey) {
       try {
         catalogue = await bridge.listGatewayModels(settings.gatewayBaseUrl, settings.gatewayId);

@@ -1,0 +1,15 @@
+import {strict as assert} from "node:assert";
+import {describeCodeLanguage, inferCodeLanguage} from "../src/lib/solutionLanguage.ts";
+assert.deepEqual(describeCodeLanguage(""),{id:"",label:"Awaiting solution",extension:""});
+assert.equal(describeCodeLanguage("def isMatch(s,p):\n  return True","text").label,"Python");
+assert.equal(describeCodeLanguage("def isMatch(s,p):\n  return True","n/a").extension,".py");
+assert.equal(describeCodeLanguage("class Solution {public: bool isMatch(string s,string p){return true;}}","C++").label,"C++");
+assert.equal(describeCodeLanguage("public static void main(String[] args) {}","Java").label,"Java");
+assert.equal(describeCodeLanguage("fn main() {}",null).label,"Rust");
+assert.equal(describeCodeLanguage("const x: number = 2",null).label,"TypeScript");
+assert.equal(describeCodeLanguage("const x = 2",null).label,"JavaScript");
+assert.equal(describeCodeLanguage("??!",null).label,"Code");
+assert.equal(describeCodeLanguage("def main():\n  pass","py").label,"Python");
+assert.equal(describeCodeLanguage("print('hello')","ruby").label,"Ruby");
+assert.equal(inferCodeLanguage(""),null);
+console.log("PASS: detected solution language, robust fallback, never TEXT for pending output");

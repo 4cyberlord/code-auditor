@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import Markdown from "./Markdown";
+import { useMemo, useState } from "react";
+import { highlight } from "@/lib/highlight";
+import { describeCodeLanguage } from "@/lib/solutionLanguage";
 import { useStore } from "@/lib/store";
 import { gateFor } from "@/lib/council";
 import { PORT_LABELS, PORT_LANGUAGES } from "@/lib/review";
@@ -14,7 +15,6 @@ export default function StoryResultWorkspace() {
   const review = useStore(s => s.review);
   const extraction = useStore(s => s.extraction);
   const running = useStore(s => s.running);
-  const runId = useStore(s => s.runId);
   const judge = useStore(s => s.judge);
   const consensus = useStore(s => s.consensus);
   const runReview = useStore(s => s.runReview);
@@ -23,7 +23,9 @@ export default function StoryResultWorkspace() {
   const ports = PORT_LANGUAGES.filter(lang => !!review.data?.ports[lang]);
   const sourceCode = language === "original" ? report?.code : review.data?.ports[language as "cpp" | "rust" | "python"];
   const code = sourceCode || report?.code || "";
-  const shownLang = language === "original" ? report?.language || "text" : language;
+  const syntax = describeCodeLanguage(code, language === "original" ? report?.language : language);
+  const tokens = useMemo(() => highlight(code, syntax.id), [code, syntax.id]);
+  const lineCount = useMemo(() => code ? code.split("\n").length : 0, [code]);
   const functions = extractFunctionSignatures(code);
   const run = report?.benchmark;
   const gate = run ? gateFor(run) : "untested";
@@ -36,7 +38,6 @@ export default function StoryResultWorkspace() {
     council.phase !== "idle" && council.phase !== "done" && council.phase !== "error" && council.phase !== "cancelled" ? "Verifying and reviewing" :
     review.status === "running" ? "Reviewing the solution" :
     report ? "Solution ready" : failed.length ? "Analysis needs attention" : running ? "Preparing analysis" : "Awaiting solution";
-  useEffect(() => { setLanguage("original"); }, [runId]);
 
   return <main className="story-result" aria-label="Analysis results">
     <header className="story-result-status">
@@ -53,15 +54,22 @@ export default function StoryResultWorkspace() {
         {report && <div className="story-code-source">Selected solution <strong>{report.source}</strong></div>}
         <div className="story-code-window">
           <div className="story-code-toolbar">
-            <div className="story-code-file"><span className="story-code-dot" />{shownLang.toUpperCase()}</div>
+            <div className="story-code-file"><span className="story-code-dot" /><span>{code ? syntax.label : "AWAITING CODE"}</span>{code && syntax.extension && <span className="story-code-extension">{syntax.extension}</span>}</div>
             <div className="story-code-tabs">
               <button className={language === "original" ? "active" : ""} onClick={() => setLanguage("original")}>Original</button>
               {ports.map(lang => <button key={lang} className={language === lang ? "active" : ""} onClick={() => setLanguage(lang)}>{PORT_LABELS[lang]}</button>)}
-              {code && <button className="story-copy" onClick={() => void navigator.clipboard.writeText(code)}>Copy code</button>}
+              {code && <button type="button" className="story-copy" onClick={() => void navigator.clipboard.writeText(code)} aria-label="Copy full solution code">Copy code</button>}
             </div>
           </div>
           <div className="story-code-content">
-            {code ? <Markdown text={"```" + shownLang + "\n" + code + "\n```"} /> :
+            {code ? <div className="story-code-editor" role="region" tabIndex={0} aria-label={syntax.label + " code solution"}>
+              <div className="story-code-gutter" aria-hidden="true">
+                {Array.from({length:lineCount},(_,i)=><span key={i}>{i+1}</span>)}
+              </div>
+              <pre className="story-code-pre"><code>{tokens.map((token,i)=>
+                <span key={i} className={"story-token-" + token.kind}>{token.text}</span>
+              )}</code></pre>
+            </div> :
               <div className="story-code-empty"><div className="story-code-empty-icon">{"{ }"}</div><h2>{progress}</h2>
                 <p>{failed.length ? failed.map(a => a.error || a.model + " failed").join("; ") :
                   extraction.status === "error" ? extraction.error || "The screenshot could not be interpreted." :
