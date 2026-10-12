@@ -1870,11 +1870,14 @@ export const useStore = create<State>((set, get) => ({
     // Screenshot uploads are authorized by the authenticated server API.
     // A locally stored Supabase service-role key is neither required nor safe.
     if (!imgs.length) return;
-    const sessionId = await get().ensureSession();
-    if (!sessionId) {
-      // A missing server session is an upload failure, not a silent success.
-      // Keep all local captures for retry and surface the problem in the tray.
-      const why = "Screenshot upload requires a signed-in server session.";
+    let sessionId: string | null;
+    try {
+      sessionId = await get().ensureSession();
+      if (!sessionId) throw new Error("Screenshot upload requires a signed-in server session.");
+    } catch (err) {
+      // Rejected authentication/network calls must retain local captures and
+      // report an upload error, just like a missing session.
+      const why = cleanError(String(err));
       set((st) => ({
         sessionsError: why,
         uploads: {
