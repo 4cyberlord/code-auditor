@@ -90,6 +90,7 @@ function Workbench() {
   type Workspace = "council" | "coding" | "knowledge";
   const [workspace, setWorkspace] = useState<Workspace>("council");
   const [intakeOpen, setIntakeOpen] = useState(true);
+  const [storyMode, setStoryMode] = useState(false);
   const agents = useStore((s) => s.agents);
   const hydrated = useStore((s) => s.hydrated);
   const hydrate = useStore((s) => s.hydrate);
@@ -249,6 +250,7 @@ function Workbench() {
         <StoryStripIntake running={running} onStartAnalysis={() => {
           // The store chooses available routes, initializes the selected agents,
           // and starts extraction/reasoning. The running state reveals the panes.
+          setStoryMode(true);
           void startAnalysis({ adaptivePanels: true });
         }} />
       )}
@@ -290,12 +292,12 @@ function Workbench() {
 
             {/* The verdict, and the drawers in one column. */}
             <div className="rail" data-sessions={sessionsOpen} data-history={historyOpen}>
-              <CouncilPanel />
-              <SolutionCard />
-              <div className="solution-divider" aria-hidden="true" />
-              <ConsensusPanel />
-              <BackgroundJobsPanel />
-              <HistoryPanel />
+              {!storyMode && <CouncilPanel />}
+              <SolutionCard alwaysOpen={storyMode} />
+              {!storyMode && <div className="solution-divider" aria-hidden="true" />}
+              {!storyMode && <ConsensusPanel />}
+              {!storyMode && <BackgroundJobsPanel />}
+              {!storyMode && <HistoryPanel />
               {sessionsOpen && (
                 <Splitter
                   axis="row"
