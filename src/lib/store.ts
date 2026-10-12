@@ -2604,7 +2604,32 @@ export const useStore = create<State>((set, get) => ({
     const anyBlind = active.some((p) => !canSeeVia(p, routes.get(p) ?? null, settings));
     let context = "";
     if (options?.adaptivePanels && images.length > 0 || needsExtraction(settings.contextMode, images.length > 0, anyBlind)) {
-      await get().runExtraction();
+      if (get().extraction.status === "running" &&
+          get().extraction.for === readingKey(images)) {
+        // In-flight reading was started when the capture arrived. Wait for that
+        // exact capture instead of issuing a second model request or guessing.
+        await new Promise<void>(resolve => {
+          let settled = false;
+          let unsubscribe = () => {};
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            unsubscribe();
+            clearTimeout(timeout);
+            resolve();
+          };
+          const timeout = setTimeout(finish, 30_000);
+          unsubscribe = useStore.subscribe(state => {
+            if (!state.running || state.runId !== runId ||
+                state.extraction.status !== "running" ||
+                state.extraction.for !== readingKey(images)) finish();
+          });
+          const latest = get();
+          if (latest.extraction.status !== "running" || latest.runId !== runId) finish();
+        });
+      } else {
+        await get().runExtraction();
+      }
 
       // Extraction is slow enough that Stop is a real possibility during it, and
       // a run that was stopped must not then launch four requests.
@@ -2664,8 +2689,14 @@ export const useStore = create<State>((set, get) => ({
         // the right thing to send a vision model and useless to send a text-only
         // one, and both are in the panel now.
         const plan = planFor({
-          mode: settings.contextMode,
-          canSee: canSeeVia(provider, route, settings),
+          mode: options?.adaptivePanels
+            ? (context && get().extraction.agreement ? "extract" : "auto")
+            : settings.contextMode,
+          canSee: options?.adaptivePanels
+            ? (settings.probes[route.model]?.ok === true &&
+               settings.probes[route.model]?.vision === true &&
+               canSeeVia(provider, route, settings))
+            : canSeeVia(provider, route, settings),
           hasImages: images.length > 0,
           context,
         });
