@@ -60,7 +60,7 @@ import { routingGuidance, reconcileProblemReadings, routeUnparsedProblem } from 
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders, type ModelCapability } from "./adaptiveModelRouting.ts";
 import { planIntelligentPanels, loadTrustedPanelMetrics } from "./intelligentPanelSelection.ts";
 import { verifyGatewayCandidates, resolveGatewayCandidates, resolveListedGatewayModel, selectGatewayGpt, parseGatewayRouterChoice, gatewayRouterPrompt, type LiveModelProbe } from "./quickGatewayRouter.ts";
-import { coordinatorCandidates, coordinatorPrompt, verifyCoordinatorAssignment } from "./visionCoordinator.ts";
+import { coordinateAndVerify } from "./visionCoordinator.ts";
 import { isPrimaryModel, preferredPrimaryRoute, primaryCatalog, primaryModelFamily, primaryModelId } from "./primaryModels.ts";
 import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { loadAuthenticatedBenchmarkCapabilities } from "./benchmarkFeed.ts";
@@ -2631,19 +2631,33 @@ export const useStore = create<State>((set, get) => ({
       // Screenshots have no pre-extracted text. Only a successful image
       // transport probe can authorize dispatch of their original bytes.
       const taskRoute = routeUnparsedProblem(note, images.length > 0);
-      // Rank the pool before live checks; image support is then measured on
-      // just these four exact routes before they can receive screenshot pixels.
-      const shortlist = planIntelligentPanels({ candidates, route: taskRoute,
-        hasImages: false, safeTextOnly: true, trustedMetrics: await trustedMetricsReady,
-        probes: availabilityProbes, maxPanels: 4 });
-      const shortlisted = new Set(shortlist.selected);
-      const availability = await verifyGatewayCandidates({
-        configured: candidates.filter(candidate => shortlisted.has(candidate.id)),
-        catalogue,
-        requireVision: images.length > 0,
-        allowFamilyAlternatives: false,
-        probe: (models, vision) => probeGatewayWithRecentSuccess(models, vision, get().settings),
+      // A verified member of the ten-model roster reads the original images
+      // only to assign specialists. The actual solvers read those same images
+      // independently and never receive a coordinator transcription.
+      const shortlist = planIntelligentPanels({
+        candidates, route: taskRoute, hasImages: false, safeTextOnly: true,
+        trustedMetrics: await trustedMetricsReady, probes: availabilityProbes,
+        maxPanels: 4,
       });
+      const availability = await coordinateAndVerify({
+        candidates, catalogue, note, screenshotCount: images.length,
+        fallbackOrder: shortlist.selected,
+        probe: (models, vision) => probeGatewayWithRecentSuccess(models, vision, get().settings),
+        ask: async (model, prompt) => Promise.race([
+          bridge.runOnce({
+            runId: `coordinator-${generation}`, agentId: "vision-coordinator",
+            attemptId: newAttemptId(), provider: settings.gatewayId, model,
+            systemPrompt: prompt.systemPrompt, userText: prompt.userText,
+            images: images.map(image => ({mime:image.mime,data:image.base64})),
+            maxTokens: 360, temperature: 0,
+            baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+            endpoint: endpointForModel(settings, model),
+          }),
+          new Promise<never>((_, reject) => setTimeout(
+            () => reject(new Error("Coordinator timed out")), 15_000)),
+        ]),
+      });
+      if (generation !== startGeneration) return;
       for (const check of availability.probes) {
         availabilityProbes[check.model] = {
           ok: check.ok, ms: check.ms, error: check.error, at: Date.now(),
