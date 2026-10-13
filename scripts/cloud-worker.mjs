@@ -23,6 +23,7 @@ import { executionId, validateExecution, parseExecutionOutput, executionStatus, 
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
+import { fetchExternalLanguageRows } from "./lib/externalLanguageSources.mjs";
 import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
 import { phaseTimer } from "./lib/phaseTimings.mjs";
 import { readFileSync } from "node:fs";
@@ -1166,12 +1167,14 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   const failures = new Map();
   // Database packs are checksum validated; verified bundled packs remain an offline fallback.
   const languagePacks = await Promise.all(languages.map(language => loadLanguagePack(language, {
-    fetchRows: id => rest(`language_runtime_packs?select=language,runtime_version,content_md,checksum,status,reviewed_at&language=eq.${encodeURIComponent(id)}&status=eq.validated&limit=1`),
+    // Language documentation is stored on separately configured external
+    // databases, never on the app's Supabase project.
+    fetchRows: id => fetchExternalLanguageRows(id),
   })));
   const packsByLanguage = new Map(languagePacks.map(pack => [pack.language,pack]));
   await addEvent(job.id,"info","language_packs_ready",
     `Loaded ${languagePacks.length} language-specific guides.`,
-    {languages:languagePacks.map(pack=>({language:pack.language,source:pack.source,checksum:pack.checksum.slice(0,12)}))});
+    {languages:languagePacks.map(pack=>({language:pack.language,source:pack.source,database:pack.databaseId??null,checksum:pack.checksum.slice(0,12)}))});
   // Independent languages run concurrently; within-language retry remains bounded and serial.
   const suitesByLanguage = await parallelMap(languages,
     workerConcurrency(process.env.CODE_AUDITOR_HARNESS_CONCURRENCY, 2, 3),

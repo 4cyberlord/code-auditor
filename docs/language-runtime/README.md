@@ -1,16 +1,25 @@
 # Language runtime Markdown registry
 
-Each E2B runner language has a reviewed Markdown guide:
-- Python 3: python.md
-- Node ESM JavaScript: javascript.md
-- TypeScript with Node strip-types: typescript.md
-- Java: java.md
-- C17: c.md
-- C++20: cpp.md
-- Rust stable: rust.md
-- Go: go.md
-- PHP CLI: php.md
-- Ruby CLI: ruby.md
-- Bash: bash.md
+The Council worker reads a language-specific guide before generating harnesses.
+Source-controlled, checksum-verified guides are the reliable offline fallback;
+optionally it reads approved Markdown from external PostgREST-compatible
+PostgreSQL services configured through `CODE_AUDITOR_LANGUAGE_REGISTRIES`.
 
-The worker prefers checksum-validated PostgreSQL documentation with five-minute in-memory cache. Bundled guides are a trusted offline fallback. Knowledge is guidance and cannot replace verified execution and mutation testing.
+**Do not store language documentation in the Supabase application database.**
+The external database schema is `deploy/external-language-registry.sql`.
+See `docs/council-language-registry.md` for secure configuration and publishing.
+
+- [python](python.md)
+- [javascript](javascript.md)
+- [typescript](typescript.md)
+- [java](java.md)
+- [c](c.md)
+- [cpp](cpp.md)
+- [rust](rust.md)
+- [go](go.md)
+- [php](php.md)
+- [ruby](ruby.md)
+- [bash](bash.md)
+
+Documentation guides generation, but executable E2B validation, independent
+reference checking and mutation testing remain the correctness authority.

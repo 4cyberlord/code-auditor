@@ -103,6 +103,9 @@ export const BOOTSTRAP = new Set([
   "SUPABASE_PUBLISHABLE_KEY",
   "SUPABASE_SERVICE_ROLE_KEY",
   "SUPABASE_SERVICE_KEY",
+  // External language sources are bootstrap-only: never load their endpoints
+  // or credentials from the Supabase application configuration database.
+  "CODE_AUDITOR_LANGUAGE_REGISTRIES",
 ]);
 
 /**

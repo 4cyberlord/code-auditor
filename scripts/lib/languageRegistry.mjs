@@ -23,7 +23,7 @@ export function approvedRow(row,name){
   !/^[a-f0-9]{64}$/.test(row.checksum||"")||
   sha256(row.content_md)!==row.checksum||
   typeof row.runtime_version!=="string"||!row.runtime_version.trim())return null;
- return {language:name,markdown:row.content_md,checksum:row.checksum,version:row.runtime_version,source:"postgres",validated:true};
+ return {language:name,markdown:row.content_md,checksum:row.checksum,version:row.runtime_version,source:"postgres",databaseId:typeof row.registry_id==="string"&&/^[a-z][a-z0-9_-]{0,47}$/.test(row.registry_id)?row.registry_id:undefined,validated:true};
 }
 export async function loadLanguagePack(raw,options={}){
  const name=canonicalLanguage(raw),now=options.now??Date.now(),ttl=options.ttlMs??300000;
