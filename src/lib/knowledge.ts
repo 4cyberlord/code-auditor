@@ -1059,7 +1059,7 @@ const RECORDS: KnowledgeRecord[] = [
     id: "dynamic-programming-optimization",
     title: "Dynamic programming optimisation",
     kind: "pattern",
-    tags: ["dynamic-programming", "dp", "memoization", "tabulation", "knuth", "divide-and-conquer-dp", "bitmask", "optimization"],
+    tags: ["dynamic-programming", "dp", "memoization", "tabulation", "knuth", "divide-and-conquer-dp", "bitmask", "optimization", "optimize", "state", "memory", "compression"],
     summary:
       "Use DP to remove repeated subproblems, then compress state or apply known optimizations when naive DP is too large.",
     guidance: [
