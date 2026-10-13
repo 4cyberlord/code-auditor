@@ -45,16 +45,14 @@ export function selectStorySolution(
       const benchmark = winner?.revised?.code?.trim()
         ? council.revisedRuns[winner.letter] ?? null
         : council.runs[winner!.letter] ?? null;
-      return toDisplay(final, winner!.model, benchmark, gateFor(benchmark) !== "pass");
+      if (gateFor(benchmark) !== "pass") return null;
+      return toDisplay(final, winner!.model, benchmark, false);
     }
   }
-  const completed = agents.filter(a => a.enabled && a.status === "done" && a.final?.code?.trim());
-  const chosen = completed.find(a => a.id === representative && a.final?.wellFormed) ??
-    completed.find(a => a.final?.wellFormed) ?? completed[0];
-  if (!chosen?.final) return null;
-  // Pane code has not been executed as the final artifact. It is useful to
-  // show immediately, but never as a verified finished solution.
-  return toDisplay(chosen.final, chosen.model, null, true);
+  // Solver panes are candidates, not answers. Keep the solution area empty
+  // until Council has selected a candidate that passed executable verification.
+  // Progress and agent state remain visible elsewhere in the workspace.
+  return null;
 }
 
 /** A coding result is publishable only when this exact code passed execution. */
