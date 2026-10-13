@@ -58,3 +58,93 @@ export function verifyCoordinatorAssignment<Id extends string>(
   const known = available.filter(c=>primaryModelId(c.model)).map(c=>c.id);
   return parseGatewayRouterChoice(response,known,4);
 }
+
+
+import { verifyGatewayCandidates, type LiveModelProbe, type SelectedGatewayCandidate } from "./quickGatewayRouter.ts";
+
+/** A coordinator can read first, but it cannot grant itself permission.
+ * Probe its image route, ask for an assignment, then independently probe each
+ * chosen solver. If no coordinator succeeds, use the caller's safe fallback. */
+export async function coordinateAndVerify<Id extends string>(input: {
+  candidates: readonly GatewayCandidate<Id>[];
+  fallbackOrder: readonly Id[];
+  catalogue: readonly string[];
+  note: string;
+  screenshotCount: number;
+  maxSolvers?: number;
+  probe: (models: string[], checkVision: boolean) => Promise<LiveModelProbe[]>;
+  ask: (model: string, prompt: ReturnType<typeof coordinatorPrompt>) => Promise<string>;
+}): Promise<{
+  routes: SelectedGatewayCandidate<Id>[];
+  probes: LiveModelProbe[];
+  rejected: { id: Id; model: string; reason: string }[];
+  coordinator: string | null;
+  reason: string;
+}> {
+  const probes: LiveModelProbe[] = [];
+  const rejected: {id:Id;model:string;reason:string}[] = [];
+  const verified = new Map<string,LiveModelProbe>();
+  const check = async (models:string[], vision:boolean) => {
+    const missing=models.filter(model=>{
+      const prior=verified.get(model);
+      return !prior || !prior.ok || (vision && prior.vision !== true);
+    });
+    const fresh=missing.length ? await input.probe(missing,vision) : [];
+    for(const probe of fresh){
+      if(!missing.includes(probe.model))continue;
+      verified.set(probe.model,probe);
+      probes.push(probe);
+    }
+    return models.map(model=>verified.get(model)).filter(
+      (probe):probe is LiveModelProbe=>!!probe
+    );
+  };
+  let coordinator: string | null = null;
+  let assigned: Id[] = [];
+  let reason = "Validated deterministic fallback";
+  const coordinatorList = coordinatorCandidates(input.candidates,3);
+  for(const candidate of coordinatorList){
+    const checked=await verifyGatewayCandidates({
+      configured:[candidate],catalogue:input.catalogue,
+      requireVision:input.screenshotCount>0,allowFamilyAlternatives:false,probe:check,
+    });
+    rejected.push(...checked.rejected);
+    if(!checked.routes.length)continue;
+    coordinator=checked.routes[0].model;
+    break;
+  }
+  if(coordinator){
+    try{
+      const response=await input.ask(coordinator,
+        coordinatorPrompt(input.note,input.candidates,input.screenshotCount));
+      const choice=verifyCoordinatorAssignment(response,input.candidates);
+      if(choice){
+        assigned=choice.selected;
+        reason=choice.reason || "Approved vision coordinator assignment";
+      }
+    }catch{
+      reason="Coordinator timed out or failed; validated deterministic fallback";
+    }
+  }
+  const approvedIds=new Set(input.candidates.map(c=>c.id));
+  const unique = new Set<Id>();
+  const order=[...assigned,...input.fallbackOrder,...input.candidates.map(c=>c.id)]
+    .filter(id=>{
+      if(!approvedIds.has(id)||unique.has(id))return false;
+      unique.add(id);return true;
+    });
+  const routes:SelectedGatewayCandidate<Id>[]=[];
+  const limit=Math.min(4,Math.max(1,input.maxSolvers??4));
+  for(let cursor=0;cursor<order.length && routes.length<limit;){
+    const batch=order.slice(cursor,cursor+Math.min(limit-routes.length,order.length-cursor))
+      .map(id=>input.candidates.find(c=>c.id===id)!);
+    cursor+=batch.length;
+    const checked=await verifyGatewayCandidates({
+      configured:batch,catalogue:input.catalogue,
+      requireVision:input.screenshotCount>0,allowFamilyAlternatives:false,probe:check,
+    });
+    routes.push(...checked.routes);
+    rejected.push(...checked.rejected);
+  }
+  return {routes,probes,rejected,coordinator,reason};
+}
