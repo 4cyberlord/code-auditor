@@ -16,6 +16,9 @@ export default function StoryResultWorkspace() {
   const agents = useStore(s => s.agents);
   const runId = useStore(s => s.runId);
   const viewingRunId = useStore(s => s.viewingRunId);
+  const historyQuestion = useStore(s => s.historyQuestion);
+  const historyImages = useStore(s => s.historyImages);
+  const sessionsError = useStore(s => s.sessionsError);
   const council = useStore(s => s.council);
   const review = useStore(s => s.review);
   const running = useStore(s => s.running);
@@ -33,7 +36,7 @@ export default function StoryResultWorkspace() {
   // workspace empty until the full comparison settles (or explicitly fails).
   const awaitingCouncil = settings.councilEnabled && (preparing || running ||
     (council.phase !== "idle" && council.phase !== "done" && council.phase !== "error" && council.phase !== "cancelled"));
-  const finalReviewPending = settings.councilEnabled && council.phase === "done" &&
+  const finalReviewPending = !viewingRunId && settings.councilEnabled && council.phase === "done" &&
     review.status !== "done" && review.status !== "error";
   const report = preparing || awaitingCouncil || finalReviewPending ? null : settings.councilEnabled
     ? selectVerifiedStorySolution(agents, council, consensus().representative)
@@ -50,13 +53,16 @@ export default function StoryResultWorkspace() {
   const tokens = highlight(code, syntax.id);
   const lineCount = code ? code.split("\n").length : 0;
   const functions = extractFunctionSignatures(code);
-  // A translated port is new code. The original run cannot certify it.
-  const run = language === "original" ? report?.benchmark : null;
+  // Keep the tested original's evidence visible when a port is selected,
+  // while explicitly saying that the translated code itself is untested.
+  const run = report?.benchmark ?? null;
   const complexityAudit = councilPhase === "done" && council.winner
     ? agreedComplexityAudits(council.dossier?.judges ?? [])[council.winner]
     : undefined;
   const gate = run ? gateFor(run) : "untested";
-  const benchmarkNote = awaitingCouncil
+  const benchmarkNote = language !== "original" && run?.ran
+    ? `These measurements belong to the tested original solution, not this ${PORT_LABELS[language as keyof typeof PORT_LABELS] ?? language} translation. This port has not been executed in E2B.`
+    : awaitingCouncil
     ? "The Council is still testing and comparing candidates; no final measurement is available yet."
     : councilPhase === "error" ? `Verification stopped: ${councilError || "unknown reason"}`
     : !council.testSuites.length ? "No executable test suite was produced, so this solution has not been benchmarked."
@@ -147,6 +153,17 @@ export default function StoryResultWorkspace() {
     </section>
     <div className="story-result-columns">
       <section className="story-code-column" aria-label="Final code solution">
+        {viewingRunId && <section className="story-saved-question" aria-label="Saved question">
+          <span className="story-eyebrow">SAVED QUESTION</span>
+          {historyQuestion ? <pre>{historyQuestion}</pre> :
+            <p>{historyImages.length ? "The original screenshots are saved below." : "No text reading or screenshot was retained for this older run."}</p>}
+          {historyImages.length > 0 && <div className="story-saved-images">
+            {historyImages.map((image, index) => <a key={`${image.name}-${index}`} href={image.dataUrl} target="_blank" rel="noreferrer" title={`Open ${image.name}`}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={image.dataUrl} alt={`Original question screenshot ${index + 1}`} />
+            </a>)}
+          </div>}
+        </section>}
         <div className="story-section-heading">
           <div><span className="story-eyebrow">01 / SOLUTION</span><h1>Code solution</h1></div>
           {report && <span className="story-outcome" data-provisional={report.provisional || language !== "original"}>{language !== "original" ? "Port untested" : report.provisional ? "Provisional" : "Completed"}</span>}
@@ -219,7 +236,7 @@ export default function StoryResultWorkspace() {
           {report && !viewingRunId && !reviewRunning && !reviewData && <button className="story-subtle-button" onClick={() => void runReview()}>Review solution</button>}
         </section>
         <section className="story-report-card">
-          <div className="story-report-heading">Benchmarks <span data-gate={gate}>{gate === "pass" ? "Passed" : gate === "fail" ? "Failed" : "Not measured"}</span></div>
+          <div className="story-report-heading">Benchmarks <span data-gate={gate}>{gate === "pass" ? language === "original" ? "Passed" : "Original passed" : gate === "fail" ? "Failed" : "Not measured"}</span></div>
           <div className="story-report-metrics">
             <div><small>TEST PROCESS WALL TIME</small><strong>{run?.ran && run.remoteElapsedMs != null ? (run.remoteElapsedMs === 0 ? "<1 ms" : run.remoteElapsedMs + " ms") : "—"}</strong></div>
             <div><small>PEAK PROCESS MEMORY</small><strong>{run?.ran && run.peakMemoryKb != null ? (run.peakMemoryKb >= 1024 ? (run.peakMemoryKb/1024).toFixed(1) + " MB" : Math.round(run.peakMemoryKb) + " KB") : "—"}</strong></div>
@@ -230,6 +247,7 @@ export default function StoryResultWorkspace() {
             <p className="story-muted">Test-process wall time: {run.durationMs} ms (includes startup and possibly compilation; not the algorithm runtime).</p>}
         </section>
         {councilPhase === "error" && <p className="story-warning">{councilError}</p>}
+        {sessionsError && <p className="story-warning">History save needs attention: {sessionsError}</p>}
         {!preparing && judge.status === "error" && <p className="story-warning">{judge.error}</p>}
       </aside>
     </div>

@@ -100,6 +100,8 @@ function Workbench() {
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const running = useStore((s) => s.running);
   const preparing = useStore((s) => s.preparing);
+  const councilPhase = useStore((s) => s.council.phase);
+  const reviewRunning = useStore((s) => s.review.status === "running");
   const storyRunId = useStore((s) => s.runId);
   const startAnalysis = useStore((s) => s.start);
   const signOut = useAuth((s) => s.signOut);
@@ -117,7 +119,7 @@ function Workbench() {
   const exitHistory = useStore((s) => s.exitHistory);
   const viewingAsked = useStore((s) => {
     const row = s.history.find((r) => r.id === s.viewingRunId);
-    return row?.asked.trim().split("\n")[0] ?? "";
+    return row?.title ?? "";
   });
 
   const panes = agents.filter((a) => a.enabled);
@@ -180,6 +182,8 @@ function Workbench() {
   useEffect(() => {
     let unlistenSettings: (() => void) | undefined;
     let unlistenWorkspace: (() => void) | undefined;
+    let unlistenSolve: (() => void) | undefined;
+    let disposed = false;
     if (inTauri()) {
       void listen("settings://open", () => setSettingsOpen(true)).then((off) => {
         unlistenSettings = off;
@@ -191,6 +195,24 @@ function Workbench() {
         }
       }).then((off) => {
         unlistenWorkspace = off;
+      });
+      void listen("shortcut://solve", () => {
+        const s = useStore.getState();
+        if (s.running || s.preparing) return;
+        setWorkspace("council");
+        if (!s.images.length && !s.note.trim()) {
+          setStoryMode(false);
+          setIntakeOpen(true);
+          s.setShortcutError("Capture or add a question before pressing 14 to start analysis.");
+          return;
+        }
+        setIntakeOpen(false);
+        setStoryMode(true);
+        if (s.viewingRunId) s.exitHistory();
+        void useStore.getState().start();
+      }).then((off) => {
+        if (disposed) off();
+        else unlistenSolve = off;
       });
     }
 
@@ -207,9 +229,11 @@ function Workbench() {
     };
     window.addEventListener("keydown", onKey);
     return () => {
+      disposed = true;
       window.removeEventListener("keydown", onKey);
       unlistenSettings?.();
       unlistenWorkspace?.();
+      unlistenSolve?.();
     };
   }, [setSettingsOpen]);
 
@@ -233,7 +257,16 @@ function Workbench() {
           </span>
         )}
         {storyMode && <div style={{ display: "flex", gap: 7, position: "relative" }}>
-          <button className="btn tiny ghost" disabled={running} onClick={() => { setTopMenu(null); useStore.getState().reset(); useStore.getState().clearImages(); setStoryMode(false); setIntakeOpen(true); }} title="Begin a new screenshot intake">New capture</button>
+          <button className="btn tiny ghost" disabled={preparing || running || reviewRunning || !["idle", "done", "error", "cancelled"].includes(councilPhase)} onClick={() => void (async () => {
+            setTopMenu(null);
+            const before = useStore.getState().currentSessionId;
+            await useStore.getState().persistRun();
+            if (useStore.getState().sessionsError) return;
+            await useStore.getState().newSession();
+            if (useStore.getState().currentSessionId === before) return;
+            setStoryMode(false);
+            setIntakeOpen(true);
+          })()} title="Begin a new screenshot intake in its own saved session">New capture</button>
           <button className="btn tiny ghost" onClick={() => setTopMenu(topMenu === "about" ? null : "about")}>About</button>
           {topMenu === "about" && <div style={{ position: "absolute", zIndex: 50, right: 0, top: 34, width: 310, background: "var(--panel)", border: "1px solid var(--line-strong)", borderRadius: 12, padding: 14, boxShadow: "var(--shadow)" }}>
             <strong>Council Editor</strong><p className="hint" style={{ lineHeight: 1.6 }}>Capture a problem, let the intelligence engine select eligible AI agents, then review one solution and its measured evidence.</p>
@@ -245,9 +278,9 @@ function Workbench() {
             <strong style={{ fontSize: 13 }}>Saved solutions</strong>
             {historyError && <p className="hint" role="alert">{historyError}</p>}
             {history.length ? history.map(item => <button key={item.id} className="btn tiny ghost" style={{ display: "block", width: "100%", textAlign: "left", height: "auto", padding: "12px 8px", marginTop: 5 }} disabled={running} onClick={() => { setIntakeOpen(false); setStoryMode(true); void openRun(item.id); setTopMenu(null); }}>
-              <span style={{ display: "block" }}>{item.asked?.trim().split("\n")[0].slice(0, 85) || "Untitled analysis"}</span>
+              <span style={{ display: "block" }}>{item.title || "Captured question"}</span>
               <small className="hint">{new Date(item.startedAt).toLocaleString()} · {item.answered} answers · {item.verdict || "No verdict"}</small>
-            </button>) : !historyError && <p className="hint">No saved analyses in this session.</p>}
+            </button>) : !historyError && <p className="hint">No saved analyses yet.</p>}
           </div>}
         </div>
         <button

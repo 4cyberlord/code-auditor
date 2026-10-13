@@ -253,6 +253,8 @@ export async function saveRun(args: {
 export interface RunSummary {
   id: string;
   sessionId: string;
+  /** Client-derived from this run's saved answer; not a database column. */
+  title?: string;
   mode: string;
   /** The note as it stood when the run was launched, not as the session reads now. */
   asked: string;

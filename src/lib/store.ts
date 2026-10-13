@@ -72,6 +72,7 @@ import { planFor, type ContextMode } from "./payload.ts";
 import { selectStorySolution } from "./storySolution.ts";
 import * as bridge from "./bridge.ts";
 import * as db from "./sessions.ts";
+import { savedRunQuestion, savedRunTitle } from "./historyPresentation.ts";
 import { detectZone, isUsableZone, formatWhen } from "./when.ts";
 import { titleFor, placeholderTitle, isPlaceholder } from "./title.ts";
 import { resolveAnswerLanguage } from "./answerLanguage.ts";
@@ -790,7 +791,7 @@ interface State {
   /** The session captures attach to. Null when no database is configured. */
   currentSessionId: string | null;
 
-  /** Past runs in this session, newest first. Empty until asked for. */
+  /** Past runs across all owned sessions, newest first. */
   history: db.RunSummary[];
   historyLoading: boolean;
   historyError: string | null;
@@ -801,6 +802,8 @@ interface State {
    * back on exit, so opening an old answer never costs you the one on screen.
    */
   viewingRunId: string | null;
+  historyQuestion: string;
+  historyImages: ImageAsset[];
   loadHistory: () => Promise<void>;
   openRun: (runId: string) => Promise<void>;
   exitHistory: () => void;
@@ -1615,6 +1618,7 @@ let liveSnapshot: {
   runId: string | null;
 } | null = null;
 let persistedRecord: { sourceRunId: string | null; dbRunId: string } | null = null;
+let persistRunPromise: Promise<void> | null = null;
 
 /**
  * How long to wait for a pane that has not started before judging without it.
@@ -1687,6 +1691,8 @@ export const useStore = create<State>((set, get) => ({
   historyLoading: false,
   historyError: null,
   viewingRunId: null,
+  historyQuestion: "",
+  historyImages: [],
   sessionsError: null,
   sessionsLoading: false,
   runPersisted: false,
@@ -1830,7 +1836,8 @@ export const useStore = create<State>((set, get) => ({
 
   newSession: async (title = "") => {
     try {
-      const id = await db.createSession(title);
+      const name = title.trim() || placeholderTitle(formatWhen(Date.now(), get().settings.timeZone, "short"));
+      const id = await db.createSession(name);
       await get().loadSessions("active");
       set({ currentSessionId: id, sessionsError: null });
       // A new session is a fresh start: nothing carried over from the last one.
@@ -2002,7 +2009,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   autoTitle: async () => {
-    const { currentSessionId, sessions, extraction, note } = get();
+    const { currentSessionId, sessions, extraction, note, council, agents } = get();
     if (!currentSessionId) return;
     const current = sessions.find((x) => x.id === currentSessionId);
     // A name the user chose outranks anything inferable.
@@ -2011,6 +2018,15 @@ export const useStore = create<State>((set, get) => ({
     const suggested = titleFor({
       extraction: extraction.agreement?.merged ?? null,
       note,
+      answers: [
+        ...council.candidates.filter(candidate => candidate.letter === council.winner)
+          .map(candidate => candidate.revised ?? candidate.final)
+          .filter((answer): answer is AgentFinal => Boolean(answer))
+          .map(answer => ({ answer: answer.answer, code: answer.code, language: answer.language })),
+        ...agents.filter(agent => agent.final).map(agent => ({
+          answer: agent.final?.answer, code: agent.final?.code, language: agent.final?.language,
+        })),
+      ],
     });
     if (!suggested || suggested === current?.title) return;
     try {
@@ -2062,7 +2078,11 @@ export const useStore = create<State>((set, get) => ({
       runId: null,
       running: false,
       preparing: false,
+      viewingRunId: null,
+      historyQuestion: "",
+      historyImages: [],
       council: IDLE_COUNCIL,
+      review: { status: "idle", data: null, error: null, language: s.review.language, sourceCode: null },
       judge: { status: "idle", provider: s.settings.judgeProvider, text: "", error: null },
       // The reading belonged to the images of the run being cleared. Keeping it
       // would let the next run inherit a transcription of a different picture.
@@ -3365,14 +3385,21 @@ export const useStore = create<State>((set, get) => ({
    */
   /** The runs this session has finished. */
   loadHistory: async () => {
-    const sessionId = get().currentSessionId;
-    if (!sessionId) {
-      set({ history: [], historyError: null });
-      return;
-    }
     set({ historyLoading: true, historyError: null });
     try {
-      set({ history: await db.listRuns(sessionId), historyLoading: false });
+      const groups = await Promise.all([db.listSessions("active"), db.listSessions("archived")]);
+      const sessions = groups.flat();
+      const batches = await Promise.all(sessions.map(session => db.listRuns(session.id)));
+      const titles = new Map(sessions.map(session => [session.id, session.title]));
+      const rows = batches.flat().sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+      const history = await Promise.all(rows.map(async row => {
+        // A screenshot-only run has no typed note. Its stored winner is the
+        // source of a useful per-task name, even when several old runs share a
+        // session and that session has only one title.
+        const detail = row.asked.trim() ? null : await db.getRun(row.id).catch(() => null);
+        return { ...row, title: savedRunTitle(row, titles.get(row.sessionId) ?? "", detail) };
+      }));
+      set({ history, historyLoading: false });
     } catch (err) {
       set({ historyLoading: false, historyError: cleanError(String(err)) });
     }
@@ -3400,16 +3427,14 @@ export const useStore = create<State>((set, get) => ({
     set({ historyError: null });
     try {
       const detail = await db.getRun(runId);
-      const byProvider = new Map(detail.responses.map((r) => [r.provider, r]));
-      const byModel = new Map(detail.responses.map((r) => [r.model, r]));
-
-      const agents = s.agents.map((slot) => {
-        const stored = byModel.get(slot.model) ?? byProvider.get(slot.provider);
-        if (!stored) {
-          return { ...slot, status: "idle" as AgentStatus, text: "", error: null, final: null, attemptId: null };
-        }
+      const agents = detail.responses.flatMap((stored, index) => {
+        const slot = s.agents.find(agent => agent.model === stored.model) ??
+          s.agents.find(agent => agent.provider === stored.provider) ?? s.agents[index];
+        if (!slot) return [];
         return {
           ...slot,
+          id: `saved-${index}`,
+          enabled: true,
           model: stored.model,
           status: (stored.status === "done" ? "done" : stored.status === "cancelled" ? "cancelled" : "error") as AgentStatus,
           text: stored.body,
@@ -3423,9 +3448,24 @@ export const useStore = create<State>((set, get) => ({
         };
       });
 
+      const screenshots = await db.listScreenshots(detail.run.sessionId).catch(() => []);
+      const historyImages = (await Promise.all(screenshots.filter(shot => !shot.purged).map(async shot => {
+        try {
+          const bucket = shot.storageBucket ??
+            (shot.storagePath?.split("/")[1] === "azure" ? "azure:council-images" : undefined);
+          const file = shot.storagePath
+            ? await fetchStored(shot.storagePath, shot.mime, bucket)
+            : shot.localPath ? await bridge.readCapture(shot.localPath) : null;
+          return file ? { name: shot.fileName, mime: shot.mime, dataUrl: file.dataUrl,
+            base64: file.dataUrl.slice(file.dataUrl.indexOf(",") + 1), bytes: shot.bytes } : null;
+        } catch { return null; }
+      }))).filter((image): image is ImageAsset => Boolean(image));
+
       set({
         agents,
         note: detail.run.asked,
+        historyQuestion: savedRunQuestion(detail),
+        historyImages,
         council: detail.report?.council && typeof detail.report.council === "object"
           ? { ...IDLE_COUNCIL, ...(detail.report.council as Partial<CouncilState>), chatSending: false }
           : { ...IDLE_COUNCIL },
@@ -3457,18 +3497,21 @@ export const useStore = create<State>((set, get) => ({
     set({
       viewingRunId: null,
       historyError: null,
+      historyQuestion: "",
+      historyImages: [],
       ...(kept ?? {}),
       judge: { status: "idle", provider: get().settings.judgeProvider, text: "", error: null },
     });
   },
 
   persistRun: async () => {
+    if (persistRunPromise) return persistRunPromise;
     const s = get();
     if (s.runPersisted || s.running) return;
     const sessionId = s.currentSessionId;
     if (!sessionId) return;
 
-      const answered = s.agents.filter((a) => a.enabled && (a.final || a.error));
+    const answered = s.agents.filter((a) => a.enabled && (a.final || a.error));
     if (!answered.length) return;
 
     // A council run persists when the council settles, not here. Its record
@@ -3480,7 +3523,9 @@ export const useStore = create<State>((set, get) => ({
 
     // Claim it before the await, so two callers landing together cannot both
     // pass the guard and write the run twice.
-    set({ runPersisted: true });
+    set({ runPersisted: true, sessionsError: null });
+
+    persistRunPromise = (async () => {
 
     const result = s.consensus();
     try {
@@ -3547,11 +3592,15 @@ export const useStore = create<State>((set, get) => ({
         }).catch((err) => set({ sessionsError: cleanError(String(err)) }));
       }
       await get().loadSessions();
+      await get().loadHistory();
     } catch (err) {
       // History failing must not look like the run failing. The answers are on
       // screen either way.
       set({ runPersisted: false, sessionsError: cleanError(String(err)) });
     }
+    })();
+    try { await persistRunPromise; }
+    finally { persistRunPromise = null; }
   },
 
   consensus: () => {
@@ -5028,6 +5077,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     council: { ...st.council, phase: error ? "error" : "done", synthesis, winner, dossier, error },
     running: false,
   }));
+  void get().autoTitle();
   // The visible solution may have changed from a provisional pane answer to
   // the measured council winner. Review that exact code, not the old pane.
   if (winner) void get().runReview();

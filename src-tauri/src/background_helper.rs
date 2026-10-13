@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, thread, time::Duration};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 const GHOST_LABEL: &str = "com.apple.mds.useragent";
 const GHOST_BUNDLE_ID: &str = "com.apple.mds";
@@ -126,7 +126,16 @@ pub(crate) fn watch_app_capture_requests(app: AppHandle) {
                     Some("process") => Some("shortcut://solve"),
                     _ => None,
                 };
-                if let Some(event) = event { let _ = app.emit(event, ()); }
+                if let Some(event) = event {
+                    if event == "shortcut://solve" {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    let _ = app.emit(event, ());
+                }
             }
         }
         thread::sleep(Duration::from_millis(125));
