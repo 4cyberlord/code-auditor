@@ -1217,6 +1217,10 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
         return suite;
       } catch (err) {
         lastError=err instanceof Error?err.message:String(err);
+        // A failed E2B account, network or sandbox is not an invalid harness.
+        // Do not spend two more provider generations on an infrastructure fault.
+        if (/No E2B key|E2B_API_KEY|quota|rate limit|sandbox unavailable|ECONNREFUSED|ETIMEDOUT|deadline_exceeded/i.test(lastError))
+          throw err;
         failures.set(language,`${model}: ${lastError}`);
         await bench.note(model,err,"speccing");
         await addEvent(job.id,"warn","spec_retry",

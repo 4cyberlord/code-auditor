@@ -45,7 +45,7 @@ export default function StoryResultWorkspace() {
   const reviewError = preparing ? null : review.error;
   const councilPhase = preparing ? "idle" : council.phase;
   const [phaseTimes,setPhaseTimes]=useState<Record<string,number>>({});
-  const phaseClock=useRef({phase:"idle",at:Date.now(),runId:""});
+  const phaseClock=useRef<{phase:string;at:number;runId:string|null}>({phase:"idle",at:Date.now(),runId:null});
   useEffect(()=>{
     const tick=Date.now(),previous=phaseClock.current;
     if(previous.runId!==runId){
@@ -59,8 +59,9 @@ export default function StoryResultWorkspace() {
   const councilError = preparing ? null : council.error;
   // A translated port has not inherited source-code E2B evidence; keep it hidden.
   const ports = PORT_LANGUAGES.slice(0,0);
-  const sourceCode = language === "original" ? report?.code : reviewData?.ports[language as "cpp" | "rust" | "python"];
-  const code = sourceCode || report?.code || "";
+  // Do not expose a separately unverified translation, even if a stale UI
+  // selection remains from an older render. Only the tested original is shown.
+  const code = report?.code || "";
   const syntax = describeCodeLanguage(code, language === "original" ? report?.language : language);
   const tokens = highlight(code, syntax.id);
   const lineCount = code ? code.split("\n").length : 0;
