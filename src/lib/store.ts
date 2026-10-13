@@ -1000,7 +1000,7 @@ const defaultSettings = (): Settings => ({
   ) as Record<AgentId, boolean>,
   judgeProvider: "anthropic",
   autoJudge: "prose",
-  contextMode: "auto",
+  contextMode: "images",
   gatewayPerMinute: 5,
   timeZone: detectZone(),
   // One reader, not two.
@@ -1141,9 +1141,8 @@ function normalizeSettings(s: Settings): Settings {
       ? s.autoJudge
       : base.autoJudge,
     judgeProvider: PROVIDER_ORDER.includes(s.judgeProvider) ? s.judgeProvider : base.judgeProvider,
-    contextMode: (["auto", "images", "extract", "both"] as const).includes(s.contextMode)
-      ? s.contextMode
-      : base.contextMode,
+    // Migrate legacy persisted extraction preferences to direct image delivery.
+    contextMode: "images",
     extractors: normalizeExtractors(s.extractors, base.extractors),
     // 1 is a legal budget and 600 is effectively none. Clamped rather than
     // trusted, because a saved zero would queue every request forever and look
@@ -1756,19 +1755,8 @@ export const useStore = create<State>((set, get) => ({
         extraction: IDLE_EXTRACTION,
       }));
 
-      // The countermeasure, and the reason this fires here rather than at Run.
-      //
-      // A screenshot is a capability, not a message: it only reaches a model
-      // whose route actually carries an image, and two of this app's routes
-      // demonstrably do not. Text is not a capability. So the moment a picture
-      // arrives it is converted into a document, and from then on the panel
-      // depends on nothing but words.
-      //
-      // Starting now rather than at Run also buys the reading for free: it
-      // happens while the user is still typing their note, so pressing Run does
-      // not sit waiting on two vision calls that could have been made already.
-      if (get().settings.contextMode !== "images") void get().runExtraction();
-
+      // Story Strip uses independent model vision. Saving a capture must not
+      // start a shared transcription or a separate image-reader workflow.
       // And the bytes go where they are meant to live. Not awaited: an upload
       // that takes a second must not hold up the reading or the panel, and the
       // only thing depending on it finishing is history.
@@ -2611,36 +2599,8 @@ export const useStore = create<State>((set, get) => ({
     const knowledgeReady = ensureSolverKnowledge(get);
     const trustedMetricsReady = options?.adaptivePanels ? loadTrustedPanelMetrics() : Promise.resolve([]);
 
-    // Readers identify the screenshot before spending probes on solver seats.
-    // Join a capture's existing reading so pressing Start does not pay twice.
-    if (options?.adaptivePanels && images.length > 0) {
-      const key = readingKey(images);
-      const existing = get().extraction;
-      if (existing.status !== "done" || existing.for !== key) {
-        await new Promise<void>((resolve, reject) => {
-          let unsubscribe = () => {};
-          const timeout = setTimeout(() => {
-            unsubscribe();
-            reject(new Error("Screenshot reading did not finish within 90 seconds. No solver was started; retry the reading before analysis."));
-          }, 90_000);
-          const finish = () => { clearTimeout(timeout); unsubscribe(); resolve(); };
-          unsubscribe = useStore.subscribe(state => {
-            if (generation !== startGeneration || state.extraction.for !== key ||
-                state.extraction.status !== "running") finish();
-          });
-          if (existing.status !== "running" || existing.for !== key) {
-            void get().runExtraction().catch(err => {
-              set({ extraction: { ...IDLE_EXTRACTION, status: "error", for: key, error: cleanError(String(err)) } });
-            });
-          }
-        });
-      }
-      if (generation !== startGeneration || readingKey(get().images) !== key) return;
-      if (get().extraction.status !== "done") {
-        throw new Error(get().extraction.error || "Screenshot reading failed. Retry the reading before starting analysis.");
-      }
-    }
-
+    // No shared reading/extraction stage. The selected solvers will each
+    // receive the original screenshots after their own verified vision probe.
     // A gateway listing can be broken or incomplete. Probe candidate routes
     // with the ACTIVE gateway credential before submitting the real problem.
     const routes = new Map<AgentId, Route>();
@@ -2664,12 +2624,9 @@ export const useStore = create<State>((set, get) => ({
         seenModels.add(canonical);
         return [{ id, model, canSeeImages: agentSpec(id).vision }];
       });
-      const agreement = get().extraction.agreement;
-      const taskRoute = agreement?.merged ? routeProblem(agreement.merged) : routeUnparsedProblem(note, images.length > 0);
-      const safeTextOnly = images.length > 0 && !!agreement && verifiedTextOnlyScreenshot(
-        true, get().extraction.readings.map(r => r.extraction), agreement.merged, taskRoute,
-        agreement.conflicts?.filter(c => c.severity === "high").map(c => c.field) ?? [],
-      );
+      // Screenshots have no pre-extracted text. Only a successful image
+      // transport probe can authorize dispatch of their original bytes.
+      const taskRoute = routeUnparsedProblem(note, images.length > 0);
       // Rank the pool before live checks; image support is then measured on
       // just these four exact routes before they can receive screenshot pixels.
       const shortlist = planIntelligentPanels({ candidates, route: taskRoute,
@@ -2679,7 +2636,7 @@ export const useStore = create<State>((set, get) => ({
       const availability = await verifyGatewayCandidates({
         configured: candidates.filter(candidate => shortlisted.has(candidate.id)),
         catalogue,
-        requireVision: images.length > 0 && !safeTextOnly,
+        requireVision: images.length > 0,
         allowFamilyAlternatives: false,
         probe: (models, vision) => probeGatewayWithRecentSuccess(models, vision, get().settings),
       });
@@ -2761,7 +2718,7 @@ export const useStore = create<State>((set, get) => ({
       preparing: false,
       runPersisted: false,
       viewingRunId: null,
-      extraction: options?.adaptivePanels ? s.extraction : IDLE_EXTRACTION,
+      extraction: IDLE_EXTRACTION,
       council: IDLE_COUNCIL,
       judge: { status: "idle", provider: s.settings.judgeProvider, text: "", error: null },
       review: { status: "idle", data: null, error: null, language: s.review.language, sourceCode: null },
@@ -2794,71 +2751,9 @@ export const useStore = create<State>((set, get) => ({
     }));
     publishOverlayState(get());
 
-    // The vision pass, when asked for, happens before anyone reasons. The panes
-    // sit at "queued" through it, which is the truth: they are waiting on the
-    // reading, not on a model.
-    // Demand-driven: the transcription only costs two extra calls when somebody
-    // in the panel actually cannot see the picture.
-    const anyBlind = active.some((p) => !canSeeVia(p, routes.get(p) ?? null, settings));
-    let context = "";
-    if ((options?.adaptivePanels && images.length > 0) || needsExtraction(settings.contextMode, images.length > 0, anyBlind)) {
-      let readingTimedOut = false;
-      if (get().extraction.status === "running" &&
-          get().extraction.for === readingKey(images)) {
-        // In-flight reading was started when the capture arrived. Wait for that
-        // exact capture instead of issuing a second model request or guessing.
-        await new Promise<void>(resolve => {
-          let settled = false;
-          let unsubscribe = () => {};
-          const finish = () => {
-            if (settled) return;
-            settled = true;
-            unsubscribe();
-            clearTimeout(timeout);
-            resolve();
-          };
-          const timeout = setTimeout(() => { readingTimedOut = true; finish(); }, 90_000);
-          unsubscribe = useStore.subscribe(state => {
-            if (!state.running || state.runId !== runId ||
-                state.extraction.status !== "running" ||
-                state.extraction.for !== readingKey(images)) finish();
-          });
-          const latest = get();
-          if (latest.extraction.status !== "running" || latest.runId !== runId) finish();
-        });
-      } else {
-        let timeoutId: ReturnType<typeof setTimeout>;
-        const timeout = new Promise<null>(resolve => {
-          timeoutId = setTimeout(() => { readingTimedOut = true; resolve(null); }, 90_000);
-        });
-        try {
-          await Promise.race([get().runExtraction(), timeout]);
-        } finally {
-          clearTimeout(timeoutId!);
-        }
-      }
-
-      // Extraction is slow enough that Stop is a real possibility during it, and
-      // a run that was stopped must not then launch four requests.
-      const now = get();
-      if (!now.running || now.runId !== runId) return;
-      if (readingTimedOut && now.extraction.status === "running") {
-        set(state => ({
-          running: false,
-          agents: state.agents.map(agent => agent.status === "queued"
-            ? { ...agent, status: "error" as const,
-                error: "Screenshot reading is taking longer than 90 seconds. No solver was sent an unread picture. Wait for the reading or retry it, then start analysis again." }
-            : agent),
-        }));
-        get().pushToast("err", "Screenshot reading timed out",
-          "No solver was started. Wait for the reading to finish or retry it, then start analysis again.", { sticky: true });
-        return;
-      }
-      // Read it back from the store rather than from the return value, so the
-      // agents and the panel are quoting the same text by construction.
-      context = now.extraction.context;
-    }
-
+    // Every selected agent interprets the original screenshots independently.
+    // There is no shared OCR, model extraction, or agreed transcription.
+    const context = "";
     // The readers identify the task first. Then every solver gets relevant
     // notes from the user's local library as well as the bundled patterns.
     await knowledgeReady;
@@ -2875,25 +2770,15 @@ export const useStore = create<State>((set, get) => ({
         `No solver was started. Check the Knowledge tab, then retry. ${reason}`, { sticky: true });
       return;
     }
-    const knowledge = solverKnowledgePack(get, `${note}\n\n${context}`);
+    const knowledge = solverKnowledgePack(get, note);
     const sys = systemPrompt(
       settings.mode,
-      resolveAnswerLanguage(settings.outputLanguage, get().extraction.agreement?.merged.language ?? "")
+      resolveAnswerLanguage(settings.outputLanguage, "")
     );
 
     if (options?.adaptivePanels) {
-      const agreement = get().extraction.agreement;
-      // Reader preflight may have just measured vision on a solver model.
-      // The solver preflight snapshot was taken earlier and only checked text.
       const currentProbes = { ...availabilityProbes, ...get().settings.probes };
-      const verified = agreement?.merged;
-      const taskRoute = verified
-        ? routeProblem(verified)
-        : routeUnparsedProblem(note, images.length > 0);
-      const safeTextOnly = images.length > 0 && !!agreement &&
-        verifiedTextOnlyScreenshot(images.length > 0,
-          get().extraction.readings.map(r => r.extraction), verified, taskRoute,
-          agreement.conflicts?.filter(c => c.severity === "high").map(c => c.field) ?? []);
+      const taskRoute = routeUnparsedProblem(note, images.length > 0);
       const trustedMetrics = await trustedMetricsReady;
       if (!get().running || get().runId !== runId) return;
       const decision = planIntelligentPanels({
@@ -2915,7 +2800,7 @@ export const useStore = create<State>((set, get) => ({
         try {
           const eligible = decision.selected.map(id => ({ id, model: routes.get(id)!.model }));
           const prompt = gatewayRouterPrompt(
-            [note, verified?.problemSummary ?? "", context].filter(Boolean).join("\n").slice(0, 6500),
+            [note, images.length ? `${images.length} untranscribed screenshot image(s)` : ""].filter(Boolean).join("\n").slice(0, 6500),
             eligible, decision.selected);
           const response = await Promise.race([
             bridge.runOnce({
@@ -2953,7 +2838,7 @@ export const useStore = create<State>((set, get) => ({
       if (!active.length) {
         set({ running: false });
         get().pushToast("err", "No verified image-capable agents",
-          "Run a vision capability probe for an enabled model, or use verified screenshot extraction before analysis.");
+          "No approved model on this gateway passed the required live image check. Verify your vision-capable model access in API Settings.");
         return;
       }
       publishOverlayState(get());
@@ -2968,20 +2853,15 @@ export const useStore = create<State>((set, get) => ({
         // the right thing to send a vision model and useless to send a text-only
         // one, and both are in the panel now.
         const plan = planFor({
-          mode: options?.adaptivePanels
-            ? (context && get().extraction.agreement ? "extract" : "auto")
-            : settings.contextMode,
-          canSee: options?.adaptivePanels
-            ? (get().settings.probes[route.model]?.ok === true &&
-               get().settings.probes[route.model]?.vision === true &&
-               canSeeVia(provider, route, get().settings))
-            : canSeeVia(provider, route, get().settings),
+          mode: "images",
+          canSee: images.length === 0 || (get().settings.probes[route.model]?.ok === true &&
+            get().settings.probes[route.model]?.vision === true),
           hasImages: images.length > 0,
           context,
         });
         if (plan.blind) {
           get().failAgent({ runId, agentId: provider, attemptId: attempts[provider],
-            message: `${route.model} was not called: it has neither verified screenshot access nor a successful reading. Retry the reading or choose an image-capable model.` });
+            message: `${route.model} was not called: it has not passed live vision verification on the selected gateway. Choose an approved vision-capable model.` });
           return;
         }
         try {
@@ -3068,7 +2948,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   retry: async (agentId) => {
-    const { settings, images, note, runId, keys, gatewayKey, extraction } = get();
+    const { settings, images, note, runId, keys, gatewayKey } = get();
     const provider = agentId as AgentId;
     const route = routeFor(provider, settings, keys, gatewayKey);
     if (!route) {
@@ -3110,22 +2990,24 @@ export const useStore = create<State>((set, get) => ({
       ),
     }));
     publishOverlayState(get());
-    // Reuse the reading the rest of the panel was given rather than extracting
-    // again: a second vision pass could transcribe slightly differently, and this
-    // pane's answer would then be to a subtly different question than its
-    // neighbours' -- which would show up in the consensus as a real disagreement.
-    const plan = planFor({
-      mode: settings.contextMode,
-      canSee: canSeeVia(provider, route, settings),
-      hasImages: images.length > 0,
-      context: extraction.context,
-    });
+    // A retry is also a fresh direct-vision request; never fall back to OCR.
+    let canSee = images.length === 0;
+    if (images.length && route.viaGateway && gatewayKey) {
+      const checked = await verifyGatewayCandidates({
+        configured: [{ id: provider, model: route.model }],
+        catalogue: [], requireVision: true, allowFamilyAlternatives: false,
+        probe: (models, vision) => probeGatewayWithRecentSuccess(models, vision, get().settings),
+      });
+      canSee = checked.routes.length > 0;
+    }
+    const plan = planFor({ mode: "images", canSee,
+      hasImages: images.length > 0, context: "" });
     if (plan.blind) {
       get().failAgent({ runId: id, agentId, attemptId,
-        message: "Retry stopped: this model has neither verified screenshot access nor a successful reading." });
+        message: "Retry stopped: model has no verified vision access on the active gateway." });
       return;
     }
-    const knowledge = solverKnowledgePack(get, `${note}\n\n${extraction.context}`);
+    const knowledge = solverKnowledgePack(get, note);
 
     try {
       await bridge.runAgent({
@@ -3136,12 +3018,12 @@ export const useStore = create<State>((set, get) => ({
         model: route.model,
         systemPrompt: systemPrompt(
           settings.mode,
-          resolveAnswerLanguage(settings.outputLanguage, get().extraction.agreement?.merged.language ?? "")
+          resolveAnswerLanguage(settings.outputLanguage, "")
         ),
         userText: userPrompt(
           note,
           plan.sendImages && images.length > 0,
-          plan.context,
+          "",
           plan.sendImages ? images : [],
           knowledge
         ),

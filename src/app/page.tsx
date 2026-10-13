@@ -274,7 +274,7 @@ function Workbench() {
       {workspace === "council" && intakeOpen && (
         <StoryStripIntake running={running} onStartAnalysis={() => {
           // The store chooses available routes, initializes the selected agents,
-          // and starts extraction/reasoning. Reveal the result workspace now:
+          // and starts independent image reasoning. Reveal the result workspace now:
           // route discovery performs live gateway checks before it flips
           // `running`, so waiting for that flag leaves the click looking inert.
           setStoryMode(true);

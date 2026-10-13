@@ -17,7 +17,6 @@ export default function StoryResultWorkspace() {
   const runId = useStore(s => s.runId);
   const council = useStore(s => s.council);
   const review = useStore(s => s.review);
-  const extraction = useStore(s => s.extraction);
   const running = useStore(s => s.running);
   const preparing = useStore(s => s.preparing);
   const judge = useStore(s => s.judge);
@@ -25,7 +24,6 @@ export default function StoryResultWorkspace() {
   const settings = useStore(s => s.settings);
   const gatewayKey = useStore(s => s.gatewayKey);
   const runReview = useStore(s => s.runReview);
-  const runExtraction = useStore(s => s.runExtraction);
   const start = useStore(s => s.start);
   const [language, setLanguage] = useState("original");
   // A new run can spend time in live model checks before it gets a new runId.
@@ -60,7 +58,6 @@ export default function StoryResultWorkspace() {
   const failed = active.filter(a => a.status === "error");
   const actuallyWorking = active.filter(a => ["streaming", "done"].includes(a.status));
   const diagnostics = [
-    extraction.status === "error" && extraction.error ? { label: "Screenshot reading", message: extraction.error } : null,
     ...Object.values(settings.routerModels).flatMap(model => {
       const probe = settings.probes[model];
       return settings.useGateway && probe && !probe.ok
@@ -75,8 +72,7 @@ export default function StoryResultWorkspace() {
     !preparing && review.status === "error" && reviewError ? { label: "Solution review", message: reviewError } : null,
   ].filter((entry): entry is { label: string; message: string } => Boolean(entry));
   const councilStage = councilStageText(councilPhase);
-  const processText = extraction.status === "running" ? "Reading the screenshots and agreeing on what the question asks." :
-    preparing ? "Selecting up to four models from the approved roster and checking their API routes." :
+  const processText = preparing ? "Checking up to four approved models for live screenshot vision support." :
     active.length === 0 && running ? "Choosing verified models for this question." :
     councilStage ? councilStage :
     reviewRunning ? "Reviewing the selected code and its technical report." :
@@ -88,8 +84,7 @@ export default function StoryResultWorkspace() {
     issueCount ? `${issueCount} selected ${issueCount === 1 ? "model needs" : "models need"} attention. Open run diagnostics for details.` :
     report ? "A candidate answer is available while verification finishes." :
     "The solution will appear here when a selected model returns usable code.";
-  const progress = extraction.status === "running" ? "Reading screenshots" :
-    preparing ? "Checking model availability" :
+  const progress = preparing ? "Checking vision-capable models" :
     active.length === 0 && running ? "Selecting best agents" :
     busyAgents.length ? actuallyWorking.length ? "Solving your problem" : "Preparing solver models" :
     councilStage ? "Verifying and reviewing" :
@@ -103,7 +98,7 @@ export default function StoryResultWorkspace() {
     <header className="story-result-status">
       <span className="story-result-indicator" data-busy={preparing || running || reviewRunning} />
       <div><strong>{progress}</strong><span>{active.length ? `${readyCount} of ${active.length} selected answers ready` : preparing ? "Checking API routes" : "The engine is preparing the problem"}</span></div>
-      <span className="story-result-status-note">{extraction.status === "done" ? "Screenshot understood" : extraction.status === "error" ? "Reading needs attention" : ""}</span>
+      <span className="story-result-status-note">{active.length ? "Independent image analysis" : "Direct vision · no extraction"}</span>
     </header>
     <section className="story-agent-progress" aria-label="Selected API model progress">
       <div className="story-agent-progress-heading">
@@ -114,7 +109,7 @@ export default function StoryResultWorkspace() {
         {modelProgress.map(({ agent, lamp }) => {
           const label = lamp === "ready" ? "Answer ready" : lamp === "issue" ? "Needs attention" :
             lamp === "cancelled" ? "Cancelled" : agent.status === "streaming" ? "Generating answer" :
-            extraction.status === "running" ? "Waiting for reading" : "Waiting for response";
+            preparing ? "Verifying image access" : "Waiting for response";
           return <li className="story-agent-tile" data-lamp={lamp} key={agent.id}>
             <span className="story-agent-light" aria-hidden="true" />
             <div className="story-agent-identity">
@@ -127,7 +122,7 @@ export default function StoryResultWorkspace() {
             </div>
           </li>;
         })}
-      </ol> : <p className="story-agent-pending">{extraction.status === "running" ? "Waiting for screenshot reading…" : preparing ? "Checking available models…" : "The selected models will appear here when assigned."}</p>}
+      </ol> : <p className="story-agent-pending">{preparing ? "Checking available models and vision capability…" : "The selected models will appear here when assigned."}</p>}
       <p className="story-process-text" role="status"><span aria-hidden="true" />{processText}</p>
     </section>
     <div className="story-result-columns">
@@ -166,13 +161,9 @@ export default function StoryResultWorkspace() {
         {diagnostics.length > 0 && <details className="story-diagnostics" open={!report}>
           <summary>Run diagnostics ({diagnostics.length})</summary>
           {diagnostics.map((entry, index) => <p key={index}><strong>{entry.label}:</strong> {entry.message}</p>)}
-          {extraction.status === "error" && <button type="button" className="story-subtle-button" disabled={running || preparing} onClick={() => void (async () => {
-            const reading = await runExtraction();
-            if (reading && !running) await start({ adaptivePanels: true });
-          })()}>Retry screenshot reading and analysis</button>}
-          {!running && !preparing && extraction.status === "done" && !report && failed.length > 0 &&
+          {!running && !preparing && !report && (failed.length > 0 || diagnostics.length > 0) &&
             <button type="button" className="story-subtle-button" onClick={() => void start({ adaptivePanels: true })}>
-              Start analysis with this reading
+              Retry with verified vision models
             </button>}
         </details>}
       </section>

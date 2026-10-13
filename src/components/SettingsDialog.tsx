@@ -1158,116 +1158,40 @@ function ProviderCard({ id }: { id: ProviderId }) {
   );
 }
 
-const CONTEXT_MODES = [
-  {
-    id: "auto" as const,
-    label: "Auto",
-    blurb:
-      "Each pane gets what it can use. Vision models see the screenshot; text-only models get a transcription only when needed. No extra setup or unnecessary reading pass.",
-  },
-  {
-    id: "images" as const,
-    label: "Images",
-    blurb:
-      "Every agent gets the screenshot and reads it itself. No shared transcription, so no shared misreading — this is the safest option and the default.",
-  },
-  {
-    id: "extract" as const,
-    label: "Reading",
-    blurb:
-      "Two vision models transcribe and compare the screenshot. Other agents use the agreed text, so text-only models can join. This adds two calls and can spread a transcription mistake.",
-  },
-  {
-    id: "both" as const,
-    label: "Both",
-    blurb:
-      "The screenshot and the reading. The most expensive and the most thorough: an agent that can see gets to catch the transcription being wrong.",
-  },
-];
-
-/** How the screenshot reaches the agents, and who reads it. */
+/** Read-only: Story Strip no longer has a separate extraction configuration. */
 function ReadingCard() {
-  const contextMode = useStore((s) => s.settings.contextMode);
-  const extractors = useStore((s) => s.settings.extractors);
-  const keys = useStore((s) => s.keys);
-  const patch = useStore((s) => s.patchSettings);
-
-  const mode = CONTEXT_MODES.find((m) => m.id === contextMode) ?? CONTEXT_MODES[0];
-
-  // Replacing one half of the pair. Picking the provider the other half already
-  // uses would collapse the cross-check into one model agreeing with itself, so
-  // the two swap places instead of colliding.
-  const setExtractor = (slot: 0 | 1, next: ProviderId) => {
-    const other = extractors[slot === 0 ? 1 : 0];
-    const pair: ProviderId[] = slot === 0 ? [next, other] : [other, next];
-    if (next === other) pair[slot === 0 ? 1 : 0] = extractors[slot];
-    patch({ extractors: pair });
-  };
-
-  const missing = extractors.filter((p) => !keys[p]);
-
-  return (
-    <div className="provider-card">
-      <div className="top">
-        <span className="name">Reading the screenshot</span>
-        <span className="spacer" />
-        <span className="vendor">section 9</span>
-      </div>
-
-      <div className="segmented" style={{ marginBottom: 8 }}>
-        {CONTEXT_MODES.map((m) => (
-          <button
-            key={m.id}
-            data-on={contextMode === m.id}
-            style={{ flex: 1 }}
-            onClick={() => patch({ contextMode: m.id })}
-          >
-            {m.label}
-          </button>
-        ))}
-      </div>
-
-      <p className="hint" style={{ marginTop: 0, marginBottom: 8 }}>
-        {mode.blurb}
-      </p>
-
-      {contextMode !== "images" && (
-        <>
-          {([0, 1] as const).map((slot) => (
-            <div className="row" key={slot}>
-              <label htmlFor={`extractor-${slot}`}>{slot === 0 ? "Reader" : "Checked by"}</label>
-              <select
-                id={`extractor-${slot}`}
-                className="field"
-                value={extractors[slot]}
-                onChange={(e) => setExtractor(slot, e.target.value as ProviderId)}
-              >
-                {VISION_PROVIDERS.map((p) => (
-                  <option key={p} value={p}>
-                    {PROVIDERS[p].label} — {PROVIDERS[p].vendor}
-                  </option>
-                ))}
-              </select>
-            </div>
-          ))}
-          <p className="hint">
-            Two different vendors is the point: a blind spot one model has, the other
-            probably does not. When they disagree on the code or the error, the run says so
-            instead of quietly picking one.
-            {missing.length > 0 && (
-              <>
-                {" "}
-                <b>No key saved for {missing.map((p) => PROVIDERS[p].vendor).join(" or ")}</b>
-                {missing.length === extractors.length
-                  ? " — reading cannot run, so runs fall back to sending the images."
-                  : " — only one model will read, and nothing will check it."}
-              </>
-            )}
-          </p>
-        </>
-      )}
+  const gatewayId = useStore(s => s.settings.gatewayId);
+  const gatewayKey = useStore(s => s.gatewayKey);
+  const probes = useStore(s => s.settings.probes);
+  const enabled = useStore(s => s.settings.enabled);
+  const availableVision = Object.values(probes).filter(p => p.ok && p.vision === true).length;
+  return <div className="provider-card">
+    <div className="top">
+      <span className="name">Independent screenshot vision</span>
+      <span className="spacer" />
+      <span className="vendor">Direct images</span>
     </div>
-  );
+    <p className="hint">
+      Council Editor uses a fixed roster of ten models, regardless of which API gateway
+      you select. Wiro, TokenRouter and Clean APIs only change the transport and
+      exact model-ID spelling. No gateway is allowed to introduce an eleventh model.
+    </p>
+    <p className="hint">
+      Every selected AI agent sees the original images and independently determines the
+      question and solution. There is no shared OCR or image extraction, no separate
+      reading agents, and no text-only substitute for a screenshot.
+    </p>
+    <div className="row"><span>Selected API</span><b>{gatewayPreset(gatewayId).label}</b></div>
+    <div className="row"><span>Gateway credential</span><b>{gatewayKey ? "Connected" : "Not connected"}</b></div>
+    <div className="row"><span>Eligible configured models</span><b>{Object.values(enabled).filter(Boolean).length} / 10</b></div>
+    <div className="row"><span>Models with observed vision support</span><b>{availableVision}</b></div>
+    <p className="hint">
+      Use the API tab to refresh this gateway's model catalogue and run a live
+      image-capability check. Only verified vision-capable models receive screenshot
+      bytes. The Big O knowledge library and Council test evidence guide solution
+      analysis; runtime measurements are never presented as theoretical Big O.
+    </p>
+  </div>;
 }
 
 const TABS = [
@@ -1275,7 +1199,7 @@ const TABS = [
   { id: "council" as const, label: "Council" },
   { id: "appearance" as const, label: "Appearance" },
   { id: "updates" as const, label: "Updates" },
-  { id: "reading" as const, label: "Reading" },
+  { id: "reading" as const, label: "Vision" },
   { id: "capture" as const, label: "Capture" },
   { id: "sessions" as const, label: "Sessions" },
   { id: "limits" as const, label: "Limits" },
@@ -2279,7 +2203,7 @@ export default function SettingsDialog() {
               />
             </div>
             <p className="hint">
-              Pane, reader, and judge requests use this rate. Extra requests queue instead of
+              Solver and Council requests use this rate. Extra requests queue instead of
               failing with <span className="mono">429 Too Many Requests</span>, so runs may take
               longer. TokenRouter&rsquo;s free tier allows 5 requests per minute.
             </p></> : <p className="hint">
