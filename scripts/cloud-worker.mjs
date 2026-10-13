@@ -207,10 +207,12 @@ const {
   synthesisUserPrompt,
   testSpecSystemPrompt,
   testSpecUserPrompt,
+  harnessPreflightDiagnostics,
 } = council;
 
 const MAX_OUTPUT = 64 * 1024;
 const REMOTE_RUN_TIMEOUT_MS = 120_000;
+const E2B_TIMEOUT_ATTEMPTS = Math.max(1, Number(process.env.CODE_AUDITOR_E2B_TIMEOUT_ATTEMPTS || 2));
 const TOKENROUTER_MIN_DELAY_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS || 13_000);
 const TOKENROUTER_JITTER_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_JITTER_MS || 1_500);
 const TOKENROUTER_REQUEST_TIMEOUT_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_REQUEST_TIMEOUT_MS || 75_000);
@@ -916,7 +918,19 @@ async function runVerification(settings, suite, program, options = {}) {
   if (provider !== "e2b" || !secret("E2B_API_KEY")) {
     throw new Error("No E2B key is saved for the account that owns this job.");
   }
-  return runE2BCode(suite.language, program, Number(settings.e2bTimeoutMs || REMOTE_RUN_TIMEOUT_MS), options);
+  const timeoutMs = Number(settings.e2bTimeoutMs || REMOTE_RUN_TIMEOUT_MS);
+  let last;
+  for (let attempt = 1; attempt <= E2B_TIMEOUT_ATTEMPTS; attempt += 1) {
+    try {
+      const result = await runE2BCode(suite.language, program, timeoutMs, options);
+      if (!result.timedOut || attempt === E2B_TIMEOUT_ATTEMPTS) return result;
+      last = new Error(`E2B execution timed out (attempt ${attempt})`);
+    } catch (error) {
+      if (!/timed out|timeout|deadline_exceeded|unavailable/i.test(String(error)) || attempt === E2B_TIMEOUT_ATTEMPTS) throw error;
+      last = error;
+    }
+  }
+  throw last || new Error("E2B execution timed out");
 }
 
 /**
@@ -1024,9 +1038,9 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
       // Naming it distinctly keeps a build problem out of the evidence the
       // judges weigh, where it would read as "this candidate is wrong".
       const brokenHarness =
-        /could not find or load main class|error: cannot find symbol|no such file or directory|command not found|compilation failed|error: expected/i.test(
+        /could not find or load main class|error: cannot find symbol|no such file or directory|command not found|compilation failed|error: expected|traceback \(most recent call last\)|nameerror:|syntaxerror:|typeerror:/i.test(
           diagnostic
-        );
+        ) || harnessPreflightDiagnostics(suite.language, suite.harness).length > 0;
       runs[candidate.letter] = {
         letter: candidate.letter,
         ran: true,

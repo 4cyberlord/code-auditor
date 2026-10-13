@@ -39,6 +39,26 @@ export interface KnowledgeHit {
 const RECORDS: KnowledgeRecord[] = [
   ...THEORETICAL_COMPLEXITY_RECORDS,
   {
+    id: "harness-language-safety",
+    title: "Language-aware executable harness rules",
+    kind: "runtime",
+    tags: ["harness", "e2b", "python", "javascript", "typescript", "java", "cpp", "rust", "go", "syntax", "testing"],
+    summary: "Generated test programs must be independently valid before they are used as evidence about a candidate.",
+    guidance: [
+      "Run a syntax/compile preflight for the harness before splicing in a candidate; a harness error is not a candidate failure.",
+      "Python comprehensions, closures, and expected-value builders must define every referenced name in scope; never use a different iterator name than the expression references.",
+      "Java harnesses use exactly one public Main class; C/C++/Rust/Go harnesses must compile as one standalone source with all imports/includes present.",
+      "Require a known-good reference implementation to pass and a deliberately mutated implementation to fail before trusting a harness.",
+      "Separate provider, sandbox-creation, command, process, and polling timeouts; retry transient infrastructure failures, not deterministic syntax or assertion failures.",
+      "Record complete stdout, stderr, exit status, and measured metrics so a failed harness can be regenerated instead of misattributed to a solver.",
+    ],
+    sources: [
+      { title: "Python language reference", url: "https://docs.python.org/3/reference/", trust: "official", note: "Scope, expressions, comprehensions, and syntax rules used by Python harness validation." },
+      { title: "Java language specification", url: "https://docs.oracle.com/javase/specs/", trust: "official", note: "Compilation-unit and class rules relevant to single-file Java harnesses." },
+      { title: "E2B sandbox SDK reference", url: "https://e2b.dev/docs/sdk-reference/js-sdk/v2.6.2/sandbox", trust: "official", note: "Sandbox lifetime and command/request timeout separation." },
+    ],
+  },
+  {
     id: "asymptotic-analysis-core",
     title: "Big O, tight bounds, and problem-size reasoning",
     kind: "runtime",

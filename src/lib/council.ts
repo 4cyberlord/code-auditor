@@ -172,6 +172,36 @@ export interface TestSuite {
   harness: string;
 }
 
+/**
+ * Static checks applied before a generated suite is allowed into E2B. These
+ * are intentionally conservative: rejecting a suspicious suite causes a
+ * regeneration, while accepting one never counts as proof of correctness.
+ */
+export function harnessPreflightDiagnostics(language: string, harness: string): string[] {
+  const lang = normalizeCodeLanguage(language);
+  const text = String(harness || "");
+  const errors: string[] = [];
+  if (!text.includes(SPLICE_MARKER)) errors.push("missing solution splice marker");
+  if (!text.trim()) errors.push("empty harness");
+  if (lang === "python") {
+    if (/Traceback|NameError|SyntaxError/i.test(text)) errors.push("contains Python traceback/error text");
+    // Catch the exact class of failure that escaped into production: a
+    // comprehension refers to a different variable than its iterator.
+    const comprehensions = text.matchAll(/\[[^\n\]]*\b([A-Za-z_]\w*)\s*%[^\n\]]*\s+for\s+([A-Za-z_]\w*)\s+in\s+/g);
+    for (const match of comprehensions) {
+      const referenced = match[1];
+      const iterator = match[2];
+      if (referenced !== iterator && referenced !== "range" && referenced !== "len") {
+        errors.push(`comprehension references '${referenced}' but iterates '${iterator}'`);
+      }
+    }
+  }
+  if (["cpp", "c", "java", "go", "rust"].includes(lang) && /<<<<<<<|>>>>>>>|<<<<<<< HEAD/.test(text)) {
+    errors.push("contains unresolved merge markers");
+  }
+  return [...new Set(errors)];
+}
+
 export const SPLICE_MARKER = "<<<SOLUTION>>>";
 
 const TESTS_BLOCK = /<<<TESTS\s*([\s\S]*?)\s*TESTS>>>/i;
@@ -186,7 +216,7 @@ export function parseTestSuites(text: string): TestSuite[] {
   let m: RegExpExecArray | null;
   while ((m = re.exec(body))) {
     const harness = m[2].trim();
-    if (harness.includes(SPLICE_MARKER)) {
+    if (harness.includes(SPLICE_MARKER) && harnessPreflightDiagnostics(m[1], harness).length === 0) {
       suites.push({ language: normalizeCodeLanguage(m[1]), harness });
     }
   }
@@ -1413,6 +1443,15 @@ export function testSpecSystemPrompt(): string {
     "\nTESTS>>>",
     "",
     "Every runnable case must assert its expected result, not merely call the code.",
+    "Before emitting the harness, perform a language-level self-review: every variable in a",
+    "comprehension, loop, closure, and expected-value expression must be defined in scope;",
+    "the harness must be syntactically valid for its stated language; and the harness itself",
+    "must not contain traceback text, placeholder variables, or code copied from a candidate",
+    "as an expected answer. Prefer a small independent oracle over a large fragile generator.",
+    "Python: use the actual comprehension variable (for example `for i in range(n)` when",
+    "the expression references i), and avoid relying on globals or implementation details.",
+    "Java: emit exactly one public Main class. C/C++/Rust/Go: keep the harness compilable",
+    "as a single standalone source file with imports/includes included.",
     "If the statement is too ambiguous to derive expected outputs safely, do not",
     "fabricate a passing harness; output the block empty so verification fails clearly.",
     "Write no commentary. If no candidate is code, output the block empty.",

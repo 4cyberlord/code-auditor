@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { extractFunctionSignatures, selectStorySolution, selectVerifiedStorySolution } from "../src/lib/storySolution.ts";
 import type { AgentFinal } from "../src/lib/parse.ts";
-import { missingSuiteLanguages, testSpecSystemPrompt, testSpecUserPrompt } from "../src/lib/council.ts";
+import { harnessPreflightDiagnostics, missingSuiteLanguages, testSpecSystemPrompt, testSpecUserPrompt } from "../src/lib/council.ts";
 const final=(code:string):AgentFinal=>({kind:"code",language:"python",answer:"Use a map",complexity:"O(n)",confidence:0.9,claims:[],code,raw:"",wellFormed:true});
 const agents=[
   {id:"a",model:"model A",enabled:true,status:"done" as const,final:final("def f():\n return 1")},
@@ -13,6 +13,8 @@ assert.equal(selectStorySolution(agents,council,"b")?.benchmark,null);
 assert.equal(selectStorySolution(agents,council,"b")?.provisional,true,"pane code is not a measured final answer");
 assert.equal(selectVerifiedStorySolution(agents,council,"b"),null,"no code is published during Council handoff");
 assert.equal(selectStorySolution([{...agents[0],status:"queued" as const,final:null}],council),null);
+assert.deepEqual(harnessPreflightDiagnostics("python", "x = [2 if i % 2 == 0 else -1 for _ in range(2000)]\n<<<SOLUTION>>>"), ["comprehension references 'i' but iterates '_'"]);
+assert.deepEqual(harnessPreflightDiagnostics("python", "x = [2 if i % 2 == 0 else -1 for i in range(2000)]\n<<<SOLUTION>>>"), []);
 const victory={...council,phase:"done",winner:"B",candidates:[{letter:"B",model:"validated",final:final("def winner():\n return 2"),text:"",error:null}],runs:{},revisedRuns:{}};
 assert.equal(selectStorySolution(agents,victory,"a")?.source,"validated");
 assert.equal(selectStorySolution(agents,victory,"a")?.provisional,true,"unmeasured council code remains provisional");
