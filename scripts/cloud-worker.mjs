@@ -23,7 +23,7 @@ import { executionId, validateExecution, parseExecutionOutput, executionStatus, 
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
-import { fetchExternalLanguageRows } from "./lib/externalLanguageSources.mjs";
+import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/externalLanguageSources.mjs";
 import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
 import { phaseTimer } from "./lib/phaseTimings.mjs";
 import { readFileSync } from "node:fs";
@@ -272,6 +272,12 @@ function mustEnv(name) {
   }
   return v;
 }
+
+// Fetch directory records once per TTL, shared by all languages/jobs. This
+// directory is service-role-only and contains no actual programming guides.
+const languageDirectory=createRegistryDirectoryLoader(()=>
+  rest("external_service_registry?select=service_key,provider,content_category,stores_language_markdown,is_external,metadata&service_key=eq.council_language_docs&limit=1")
+);
 
 async function rest(path, init = {}) {
   const res = await fetch(`${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/${path}`, {
@@ -1167,9 +1173,9 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   const failures = new Map();
   // Database packs are checksum validated; verified bundled packs remain an offline fallback.
   const languagePacks = await Promise.all(languages.map(language => loadLanguagePack(language, {
-    // Language documentation is stored on separately configured external
-    // databases, never on the app's Supabase project.
-    fetchRows: id => fetchExternalLanguageRows(id),
+    // Supabase supplies only external-service *metadata*, never language
+    // documents or Neon authentication secrets.
+    fetchRows: id => fetchExternalLanguageRows(id,{registryDirectory:languageDirectory}),
   })));
   const packsByLanguage = new Map(languagePacks.map(pack => [pack.language,pack]));
   await addEvent(job.id,"info","language_packs_ready",

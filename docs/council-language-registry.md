@@ -5,7 +5,9 @@ Council reports. The worker MUST NOT read or write language Markdown in Supabase
 Documentation lives either in the source-controlled `docs/language-runtime/*.md`
 fallback or in one or more independently provisioned external PostgreSQL
 databases exposing an authenticated PostgREST-compatible HTTPS endpoint
-(e.g. a Neon Data API). No external database has been provisioned automatically.
+(e.g. a Neon Data API). An external Neon database has been provisioned at project
+`rough-lake-58845101`, database `language_docs`, with eleven verified
+Markdown guides. Supabase holds only the non-secret directory entry.
 
 ## Configuration (cloud worker only)
 
@@ -29,7 +31,19 @@ copies the external token or any Markdown to the client or Supabase.
 Only HTTPS, external, non-Supabase endpoints are accepted. Registries are
 checked in listed priority order with a 2.5-second timeout each. Each result
 requires an approved status, review timestamp, size bound and SHA256 checksum.
-Without a configured external source the bundled packs are used immediately.
+A secure worker may discover the Neon endpoint from the service-role-only
+`public.external_service_registry` table in Supabase when explicit registry
+configuration is absent. This directory is metadata only and is cached for
+five minutes. The worker additionally requires a separate
+`NEON_LANGUAGE_DOCS_TOKEN` in its server environment and the directory's
+`credential_state` must be set to `verified` after a successful authenticated
+test. This value must be a valid Neon Auth JWT, not a Neon management API key
+or a Supabase service-role key.
+
+Until the signed service token and its lifecycle are configured and verified,
+the metadata intentionally remains `pending-verified-service-identity`, so
+the worker continues using the bundled Markdown guides without attempting
+unauthorized API requests.
 
 ## External database deployment and publishing
 

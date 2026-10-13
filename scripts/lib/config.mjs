@@ -107,6 +107,7 @@ export const BOOTSTRAP = new Set([
   // or credentials from the Supabase application configuration database.
   "CODE_AUDITOR_LANGUAGE_REGISTRIES",
   "CODE_AUDITOR_LANGUAGE_PUBLISH_TOKEN",
+  "NEON_LANGUAGE_DOCS_TOKEN",
 ]);
 
 /**

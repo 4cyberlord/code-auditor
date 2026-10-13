@@ -59,9 +59,53 @@ export function configuredLanguageRegistries(environment=process.env) {
  * On outage or tampered content, try the next external registry.
  * The caller's existing loadLanguagePack fallback handles a complete outage.
  */
-export async function fetchExternalLanguageRows(language,{environment=process.env,fetchImpl=fetch}={}){
+/**
+ * Only server-side, service-role authenticated application metadata may define
+ * which *external* database to contact. This directory does not contain docs
+ * or tokens. The worker must supply its own Neon Auth access token separately.
+ */
+export function registriesFromDirectory(rows,environment=process.env) {
+  const token=environment.NEON_LANGUAGE_DOCS_TOKEN;
+  if(typeof token!=="string"||!token.trim()||!Array.isArray(rows))return [];
+  return rows.filter(row=>
+    row && row.service_key==="council_language_docs" &&
+    row.provider==="neon" && row.content_category==="language_documentation" &&
+    row.stores_language_markdown===true && row.is_external===true &&
+    row.metadata?.credential_state==="verified" &&
+    row.metadata?.data_api_status==="active" &&
+    typeof row.metadata?.data_api_url==="string" &&
+    /^https:\/\/[^/]+\.neon\.tech\//.test(row.metadata.data_api_url)
+  ).slice(0,1).map(row=>({
+    id:"neon-docs",endpoint:externalRegistryUrl(row.metadata.data_api_url),
+    token:token.trim(),
+  }));
+}
+
+export function createRegistryDirectoryLoader(fetchRows, ttlMs=300000) {
+  let until=0,cache=[],pending=null;
+  return async ()=>{
+    const now=Date.now();
+    if(now<until)return cache;
+    if(pending)return pending;
+    pending=(async()=>{
+      try{
+        const rows=await fetchRows();
+        cache=Array.isArray(rows)?rows:[];
+      } catch {cache=[];}
+      until=Date.now()+Math.max(1000,ttlMs);
+      return cache;
+    })();
+    try{return await pending}finally{pending=null}
+  };
+}
+
+export async function fetchExternalLanguageRows(language,{environment=process.env,fetchImpl=fetch,registryDirectory}={}){
   const id=canonicalLanguage(language);
-  const registries=configuredLanguageRegistries(environment);
+  let registries=configuredLanguageRegistries(environment);
+  if(!registries.length && typeof registryDirectory==="function" && environment.NEON_LANGUAGE_DOCS_TOKEN) {
+    const rows=await registryDirectory();
+    registries=registriesFromDirectory(rows,environment);
+  }
   for(const registry of registries){
     try{
       const endpoint=new URL(registry.endpoint.href);
