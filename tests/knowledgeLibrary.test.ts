@@ -61,6 +61,8 @@ console.log("\n2. a loaded library is what retrieval searches");
     now: 1_000,
   });
   check("the database was used", library.source === "database", library.source);
+  check("bundled Big O guidance remains available with database rows",
+    library.records.some(record => record.id === "asymptotic-analysis-core"));
   const pack = knowledgePackFor("two pointers on a sorted array", 3, library.records);
   check("and its records reach the pack", pack.includes("Walk both ends inward"), pack.slice(0, 120));
   // The bundled pack does not know this record, so the two shelves are

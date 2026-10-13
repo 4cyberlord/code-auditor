@@ -24,6 +24,8 @@ const events = [];
 const patches = [];
 const reports = [];
 const modelCalls = [];
+const apiRoutes = [];
+let cleanRateRetries = 0;
 // Flipped for the second scenario, so the generated harness rejects every
 // candidate the way a harness with a wrong expectation does.
 let HARNESS_WRONG = false;
@@ -38,7 +40,7 @@ const abort = () => Object.assign(new Error("aborted"), { name: "AbortError" });
 function json(data, init = {}) {
   return new Response(JSON.stringify(data), {
     status: init.status || 200,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...init.headers },
   });
 }
 
@@ -56,6 +58,12 @@ let TIE_BREAK_PICK = "B";
 
 globalThis.fetch = async (url, init = {}) => {
   const href = String(url);
+  if (href.includes("/rest/v1/app_config?")) {
+    return json([{ key: "cleanapis", value: "test-clean-token", owner_id: "clean-owner" }]);
+  }
+  if (href === "https://cleanapis.com/v1/models") {
+    return json({ data: ["claude-opus-5.5", "kimi-k3", "gpt-5.6-sol", "unapproved-model"].map(id => ({ id })) });
+  }
   if (href.includes("/rest/v1/intelligence_")) {
     if (LIBRARY_DOWN) throw new Error("ECONNREFUSED");
     if (href.includes("intelligence_sources")) return json([]);
@@ -119,6 +127,11 @@ globalThis.fetch = async (url, init = {}) => {
   if (href.includes("/chat/completions")) {
     const req = JSON.parse(init.body);
     modelCalls.push(req);
+    apiRoutes.push({ url: href, authorization: init.headers?.authorization, model: req.model });
+    if (href === "https://cleanapis.com/v1/chat/completions" && cleanRateRetries === 0) {
+      cleanRateRetries++;
+      return json({ error: { message: "Rate limit exceeded" } }, { status: 429, headers: { "retry-after": "0.001" } });
+    }
     if (DEAD_MODEL && req.model === DEAD_MODEL) throw abort();
     if (REJECTS_REASONING && req.model === REJECTS_REASONING && req.reasoning_effort) {
       return json({ error: { message: "Unsupported parameter: 'reasoning_effort'" } }, { status: 400 });
@@ -291,7 +304,10 @@ FINAL>>>`);
   throw new Error(`Unexpected fetch: ${href}`);
 };
 
-const { runCouncilJob } = await import("../scripts/cloud-worker.mjs");
+const { runCouncilJob: runWorkerJob } = await import("../scripts/cloud-worker.mjs");
+const runCouncilJob = job => runWorkerJob({ ...job,
+  settings_snapshot: { executionProvider: "local", ...job.settings_snapshot },
+});
 const { COUNCIL_DEFAULT_MODELS } = await import("../src/lib/council.ts");
 
 console.log("\n1. cloud worker v1 happy path");
@@ -303,10 +319,10 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -361,7 +377,7 @@ const parsed = reports[0]?.report?.parsed;
 check("the synthesis parsed", parsed?.synthesis?.winner === "A", JSON.stringify(parsed?.synthesis?.winner));
 check("the approach is a field now", parsed?.synthesis?.approach === "direct", String(parsed?.synthesis?.approach));
 check("the judge's ranking was counted", parsed?.tally?.[0]?.letter === "A", JSON.stringify(parsed?.tally));
-check("the winner came from the synthesis, uncontested", parsed?.winnerSource === "synthesis", String(parsed?.winnerSource));
+check("the winner was selected from execution evidence", parsed?.winnerSource === "evidence", String(parsed?.winnerSource));
 
 // --- the presentation the overlay renders ----------------------------------
 const presentation = reports[0]?.report?.presentation;
@@ -459,10 +475,10 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -495,10 +511,10 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -533,11 +549,11 @@ await runCouncilJob({
     // past the solver slice — it is not a seat, but it can see, and that is
     // what the reading pass needs.
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat", vision: false },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat", vision: false },
       { id: "moonshotai/kimi-k3", endpoint: "chat", vision: false },
-      { id: "anthropic/claude-opus-4.6", endpoint: "chat", vision: true },
+      { id: "anthropic/claude-fable-5.1", endpoint: "chat", vision: true },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -548,7 +564,7 @@ check("so it transcribed instead", events.some((e) => e.phase === "reading_done"
 const readerEvent = events.find((e) => e.phase === "no_seeing_models");
 check(
   "the reader was a model that can see",
-  readerEvent?.payload?.readers?.includes("anthropic/claude-opus-4.6") &&
+  readerEvent?.payload?.readers?.includes("anthropic/claude-fable-5.1") &&
     !readerEvent?.payload?.readers?.includes("moonshotai/kimi-k3"),
   JSON.stringify(readerEvent?.payload?.readers)
 );
@@ -604,10 +620,10 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -638,15 +654,15 @@ await runCouncilJob({
   mode: "mcq",
   settings_snapshot: {
     overlayMode: "mcq",
-    mcqModel: "anthropic/claude-fable-5",
+    mcqModel: "anthropic/claude-fable-5.1",
     mcqEndpoint: "chat",
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-fable-5", endpoint: "chat", vision: true },
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat", vision: true },
+      { id: "anthropic/claude-fable-5.1", endpoint: "chat", vision: true },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat", vision: true },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -656,7 +672,7 @@ check("MCQ report is tagged", mcqReport.kind === "mcq", JSON.stringify(mcqReport
 check("MCQ answer is stored", mcqReport.answer?.label === "C", JSON.stringify(mcqReport.answer));
 check("MCQ why-not reasons are stored", mcqReport.whyNot?.length === 3, JSON.stringify(mcqReport.whyNot));
 check("MCQ checked knowledge first", events.some((e) => e.phase === "knowledge_selected"));
-check("MCQ used the configured model", mcqCall?.model === "anthropic/claude-fable-5", String(mcqCall?.model));
+check("MCQ used the configured model", mcqCall?.model === "anthropic/claude-fable-5.1", String(mcqCall?.model));
 check("MCQ completed", patches.some((p) => p.status === "completed" && p.mode === "mcq"));
 MCQ_READING = false;
 
@@ -675,15 +691,15 @@ await runCouncilJob({
   mode: "council",
   settings_snapshot: {
     overlayMode: "auto",
-    mcqModel: "anthropic/claude-fable-5",
+    mcqModel: "anthropic/claude-fable-5.1",
     mcqEndpoint: "chat",
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-fable-5", endpoint: "chat", vision: true },
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat", vision: true },
+      { id: "anthropic/claude-fable-5.1", endpoint: "chat", vision: true },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat", vision: true },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -712,10 +728,10 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat", vision: false },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat", vision: false },
       { id: "moonshotai/kimi-k3", endpoint: "chat", vision: false },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 }).catch((err) => {
   noEyesError = err;
@@ -762,16 +778,16 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
 const picked = events.find((e) => e.phase === "knowledge_selected");
 check("the database library was used", picked?.payload?.library === "database", JSON.stringify(picked?.payload));
-check("and only its records were searched", picked?.payload?.records === 1, String(picked?.payload?.records));
+check("database rows are searched alongside bundled algorithm guidance", picked?.payload?.records > 1, String(picked?.payload?.records));
 const dbSolver = modelCalls.find((c) => String(c.messages[0].content).includes("independent expert agents"));
 const dbText = textOf(dbSolver);
 check("the row reached the solver", dbText.includes("Counting the elements of an array"), dbText.slice(-260));
@@ -791,10 +807,10 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -823,11 +839,11 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
       { id: "z-ai/glm-5.3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -860,11 +876,11 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
       { id: "z-ai/glm-5.3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -878,6 +894,34 @@ check(
 );
 READERS_DISAGREE = false;
 TIE_BREAK_PICK = "B";
+
+console.log("\n10. Clean API carries the owner's token and only approved model IDs");
+events.length = patches.length = reports.length = modelCalls.length = apiRoutes.length = 0;
+await runCouncilJob({
+  id: "clean-job", owner_id: "clean-owner", session_id: "session-1",
+  settings_snapshot: {
+    mode: "code", maxTokens: 2048, gatewayId: "cleanapis", gatewayBaseUrl: "https://cleanapis.com/v1",
+    councilModels: [
+      { id: "unapproved-model", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
+      { id: "moonshotai/kimi-k3", endpoint: "chat" },
+    ],
+    councilJudges: [{ model: "openai/gpt-5.6-sol", emphasis: "correctness" }],
+    synthesisModel: "openai/gpt-5.6-sol",
+  },
+});
+check("Clean API job completed", patches.some(patch => patch.status === "completed"));
+check("Clean API's quota response was retried", cleanRateRetries === 1);
+check("every call used Clean API's chat endpoint", apiRoutes.length > 0 &&
+  apiRoutes.every(route => route.url === "https://cleanapis.com/v1/chat/completions"));
+check("every call used the owner's Clean token", apiRoutes.length > 0 &&
+  apiRoutes.every(route => route.authorization === "Bearer test-clean-token"));
+check("gateway aliases became exact Clean model IDs", apiRoutes.length > 0 &&
+  apiRoutes.every(route => ["claude-opus-5.5", "kimi-k3", "gpt-5.6-sol"].includes(route.model)));
+check("the unapproved model was never called", !apiRoutes.some(route => route.model === "unapproved-model"));
+check("Clean API received the screenshot", modelCalls.some(call =>
+  call.messages?.[1]?.content?.some?.(part => part.type === "image_url")));
+check("Clean API produced a tested final solution", reports[0]?.winner === "A" && reports[0]?.report?.runs?.A?.passed === 2);
 
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall cloud worker checks passed\n");
 process.exit(fail ? 1 : 0);

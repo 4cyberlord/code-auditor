@@ -29,6 +29,7 @@ export type ProbeReason =
   | "unknown-model"
   | "no-entitlement"
   | "auth"
+  | "quota"
   | "timeout"
   | "empty"
   | "unknown";
@@ -107,6 +108,30 @@ export function classifyProbeResult(
 
   const lower = raw.toLowerCase();
 
+  if (lower.includes("insufficient_user_quota") ||
+      lower.includes("remaining eligible quota") ||
+      lower.includes("cannot use part of your gift balance")) {
+    return {
+      status: "failed",
+      summary: `${model} — this gateway account has insufficient eligible credit.`,
+      reason: "quota" as const,
+      detail: "The key is accepted and the model is listed, but this account cannot fund the request. Add eligible credit or use another funded gateway.",
+      retryAfterMs: 0,
+      raw,
+    };
+  }
+
+  if (lower.includes("model catalog returned an invalid response")) {
+    return {
+      status: "failed",
+      summary: `${model} — the gateway could not resolve this model ID.`,
+      reason: "unknown" as const,
+      detail: "Refresh the gateway model list and use its exact spelling. A model shown in the list still needs a successful live test.",
+      retryAfterMs: 0,
+      raw,
+    };
+  }
+
   // Rate ceilings. The gateway's own message says "request limit" for the
   // per-minute plan and "concurrency limit" for the floods. Both are the same
   // advice to the user even though only one says a number.
@@ -116,8 +141,8 @@ export function classifyProbeResult(
     const retryAfterMs = parseRetryAfter(raw);
     const base =
       perMin != null
-        ? `Rate limited by TokenRouter — your plan is ${perMin} requests/minute.`
-        : "Rate limited by TokenRouter — too many requests in this window.";
+        ? `Rate limited by the gateway — your plan is ${perMin} requests/minute.`
+        : "Rate limited by the gateway — too many requests in this window.";
     return {
       status: "failed",
       summary: base,
@@ -164,7 +189,7 @@ export function classifyProbeResult(
       status: "failed",
       summary: `${model} — model id not recognised.`,
       reason: "unknown-model" as const,
-      detail: "Check the exact id in the TokenRouter catalogue, then again on the key's allowed list. It is usually the suffix (e.g. -preview) or the key's group entitlements.",
+      detail: "Check the exact ID in this gateway's catalogue and the key's allowed models.",
       retryAfterMs: 0,
       raw,
     };
@@ -179,7 +204,7 @@ export function classifyProbeResult(
       status: "failed",
       summary: `${model} — this key is not entitled to that model.`,
       reason: "no-entitlement" as const,
-      detail: "Go to tokenrouter.com → API Keys → edit the key → enable this model under Permissions. If the model is not in your plan, you may need to add it first under Models.",
+      detail: "Check the key's model permissions and plan in the gateway dashboard.",
       retryAfterMs: 0,
       raw,
     };
@@ -192,7 +217,7 @@ export function classifyProbeResult(
       status: "failed",
       summary: `${model} — the key was refused.`,
       reason: "auth" as const,
-      detail: "Re-paste the key in Settings; if it still fails, it is disabled at TokenRouter for this model, not mistyped here.",
+      detail: "Check this gateway key in Settings and verify its model permissions in the gateway dashboard.",
       retryAfterMs: 0,
       raw,
     };
@@ -219,7 +244,7 @@ export function classifyProbeResult(
       status: "failed",
       summary: `${model} — the gateway answered but gave nothing back.`,
       reason: "empty" as const,
-      detail: "Almost always the router, not the model: it is listed as available but its backing route returned an empty reply. TokenRouter usually fixes it within minutes.",
+      detail: "The gateway listed this model, but its backing route returned an empty reply. Retest shortly.",
       retryAfterMs: 30_000,
       raw,
     };
@@ -229,7 +254,7 @@ export function classifyProbeResult(
   if (lower.includes("overload") || lower.includes("capacity") || lower.includes("503") || lower.includes("502")) {
     return {
       status: "failed",
-      summary: `${model} — TokenRouter is overloaded.`,
+      summary: `${model} — the gateway is overloaded.`,
       reason: "unknown" as const,
       detail: "Not your key and not the model: the gateway itself said so. Wait and re-probe; this one costs nothing on our side to retry.",
       retryAfterMs: 30_000,
@@ -241,7 +266,9 @@ export function classifyProbeResult(
     status: "failed",
     summary: `${model} failed.`,
     reason: "unknown" as const,
-    detail: "The provider did not categorise this error. The raw reason is on the panel row; copy it into a bug report if this keeps happening.",
+    // Story Strip has no visible pane row. Keep the provider's actual reason
+    // in the notification so an uncategorised error remains actionable.
+    detail: raw,
     retryAfterMs: 0,
     raw,
   };
@@ -268,6 +295,8 @@ export function probeToastText(report: ProbeReport): { title: string; body: stri
   }
   return {
     title: report.summary,
-    body: report.detail ?? (report.raw || report.summary),
+    body: report.detail && report.raw && report.detail !== report.raw
+      ? `${report.detail}\nProvider response: ${report.raw.slice(0, 700)}`
+      : report.detail ?? (report.raw || report.summary),
   };
 }

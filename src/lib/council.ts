@@ -30,10 +30,11 @@
  */
 
 import type { AgentFinal } from "./parse.ts";
+import { isPrimaryModel, listedPrimaryRoute } from "./primaryModels.ts";
 
 // ------------------------------------------------------------------ candidates
 
-/** Candidate names. Ten solvers is the design; the alphabet past J is spare. */
+/** Candidate names. At most four independent solvers are dispatched per task. */
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 
 export const letterFor = (i: number): string => LETTERS[i] ?? `?${i}`;
@@ -361,13 +362,30 @@ export function selectVerifiedCandidate(runs: Record<string, CandidateRun>): {
   passed.sort(([letterA, a], [letterB, b]) => {
     // More passing cases are stronger coverage evidence, not a popularity vote.
     if (a.passed !== b.passed) return b.passed - a.passed;
-    // A reliable elapsed metric can break ties, but missing data cannot win.
+    // Compare actual execution measurements, never wall-clock orchestration
+    // duration. A 0-ms sample is a timer-resolution reading, not free work.
     const elapsedA = a.remoteElapsedMs;
     const elapsedB = b.remoteElapsedMs;
     const validA = typeof elapsedA === "number" && Number.isFinite(elapsedA) && elapsedA >= 0;
     const validB = typeof elapsedB === "number" && Number.isFinite(elapsedB) && elapsedB >= 0;
+    const memoryA = a.peakMemoryKb;
+    const memoryB = b.peakMemoryKb;
+    const measuredA = typeof memoryA === "number" && Number.isFinite(memoryA) && memoryA >= 0;
+    const measuredB = typeof memoryB === "number" && Number.isFinite(memoryB) && memoryB >= 0;
+    // A candidate that is no slower and uses no more memory is strictly
+    // preferable when both measurements come from the same test coverage.
+    if (validA && validB && measuredA && measuredB) {
+      if (elapsedA <= elapsedB && memoryA <= memoryB &&
+          (elapsedA < elapsedB || memoryA < memoryB)) return -1;
+      if (elapsedB <= elapsedA && memoryB <= memoryA &&
+          (elapsedB < elapsedA || memoryB < memoryA)) return 1;
+    }
+    // For a speed/memory trade-off, prefer measured speed, then memory. The
+    // report retains both numbers so this policy remains visible to the user.
     if (validA && validB && elapsedA !== elapsedB) return elapsedA - elapsedB;
     if (validA !== validB) return validA ? -1 : 1;
+    if (measuredA && measuredB && memoryA !== memoryB) return memoryA - memoryB;
+    if (measuredA !== measuredB) return measuredA ? -1 : 1;
     return letterA.localeCompare(letterB);
   });
   return {
@@ -605,15 +623,15 @@ export const COUNCIL_DEFAULT_MODELS: CouncilModelSpec[] = [
   { id: "moonshotai/kimi-k3", endpoint: "chat" },
   { id: "z-ai/glm-5.3", endpoint: "chat" },
   { id: "x-ai/grok-4.6", endpoint: "chat" },
-  { id: "google/gemini-3.7-flash", endpoint: "chat" },
+  { id: "qwen/qwen3.8-max", endpoint: "chat" },
 ];
 
 export const COUNCIL_DEFAULT_JUDGES: JudgeSeat[] = [
   { model: "openai/gpt-5.6-sol", emphasis: "performance" },
-  { model: "anthropic/claude-opus-5", emphasis: "security" },
+  { model: "anthropic/claude-opus-5.5", emphasis: "security" },
 ];
 
-export const COUNCIL_SIZE = { solversMin: 2, solversMax: 10, judgesMin: 1, judgesMax: 7 } as const;
+export const COUNCIL_SIZE = { solversMin: 2, solversMax: 4, judgesMin: 1, judgesMax: 7 } as const;
 
 /**
  * Gateway models that speak `/responses` rather than `/chat/completions`.
@@ -624,7 +642,7 @@ export const COUNCIL_SIZE = { solversMin: 2, solversMax: 10, judgesMin: 1, judge
  * wrong wire by the other, and that failure looks like a model refusing rather
  * than a router misdialling. One copy, in the file both sides already import.
  */
-export const RESPONSES_MODELS = new Set(["openai/gpt-5.3-codex", "openai/gpt-5.6-sol"]);
+export const RESPONSES_MODELS = new Set(["openai/gpt-5.6-sol"]);
 
 /**
  * Which wire a model answers on.
@@ -655,7 +673,7 @@ export function endpointForCouncilModel(
  * can be shown. So neither the vendor's word nor the gateway's is worth much.
  * Only measurement is, and this is where measurements are remembered.
  */
-export const BLIND_GATEWAY_ROUTES = new Set(["google/gemini-3.7-flash"]);
+export const BLIND_GATEWAY_ROUTES = new Set<string>();
 
 /**
  * How hard this model should think before answering.
@@ -792,12 +810,14 @@ export function reachableSeats<T>(
   idOf: (seat: T) => string,
   catalogue: string[] | undefined
 ): { reachable: T[]; unreachable: T[] } {
-  if (!catalogue?.length) return { reachable: seats, unreachable: [] };
-  const known = new Set(catalogue);
+  if (!catalogue?.length) return {
+    reachable: seats.filter(seat => isPrimaryModel(idOf(seat))),
+    unreachable: seats.filter(seat => !isPrimaryModel(idOf(seat))),
+  };
   const reachable: T[] = [];
   const unreachable: T[] = [];
   for (const seat of seats) {
-    (known.has(idOf(seat)) ? reachable : unreachable).push(seat);
+    (listedPrimaryRoute(idOf(seat), catalogue) ? reachable : unreachable).push(seat);
   }
   return { reachable, unreachable };
 }
@@ -986,10 +1006,15 @@ export function judgeSystemPrompt(emphasis: Emphasis): string {
     "every opinion including yours: a candidate whose tests failed is wrong, full stop.",
     "Among correct candidates, prefer the one with the strongest complexity and smallest",
     "auxiliary memory. Treat Runtime: 0ms / Memory <=10MB as measured claims only.",
+    "Derive each coding candidate's worst-case time and auxiliary space from its actual",
+    "code, not its COMPLEXITY claim. Name the dominant loops, recursion, data-structure",
+    "costs, and input dimensions in BASIS. If a bound is uncertain, write UNKNOWN.",
     "",
     "Report:\nVERDICT: <one line>\nRANKING: <letters, best first>\nCORRECT: <letters you",
     "verified correct yourself>\nWHY: <what separates the winner>\nDEFECTS: <per letter, the",
-    "failures you found>\nBEST ANSWER: <the answer you would ship, in full - corrected code",
+    "failures you found>\nCOMPLEXITY AUDIT:\n<one line per coding candidate:",
+    "A | TIME: O(n) | SPACE: O(1) | BASIS: one scan, fixed counters>",
+    "Use UNKNOWN for any bound you cannot justify.\nBEST ANSWER: <the answer you would ship, in full - corrected code",
     "if relevant>",
   ].join("\n");
 }
@@ -1566,9 +1591,18 @@ export interface JudgeReading {
   correct: string[];
   why: string;
   defects: string;
+  complexityAudits?: ComplexityAudit[];
   best: string;
   preamble: string;
   wellFormed: boolean;
+}
+
+/** An independent judge's code-derived claim, never a measured fact or proof. */
+export interface ComplexityAudit {
+  letter: string;
+  time: string;
+  space: string;
+  basis: string;
 }
 
 const JUDGE_LABELS: [string, string[]][] = [
@@ -1577,8 +1611,20 @@ const JUDGE_LABELS: [string, string[]][] = [
   ["correct", ["CORRECT"]],
   ["why", ["WHY"]],
   ["defects", ["DEFECTS"]],
+  ["complexityAudit", ["COMPLEXITY AUDIT"]],
   ["best", ["BEST ANSWER", "BEST"]],
 ];
+
+function parseComplexityAudits(body: string): ComplexityAudit[] {
+  const audits: ComplexityAudit[] = [];
+  for (const line of body.split("\n")) {
+    const match = /^\s*(?:[-*]\s*)?([A-Z])\s*\|\s*TIME:\s*(O\([^)]+\)|UNKNOWN)\s*\|\s*SPACE:\s*(O\([^)]+\)|UNKNOWN)\s*\|\s*BASIS:\s*(.+)\s*$/i.exec(line.replace(/\*\*/g, ""));
+    if (!match || audits.some(audit => audit.letter === match[1].toUpperCase())) continue;
+    audits.push({ letter: match[1].toUpperCase(), time: match[2].trim(),
+      space: match[3].trim(), basis: match[4].trim() });
+  }
+  return audits;
+}
 
 export function parseJudgeReport(text: string): JudgeReading {
   const { fields, preamble, matched } = readLabels(text || "", JUDGE_LABELS);
@@ -1588,10 +1634,55 @@ export function parseJudgeReport(text: string): JudgeReading {
     correct: lettersInOrder(fields.correct.split("\n")[0] || ""),
     why: fields.why,
     defects: fields.defects,
+    complexityAudits: parseComplexityAudits(fields.complexityAudit || ""),
     best: fields.best,
     preamble,
     wellFormed: matched,
   };
+}
+
+/** Rank only simple, same-input-size families. Multi-parameter or conditional
+ * bounds are left unranked instead of pretending O(V+E) equals O(n). */
+export function growthOrder(bound: string): number | null {
+  const outer = /^O\((.*)\)$/i.exec(bound.trim());
+  if (!outer) return null;
+  const expression = outer[1].toLowerCase().replace(/\s+/g, "").replace(/[×*]/g, "")
+    .replace(/²/g, "^2").replace(/³/g, "^3").replace(/log_?2\(?n\)?/g, "logn");
+  const orders: Record<string, number> = {
+    "1": 0, "logn": 1, "n": 2, "nlogn": 3, "n^2": 4,
+    "n^2logn": 5, "n^3": 6, "2^n": 7, "n!": 8,
+  };
+  return orders[expression] ?? null;
+}
+
+/** Two independent, code-based audits must agree before an asymptotic claim
+ * influences selection. A missing or unfamiliar expression is not a fast one. */
+export function agreedComplexityAudits(judges: readonly JudgeReading[]): Record<string, ComplexityAudit> {
+  const reports = new Map<string, Map<string, { audit: ComplexityAudit; voters: Set<string> }>>();
+  const totals = new Map<string, Set<string>>();
+  judges.forEach((judge, index) => {
+    const identity = (judge as JudgeReading & { model?: string }).model || `judge-${index}`;
+    for (const audit of judge.complexityAudits ?? []) {
+      if (!audit.basis || growthOrder(audit.time) === null || growthOrder(audit.space) === null) continue;
+      const byBound = reports.get(audit.letter) ?? new Map();
+      reports.set(audit.letter, byBound);
+      const key = `${growthOrder(audit.time)}:${growthOrder(audit.space)}`;
+      const vote = byBound.get(key) ?? { audit, voters: new Set<string>() };
+      vote.voters.add(identity);
+      byBound.set(key, vote);
+      const everyone = totals.get(audit.letter) ?? new Set<string>();
+      everyone.add(identity);
+      totals.set(audit.letter, everyone);
+    }
+  });
+  const agreed: Record<string, ComplexityAudit> = {};
+  for (const [letter, alternatives] of reports) {
+    const winner = [...alternatives.values()].sort((a, b) => b.voters.size - a.voters.size)[0];
+    if (winner && winner.voters.size >= 2 && winner.voters.size * 2 > (totals.get(letter)?.size ?? 0)) {
+      agreed[letter] = winner.audit;
+    }
+  }
+  return agreed;
 }
 
 // ------------------------------------------------ the deterministic winner
@@ -1669,13 +1760,11 @@ export interface WinnerDecision {
  * the first real run showed when it reinterpreted a failed execution until the
  * gate appeared not to apply.
  *
- * So the order here is: the gate first (execution beats everything), then the
- * judges' counted scoreboard, and the synthesis last, as the narrator. A
- * synthesis pick that clears the gate normally stands — it read the same
- * evidence and it wrote the answer text. It is displaced only when the judges
- * put a *gate-passing* candidate strictly above it, which is the one case where
- * the prose and the arithmetic genuinely disagree, and the disagreement is
- * recorded either way so a reader can see it happened.
+ * For executed code: require a passing run, compare equal-coverage candidates
+ * by independently agreed asymptotic bounds when available, then use measured
+ * runtime and memory for equal bounds or missing audits. The synthesis narrates
+ * the result; a model's uncorroborated complexity claim cannot award a win.
+ * Reasoning-only questions retain the judge/synthesis policy below.
  */
 export function decideWinner(args: {
   claimed: string;
@@ -1694,10 +1783,31 @@ export function decideWinner(args: {
       return { winner: "", source: "none", overruledReason: ruling.overruledReason,
         disagreement: evidence.reason, tally };
     }
-    return { winner: evidence.winner, source: "evidence", overruledReason: ruling.overruledReason,
-      disagreement: args.claimed && args.claimed !== evidence.winner
-        ? `The synthesis preferred Candidate ${args.claimed}, but ${evidence.reason}`
-        : evidence.reason, tally };
+    const strongestCoverage = Math.max(...evidence.eligible.map(letter => args.runs[letter].passed));
+    const comparable = evidence.eligible.filter(letter => args.runs[letter].passed === strongestCoverage);
+    const audited = agreedComplexityAudits(args.judges);
+    let chosen = evidence.winner;
+    let reason = evidence.reason;
+    // Compare Big O only after the correctness gate, on the same coverage,
+    // and only when every contender has two agreeing code-derived audits.
+    // Otherwise measurements remain the defensible tie-breaker.
+    if (comparable.length > 1 && comparable.every(letter => audited[letter])) {
+      comparable.sort((a, b) =>
+        growthOrder(audited[a].time)! - growthOrder(audited[b].time)! ||
+        growthOrder(audited[a].space)! - growthOrder(audited[b].space)!);
+      const best = comparable[0];
+      const tied = comparable.filter(letter =>
+        growthOrder(audited[letter].time) === growthOrder(audited[best].time) &&
+        growthOrder(audited[letter].space) === growthOrder(audited[best].space));
+      chosen = selectVerifiedCandidate(Object.fromEntries(tied.map(letter => [letter, args.runs[letter]]))).winner ?? best;
+      reason = `Candidate ${chosen} passed ${strongestCoverage} tests and its code-derived ` +
+        `complexity audit agreed across judges (${audited[chosen].time} time, ` +
+        `${audited[chosen].space} auxiliary space). Measured performance broke any equal-bound tie.`;
+    }
+    return { winner: chosen, source: "evidence", overruledReason: ruling.overruledReason,
+      disagreement: args.claimed && args.claimed !== chosen
+        ? `The synthesis preferred Candidate ${args.claimed}, but ${reason}`
+        : reason, tally };
   }
   const eligible = tally.filter((row) => (executed ? row.gate === "pass" : true) && row.points > 0);
   const leader = eligible[0];
@@ -1938,6 +2048,7 @@ export function buildPresentation(report: CouncilReport): Presentation {
 
   const winnerCandidate = report.candidates.find((c) => c.letter === report.winner);
   const winnerFinal = winnerCandidate?.revised ?? winnerCandidate?.final ?? null;
+  const winnerAudit = agreedComplexityAudits(report.dossier?.judges ?? [])[report.winner];
   const synth = report.dossier?.synthesis;
   return {
     standing: standing.standing,
@@ -1946,7 +2057,9 @@ export function buildPresentation(report: CouncilReport): Presentation {
     winnerSource: report.dossier?.winnerSource ?? (report.winner ? "synthesis" : "none"),
     provenance: winnerCandidate ? `Candidate ${winnerCandidate.letter} — ${winnerCandidate.model}` : "",
     approach: synth?.approach || "",
-    complexity: report.contract?.complexity || winnerFinal?.complexity || "",
+    complexity: winnerAudit
+      ? `Time ${winnerAudit.time}, auxiliary space ${winnerAudit.space} (independent code audits)`
+      : winnerFinal?.complexity || "",
     evidence,
     dissent,
     rejected: bullets(synth?.rejected || ""),

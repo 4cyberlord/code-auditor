@@ -69,9 +69,16 @@ console.log("\n6. patience failures");
 
 console.log("\n7. uncategorised errors stay raw rather than wearing polish");
 {
+  const quota = classifyProbeResult("moonshotai/kimi-k3", false,
+    "403 insufficient_user_quota: This model cannot use part of your gift balance, remaining eligible quota: $-0.04");
+  check("quota is identified", quota.reason === "quota" && quota.summary.includes("eligible credit"));
+  const catalog = classifyProbeResult("google/gemini-3.7-flash", false,
+    "500 The model catalog returned an invalid response.");
+  check("catalog error points to model spelling", catalog.detail?.includes("exact spelling") === true);
   const weird = classifyProbeResult("x/y", false, "the semaphore has escaped its kettle");
   check("still failed", weird.status === "failed");
   check("raw preserved", weird.raw.includes("kettle"));
+  check("unknown toast shows actual provider reason", probeToastText(weird).body.includes("kettle"));
 }
 
 console.log(fail ? `\n${fail} FAILURES\n` : "\nall probe-fit checks passed\n");

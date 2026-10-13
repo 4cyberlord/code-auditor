@@ -56,7 +56,10 @@ This is a programming problem. Work it as a senior engineer would:
 3. Write a complete, runnable solution. Not pseudocode, not a sketch.
 4. Trace your solution by hand against at least one example and any edge case that
    worries you. If the trace fails, fix the code and say what you changed.
-5. State time and space complexity.
+5. Derive worst-case time and auxiliary-space complexity from your actual code:
+   name the input dimensions, count preprocessing and repeated queries, and
+   distinguish expected or amortized costs from worst-case guarantees. If you
+   cannot justify a bound, say it is uncertain rather than guessing.
 
 Runtime discipline: optimise for the fastest correct approach the constraints justify.
 For LeetCode-style answers, aim for a practical runtime at or below 17ms when that is

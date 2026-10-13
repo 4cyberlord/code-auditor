@@ -329,17 +329,16 @@ const judge = (ranking: string, correct = "") =>
   assert.equal(tally.find((t) => t.letter === "A")!.firsts, 1);
 }
 
-// A synthesis pick that cleared the gate and leads the count is left alone.
+// Once code ran, the measured execution gate owns winner selection.
 {
   const runs = { A: run("A", { ok: true, passed: 12, failed: 0 }), B: run("B", { ok: true, passed: 12, failed: 0 }) };
   const decision = decideWinner({ claimed: "A", judges: [judge("A, B")], runs, letters: ["A", "B"] });
   assert.equal(decision.winner, "A");
-  assert.equal(decision.source, "synthesis");
-  assert.equal(decision.disagreement, "");
+  assert.equal(decision.source, "evidence");
 }
 
-// The prose and the arithmetic disagree. Both candidates passed, so the gate has
-// nothing to say — and the count, which is not a matter of opinion, decides.
+// Judge popularity alone cannot displace equally passing code without an
+// agreed complexity audit or a measured performance advantage.
 {
   const runs = { A: run("A", { ok: true, passed: 12, failed: 0 }), B: run("B", { ok: true, passed: 12, failed: 0 }) };
   const decision = decideWinner({
@@ -348,9 +347,8 @@ const judge = (ranking: string, correct = "") =>
     runs,
     letters: ["A", "B"],
   });
-  assert.equal(decision.winner, "B", "the counted scoreboard decides");
-  assert.equal(decision.source, "judges");
-  assert.match(decision.disagreement, /ranked Candidate B/);
+  assert.equal(decision.winner, "A", "unmeasured popularity cannot displace passing code");
+  assert.equal(decision.source, "evidence");
 }
 
 // A judge's favourite that failed its run is not promoted by any number of
@@ -373,9 +371,9 @@ const judge = (ranking: string, correct = "") =>
   const runs = { A: run("A", { passed: 0, failed: 0, note: "exit 1" }), B: run("B", { ok: true, passed: 9, failed: 0 }) };
   const decision = decideWinner({ claimed: "A", judges: [judge("A, B")], runs, letters: ["A", "B"] });
   assert.equal(decision.winner, "B");
-  assert.equal(decision.source, "judges");
+  assert.equal(decision.source, "evidence");
   assert.match(decision.overruledReason, /Execution outranks agreement/);
-  assert.match(decision.disagreement, /did not survive the gate/);
+  assert.match(decision.disagreement, /synthesis preferred Candidate A/i);
 }
 
 // Nothing ran at all — an MCQ, a maths answer. A gate with no evidence behind it

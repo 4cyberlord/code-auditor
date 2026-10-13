@@ -27,6 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { isPrimaryModel, listedPrimaryRoute, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "../src/lib/primaryModels.ts";
 import {
   captureWorkerException,
   closeObservability,
@@ -372,7 +373,7 @@ function chatModels(settings) {
     // spoke chat-completions. It now speaks both, so dropping a seat the user
     // deliberately configured would be silently discarding their roster.
     .filter((model) => model?.id)
-    .slice(0, Number(process.env.CODE_AUDITOR_WORKER_SOLVERS || 4));
+    .slice(0, Math.min(4, Math.max(1, Number(process.env.CODE_AUDITOR_WORKER_SOLVERS || 4))));
 }
 
 function chatJudges(settings) {
@@ -385,11 +386,52 @@ function chatJudges(settings) {
 }
 
 function gatewayBaseUrl(settings) {
-  return settings?.gatewayBaseUrl || "https://api.tokenrouter.com/v1";
+  return settings?.gatewayBaseUrl || ({
+    cleanapis: "https://cleanapis.com/v1",
+    wiro: "https://llm.wiro.ai/v1",
+    tokenrouter: "https://api.tokenrouter.com/v1",
+  })[settings?.gatewayId || "tokenrouter"] || "https://api.tokenrouter.com/v1";
 }
 
-function retryDelayMs(status, text, attempt) {
+function gatewayId(settings) {
+  return ["tokenrouter", "wiro", "cleanapis"].includes(settings?.gatewayId)
+    ? settings.gatewayId : "tokenrouter";
+}
+
+function gatewayCredential(settings) {
+  const id = gatewayId(settings);
+  return secret(id) || (id === "tokenrouter" ? secret("TOKENROUTER_API_KEY") : "");
+}
+
+function gatewayModel(model, settings) {
+  const approved = primaryModelId(model);
+  if (!approved) throw new Error(`${model} is outside the approved ten-model roster.`);
+  return listedPrimaryRoute(model, settings?.availableModels ?? []) ||
+    preferredPrimaryRoute(approved, gatewayId(settings));
+}
+
+async function discoverWorkerCatalog(settings) {
+  // A saved list may belong to the gateway selected before this job. Never use
+  // it as evidence about the current credential.
+  settings.availableModels = [];
+  try {
+    const response = await fetch(`${gatewayBaseUrl(settings).replace(/\/$/, "")}/models`, {
+      headers: { authorization: `Bearer ${gatewayCredential(settings)}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) return;
+    const body = await response.json();
+    const rows = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
+    settings.availableModels = primaryCatalog(rows.map(row => typeof row === "string" ? row : row?.id).filter(Boolean));
+  } catch {
+    // An unavailable catalogue is unknown, not permission to use other models.
+  }
+}
+
+function retryDelayMs(status, text, attempt, retryAfter) {
   if (status !== 429) return 0;
+  const seconds = retryAfter == null ? NaN : Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds * 1000, 90_000);
   const minuteLimit = /within\s+1\s+minutes?/i.test(text);
   const explicit = /retry(?:\s|-)?after["':\s]+(\d+)/i.exec(text);
   if (explicit) return Math.min(Number(explicit[1]) * 1000, 90_000);
@@ -412,7 +454,8 @@ async function tokenRouterTurn() {
   await run;
 }
 
-async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off" }) {
+async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off", apiKey, paced = true }) {
+  if (!isPrimaryModel(model)) throw new Error(`${model} is outside the approved ten-model roster.`);
   const content = [{ type: "text", text: user }];
   for (const image of images) {
     content.push({ type: "image_url", image_url: { url: image.dataUrl } });
@@ -423,7 +466,7 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
   let timeouts = 0;
   let think = noReasoning.has(model) ? "off" : reasoning;
   for (let attempt = 0; attempt < 3; attempt++) {
-    await tokenRouterTurn();
+    if (paced) await tokenRouterTurn();
     const controller = new AbortController();
     const budget = thinkingBudget(think);
     const timeout = setTimeout(() => controller.abort(), budget);
@@ -433,7 +476,7 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
         method: "POST",
         signal: controller.signal,
         headers: {
-          authorization: `Bearer ${secret("TOKENROUTER_API_KEY")}`,
+          authorization: `Bearer ${apiKey}`,
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -504,14 +547,15 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
       continue;
     }
 
-    const waitMs = retryDelayMs(resp.status, text, attempt);
+    const waitMs = retryDelayMs(resp.status, text, attempt, resp.headers.get("retry-after"));
     if (!waitMs || attempt === 2) break;
     await sleep(waitMs);
   }
   throw new Error(`${model}: ${last}`);
 }
 
-async function tokenRouterResponses({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off" }) {
+async function tokenRouterResponses({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off", apiKey, paced = true }) {
+  if (!isPrimaryModel(model)) throw new Error(`${model} is outside the approved ten-model roster.`);
   const content = [{ type: "input_text", text: user }];
   for (const image of images) {
     content.push({ type: "input_image", image_url: image.dataUrl });
@@ -521,7 +565,7 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
   let timeouts = 0;
   let think = noReasoning.has(model) ? "off" : reasoning;
   for (let attempt = 0; attempt < 3; attempt++) {
-    await tokenRouterTurn();
+    if (paced) await tokenRouterTurn();
     const controller = new AbortController();
     const budget = thinkingBudget(think);
     const timeout = setTimeout(() => controller.abort(), budget);
@@ -531,7 +575,7 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
         method: "POST",
         signal: controller.signal,
         headers: {
-          authorization: `Bearer ${secret("TOKENROUTER_API_KEY")}`,
+          authorization: `Bearer ${apiKey}`,
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -579,7 +623,7 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
       continue;
     }
 
-    const waitMs = retryDelayMs(resp.status, text, attempt);
+    const waitMs = retryDelayMs(resp.status, text, attempt, resp.headers.get("retry-after"));
     if (!waitMs || attempt === 2) break;
     await sleep(waitMs);
   }
@@ -610,11 +654,13 @@ function responseText(json) {
  * configured model did nothing on the cloud path.
  */
 async function tokenRouterGenerate({ settings, ...args }) {
-  const endpoint = endpointForCouncilModel(settings?.councilModels, args.model);
+  const endpoint = gatewayId(settings) === "tokenrouter"
+    ? endpointForCouncilModel(settings?.councilModels, args.model) : "chat";
   // Decided here rather than at six call sites, so no phase can quietly forget
   // to ask a model to think.
   const reasoning = reasoningForModel(settings, args.model);
-  const withThinking = { ...args, reasoning };
+  const withThinking = { ...args, model: gatewayModel(args.model, settings),
+    apiKey: gatewayCredential(settings), paced: gatewayId(settings) !== "cleanapis", reasoning };
   return endpoint === "responses"
     ? tokenRouterResponses(withThinking)
     : tokenRouterChat(withThinking);
@@ -677,10 +723,10 @@ function runtimeFor(language, code) {
   const lang = normalizeCodeLanguage(language);
   if (["python", "python3", "py", "py3"].includes(lang)) return { file: "main.py", command: "python3 main.py", runtime: "python3" };
   if (["javascript", "js", "node", "nodejs", "mjs", "cjs"].includes(lang)) {
-    if (isCommonJs(code)) return { file: "main.cjs", command: "node main.cjs", runtime: "node (commonjs)" };
-    return { file: "main.mjs", command: "node main.mjs", runtime: "node (esm)" };
+    if (isCommonJs(code)) return { file: "main.cjs", command: `${shellSingle(process.execPath)} main.cjs`, runtime: "node (commonjs)" };
+    return { file: "main.mjs", command: `${shellSingle(process.execPath)} main.mjs`, runtime: "node (esm)" };
   }
-  if (["typescript", "ts"].includes(lang)) return { file: "main.ts", command: "node --experimental-strip-types main.ts", runtime: "node (type stripping)" };
+  if (["typescript", "ts"].includes(lang)) return { file: "main.ts", command: `${shellSingle(process.execPath)} --experimental-strip-types main.ts`, runtime: "node (type stripping)" };
   if (["bash", "sh", "shell", "zsh", "console"].includes(lang)) return { file: "main.sh", command: "bash main.sh", runtime: "bash" };
   if (["ruby", "rb"].includes(lang)) return { file: "main.rb", command: "ruby main.rb", runtime: "ruby" };
   if (lang === "php") return { file: "main.php", command: "php main.php", runtime: "php" };
@@ -1476,7 +1522,7 @@ async function selectKnowledge(job, settings, { candidates = [], reading = null,
 
   const limit = Math.max(1, Number(settings.knowledgeLimit || 5));
   const library = await libraryFor(settings);
-  const pack = knowledgePackFor(query, limit, library.records);
+  const pack = knowledgePackFor(query, limit, library.records, true);
   await addEvent(
     job.id,
     pack.trim() ? "info" : "warn",
@@ -1694,19 +1740,22 @@ function mcqUserPrompt({ readingText, knowledge, detection, model }) {
 }
 
 function mcqEndpointFor(settings, model) {
+  if (gatewayId(settings) !== "tokenrouter") return "chat";
   if (settings?.mcqEndpoint === "chat" || settings?.mcqEndpoint === "responses") return settings.mcqEndpoint;
   return endpointForCouncilModel(settings?.councilModels, model);
 }
 
 async function mcqGenerate({ settings, baseUrl, model, system, user, images = [], maxTokens = 2048 }) {
-  const args = { baseUrl, model, system, user, images, maxTokens, reasoning: reasoningForModel(settings, model) };
+  const args = { baseUrl, model: gatewayModel(model, settings), system, user, images, maxTokens,
+    apiKey: gatewayCredential(settings), paced: gatewayId(settings) !== "cleanapis",
+    reasoning: reasoningForModel(settings, model) };
   return mcqEndpointFor(settings, model) === "responses"
     ? tokenRouterResponses(args)
     : tokenRouterChat(args);
 }
 
 function mcqModel(settings, models) {
-  const preferred = String(settings?.mcqModel || "anthropic/claude-fable-5").trim();
+  const preferred = String(settings?.mcqModel || "anthropic/claude-fable-5.1").trim();
   const available = reachableSeats([{ id: preferred }], (m) => m?.id, settings?.availableModels).reachable;
   if (available.length) return preferred;
   return models[0]?.id || preferred;
@@ -1717,15 +1766,16 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
   await notify(job.id, APP_DISPLAY_NAME, "MCQ job started.");
   await addEvent(job.id, "info", "mcq", "MCQ overlay workflow selected.");
   await loadOwnerSecrets(job.owner_id);
-  if (!secret("TOKENROUTER_API_KEY")) {
-    const message = "No TokenRouter key is saved for the account that owns this job.";
+  const settings = { ...(job.settings_snapshot || {}) };
+  if (!gatewayCredential(settings)) {
+    const message = `No ${gatewayId(settings)} key is saved for the account that owns this job.`;
     await addEvent(job.id, "error", "needs_attention", message);
     await patchJob(job.id, { status: "needs_attention", progress_phase: "needs_attention", error: message, finished_at: new Date().toISOString() });
     return;
   }
 
-  const settings = job.settings_snapshot || {};
   const baseUrl = gatewayBaseUrl(settings);
+  await discoverWorkerCatalog(settings);
   const roster = Array.isArray(settings.councilModels) && settings.councilModels.length
     ? settings.councilModels
     : COUNCIL_DEFAULT_MODELS;
@@ -1927,33 +1977,35 @@ export async function runCouncilJob(job) {
 
   // Whose job is this, and therefore whose keys pay for it.
   await loadOwnerSecrets(job.owner_id);
+  const settings = { ...(job.settings_snapshot || {}) };
 
-  if (!secret("TOKENROUTER_API_KEY")) {
+  if (!gatewayCredential(settings)) {
+    const message = `No ${gatewayId(settings)} key is saved for the account that owns this job.`;
     await addEvent(
       job.id,
       "error",
       "needs_attention",
-      "No TokenRouter key is saved for the account that owns this job."
+      message
     );
     await patchJob(job.id, {
       status: "needs_attention",
       progress_phase: "needs_attention",
-      error: "No TokenRouter key is saved for the account that owns this job.",
+      error: message,
       finished_at: new Date().toISOString(),
     });
-    await notify(job.id, APP_DISPLAY_NAME, "Council job needs TokenRouter configuration.");
+    await notify(job.id, APP_DISPLAY_NAME, `Council job needs ${gatewayId(settings)} configuration.`);
     await notifyOps({
       level: "warn",
       title: "Council job needs attention",
-      body: "No TokenRouter key is saved for the account that owns this job.",
+      body: message,
       jobId: job.id,
       phase: "needs_attention",
     }).catch(() => {});
     return;
   }
 
-  const settings = job.settings_snapshot || {};
   const baseUrl = gatewayBaseUrl(settings);
+  await discoverWorkerCatalog(settings);
   const models = chatModels(settings);
   const judges = chatJudges(settings);
 
@@ -2659,9 +2711,9 @@ export async function runCouncilJob(job) {
   }
   const ruling = enforceWinnerGate(claimed, gateRuns);
 
-  // Scoring is counting, and counting does not need a language model. The gate
-  // decides what may win, the judges' Borda tally decides between what is left,
-  // and the synthesis narrates the result it no longer gets to choose.
+  // Scoring is deterministic: execution gates correctness, independent code
+  // audits can establish comparable Big O bounds, and measured performance
+  // breaks remaining ties. Synthesis narrates the result.
   const decision = decideWinner({
     claimed,
     judges: judgeReadings,

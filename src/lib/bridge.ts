@@ -658,7 +658,7 @@ export async function runnableLanguages(): Promise<string[]> {
  */
 export async function listGatewayModels(
   baseUrl?: string | null,
-  gatewayId: Extract<TransportId, "tokenrouter" | "wiro"> = "tokenrouter"
+  gatewayId: Extract<TransportId, "tokenrouter" | "wiro" | "cleanapis"> = "tokenrouter"
 ): Promise<string[]> {
   if (!inTauri()) throw new Error(NOT_TAURI);
   return invoke<string[]>("list_gateway_models", { baseUrl: baseUrl ?? null, gatewayId });
@@ -686,11 +686,12 @@ export interface ProbeResult {
 export async function probeModels(
   models: string[],
   baseUrl?: string | null,
-  gatewayId: Extract<TransportId, "tokenrouter" | "wiro"> = "tokenrouter",
+  gatewayId: Extract<TransportId, "tokenrouter" | "wiro" | "cleanapis"> = "tokenrouter",
   testVision = false,
   // Which wire each model speaks when it is not chat. Passed through to the
   // probe so it does not mark a Responses-API model broken for being one.
-  endpointByModel?: Record<string, "chat" | "responses">
+  endpointByModel?: Record<string, "chat" | "responses">,
+  notifyOnResult = true
 ): Promise<ProbeResult[]> {
   if (!inTauri()) throw new Error(NOT_TAURI);
   return invoke<ProbeResult[]>("probe_models", {
@@ -699,6 +700,7 @@ export async function probeModels(
     gatewayId,
     testVision,
     endpointByModel: endpointByModel ?? null,
+    notifyOnResult,
   });
 }
 

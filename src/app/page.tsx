@@ -29,6 +29,7 @@ import LoginScreen from "@/components/LoginScreen";
 import { inTauri } from "@/lib/bridge";
 import { gateFor, useAuth } from "@/lib/auth";
 import { devLog } from "@/lib/devLog";
+import { PRIMARY_MODEL_IDS } from "@/lib/primaryModels";
 
 // The desktop session is stored in the system Keychain for thirty days. Do not
 // discard it after a short idle or sleep; doing so defeats saved sign-in and
@@ -98,6 +99,7 @@ function Workbench() {
   const hydrate = useStore((s) => s.hydrate);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const running = useStore((s) => s.running);
+  const preparing = useStore((s) => s.preparing);
   const storyRunId = useStore((s) => s.runId);
   const startAnalysis = useStore((s) => s.start);
   const signOut = useAuth((s) => s.signOut);
@@ -120,7 +122,10 @@ function Workbench() {
   const panes = agents.filter((a) => a.enabled);
   // Any run launched via a global shortcut should reveal the live workspace.
   useEffect(() => useStore.subscribe((current, previous) => {
-    if (current.running && !previous.running) setIntakeOpen(false);
+    if ((current.preparing && !previous.preparing) || (current.running && !previous.running)) {
+      setIntakeOpen(false);
+      setStoryMode(true);
+    }
   }), []);
 
   useAgentEvents();
@@ -215,6 +220,8 @@ function Workbench() {
           <span data-tauri-drag-region>
             {running
               ? "running"
+              : preparing ? "reading and selecting models"
+              : !storyRunId ? `${PRIMARY_MODEL_IDS.length} approved models · up to 4 per task`
               : `${panes.length} ${panes.length === 1 ? "model" : "models"}, one problem, one verdict`}
           </span>
         </span>
@@ -267,8 +274,11 @@ function Workbench() {
       {workspace === "council" && intakeOpen && (
         <StoryStripIntake running={running} onStartAnalysis={() => {
           // The store chooses available routes, initializes the selected agents,
-          // and starts extraction/reasoning. The running state reveals the panes.
+          // and starts extraction/reasoning. Reveal the result workspace now:
+          // route discovery performs live gateway checks before it flips
+          // `running`, so waiting for that flag leaves the click looking inert.
           setStoryMode(true);
+          setIntakeOpen(false);
           void startAnalysis({ adaptivePanels: true });
         }} />
       )}

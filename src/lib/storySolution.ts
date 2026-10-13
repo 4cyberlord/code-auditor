@@ -1,5 +1,5 @@
 import type { AgentFinal } from "./parse.ts";
-import type { Candidate, CandidateRun } from "./council.ts";
+import { gateFor, type Candidate, type CandidateRun } from "./council.ts";
 
 /** Keep one coherent source for the code and its execution evidence.
  * An unrelated benchmark must never be shown as a measurement of this code. */
@@ -45,17 +45,16 @@ export function selectStorySolution(
       const benchmark = winner?.revised?.code?.trim()
         ? council.revisedRuns[winner.letter] ?? null
         : council.runs[winner!.letter] ?? null;
-      return toDisplay(final, winner!.model, benchmark, false);
+      return toDisplay(final, winner!.model, benchmark, gateFor(benchmark) !== "pass");
     }
   }
   const completed = agents.filter(a => a.enabled && a.status === "done" && a.final?.code?.trim());
   const chosen = completed.find(a => a.id === representative && a.final?.wellFormed) ??
     completed.find(a => a.final?.wellFormed) ?? completed[0];
   if (!chosen?.final) return null;
-  return toDisplay(chosen.final, chosen.model, null,
-    agents.some(a => a.enabled && (a.status === "queued" || a.status === "streaming")) ||
-      (council.phase !== "idle" && council.phase !== "done" &&
-        council.phase !== "error" && council.phase !== "cancelled"));
+  // Pane code has not been executed as the final artifact. It is useful to
+  // show immediately, but never as a verified finished solution.
+  return toDisplay(chosen.final, chosen.model, null, true);
 }
 
 export interface FunctionSignature { name: string; signature: string }

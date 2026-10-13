@@ -1,9 +1,8 @@
 /**
  * Provider catalogue.
  *
- * Model IDs move fast — every one of these is editable in Settings at runtime,
- * so a new release from any vendor is a text-field change, not a rebuild.
- * Defaults verified against vendor docs, August 2026.
+ * Defaults belong to the user's fixed ten-model pool. Gateway discovery and
+ * live requests establish which exact routes the current credential can use.
  */
 
 export type ProviderId = "openai" | "moonshot" | "anthropic" | "gemini";
@@ -25,9 +24,9 @@ export interface ProviderSpec {
    * not exist on the other side.
    */
   defaultRouterModel: string;
-  /** Suggestions shown as a datalist; the field stays free-text. */
+  /** Approved suggestions shown as a datalist. */
   knownModels: string[];
-  /** The same, for the gateway's namespaced catalogue. Verified August 2026. */
+  /** The same identities, using TokenRouter's namespaced spelling. */
   knownRouterModels: string[];
   defaultBaseUrl: string;
   accent: string;
@@ -49,13 +48,10 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     keyHint: "sk-…",
     defaultModel: "gpt-5.6-sol",
     defaultRouterModel: "openai/gpt-5.6-sol",
-    knownModels: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+    knownModels: ["gpt-5.6-sol", "gpt-5.6-terra"],
     knownRouterModels: [
       "openai/gpt-5.6-sol",
       "openai/gpt-5.6-terra",
-      "openai/gpt-5.6-luna",
-      "openai/gpt-5.5-pro",
-      "openai/gpt-5.3-codex",
     ],
     defaultBaseUrl: "https://api.openai.com/v1",
     accent: "#10a37f",
@@ -69,12 +65,9 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     keyHint: "sk-…",
     defaultModel: "kimi-k3",
     defaultRouterModel: "moonshotai/kimi-k3",
-    knownModels: ["kimi-k3", "kimi-k2.6", "kimi-k2.5", "moonshot-v1-128k-vision-preview"],
+    knownModels: ["kimi-k3"],
     knownRouterModels: [
       "moonshotai/kimi-k3",
-      "moonshotai/kimi-k2.7-code",
-      "moonshotai/kimi-k2.6",
-      "moonshotai/kimi-k2.5",
     ],
     // api.moonshot.cn for the China region.
     defaultBaseUrl: "https://api.moonshot.ai/v1",
@@ -87,25 +80,13 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     vendor: "Anthropic",
     keyUrl: "https://console.anthropic.com/settings/keys",
     keyHint: "sk-ant-…",
-    defaultModel: "claude-opus-5",
-    /**
-     * Verified against the TokenRouter catalogue 2026-08-25.
-     *
-     * claude-opus-5 exists in the catalogue but fails with "no access" on keys
-     * that have not been explicitly entitled to it. claude-opus-4.6 is the
-     * stable, broadly-accessible alternative and is the model used throughout
-     * the council default bench.
-     */
-    defaultRouterModel: "anthropic/claude-opus-4.6",
-    knownModels: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"],
+    defaultModel: "claude-opus-5.5",
+    /** Exact identity requested by the user; availability is checked live. */
+    defaultRouterModel: "anthropic/claude-opus-5.5",
+    knownModels: ["claude-opus-5.5", "claude-fable-5.1"],
     knownRouterModels: [
-      "anthropic/claude-opus-4.6",
-      "anthropic/claude-fable-5",
-      "anthropic/claude-sonnet-4.6",
-      "anthropic/claude-haiku-4.5",
-      // Newer generation — available on keys with explicit access enabled.
-      "anthropic/claude-opus-5",
-      "anthropic/claude-sonnet-5",
+      "anthropic/claude-opus-5.5",
+      "anthropic/claude-fable-5.1",
     ],
     defaultBaseUrl: "https://api.anthropic.com/v1",
     accent: "#d97757",
@@ -117,14 +98,11 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     vendor: "Google",
     keyUrl: "https://aistudio.google.com/apikey",
     keyHint: "AIza…",
-    defaultModel: "gemini-3.7-flash",
-    defaultRouterModel: "google/gemini-3.7-flash",
-    knownModels: ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3-pro-image", "gemini-2.5-flash"],
+    defaultModel: "gemini-3.1-pro",
+    defaultRouterModel: "google/gemini-3.1-pro",
+    knownModels: ["gemini-3.1-pro"],
     knownRouterModels: [
-      "google/gemini-3.7-flash",
-      "google/gemini-3.6-flash",
-      "google/gemini-3.5-flash",
-      "google/gemini-3.1-pro-preview",
+      "google/gemini-3.1-pro",
     ],
     defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
     accent: "#4285f4",
@@ -205,15 +183,32 @@ export const WIRO_GATEWAY = {
   modelsUrl: "https://wiro.ai/models",
   accent: "#6c47ff",
   /**
-   * Wiro's model ids for each provider pane, verified against their docs
-   * (October 2026). All are free-text fields in Settings so any new model
-   * from Wiro's catalogue is a one-line edit, not a rebuild.
+   * Expected aliases for the approved pane models. These do not promise that
+   * Wiro serves every version; the current catalogue and probe decide that.
    */
   defaultRouterModels: {
     openai: "openai/gpt-5-6-sol",
     moonshot: "moonshotai/kimi-k3",
-    anthropic: "claude/opus-5",
-    gemini: "google/gemini-3.7-flash",
+    anthropic: "claude/opus-5-5",
+    gemini: "google/gemini-3-1-pro",
+  } as Record<ProviderId, string>,
+} as const;
+
+/** Clean APIs uses the unprefixed IDs from its OpenAI-compatible catalogue. */
+export const CLEANAPIS_GATEWAY = {
+  id: "cleanapis",
+  label: "Clean API",
+  vendor: "Clean APIs",
+  keyUrl: "https://cleanapis.com/dashboard/api-keys",
+  keyHint: "cc_…",
+  defaultBaseUrl: "https://cleanapis.com/v1",
+  modelsUrl: "https://cleanapis.com/models",
+  accent: "#28a888",
+  defaultRouterModels: {
+    openai: "gpt-5.6-sol",
+    moonshot: "kimi-k3",
+    anthropic: "claude-opus-5.5",
+    gemini: "gemini-3.1-pro",
   } as Record<ProviderId, string>,
 } as const;
 
@@ -266,6 +261,17 @@ export const KNOWN_GATEWAYS: GatewayPreset[] = [
     accent: WIRO_GATEWAY.accent,
     defaultRouterModels: WIRO_GATEWAY.defaultRouterModels,
   },
+  {
+    id: CLEANAPIS_GATEWAY.id,
+    label: CLEANAPIS_GATEWAY.label,
+    vendor: CLEANAPIS_GATEWAY.vendor,
+    keyUrl: CLEANAPIS_GATEWAY.keyUrl,
+    keyHint: CLEANAPIS_GATEWAY.keyHint,
+    defaultBaseUrl: CLEANAPIS_GATEWAY.defaultBaseUrl,
+    modelsUrl: CLEANAPIS_GATEWAY.modelsUrl,
+    accent: CLEANAPIS_GATEWAY.accent,
+    defaultRouterModels: CLEANAPIS_GATEWAY.defaultRouterModels,
+  },
 ];
 
 // ----------------------------------------------------------------- the panel
@@ -310,10 +316,15 @@ export interface ExtraAgent {
   vision: boolean;
 }
 
-/**
- * Panes that exist only through the gateway. None at present.
- */
-export const EXTRA_AGENTS: readonly ExtraAgent[] = [];
+/** The remaining approved models can compete for the four solver seats. */
+export const EXTRA_AGENTS: readonly ExtraAgent[] = [
+  { id: "fable", label: "Claude Fable", vendor: "Anthropic", model: "claude-fable-5.1", accent: "#d97757", vision: true },
+  { id: "terra", label: "GPT Terra", vendor: "OpenAI", model: "gpt-5.6-terra", accent: "#10a37f", vision: true },
+  { id: "grok", label: "Grok", vendor: "xAI", model: "grok-4.6", accent: "#a2a4aa", vision: true },
+  { id: "qwen", label: "Qwen", vendor: "Alibaba", model: "qwen3.8-max", accent: "#8465dc", vision: true },
+  { id: "glm", label: "GLM", vendor: "Zhipu AI", model: "glm-5.3", accent: "#52a0e8", vision: true },
+  { id: "seed", label: "Seed", vendor: "ByteDance", model: "seed-2.1-pro", accent: "#ef9050", vision: true },
+];
 
 export type ExtraAgentId = (typeof EXTRA_AGENTS)[number]["id"];
 
@@ -360,7 +371,7 @@ export function agentSpec(id: AgentId): AgentSpec {
       accent: extra.accent,
       vision: extra.vision,
       routerOnly: true,
-      free: true,
+      free: false,
     };
   }
   const p = PROVIDERS[id as ProviderId];
@@ -399,7 +410,7 @@ export function agentSpec(id: AgentId): AgentSpec {
  * travels over is either that vendor or the gateway. It doubles as the Keychain
  * entry id, because a credential belongs to whoever you are actually talking to.
  */
-export type GatewayId = typeof GATEWAY.id | typeof WIRO_GATEWAY.id;
+export type GatewayId = typeof GATEWAY.id | typeof WIRO_GATEWAY.id | typeof CLEANAPIS_GATEWAY.id;
 
 /** Finds the saved gateway preset, retaining TokenRouter for older settings. */
 export const gatewayPreset = (id: string | null | undefined): GatewayPreset =>

@@ -159,7 +159,12 @@ export async function loadKnowledgeLibrary(opts: LoadOptions = {}): Promise<Know
       cached = bundledLibrary("the database holds no usable records yet", now);
       return cached;
     }
-    cached = { records, source: "database", note: "", at: now };
+    // The database can contain personal/project guidance without erasing
+    // newly shipped algorithm rules. A row with the same ID deliberately
+    // overrides its bundled counterpart.
+    const merged = new Map(allKnowledgeRecords().map(record => [record.id, record]));
+    for (const record of records) merged.set(record.id, record);
+    cached = { records: [...merged.values()], source: "database", note: "bundled defaults merged with database records", at: now };
     return cached;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

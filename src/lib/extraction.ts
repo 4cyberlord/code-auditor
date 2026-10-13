@@ -1,4 +1,5 @@
 import { routeProblem, routingGuidance, reconcileProblemReadings } from "./problemRouting.ts";
+import { primaryModelId } from "./primaryModels.ts";
 
 /**
  * Turning a screenshot into structured engineering context.
@@ -478,10 +479,10 @@ export function compareExtractions(a: Extraction, b: Extraction): ExtractionAgre
  */
 export const VISION_PREFERENCE: string[] = [
   "openai/gpt-5.6-sol",
-  "anthropic/claude-opus-5",
-  "openai/gpt-5.3-codex",
-  "google/gemini-3.7-flash",
+  "anthropic/claude-opus-5.5",
+  "google/gemini-3.1-pro",
   "x-ai/grok-4.6",
+  "moonshotai/kimi-k3",
 ];
 
 export interface ReaderChoice<T> {
@@ -505,7 +506,10 @@ export function chooseReaders<T>(
   count = 2
 ): ReaderChoice<T> {
   const rank = (item: T) => {
-    const i = preference.indexOf(idOf(item));
+    const model = idOf(item);
+    const canonical = primaryModelId(model);
+    const i = preference.findIndex(known => known === model ||
+      (canonical !== null && primaryModelId(known) === canonical));
     return i === -1 ? preference.length : i;
   };
   const ordered = [...candidates].sort((a, b) => rank(a) - rank(b));

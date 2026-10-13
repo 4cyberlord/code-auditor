@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use futures_util::StreamExt;
+use futures_util::{future::join_all, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, State};
@@ -206,7 +206,7 @@ pub struct LocalQwenResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodingModelStepRequest {
-    /// "openai" | "moonshot" | "tokenrouter" | "wiro"; direct Anthropic/Gemini tools are
+    /// "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis"; direct Anthropic/Gemini tools are
     /// intentionally not claimed here until their native tool wires are mapped.
     pub provider: String,
     pub model: String,
@@ -242,14 +242,14 @@ pub async fn run_coding_model_step(
 ) -> Result<LocalQwenResponse, String> {
     crate::auth::require()?;
     let provider = req.provider.trim();
-    if !matches!(provider, "openai" | "moonshot" | "tokenrouter" | "wiro") {
+    if !matches!(provider, "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis") {
         return Err(format!(
             "{provider} is not available for Coding yet. Choose a TokenRouter, OpenAI, or Moonshot chat model."
         ));
     }
     let model = req.model.trim();
-    if model.is_empty() {
-        return Err("Choose a coding model before running.".into());
+    if !approved_model(model) {
+        return Err("Choose one of the ten approved models before running Coding.".into());
     }
     if req.messages.is_empty() {
         return Err("Coding model request must include messages.".into());
@@ -264,6 +264,7 @@ pub async fn run_coding_model_step(
             "openai" => "https://api.openai.com/v1".into(),
             "tokenrouter" => "https://api.tokenrouter.com/v1".into(),
             "wiro" => "https://llm.wiro.ai/v1".into(),
+            "cleanapis" => "https://cleanapis.com/v1".into(),
             _ => "https://api.moonshot.ai/v1".into(),
         });
     let mut body = json!({
@@ -288,7 +289,7 @@ pub async fn run_coding_model_step(
     let client = http_client()?;
     let key_c = key.clone();
     let body_c = body.clone();
-    let sent = send_governed(
+    let sent = send_for_provider(
         || {
             client
                 .post(&url)
@@ -296,7 +297,7 @@ pub async fn run_coding_model_step(
                 .json(&body_c)
                 .timeout(ONCE_TIMEOUT)
         },
-        is_gateway(provider),
+        provider,
     )
     .await
     .map_err(|e| format!("{provider}: {}", transport_detail(&e)))?;
@@ -385,6 +386,9 @@ pub async fn run_local_qwen(req: LocalQwenRequest) -> Result<String, String> {
 #[tauri::command]
 pub async fn run_local_qwen_step(req: LocalQwenRequest) -> Result<LocalQwenResponse, String> {
     crate::auth::require()?;
+    if !approved_model(&req.model) {
+        return Err("The coding bridge model is outside the approved ten-model roster.".into());
+    }
     let url = req.base_url.trim();
     if url.is_empty() {
         return Err("Qwen URL is empty.".into());
@@ -598,6 +602,9 @@ pub async fn run_agent(
     registry: State<'_, RunRegistry>,
     req: RunRequest,
 ) -> Result<(), String> {
+    if !approved_model(&req.model) {
+        return Err("This model is outside the approved ten-model roster.".into());
+    }
     let key = format!("{}::{}", req.run_id, req.agent_id);
     let token = registry.insert(key.clone(), req.attempt_id.clone());
     let registry = (*registry).clone();
@@ -608,7 +615,18 @@ pub async fn run_agent(
         let attempt_id = req.attempt_id.clone();
         let started = Instant::now();
 
-        let result = execute(&app, &req, token).await;
+        // A provider can keep a connection open without ever yielding a usable
+        // answer. Bound the whole request, including gateway admission and the
+        // stream, so one silent pane cannot hold the run open indefinitely.
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(240),
+            execute(&app, &req, token),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err("Model did not finish within four minutes. Try another verified model or retry this one.".into()),
+        };
 
         registry.finish(&key, &attempt_id);
 
@@ -670,6 +688,9 @@ const BRIDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1650)
 /// One-shot, non-streaming call. Used by the consensus judge.
 #[tauri::command]
 pub async fn run_once(req: RunRequest) -> Result<String, String> {
+    if !approved_model(&req.model) {
+        return Err("This model is outside the approved ten-model roster.".into());
+    }
     if req.endpoint.as_deref() == Some("responses") {
         return run_once_responses(&req).await;
     }
@@ -683,7 +704,7 @@ pub async fn run_once(req: RunRequest) -> Result<String, String> {
         }
         rb
     };
-    let resp = send_governed(build, is_gateway(&req.provider))
+    let resp = send_for_provider(build, &req.provider)
         .await
         .map_err(|e| format!("{}: {}", req.provider, transport_detail(&e)))?;
     let status = resp.status();
@@ -724,7 +745,7 @@ async fn run_once_responses(req: &RunRequest) -> Result<String, String> {
             .json(&body)
             .timeout(ONCE_TIMEOUT)
     };
-    let resp = send_governed(build, is_gateway(&req.provider))
+    let resp = send_for_provider(build, &req.provider)
         .await
         .map_err(|e| format!("{}: {}", req.provider, transport_detail(&e)))?;
     let status = resp.status();
@@ -769,7 +790,7 @@ async fn execute(
 
     let resp = tokio::select! {
         _ = token.cancelled() => return Ok(None),
-        r = send_governed(build, is_gateway(&req.provider)) => {
+        r = send_for_provider(build, &req.provider) => {
             r.map_err(|e| format!("{}: {}", req.provider, transport_detail(&e)))?
         }
     };
@@ -923,7 +944,7 @@ async fn execute_responses(
 
     let resp = tokio::select! {
         _ = token.cancelled() => return Ok(None),
-        r = send_governed(build, is_gateway(&req.provider)) => {
+        r = send_for_provider(build, &req.provider) => {
             r.map_err(|e| format!("{}: {}", req.provider, transport_detail(&e)))?
         }
     };
@@ -1069,7 +1090,13 @@ pub async fn probe_models(
     // Which wire each model speaks, if it is not the chat wire. A missing
     // entry is `chat`.
     endpoint_by_model: Option<std::collections::HashMap<String, String>>,
+    // Automatic preflight probes are returned to their caller. Only an explicit
+    // Settings test should show one toast per candidate, including fallbacks.
+    notify_on_result: Option<bool>,
 ) -> Result<Vec<ProbeResult>, String> {
+    if models.iter().any(|model| !approved_model(model)) {
+        return Err("Only the ten approved models can be probed.".into());
+    }
     let want_vision = test_vision.unwrap_or(false);
     let endpoint_by_model = endpoint_by_model.unwrap_or_default();
     let gateway_id = gateway_id.unwrap_or_else(|| "tokenrouter".into());
@@ -1081,19 +1108,26 @@ pub async fn probe_models(
         .filter(|b| !b.trim().is_empty())
         .unwrap_or_else(|| match gateway_id.as_str() {
             "wiro" => "https://llm.wiro.ai/v1".into(),
+            "cleanapis" => "https://cleanapis.com/v1".into(),
             _ => "https://api.tokenrouter.com/v1".into(),
         });
     let url = format!("{}/chat/completions", base.trim_end_matches('/'));
     let responses_url = format!("{}/responses", base.trim_end_matches('/'));
     let client = http_client()?;
 
-    // One at a time, through the governor. Sequentially, each probe finishes
-    // before the next is admitted, and the badges flip one by one as the models
-    // prove themselves.
-    let mut out: Vec<ProbeResult> = Vec::with_capacity(models.len());
-
-    for model in &models {
+    // Check independent models together. The gateway governor still paces
+    // requests, but one slow model no longer blocks every model behind it.
+    let checks = models.iter().map(|model| {
+        let client = &client;
+        let key = &key;
+        let url = &url;
+        let responses_url = &responses_url;
+        let endpoint_by_model = &endpoint_by_model;
+        let app = &app;
+        let gateway_id = &gateway_id;
+        async move {
         let started = std::time::Instant::now();
+        let checked = tokio::time::timeout(std::time::Duration::from_secs(90), async {
         let endpoint = endpoint_by_model
             .get(model)
             .map(|s| s.as_str())
@@ -1104,10 +1138,25 @@ pub async fn probe_models(
         // of the messages. Only asked when the user chose it — the flag is a
         // RequestBudget question, not a curiosity.
         let vision = if want_vision {
-            Some(probe_vision(&client, &url, &key, model).await)
+            Some(probe_vision(&client, &url, &key, model, &gateway_id).await)
         } else {
             None
         };
+
+        // A correct answer about the image proves both that the route exists
+        // and that it can read screenshots. A second text-only API call adds
+        // latency and consumes quota without proving anything new.
+        if let Some((true, note)) = &vision {
+            return ProbeResult {
+                model: model.clone(),
+                ok: true,
+                ms: started.elapsed().as_millis() as u64,
+                error: None,
+                reply: Some(truncate(note, 80)),
+                vision: Some(true),
+                vision_note: Some(note.clone()),
+            };
+        }
 
         // The prompt asks for the model's exact name: a reply that names it is
         // stronger evidence than a 200, and the name shows in the result so the
@@ -1151,14 +1200,15 @@ pub async fn probe_models(
         let url_c = target_url.to_string();
         let key_c = key.clone();
         let body_c = body.clone();
-        let sent = send_governed(
+        let sent = send_for_provider(
             || {
                 client
                     .post(&url_c)
                     .header("Authorization", format!("Bearer {key_c}"))
                     .json(&body_c)
+                    .timeout(std::time::Duration::from_secs(25))
             },
-            true,
+            &gateway_id,
         )
         .await;
 
@@ -1267,11 +1317,25 @@ pub async fn probe_models(
                 }
             }
         };
-        let _ = app.emit(EV_PROBE, &result);
-        out.push(result);
-    }
+        result
+        }).await;
+        let result = checked.unwrap_or_else(|_| ProbeResult {
+            model: model.clone(),
+            ok: false,
+            ms: started.elapsed().as_millis() as u64,
+            error: Some("Model availability check exceeded 90 seconds.".into()),
+            reply: None,
+            vision: None,
+            vision_note: None,
+        });
+        if notify_on_result.unwrap_or(true) {
+            let _ = app.emit(EV_PROBE, &result);
+        }
+        result
+        }
+    });
 
-    Ok(out)
+    Ok(join_all(checks).await)
 }
 
 /// Shows one model a small red square and asks it what colour it is.
@@ -1288,6 +1352,7 @@ async fn probe_vision(
     url: &str,
     key: &str,
     model: &str,
+    provider: &str,
 ) -> (bool, String) {
     let body = json!({
         "model": model,
@@ -1302,14 +1367,11 @@ async fn probe_vision(
         "max_tokens": 256,
     });
 
-    let _ = admit_to_gateway().await;
-    let sent = client
+    let sent = send_for_provider(|| client
         .post(url)
         .header("Authorization", format!("Bearer {key}"))
         .json(&body)
-        .timeout(std::time::Duration::from_secs(45))
-        .send()
-        .await;
+        .timeout(std::time::Duration::from_secs(45)), provider).await;
 
     match sent {
         Err(e) => (false, format!("No image reply: {}", transport_detail(&e))),
@@ -1379,6 +1441,7 @@ pub async fn list_gateway_models(
         .filter(|b| !b.trim().is_empty())
         .unwrap_or_else(|| match gateway_id.as_str() {
             "wiro" => "https://llm.wiro.ai/v1".into(),
+            "cleanapis" => "https://cleanapis.com/v1".into(),
             _ => "https://api.tokenrouter.com/v1".into(),
         });
     let url = format!("{}/models", base.trim_end_matches('/'));
@@ -1386,16 +1449,12 @@ pub async fn list_gateway_models(
     // The listing call also goes through the budget: before this it went out
     // immediately, so opening Settings on a fresh key cost one of five slots
     // the panes were about to need.
-    let admitted = admit_to_gateway().await;
-    let resp = http_client()?
+    let client = http_client()?;
+    let resp = send_for_provider(|| client
         .get(&url)
-        .header("Authorization", format!("Bearer {key}"))
-        .send()
+        .header("Authorization", format!("Bearer {key}")), &gateway_id)
         .await
         .map_err(|e| format!("Could not reach {url}: {e}"))?;
-    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        learn_from_429(admitted);
-    }
 
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
@@ -1516,7 +1575,27 @@ const RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 /// The transport whose budget this is. Direct vendor calls have their own,
 /// far larger, limits and must not be made to wait behind the gateway's.
 fn is_gateway(provider: &str) -> bool {
+    matches!(provider, "tokenrouter" | "wiro" | "cleanapis")
+}
+
+/// Clean API supplies its own quota and Retry-After responses. Keep the old
+/// five-per-minute shared governor scoped to the gateways it was configured for.
+fn uses_gateway_governor(provider: &str) -> bool {
     matches!(provider, "tokenrouter" | "wiro")
+}
+
+fn approved_model(model: &str) -> bool {
+    matches!(model.trim().to_ascii_lowercase().as_str(),
+        "claude-opus-5.5" | "anthropic/claude-opus-5.5" | "claude/opus-5-5" | "claude/opus-5.5" |
+        "claude-fable-5.1" | "anthropic/claude-fable-5.1" | "claude/fable-5-1" | "claude/fable-5.1" |
+        "gpt-5.6-sol" | "openai/gpt-5.6-sol" | "openai/gpt-5-6-sol" |
+        "gemini-3.1-pro" | "google/gemini-3.1-pro" | "google/gemini-3-1-pro" |
+        "grok-4.6" | "x-ai/grok-4.6" | "xai/grok-4-6" | "xai/grok-4.6" |
+        "gpt-5.6-terra" | "openai/gpt-5.6-terra" | "openai/gpt-5-6-terra" |
+        "qwen3.8-max" | "qwen/qwen3.8-max" | "qwen/qwen3-8-max" |
+        "kimi-k3" | "moonshotai/kimi-k3" | "moonshot/kimi-k3" |
+        "glm-5.3" | "z-ai/glm-5.3" | "zai/glm-5-3" | "glm/5-3" | "glm/5.3" |
+        "seed-2.1-pro" | "bytedance/seed-v2-1-pro" | "bytedance/seed-2.1-pro")
 }
 
 struct Gate {
@@ -1650,6 +1729,27 @@ fn retry_after(resp: Option<&reqwest::Response>, attempt: u32) -> std::time::Dur
     (base + std::time::Duration::from_millis(jitter_ms)).min(std::time::Duration::from_secs(30))
 }
 
+async fn send_for_provider(
+    build: impl Fn() -> reqwest::RequestBuilder,
+    provider: &str,
+) -> Result<reqwest::Response, reqwest::Error> {
+    if provider != "cleanapis" {
+        return send_governed(build, uses_gateway_governor(provider)).await;
+    }
+    // Clean API has a separate plan quota. Parallel calls use its own retry
+    // response instead of inheriting the TokenRouter/Wiro admission queue.
+    for attempt in 0..3u32 {
+        let response = send_with_retry(&build).await?;
+        if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS || attempt == 2 {
+            return Ok(response);
+        }
+        let delay = retry_after(Some(&response), attempt);
+        drop(response);
+        tokio::time::sleep(delay).await;
+    }
+    unreachable!("the loop returns on its last iteration")
+}
+
 /// Sends through the gateway's budget, and waits out a 429 rather than reporting
 /// it.
 ///
@@ -1701,7 +1801,7 @@ fn build_request(
 ) -> Result<(String, Vec<(String, String)>, Value), String> {
     let key = secrets::read_api_key(&req.provider)?;
     match req.provider.as_str() {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" => {
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => {
             let base = req
                 .base_url
                 .clone()
@@ -1709,6 +1809,7 @@ fn build_request(
                     "openai" => "https://api.openai.com/v1".into(),
                     "tokenrouter" => "https://api.tokenrouter.com/v1".into(),
                     "wiro" => "https://llm.wiro.ai/v1".into(),
+                    "cleanapis" => "https://cleanapis.com/v1".into(),
                     _ => "https://api.moonshot.ai/v1".into(),
                 });
             let mut content = vec![json!({ "type": "text", "text": req.user_text })];
@@ -1841,7 +1942,7 @@ fn gemini_text(v: &Value) -> String {
 
 fn extract_delta(provider: &str, v: &Value) -> String {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" => v["choices"][0]["delta"]["content"]
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => v["choices"][0]["delta"]["content"]
             .as_str()
             .unwrap_or_default()
             .to_string(),
@@ -1861,7 +1962,7 @@ fn extract_delta(provider: &str, v: &Value) -> String {
 
 fn extract_whole(provider: &str, v: &Value) -> String {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" => v["choices"][0]["message"]["content"]
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => v["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or_default()
             .to_string(),
@@ -1882,7 +1983,7 @@ fn extract_whole(provider: &str, v: &Value) -> String {
 
 fn extract_usage(provider: &str, v: &Value) -> Option<Usage> {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" => {
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => {
             let u = &v["usage"];
             u.is_object()
                 .then(|| (u["prompt_tokens"].as_u64(), u["completion_tokens"].as_u64()))
@@ -2029,7 +2130,7 @@ mod explain_tests {
             agent_id: "agent".into(),
             attempt_id: "attempt".into(),
             provider: "tokenrouter".into(),
-            model: "openai/gpt-5.3-codex".into(),
+            model: "openai/gpt-5.6-sol".into(),
             system_prompt: "system".into(),
             user_text: "hello".into(),
             images: vec![],
@@ -2059,6 +2160,19 @@ mod explain_tests {
         let (text, usage) = parse_responses_text("tokenrouter", raw).expect("response parses");
         assert_eq!(text, "OK");
         assert_eq!(usage, (Some(3), Some(2)));
+    }
+
+    #[test]
+    fn only_the_approved_roster_can_reach_a_provider() {
+        for id in ["claude-opus-5.5", "gpt-5.6-sol", "gemini-3.1-pro",
+            "x-ai/grok-4.6", "bytedance/seed-v2-1-pro", "google/gemini-3-1-pro"] {
+            assert!(approved_model(id), "{id}");
+        }
+        for id in ["claude/opus-5", "openai/gpt-5-mini", "google/gemini-3-7-flash", ""] {
+            assert!(!approved_model(id), "{id}");
+        }
+        assert!(is_gateway("cleanapis"));
+        assert!(!uses_gateway_governor("cleanapis"));
     }
 }
 

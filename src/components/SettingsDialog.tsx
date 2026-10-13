@@ -23,6 +23,7 @@ import * as bridge from "@/lib/bridge";
 import AccountCard from "./AccountCard";
 import HelperCard from "./HelperCard";
 import { classifyProbeResult } from "@/lib/probeFit";
+import { PRIMARY_MODEL_IDS, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "@/lib/primaryModels";
 import { PIN_LENGTH, authReauthenticate, reason, sanitizePin } from "@/lib/auth";
 
 /**
@@ -231,7 +232,7 @@ interface CodingModelChoice {
 }
 
 function supportsCodingTools(route: Route | null): boolean {
-  return !!route && ["openai", "moonshot", "tokenrouter", "wiro"].includes(route.provider);
+  return !!route && ["openai", "moonshot", "tokenrouter", "wiro", "cleanapis"].includes(route.provider);
 }
 
 function projectNameFromPath(path: string): string {
@@ -250,7 +251,8 @@ function CodingSettingsCard() {
       ALL_AGENTS.filter((id) => settings.enabled[id]).map((id) => {
         const spec = agentSpec(id);
         const route = routeFor(id, settings, keys, gatewayKey);
-        const endpoint = route ? endpointForCouncilModel(settings.councilModels, route.model) : "chat";
+        const endpoint = route && settings.gatewayId === "tokenrouter"
+          ? endpointForCouncilModel(settings.councilModels, route.model) : "chat";
         const unsupportedEndpoint = endpoint !== "chat";
         const unsupportedProvider = !supportsCodingTools(route);
         const available = !!route && !unsupportedEndpoint && !unsupportedProvider;
@@ -470,6 +472,7 @@ function GatewayCard() {
   const gatewayId = useStore((s) => s.settings.gatewayId);
   const baseUrl = useStore((s) => s.settings.gatewayBaseUrl);
   const routerModels = useStore((s) => s.settings.routerModels);
+  const enabledAgents = useStore((s) => s.settings.enabled);
   const patch = useStore((s) => s.patchSettings);
   const refreshKeys = useStore((s) => s.refreshKeys);
 
@@ -497,6 +500,10 @@ function GatewayCard() {
   const councilJudges = useStore((s) => s.settings.councilJudges);
   const synthesisModel = useStore((s) => s.settings.synthesisModel);
   const councilEnabled = useStore((s) => s.settings.councilEnabled);
+  const gatewayRoute = useCallback((model: string) => {
+    const id = primaryModelId(model);
+    return id ? preferredPrimaryRoute(id, gatewayId) : "";
+  }, [gatewayId]);
 
   // Panes, the judge, both readers, and the council roster — everything the
   // app will actually ask for, not just the four panes. Testing the router's
@@ -506,18 +513,21 @@ function GatewayCard() {
   const modelsInUse = useMemo(() => {
     const ids = new Set<string>();
     for (const p of PROVIDER_ORDER) ids.add(routerModels[p] || PROVIDERS[p].defaultRouterModel);
-    for (const e of EXTRA_AGENTS) ids.add(e.model);
+    for (const e of EXTRA_AGENTS) {
+      const id = primaryModelId(e.model);
+      if (enabledAgents[e.id] && id) ids.add(preferredPrimaryRoute(id, gatewayId));
+    }
     ids.add(routerModels[judgeProvider] || PROVIDERS[judgeProvider].defaultRouterModel);
     for (const x of extractors) {
       ids.add(routerModels[x] || PROVIDERS[x].defaultRouterModel);
     }
     if (councilEnabled) {
-      for (const m of councilModels) ids.add(m.id);
-      for (const j of councilJudges) ids.add(j.model);
-      if (synthesisModel.trim()) ids.add(synthesisModel.trim());
+      for (const m of councilModels) ids.add(gatewayRoute(m.id));
+      for (const j of councilJudges) ids.add(gatewayRoute(j.model));
+      if (synthesisModel.trim()) ids.add(gatewayRoute(synthesisModel));
     }
     return [...ids].filter(Boolean);
-  }, [routerModels, judgeProvider, extractors, councilEnabled, councilModels, councilJudges, synthesisModel]);
+  }, [routerModels, enabledAgents, gatewayId, gatewayRoute, judgeProvider, extractors, councilEnabled, councilModels, councilJudges, synthesisModel]);
 
   /** The catalogue as shown: every id the key can reach, narrowed by the filter. */
   const catalogue = useMemo(() => {
@@ -533,7 +543,10 @@ function GatewayCard() {
       const id = routerModels[p] || PROVIDERS[p].defaultRouterModel;
       if (id === m) roles.push(PROVIDERS[p].label.toLowerCase());
     }
-    for (const e of EXTRA_AGENTS) if (e.model === m) roles.push(e.label.toLowerCase());
+    for (const e of EXTRA_AGENTS) {
+      const id = primaryModelId(e.model);
+      if (id && preferredPrimaryRoute(id, gatewayId) === m) roles.push(e.label.toLowerCase());
+    }
     const judgeId = routerModels[judgeProvider] || PROVIDERS[judgeProvider].defaultRouterModel;
     if (judgeId === m) roles.push("judge");
     for (const x of extractors) {
@@ -541,10 +554,10 @@ function GatewayCard() {
       if (id === m) roles.push("reader");
     }
     if (councilEnabled) {
-      if (councilModels.some((x) => x.id === m)) roles.push("solver");
-      const seat = councilJudges.find((j) => j.model === m);
+      if (councilModels.some((x) => gatewayRoute(x.id) === m)) roles.push("solver");
+      const seat = councilJudges.find((j) => gatewayRoute(j.model) === m);
       if (seat) roles.push(`judge/${seat.emphasis}`);
-      if (synthesisModel.trim() === m) roles.push("synthesis");
+      if (gatewayRoute(synthesisModel) === m) roles.push("synthesis");
     }
     return roles;
   };
@@ -558,7 +571,7 @@ function GatewayCard() {
     setListing(true);
     setListError(null);
     try {
-      const ids = await bridge.listGatewayModels(baseUrl, gatewayId);
+      const ids = primaryCatalog(await bridge.listGatewayModels(baseUrl, gatewayId));
       setAvailable(ids);
       // Kept in settings, not just in this component's state: the Council reads
       // it before a run to skip seats this key cannot reach, and Settings is not
@@ -605,6 +618,7 @@ function GatewayCard() {
           ? `${draft.trim()}:${draftSecret.trim()}`
           : draft.trim();
       await bridge.setApiKey(gatewayId, credential);
+      patch({ availableModels: [], probes: {} });
       setDraft("");
       setDraftSecret("");
       await refreshKeys();
@@ -625,6 +639,7 @@ function GatewayCard() {
     setBusy(true);
     try {
       await bridge.deleteApiKey(gatewayId);
+      patch({ availableModels: [], probes: {} });
       await refreshKeys();
       setAvailable(null);
       setListError(null);
@@ -641,7 +656,7 @@ function GatewayCard() {
       <div className="top">
         <span className="dot" style={{ background: currentGateway.accent }} />
         <span className="name">{currentGateway.label} Gateway</span>
-        <span className="vendor">one key, every model</span>
+        <span className="vendor">one key, approved models</span>
         {active ? (
           <span className="badge" data-tone="good">
             Routing all panes
@@ -685,8 +700,13 @@ function GatewayCard() {
                     gatewayId: gw.id,
                     gatewayBaseUrl: gw.defaultBaseUrl,
                     routerModels: { ...gw.defaultRouterModels },
+                    availableModels: [],
+                    probes: {},
                   });
                   void refreshKeys();
+                  setDraft("");
+                  setDraftSecret("");
+                  setNote(null);
                   setAvailable(null);
                   setListError(null);
                 }}
@@ -762,7 +782,7 @@ function GatewayCard() {
             className="section-label"
             style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}
           >
-            <span>Everything this key can reach</span>
+            <span>Approved models listed by this key</span>
             <span className="spacer" />
               {available ? (
                 <span className="chip">{available.length} on this key</span>
@@ -809,7 +829,7 @@ function GatewayCard() {
               {working < tested && (
                 <>
                   The rest are marked below.{" "}
-                  <b>Hover a failed badge to see the exact error TokenRouter returned</b>{" "}
+                  <b>Hover a failed badge to see the exact error {currentGateway.label} returned</b>{" "}
                   — that string is the whole diagnosis: <span className="mono">model_not_found</span>{" "}
                   means the id or entitlement, <span className="mono">429</span> means the
                   key&rsquo;s budget, <span className="mono">Timeout</span> means the model sat
@@ -904,18 +924,26 @@ function GatewayCard() {
               </div>
             </>
           )}
+          {available && available.length === 0 && (
+            <p className="hint">This key lists no models from the approved ten-model roster. Try another gateway or check this key&apos;s model access.</p>
+          )}
 
           {/* The free panes have fixed ids, so they get a result line rather
               than an editable field. */}
           {EXTRA_AGENTS.map((e) => {
-            const probe = probes[e.model];
+            const id = primaryModelId(e.model);
+            const routeModel = id ? preferredPrimaryRoute(id, gatewayId) : e.model;
+            const probe = probes[routeModel];
             return (
               <div className="row" key={e.id}>
                 <label>{e.label}</label>
+                <button type="button" className="switch" data-on={!!enabledAgents[e.id]}
+                  aria-label={`Enable ${e.label} for solver selection`}
+                  onClick={() => patch({ enabled: { ...enabledAgents, [e.id]: !enabledAgents[e.id] } })} />
                 <span className="field mono" style={{ opacity: 0.7 }}>
-                  {e.model}
+                  {routeModel}
                 </span>
-                {probe && <ProbeBadge probe={probe} modelId={e.model} />}
+                {probe && <ProbeBadge probe={probe} modelId={routeModel} />}
                 {probe?.vision != null && (
                   <span
                     className="badge"
@@ -931,7 +959,7 @@ function GatewayCard() {
         </>
       )}
 
-      {active && (
+      {active && FREE_ROUTER_MODELS.length > 0 && (
         <p className="hint" style={{ marginTop: 2 }}>
           <b>Free on this router:</b>{" "}
           {FREE_ROUTER_MODELS.map((m) => m.id).join(", ")} — both text-only, so put
@@ -961,6 +989,14 @@ function GatewayCard() {
           For Wiro Signature-Based authentication, enter both values from the Wiro dashboard. The
           app stores them together as the credential required by Wiro&apos;s Direct LLM Gateway. For an
           API-Key-Only Wiro project, leave API Secret blank.
+        </p>
+      )}
+      {gatewayId === "cleanapis" && (
+        <p className="hint">
+          Paste your Clean APIs token above and save it. The token stays in your signed-in account&apos;s
+          server-side secrets; the app only receives whether it is present. Only the ten approved
+          models appear in this catalogue and can be selected for a run. Enable the token&apos;s
+          inference and models:read scopes.
         </p>
       )}
     </div>
@@ -993,7 +1029,7 @@ function ProviderCard({ id }: { id: ProviderId }) {
       await bridge.setApiKey(id, draftKey.trim());
       setDraftKey("");
       await refreshKeys();
-      setNote("Saved to your Keychain.");
+      setNote("Saved to your account.");
     } catch (err) {
       setNote(String(err));
     } finally {
@@ -1072,19 +1108,16 @@ function ProviderCard({ id }: { id: ProviderId }) {
 
       <div className="row" data-dim={routed}>
         <label htmlFor={`model-${id}`}>Model</label>
-        <input
+        <select
           id={`model-${id}`}
           className="field mono"
-          list={`models-${id}`}
           value={model}
-          spellCheck={false}
           onChange={(e) => patch({ models: { ...models, [id]: e.target.value } })}
-        />
-        <datalist id={`models-${id}`}>
+        >
           {spec.knownModels.map((m) => (
-            <option key={m} value={m} />
+            <option key={m} value={m}>{m}</option>
           ))}
-        </datalist>
+        </select>
       </div>
 
       <div className="row" data-dim={routed}>
@@ -1109,7 +1142,7 @@ function ProviderCard({ id }: { id: ProviderId }) {
           </>
         ) : (
           <>
-            Keys are stored in the macOS Keychain and read only by the app.{" "}
+            Keys are stored in your account and loaded by the desktop app.{" "}
             <button
               className="link"
               onClick={() => {
@@ -1448,7 +1481,7 @@ function CouncilCard() {
     setListing(true);
     setListError(null);
     try {
-      setAvailable(await bridge.listGatewayModels(settings.gatewayBaseUrl, settings.gatewayId));
+      setAvailable(primaryCatalog(await bridge.listGatewayModels(settings.gatewayBaseUrl, settings.gatewayId)));
     } catch (err) {
       setAvailable(null);
       setListError(String(err).replace(/^Error:\s*/, ""));
@@ -1714,7 +1747,7 @@ function CouncilCard() {
         />
       </div>
       <p className="hint">
-        Enter 2–10 gateway model IDs, one per line. Add <span className="mono">/responses</span>{" "}
+        Enter 2–4 approved gateway model IDs, one per line. Add <span className="mono">/responses</span>{" "}
         for Responses API models such as Codex. Panel models are not requested twice.
       </p>
 
@@ -1742,19 +1775,19 @@ function CouncilCard() {
 
       <div className="row">
         <label htmlFor="council-synth">Synthesizer</label>
-        <input
+        <select
           id="council-synth"
           className="field mono"
-          type="text"
-          spellCheck={false}
           value={settings.synthesisModel}
           onChange={(e) => patch({ synthesisModel: e.target.value })}
-          list="gateway-models"
           style={{ flex: 1 }}
-        />
+        >
+          {Array.from(new Set([settings.synthesisModel, ...PRIMARY_MODEL_IDS.map(id => preferredPrimaryRoute(id, settings.gatewayId))])).map(model =>
+            <option key={model} value={model}>{model}</option>)}
+        </select>
       </div>
       <p className="hint">
-        Also writes the test harness. Empty falls back to the first judge&rsquo;s model.
+        Also writes the test harness. Its exact route must be available on the selected gateway.
       </p>
 
       {reachable && (
@@ -1860,6 +1893,7 @@ function CaptureCard() {
   const mcqModel = useStore((s) => s.settings.mcqModel);
   const mcqEndpoint = useStore((s) => s.settings.mcqEndpoint);
   const availableModels = useStore((s) => s.settings.availableModels);
+  const gatewayId = useStore((s) => s.settings.gatewayId);
   const patch = useStore((s) => s.patchSettings);
   const [helper, setHelper] = useState<bridge.BackgroundHelperStatus | null>(null);
   const [helperBusy, setHelperBusy] = useState(false);
@@ -1987,18 +2021,16 @@ function CaptureCard() {
         </p>
         <div className="row">
           <label htmlFor="mcq-model">MCQ Model</label>
-          <input
+          <select
             id="mcq-model"
             className="field mono"
-            list="mcq-models"
             value={mcqModel}
             onChange={(e) => patch({ mcqModel: e.target.value })}
-          />
-          <datalist id="mcq-models">
-            {Array.from(new Set(["anthropic/claude-fable-5", ...availableModels])).map((model) => (
-              <option key={model} value={model} />
+          >
+            {Array.from(new Set([mcqModel, ...(availableModels.length ? availableModels : PRIMARY_MODEL_IDS.map(id => preferredPrimaryRoute(id, gatewayId)))])).map((model) => (
+              <option key={model} value={model}>{model}</option>
             ))}
-          </datalist>
+          </select>
         </div>
         <div className="row">
           <label htmlFor="mcq-endpoint">MCQ API</label>
@@ -2120,6 +2152,7 @@ export default function SettingsDialog() {
   };
 
   const perMinute = useStore((st) => st.settings.gatewayPerMinute);
+  const selectedGatewayId = useStore((st) => st.settings.gatewayId);
   const [rateDraft, setRateDraft] = useState<string | null>(null);
   const commitRate = () => {
     if (rateDraft !== null && rateDraft.trim()) patch({ gatewayPerMinute: Number(rateDraft) });
@@ -2228,7 +2261,7 @@ export default function SettingsDialog() {
             {/* The number that decides whether a run answers or 429s. It is a
                 property of the plan, not of the API, so it cannot be discovered
                 — only told to us, or learned the hard way from a refusal. */}
-            <div className="row" style={{ marginTop: 12 }}>
+            {selectedGatewayId !== "cleanapis" ? <><div className="row" style={{ marginTop: 12 }}>
               <label htmlFor="rate">Gateway Requests per Minute</label>
               <input
                 id="rate"
@@ -2249,7 +2282,10 @@ export default function SettingsDialog() {
               Pane, reader, and judge requests use this rate. Extra requests queue instead of
               failing with <span className="mono">429 Too Many Requests</span>, so runs may take
               longer. TokenRouter&rsquo;s free tier allows 5 requests per minute.
-            </p>
+            </p></> : <p className="hint">
+              Clean API runs the selected solvers in parallel and follows the quota and retry
+              delay returned by your Clean API plan.
+            </p>}
           </div>
           )}
         </div>

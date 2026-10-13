@@ -1,6 +1,7 @@
 import {
   allKnowledgeRecords,
   knowledgePackFor,
+  knowledgePackForLocalLibrary,
   renderKnowledgePack,
   retrieveKnowledge,
 } from "../src/lib/knowledge.ts";
@@ -90,6 +91,32 @@ console.log("\n6. performance-engineering records protect benchmark quality");
 
   const layout = retrieveKnowledge("cache locality data layout AoS SoA SIMD branch prediction", 4).map((h) => h.record.id);
   check("cache data layout retrieved", layout.includes("cache-data-layout-optimization"), layout.join(", "));
+}
+
+console.log("\n7. ready personal knowledge reaches solver prompts");
+{
+  const personal = {
+    id: "my-interval-rule", title: "My interval sweep rule", kind: "pattern" as const,
+    tags: ["interval", "sweep"], summary: "Use a sorted sweep for interval overlap.",
+    guidance: ["Keep a running active count and update it at each endpoint."],
+  };
+  const draft = {
+    id: "unsaved-draft", title: "Draft idea", kind: "pattern" as const,
+    tags: ["interval"], summary: "Unfinished", guidance: [],
+  };
+  const pack = knowledgePackForLocalLibrary("interval overlap sorted sweep", [personal, draft], 5);
+  check("relevant personal note included", pack.includes("My interval sweep rule"));
+  check("its actual guidance included", pack.includes("running active count"));
+  check("draft excluded", !pack.includes("Draft idea"));
+  const override = knowledgePackForLocalLibrary("runtime discipline", [{
+    ...personal, id: "runtime-discipline", title: "My runtime discipline",
+    tags: ["runtime", "discipline"], summary: "Local override",
+    guidance: ["Compare only passing candidates on identical inputs."],
+  }], 5);
+  check("local record overrides built-in ID", override.includes("My runtime discipline"));
+  const coding = knowledgePackForLocalLibrary("interval overlap sorted sweep", [personal], 5, true);
+  check("core Big O guidance is pinned for a coding task", coding.includes("Big O, tight bounds"));
+  check("personal note still has room beside the pinned core", coding.includes("My interval sweep rule"));
 }
 
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall knowledge checks passed\n");

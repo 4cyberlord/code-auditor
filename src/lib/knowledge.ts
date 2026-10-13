@@ -36,6 +36,54 @@ export interface KnowledgeHit {
 
 const RECORDS: KnowledgeRecord[] = [
   {
+    id: "asymptotic-analysis-core",
+    title: "Big O, tight bounds, and problem-size reasoning",
+    kind: "runtime",
+    tags: ["big-o", "asymptotic", "complexity", "algorithm", "constraints", "time", "space", "cpp", "python", "rust"],
+    summary: "Derive time and auxiliary-space growth from the actual algorithm and the problem's input dimensions before comparing measured runtimes.",
+    guidance: [
+      "Define every size variable, including multiple dimensions such as vertices V, edges E, and queries Q; account for preprocessing and all queries.",
+      "Big O is an eventual upper bound, Omega a lower bound, and Theta a tight bound. State whether the bound is worst-case, expected, or amortized; these are not interchangeable.",
+      "Derive a bound from loops, recursion, data-structure operations, and allocations in the candidate code. Do not copy a model's claimed complexity without checking its implementation.",
+      "Compare correct algorithms at the largest stated constraints. Lower asymptotic growth is preferable when it materially affects feasibility; practical constants and actual measurements still matter.",
+      "Report algorithmic auxiliary space separately from measured peak process memory. Big O never implies a particular millisecond or MB result.",
+      "Apply the same algorithmic analysis to C++, Python, Rust, and other languages; language-specific containers and operations can change constants or even the bound and must be checked.",
+    ],
+    sources: [
+      { title: "Cornell CS312: Introduction to Asymptotic Analysis", url: "https://www.cs.cornell.edu/courses/cs312/2004fa/lectures/lecture16.htm", trust: "academic", note: "Formal bounds, cases, growth orders, and the limits of asymptotic comparisons." },
+    ],
+  },
+  {
+    id: "amortized-complexity-analysis",
+    title: "Amortized cost is not average-case cost",
+    kind: "pattern",
+    tags: ["amortized", "complexity", "dynamic-array", "append", "data-structure", "time", "space"],
+    summary: "A rare expensive operation can coexist with a small amortized cost over a sequence; this does not assume random inputs.",
+    guidance: [
+      "For a dynamic array, a resize can cost Theta(n) while append is Theta(1) amortized over many operations. State both when a single-operation worst case matters.",
+      "Analyze whole operation sequences, including preprocessing, resizing, and repeated queries. Do not label an amortized guarantee as expected or worst-case per operation.",
+      "Track allocated capacity as well as live elements when explaining space; a compact algorithm can still have Theta(n) storage.",
+    ],
+    sources: [
+      { title: "MIT 6.006: Data Structures and Dynamic Arrays", url: "https://ocw.mit.edu/courses/6-006-introduction-to-algorithms-spring-2020/79a07dc1cb47d76dae2ffedc701e3d2b_MIT6_006S20_lec2.pdf", trust: "academic", note: "Dynamic-array operations, resizing, amortized time, and space trade-offs." },
+    ],
+  },
+  {
+    id: "complexity-lower-bound-scope",
+    title: "Optimality claims depend on the computation model",
+    kind: "pattern",
+    tags: ["lower-bound", "sorting", "comparison", "optimal", "complexity", "counting-sort", "radix-sort"],
+    summary: "Do not call an algorithm asymptotically optimal without stating the operations and assumptions under which the lower bound holds.",
+    guidance: [
+      "Comparison sorting has an Omega(n log n) worst-case lower bound; that bound alone does not rule out linear-time non-comparison sorting under restricted key assumptions.",
+      "An apparent faster algorithm may use more memory, require bounded integer keys, or change the problem contract. Check those conditions before recommending it.",
+      "When no lower bound is established, describe a candidate as the best supported approach among those tested, not as universally optimal.",
+    ],
+    sources: [
+      { title: "MIT 6.006: Counting Sort, Radix Sort, Lower Bounds for Sorting", url: "https://ocw.mit.edu/courses/6-006-introduction-to-algorithms-fall-2011/resources/lecture-7-counting-sort-radix-sort-lower-bounds-for-sorting/", trust: "academic", note: "Distinguishes comparison-model lower bounds from counting and radix sorting." },
+    ],
+  },
+  {
     id: "runtime-discipline",
     title: "Runtime reporting discipline",
     kind: "runtime",
@@ -1210,9 +1258,57 @@ export function renderKnowledgePack(hits: KnowledgeHit[]): string {
 export function knowledgePackFor(
   queryText: string,
   limit = 5,
-  records: KnowledgeRecord[] = RECORDS
+  records: KnowledgeRecord[] = RECORDS,
+  includeAsymptoticCore = false
 ): string {
-  return renderKnowledgePack(retrieveKnowledge(queryText, limit, records));
+  const hits = retrieveKnowledge(queryText, limit, records);
+  if (includeAsymptoticCore) pinAsymptoticCore(hits, records, limit);
+  return renderKnowledgePack(hits);
+}
+
+function pinAsymptoticCore(hits: KnowledgeHit[], records: readonly KnowledgeRecord[],
+  limit: number, protectedIds = new Set<string>()): void {
+  if (limit <= 0 || hits.some(hit => hit.record.id === "asymptotic-analysis-core")) return;
+  const core = records.find(record => record.id === "asymptotic-analysis-core");
+  if (!core) return;
+  if (hits.length >= limit) {
+    let removable = hits.length - 1;
+    while (removable >= 0 && protectedIds.has(hits[removable].record.id)) removable--;
+    if (removable < 0) return;
+    hits.splice(removable, 1);
+  }
+  hits.push({ record: core, score: 0 });
+}
+
+/** Search the same library the Council uses: shipped records with ready local
+ * Knowledge-folder records overlaid by ID. Drafts never enter a model prompt. */
+export function knowledgePackForLocalLibrary(
+  queryText: string,
+  localRecords: readonly KnowledgeRecord[],
+  limit = 5,
+  includeAsymptoticCore = false
+): string {
+  const library = new Map(RECORDS.map(record => [record.id, record]));
+  const personalIds = new Set<string>();
+  for (const record of localRecords) {
+    if (!record.id?.trim() || !record.title?.trim() || !record.guidance?.length) continue;
+    library.set(record.id, record);
+    personalIds.add(record.id);
+  }
+  const records = [...library.values()];
+  const hits = retrieveKnowledge(queryText, limit, records);
+  // A matching personal note must not be crowded out by generic bundled
+  // patterns. It still needs a real query match; no irrelevant note is forced.
+  if (queryText.trim() && limit > 0 && !hits.some(hit => personalIds.has(hit.record.id))) {
+    const personal = retrieveKnowledge(queryText, 1,
+      records.filter(record => personalIds.has(record.id)))[0];
+    if (personal && personal.score >= 2) {
+      if (hits.length >= limit) hits.pop();
+      hits.push(personal);
+    }
+  }
+  if (includeAsymptoticCore) pinAsymptoticCore(hits, records, limit, personalIds);
+  return renderKnowledgePack(hits);
 }
 
 export function allKnowledgeRecords(): KnowledgeRecord[] {
