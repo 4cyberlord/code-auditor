@@ -2787,7 +2787,7 @@ export const useStore = create<State>((set, get) => ({
         })),
         route: taskRoute,
         hasImages: images.length > 0,
-        safeTextOnly,
+        safeTextOnly: false,
         trustedMetrics,
         probes: currentProbes,
       });
