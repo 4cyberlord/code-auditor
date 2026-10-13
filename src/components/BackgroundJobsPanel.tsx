@@ -164,6 +164,9 @@ export default function BackgroundJobsPanel() {
     setError(null);
     devLog("cloud-jobs", "queue current started", { images: workspaceImages.length });
     try {
+      if (settings.imageStorage === "azure") {
+        throw new Error("Cloud Jobs currently require Supabase Storage. Switch the screenshot destination to Supabase in Settings before queuing a background job; desktop Council runs can use Azure.");
+      }
       if (!workspaceImages.length) throw new Error("Load at least one screenshot before queuing a cloud job.");
       if (workspaceImages.length > CLOUD_SOLVER_MAX_IMAGES) {
         throw new Error(`A cloud job can hold at most ${CLOUD_SOLVER_MAX_IMAGES} screenshots.`);
@@ -209,6 +212,7 @@ export default function BackgroundJobsPanel() {
             sessionId: submission.sessionId, fileName: image.name,
             mime: image.mime, data: image.base64,
             submissionId: submission.submissionId, position,
+            backend: "supabase", // The cloud worker currently reads Supabase objects.
           });
           submission.images[position] = {
             position, storageBucket: uploaded.bucket, storagePath: uploaded.path,
@@ -282,7 +286,7 @@ export default function BackgroundJobsPanel() {
         const withUrls = await Promise.all(
           imageResult.value.map(async (image) => {
             try {
-              return { ...image, url: await signedUrl(image.storagePath, 900) };
+              return { ...image, url: await signedUrl(image.storagePath, 900, image.storageBucket) };
             } catch {
               return image;
             }

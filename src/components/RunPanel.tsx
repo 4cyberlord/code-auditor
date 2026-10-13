@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import * as bridge from "@/lib/bridge";
+import { runInE2B } from "@/lib/e2bExecution";
+import { useStore } from "@/lib/store";
+import type { BenchmarkRequest } from "@/lib/sessions";
 
 /**
  * Running one agent's answer and showing what actually happened.
@@ -13,7 +15,7 @@ import * as bridge from "@/lib/bridge";
  * Running the code is the only step here that can contradict all four at once.
  *
  * The button is a button on purpose. This is code a language model wrote,
- * executing on the user's own machine, and nothing runs until a person decides
+ * executing only in an E2B cloud sandbox, and nothing runs until a person decides
  * it should -- however unanimous the panel was.
  */
 
@@ -23,7 +25,9 @@ interface Props {
 }
 
 export default function RunPanel({ language, code }: Props) {
-  const [result, setResult] = useState<bridge.RunCodeResult | null>(null);
+  const [result, setResult] = useState<NonNullable<BenchmarkRequest["result"]> | null>(null);
+  const sessionId = useStore((state) => state.currentSessionId);
+  const timeoutMs = useStore((state) => state.settings.e2bTimeoutMs);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [stdin, setStdin] = useState("");
@@ -37,7 +41,8 @@ export default function RunPanel({ language, code }: Props) {
     setError(null);
     setResult(null);
     try {
-      setResult(await bridge.runCode({ language, code, stdin }));
+      if (!sessionId) throw new Error("Sign in and save this session before running code in E2B.");
+      setResult(await runInE2B(sessionId, language, code, timeoutMs, stdin));
     } catch (err) {
       setError(String(err).replace(/^Error:\s*/, ""));
     } finally {
@@ -47,11 +52,9 @@ export default function RunPanel({ language, code }: Props) {
 
   const verdict = !result
     ? null
-    : result.timedOut
-      ? { tone: "bad" as const, text: `Still running after ${(result.durationMs / 1000).toFixed(1)}s — stopped` }
-      : result.ok
-        ? { tone: "good" as const, text: `Ran clean in ${result.durationMs}ms` }
-        : { tone: "bad" as const, text: `Exited ${result.exitCode ?? "abnormally"} after ${result.durationMs}ms` };
+    : result.ok
+      ? { tone: "good" as const, text: `E2B exit 0 · process ${result.remoteElapsedMs ?? "?"}ms` }
+      : { tone: "bad" as const, text: `E2B exited ${result.exitCode ?? "abnormally"}` };
 
   if (!acknowledged && !result) {
     return (
@@ -62,16 +65,10 @@ export default function RunPanel({ language, code }: Props) {
           </button>
           <span className="chip">{language || "code"}</span>
         </div>
-        {/* The honest version of what the sandbox is. Time, memory, processes and
-            disk are capped, and the working directory is thrown away -- so a
-            runaway cannot take the machine with it. The filesystem and the network
-            are not jailed, which means code from a model can read your files and
-            call out. Worth knowing before the first press, not after. */}
         <p className="hint" style={{ margin: 0 }}>
-          This runs {language ? `the ${language}` : "the"} code a model wrote, on this
-          machine. Time, memory and disk are capped and the working folder is deleted
-          afterwards — but it can still read your files and reach the network. Have a
-          look at it first.
+          This runs {language ? `the ${language}` : "the"} code a model wrote in an
+          isolated E2B cloud sandbox, never on your machine. Network access is disabled.
+          Review the code before sending it to E2B.
         </p>
       </div>
     );
@@ -128,12 +125,6 @@ export default function RunPanel({ language, code }: Props) {
           {!result.stdout.trim() && !result.stderr.trim() && (
             <p className="hint" style={{ margin: 0 }}>
               It ran and printed nothing at all.
-            </p>
-          )}
-          {result.truncated && (
-            <p className="hint" style={{ margin: 0 }}>
-              Output was long, so the middle was dropped — the start and the end are
-              both here.
             </p>
           )}
         </>

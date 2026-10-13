@@ -106,6 +106,7 @@ function Workbench() {
   const sessionsOpen = useStore((s) => s.settings.railPanel === "sessions");
   const historyOpen = useStore((s) => s.settings.railPanel === "history");
   const history = useStore(s => s.history);
+  const historyError = useStore(s => s.historyError);
   const loadHistory = useStore(s => s.loadHistory);
   const openRun = useStore(s => s.openRun);
 
@@ -233,14 +234,22 @@ function Workbench() {
         )}
         {storyMode && <div style={{ display: "flex", gap: 7, position: "relative" }}>
           <button className="btn tiny ghost" disabled={running} onClick={() => { setTopMenu(null); useStore.getState().reset(); useStore.getState().clearImages(); setStoryMode(false); setIntakeOpen(true); }} title="Begin a new screenshot intake">New capture</button>
-          <button className="btn tiny ghost" onClick={() => { setTopMenu(topMenu === "history" ? null : "history"); void loadHistory(); }}>History</button>
           <button className="btn tiny ghost" onClick={() => setTopMenu(topMenu === "about" ? null : "about")}>About</button>
-          {topMenu && <div style={{ position: "absolute", zIndex: 50, right: 0, top: 34, width: 310, maxHeight: 370, overflowY: "auto", background: "var(--panel)", border: "1px solid var(--line-strong)", borderRadius: 12, padding: 14, boxShadow: "var(--shadow)" }}>
-            {topMenu === "history" ? <><strong style={{ fontSize: 13 }}>Recent analyses</strong>
-              {history.length ? history.slice(0, 15).map(item => <button key={item.id} className="btn tiny ghost" style={{ display: "block", width: "100%", textAlign: "left", height: "auto", padding: "12px 8px", marginTop: 5 }} disabled={running} onClick={() => { setIntakeOpen(false); void openRun(item.id); setTopMenu(null); }}>{item.asked?.trim().slice(0, 85) || "Untitled analysis"}</button>) : <p className="hint">No saved analyses in this session.</p>}</> :
-              <><strong>Council Editor</strong><p className="hint" style={{ lineHeight: 1.6 }}>Capture a problem, let the intelligence engine select eligible AI agents, then review one solution and its measured evidence. The solvers run behind the scenes.</p></>}
+          {topMenu === "about" && <div style={{ position: "absolute", zIndex: 50, right: 0, top: 34, width: 310, background: "var(--panel)", border: "1px solid var(--line-strong)", borderRadius: 12, padding: 14, boxShadow: "var(--shadow)" }}>
+            <strong>Council Editor</strong><p className="hint" style={{ lineHeight: 1.6 }}>Capture a problem, let the intelligence engine select eligible AI agents, then review one solution and its measured evidence.</p>
           </div>}
         </div>}
+        <div style={{ position: "relative" }}>
+          <button className="btn tiny ghost" onClick={() => { setTopMenu(topMenu === "history" ? null : "history"); void loadHistory(); }}>History</button>
+          {topMenu === "history" && <div style={{ position: "absolute", zIndex: 50, right: 0, top: 34, width: 350, maxHeight: 430, overflowY: "auto", background: "var(--panel)", border: "1px solid var(--line-strong)", borderRadius: 12, padding: 14, boxShadow: "var(--shadow)" }}>
+            <strong style={{ fontSize: 13 }}>Saved solutions</strong>
+            {historyError && <p className="hint" role="alert">{historyError}</p>}
+            {history.length ? history.map(item => <button key={item.id} className="btn tiny ghost" style={{ display: "block", width: "100%", textAlign: "left", height: "auto", padding: "12px 8px", marginTop: 5 }} disabled={running} onClick={() => { setIntakeOpen(false); setStoryMode(true); void openRun(item.id); setTopMenu(null); }}>
+              <span style={{ display: "block" }}>{item.asked?.trim().split("\n")[0].slice(0, 85) || "Untitled analysis"}</span>
+              <small className="hint">{new Date(item.startedAt).toLocaleString()} · {item.answered} answers · {item.verdict || "No verdict"}</small>
+            </button>) : !historyError && <p className="hint">No saved analyses in this session.</p>}
+          </div>}
+        </div>
         <button
           className="btn tiny ghost"
           onClick={() => setSettingsOpen(true)}

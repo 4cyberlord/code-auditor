@@ -15,6 +15,7 @@ import "./StoryResultWorkspace.css";
 export default function StoryResultWorkspace() {
   const agents = useStore(s => s.agents);
   const runId = useStore(s => s.runId);
+  const viewingRunId = useStore(s => s.viewingRunId);
   const council = useStore(s => s.council);
   const review = useStore(s => s.review);
   const running = useStore(s => s.running);
@@ -28,8 +29,11 @@ export default function StoryResultWorkspace() {
   const [language, setLanguage] = useState("original");
   // A new run can spend time in live model checks before it gets a new runId.
   // Never show the previous run's answer under that new run's progress text.
-  const report = preparing ? null : selectStorySolution(agents, council, consensus().representative);
-  const reviewData = preparing ? null : review.data;
+  // A solver's first answer is not the Council's choice. Keep the final-code
+  // workspace empty until the full comparison settles (or explicitly fails).
+  const awaitingCouncil = settings.councilEnabled && (preparing || running);
+  const report = preparing || awaitingCouncil ? null : selectStorySolution(agents, council, consensus().representative);
+  const reviewData = preparing || awaitingCouncil ? null : review.data;
   const reviewRunning = !preparing && review.status === "running";
   const reviewError = preparing ? null : review.error;
   const councilPhase = preparing ? "idle" : council.phase;
@@ -47,6 +51,14 @@ export default function StoryResultWorkspace() {
     ? agreedComplexityAudits(council.dossier?.judges ?? [])[council.winner]
     : undefined;
   const gate = run ? gateFor(run) : "untested";
+  const benchmarkNote = awaitingCouncil
+    ? "The Council is still testing and comparing candidates; no final measurement is available yet."
+    : councilPhase === "error" ? `Verification stopped: ${councilError || "unknown reason"}`
+    : !council.testSuites.length ? "No executable test suite was produced, so this solution has not been benchmarked."
+    : run && !run.ran ? `Execution did not complete: ${run.note || "the runner returned no result"}.`
+    : run?.ran && run.remoteElapsedMs == null && run.peakMemoryKb == null
+      ? `Tests executed${run.provider ? ` via ${run.provider}` : ""}, but this runner did not report per-process runtime or peak-memory telemetry. E2B measurements are not available for this desktop run.`
+      : run?.ran ? `${run.passed} passed / ${run.failed} failed` : "No execution measurements are available for this exact solution.";
   const active = !preparing && runId ? agents.filter(a => a.enabled) : [];
   const modelProgress = active.map(agent => ({ agent, lamp: modelLamp(agent) }));
   const readyCount = modelProgress.filter(item => item.lamp === "ready").length;
@@ -196,15 +208,18 @@ export default function StoryResultWorkspace() {
           <div className="story-compare"><span>Structure</span><b>{reviewData?.style.structure || "Not reviewed"}</b></div>
           {reviewData?.style.note && <p>{reviewData.style.note}</p>}
           {reviewError && <p className="story-warning">{reviewError}</p>}
-          {report && !reviewRunning && !reviewData && <button className="story-subtle-button" onClick={() => void runReview()}>Review solution</button>}
+          {report && !viewingRunId && !reviewRunning && !reviewData && <button className="story-subtle-button" onClick={() => void runReview()}>Review solution</button>}
         </section>
         <section className="story-report-card">
           <div className="story-report-heading">Benchmarks <span data-gate={gate}>{gate === "pass" ? "Passed" : gate === "fail" ? "Failed" : "Not measured"}</span></div>
           <div className="story-report-metrics">
-            <div><small>RUNTIME</small><strong>{run?.ran && run.remoteElapsedMs != null ? (run.remoteElapsedMs === 0 ? "<1 ms" : run.remoteElapsedMs + " ms") : "—"}</strong></div>
-            <div><small>MEMORY</small><strong>{run?.ran && run.peakMemoryKb != null ? (run.peakMemoryKb >= 1024 ? (run.peakMemoryKb/1024).toFixed(1) + " MB" : Math.round(run.peakMemoryKb) + " KB") : "—"}</strong></div>
+            <div><small>TEST PROCESS WALL TIME</small><strong>{run?.ran && run.remoteElapsedMs != null ? (run.remoteElapsedMs === 0 ? "<1 ms" : run.remoteElapsedMs + " ms") : "—"}</strong></div>
+            <div><small>PEAK PROCESS MEMORY</small><strong>{run?.ran && run.peakMemoryKb != null ? (run.peakMemoryKb >= 1024 ? (run.peakMemoryKb/1024).toFixed(1) + " MB" : Math.round(run.peakMemoryKb) + " KB") : "—"}</strong></div>
           </div>
-          <p className="story-muted">{run?.ran ? run.passed + " passed / " + run.failed + " failed" : "No execution measurements are available for this exact solution."}</p>
+          <p className="story-muted">{benchmarkNote}</p>
+          {run?.ran && run.provider === "e2b" && <p className="story-muted">Measured inside E2B for this test program, including its harness and any compilation. It is not a claim about LeetCode runtime or the algorithm alone.</p>}
+          {run?.ran && run.durationMs > 0 && run.remoteElapsedMs == null &&
+            <p className="story-muted">Test-process wall time: {run.durationMs} ms (includes startup and possibly compilation; not the algorithm runtime).</p>}
         </section>
         {councilPhase === "error" && <p className="story-warning">{councilError}</p>}
         {!preparing && judge.status === "error" && <p className="story-warning">{judge.error}</p>}

@@ -5,7 +5,6 @@ mod coding_tools;
 mod config;
 mod db;
 pub mod deployment;
-mod exec;
 pub mod ghost_mode;
 mod helper_auth;
 mod knowledge;
@@ -13,12 +12,12 @@ mod overlay;
 mod overlay_state;
 mod platform_base;
 mod providers;
-mod runner;
 mod screen_recording;
 mod secrets;
 mod server_api;
 mod sessions;
 mod storage;
+mod azure_storage;
 mod updates;
 mod vision;
 
@@ -380,6 +379,8 @@ pub fn run() {
             storage::storage_upload,
             storage::storage_signed_url,
             storage::storage_remove,
+            storage::storage_read_azure,
+            storage::storage_test_azure,
             storage::forget_local_file,
             background_helper::background_helper_status,
             background_helper::background_helper_install,
@@ -407,13 +408,14 @@ pub fn run() {
             sessions::run_save,
             sessions::run_list,
             sessions::run_get,
+            sessions::run_report_update,
+            sessions::benchmark_create,
+            sessions::benchmark_get,
             sessions::solve_job_create,
             sessions::solve_job_list,
             sessions::solve_job_event_list,
             sessions::solve_job_image_list,
             sessions::council_report_get,
-            runner::run_code,
-            runner::runnable_languages,
         ])
         .setup(move |app| {
             #[cfg(desktop)]

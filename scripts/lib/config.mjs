@@ -21,7 +21,7 @@
  *
  * Anything already set in the real environment wins. The database fills gaps; it
  * does not overrule a value someone exported on purpose for one run. That is
- * what keeps `CODE_AUDITOR_BATCH_EXECUTION=local npm run …` working.
+ * Job-level secrets remain per account; generated code execution is E2B-only.
  */
 
 import { execFileSync } from "node:child_process";

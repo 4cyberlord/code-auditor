@@ -15,4 +15,7 @@ pub struct ImageInput {
     pub mime: String,
     /// raw base64, no `data:` prefix
     pub data: String,
+    /// Optional short-lived URL for gateways that fetch images themselves.
+    #[serde(default)]
+    pub url: Option<String>,
 }

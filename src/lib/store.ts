@@ -352,6 +352,8 @@ export interface ImageAsset {
   mime: string;
   /** base64 without the data: prefix */
   base64: string;
+  /** One run's short-lived Azure read URL, shared by its selected models. */
+  modelUrl?: string;
   dataUrl: string;
   bytes: number;
   /** 1 when it was sent untouched; below that, how much it was shrunk. */
@@ -541,6 +543,8 @@ interface Settings {
   raiseOnCapture: boolean;
   /** Images per run, 1..MAX_IMAGES. Every one is sent to every enabled agent. */
   maxImages: number;
+  /** Where new screenshots are stored; existing screenshots keep their original bucket. */
+  imageStorage: "azure" | "supabase";
   /** Which helper overlay workflow to use for background captures. */
   overlayMode: OverlayMode;
   /** Model id used for helper-only multiple-choice answers. */
@@ -631,14 +635,14 @@ interface Settings {
   /**
    * Where generated candidate programs are actually executed.
    *
-   * E2B is the default for cloud work because it keeps untrusted generated code
+   * E2B is the default because it keeps untrusted generated code
    * off the user's Mac while still returning timing and memory evidence.
    */
-  executionProvider: "e2b" | "local";
+  executionProvider: "e2b";
   /** Wall-clock ceiling for one E2B command, after sandbox creation. */
   e2bTimeoutMs: number;
   /** Optional second-pass benchmark evidence after the fast E2B/local gate. */
-  benchmarkBackend: "actions" | "off";
+  benchmarkBackend: "off";
   /**
    * Every model id the router last said this key can reach.
    *
@@ -649,6 +653,8 @@ interface Settings {
    * "nothing available" — so an empty list never disqualifies anything.
    */
   availableModels: string[];
+  /** Vision claims supplied by this key's model catalogue. A missing entry is unknown. */
+  advertisedVision: Record<string, boolean>;
   /**
    * A running worker's tick endpoint, if there is one.
    *
@@ -1015,6 +1021,7 @@ const defaultSettings = (): Settings => ({
   railPanel: "consensus",
   raiseOnCapture: false,
   maxImages: MAX_IMAGES,
+  imageStorage: "azure",
   overlayMode: "auto",
   mcqModel: "anthropic/claude-fable-5.1",
   mcqEndpoint: "auto",
@@ -1039,6 +1046,7 @@ const defaultSettings = (): Settings => ({
   // to "actions" is an explicit choice to have GitHub do the measuring instead.
   benchmarkBackend: "off",
   availableModels: [],
+  advertisedVision: {},
   workerTickUrl: "",
   workerTickSecret: "",
   reasoningEffort: "high",
@@ -1049,7 +1057,7 @@ const defaultSettings = (): Settings => ({
   codingTemperature: 0.2,
   codingReasoning: true,
   solutionLanguages: ["C++", "Python"],
-  memoryTargetKb: 20 * 1024,
+  memoryTargetKb: 9 * 1024,
   transcribeScreenshots: false,
   githubRepository: "",
   githubWorkflow: "cloud-benchmark.yml",
@@ -1160,6 +1168,7 @@ function normalizeSettings(s: Settings): Settings {
     raiseOnCapture:
       typeof s.raiseOnCapture === "boolean" ? s.raiseOnCapture : base.raiseOnCapture,
     maxImages: Math.round(clampTo(s.maxImages, 1, MAX_IMAGES, base.maxImages)),
+    imageStorage: s.imageStorage === "supabase" ? "supabase" : "azure",
     overlayMode: normalizeOverlayMode(s.overlayMode),
     mcqModel:
       typeof s.mcqModel === "string" && isPrimaryModel(s.mcqModel)
@@ -1195,15 +1204,15 @@ function normalizeSettings(s: Settings): Settings {
     // deciding what counts as a language.
     outputLanguage:
       typeof s.outputLanguage === "string" ? s.outputLanguage.trim() : base.outputLanguage,
-    executionProvider: (["e2b", "local"] as const).includes(
-      s.executionProvider as "e2b"
-    )
-      ? s.executionProvider
-      : base.executionProvider,
+    executionProvider: "e2b",
     e2bTimeoutMs: Math.round(clampTo(s.e2bTimeoutMs, 30_000, 300_000, base.e2bTimeoutMs)),
     availableModels: Array.isArray(s.availableModels)
       ? primaryCatalog((s.availableModels as string[]).filter((x) => typeof x === "string" && x.trim())).map((x) => x.trim())
       : base.availableModels,
+    advertisedVision: s.advertisedVision && typeof s.advertisedVision === "object" && !Array.isArray(s.advertisedVision)
+      ? Object.fromEntries(Object.entries(s.advertisedVision).filter(([model, vision]) =>
+          isPrimaryModel(model) && typeof vision === "boolean"))
+      : base.advertisedVision,
     workerTickUrl: typeof s.workerTickUrl === "string" ? s.workerTickUrl.trim() : base.workerTickUrl,
     workerTickSecret:
       typeof s.workerTickSecret === "string" ? s.workerTickSecret : base.workerTickSecret,
@@ -1229,16 +1238,12 @@ function normalizeSettings(s: Settings): Settings {
         ? (s.solutionLanguages as string[]).filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim())
         : base.solutionLanguages,
     memoryTargetKb:
-      typeof s.memoryTargetKb === "number" && Number.isFinite(s.memoryTargetKb) && s.memoryTargetKb > 0
+      typeof s.memoryTargetKb === "number" && Number.isFinite(s.memoryTargetKb) && s.memoryTargetKb > 0 && s.memoryTargetKb !== 20 * 1024
         ? Math.round(s.memoryTargetKb)
         : base.memoryTargetKb,
     transcribeScreenshots:
       typeof s.transcribeScreenshots === "boolean" ? s.transcribeScreenshots : base.transcribeScreenshots,
-    benchmarkBackend: (["actions", "off"] as const).includes(
-      s.benchmarkBackend as "actions"
-    )
-      ? s.benchmarkBackend
-      : base.benchmarkBackend,
+    benchmarkBackend: "off",
     githubRepository:
       typeof s.githubRepository === "string" ? s.githubRepository.trim() : base.githubRepository,
     githubWorkflow:
@@ -1532,7 +1537,8 @@ async function probeGatewayWithRecentSuccess(
   if (!missing.length) return cached;
   const fresh = await bridge.probeModels(missing, settings.gatewayBaseUrl,
     settings.gatewayId, vision,
-    Object.fromEntries(missing.map(model => [model, endpointForModel(settings, model)])), false);
+    Object.fromEntries(missing.map(model => [model, endpointForModel(settings, model)])), false,
+    settings.imageStorage);
   return [...cached, ...fresh];
 }
 
@@ -1574,9 +1580,13 @@ export function canSeeVia(agentId: AgentId, route: Route | null, s: Settings): b
  * exactly like a pasted one everywhere downstream — the panel sends base64, and
  * a URL that expires in an hour is not something to hand a model.
  */
-async function fetchStored(path: string, mime: string): Promise<{ dataUrl: string } | null> {
+async function fetchStored(path: string, mime: string, bucket?: string | null): Promise<{ dataUrl: string } | null> {
   try {
-    const url = await bridge.signedUrl(path, 3600);
+    if (bucket === "azure:council-images") {
+      const base64 = await bridge.readAzureScreenshot(path);
+      return { dataUrl: `data:${mime || "image/png"};base64,${base64}` };
+    }
+    const url = await bridge.signedUrl(path, 3600, bucket ?? undefined);
     const blob = await (await fetch(url)).blob();
     const buf = new Uint8Array(await blob.arrayBuffer());
     let binary = "";
@@ -1591,8 +1601,19 @@ async function fetchStored(path: string, mime: string): Promise<{ dataUrl: strin
   }
 }
 
+const modelImage = (image: ImageAsset): bridge.ImageInput => ({
+  mime: image.mime, data: image.base64, ...(image.modelUrl ? { url: image.modelUrl } : {}),
+});
+
 /** The live run, kept aside while history is being read. Never rendered. */
-let liveSnapshot: { agents: AgentSlot[]; note: string } | null = null;
+let liveSnapshot: {
+  agents: AgentSlot[];
+  note: string;
+  council: CouncilState;
+  review: State["review"];
+  runId: string | null;
+} | null = null;
+let persistedRecord: { sourceRunId: string | null; dbRunId: string } | null = null;
 
 /**
  * How long to wait for a pane that has not started before judging without it.
@@ -1834,8 +1855,10 @@ export const useStore = create<State>((set, get) => ({
         // From the project, not from this machine. The local file was deleted
         // the moment its row existed, which is exactly what makes a session
         // openable from a different device — the point of putting it there.
+        const bucket = shot.storageBucket ??
+          (shot.storagePath?.split("/")[1] === "azure" ? "azure:council-images" : undefined);
         const file = shot.storagePath
-          ? await fetchStored(shot.storagePath, shot.mime)
+          ? await fetchStored(shot.storagePath, shot.mime, bucket)
           : shot.localPath
             ? await bridge.readCapture(shot.localPath)
             : null;
@@ -1931,6 +1954,7 @@ export const useStore = create<State>((set, get) => ({
           fileName: img.name,
           mime: img.mime,
           data: img.base64,
+          backend: get().settings.imageStorage,
         });
         await db.addScreenshot({
           sessionId,
@@ -2149,7 +2173,9 @@ export const useStore = create<State>((set, get) => ({
         settings.gatewayBaseUrl,
         settings.gatewayId,
         testVision,
-        endpointByModel
+        endpointByModel,
+        true,
+        settings.imageStorage
       );
       const at = Date.now();
       const probes = { ...get().settings.probes };
@@ -2424,7 +2450,7 @@ export const useStore = create<State>((set, get) => ({
       return null;
     }
 
-    const payload = images.map((i) => ({ mime: i.mime, data: i.base64 }));
+    const payload = images.map(modelImage);
     const runId = `extract-${Date.now().toString(36)}`;
 
     // Both readers go at once, and one failing does not take the other with it:
@@ -2588,10 +2614,26 @@ export const useStore = create<State>((set, get) => ({
     const generation = ++startGeneration;
     set({ preparing: true });
     try {
-    const { settings, images, note, keys, gatewayKey } = get();
+    let { images } = get();
+    const { settings, note, keys, gatewayKey } = get();
     if (!images.length && !note.trim()) return;
     if (options?.adaptivePanels && (!settings.useGateway || !gatewayKey)) {
       throw new Error("Select and connect Wiro, TokenRouter or Clean APIs in Settings. The fixed ten-model roster must be routed through your active API gateway.");
+    }
+    if (images.length && settings.imageStorage === "azure" && settings.gatewayId === "cleanapis") {
+      const sessionId = await get().ensureSession();
+      if (!sessionId) throw new Error("Sign in before uploading screenshots to Azure.");
+      // One URL per screenshot for this job; every selected model receives the
+      // same ordered list, rather than a new upload for each model request.
+      images = await Promise.all(images.map(async (image) => {
+        const uploaded = await bridge.uploadScreenshot({
+          sessionId, fileName: image.name, mime: image.mime,
+          data: image.base64, backend: "azure",
+        });
+        const modelUrl = await bridge.signedUrl(uploaded.path, 7200, uploaded.bucket);
+        return { ...image, modelUrl };
+      }));
+      set({ images });
     }
     liveSnapshot = null;
     set(state => ({
@@ -2610,11 +2652,19 @@ export const useStore = create<State>((set, get) => ({
     const routes = new Map<AgentId, Route>();
     const configured = ALL_AGENTS.filter(id => settings.enabled[id]);
     let catalogue: string[] = [];
+    let advertisedVision: Record<string, boolean> = {};
     const availabilityProbes = { ...get().settings.probes };
     let coordinatorTopic = "";
+    let hadRouteFailure = false;
     if (options?.adaptivePanels && settings.useGateway && gatewayKey) {
       try {
-        catalogue = await bridge.listGatewayModels(settings.gatewayBaseUrl, settings.gatewayId);
+        const details = await bridge.listGatewayModelDetails(settings.gatewayBaseUrl, settings.gatewayId);
+        catalogue = details.map(model => model.id);
+        if (settings.gatewayId === "cleanapis") {
+          advertisedVision = Object.fromEntries(details.filter(model =>
+            Array.isArray(model.capabilities)).map(model => [model.id,
+              model.capabilities!.some(capability => capability.toLowerCase() === "vision")]));
+        }
       } catch {
         // Catalogue unavailability means UNKNOWN, not zero available models.
         catalogue = [];
@@ -2625,6 +2675,7 @@ export const useStore = create<State>((set, get) => ({
         const model = catalogue.length ? resolveListedGatewayModel(configuredModel, catalogue) : configuredModel;
         const canonical = model ? primaryModelId(model) : null;
         if (!model || !canonical || seenModels.has(canonical)) return [];
+        if (images.length > 0 && settings.gatewayId === "cleanapis" && advertisedVision[model] === false) return [];
         seenModels.add(canonical);
         return [{ id, model, canSeeImages: agentSpec(id).vision }];
       });
@@ -2648,7 +2699,7 @@ export const useStore = create<State>((set, get) => ({
             runId: `coordinator-${generation}`, agentId: "vision-coordinator",
             attemptId: newAttemptId(), provider: settings.gatewayId, model,
             systemPrompt: prompt.systemPrompt, userText: prompt.userText,
-            images: images.map(image => ({mime:image.mime,data:image.base64})),
+            images: images.map(modelImage),
             maxTokens: 360, temperature: 0,
             baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
             endpoint: endpointForModel(settings, model),
@@ -2684,10 +2735,13 @@ export const useStore = create<State>((set, get) => ({
         viaGateway: true,
       });
       if (!availability.routes.length) {
+        hadRouteFailure = true;
         get().pushToast("err", "Gateway has no verified models",
-          "The configured candidates and their compatible alternatives failed live availability checks on " +
-          settings.gatewayId + ". " +
-          availability.rejected.slice(0, 3).map(r=>r.model + ": " + r.reason).join("; "),
+          candidates.length === 0 && configured.length > 0 && catalogue.length > 0 &&
+          images.length > 0 && settings.gatewayId === "cleanapis"
+            ? "Clean API's model catalogue does not advertise image input for any enabled approved model. Enable a model with the vision capability on this key, then refresh the list."
+            : "The configured candidates failed live availability checks on " + settings.gatewayId + ". " +
+              availability.rejected.slice(0, 3).map(r=>r.model + ": " + r.reason).join("; "),
           { sticky: true });
       }
     } else {
@@ -2701,7 +2755,7 @@ export const useStore = create<State>((set, get) => ({
     if (!options?.adaptivePanels) active = active.slice(0, 4);
     if (get().running) return;
     if (!active.length) {
-      if (options?.adaptivePanels) {
+      if (options?.adaptivePanels && !hadRouteFailure) {
         get().pushToast("err", "No usable AI models found",
           settings.useGateway
             ? "The selected gateway has no verified model from the approved ten-model roster. Refresh its catalog or switch gateways in Settings."
@@ -2833,7 +2887,7 @@ export const useStore = create<State>((set, get) => ({
       }
       publishOverlayState(get());
     }
-    const allImages = images.map((i) => ({ mime: i.mime, data: i.base64 }));
+    const allImages = images.map(modelImage);
 
     // Fire all of them at once; each streams back independently.
     await Promise.all(
@@ -3017,7 +3071,7 @@ export const useStore = create<State>((set, get) => ({
           plan.sendImages ? images : [],
           knowledge
         ),
-        images: plan.sendImages ? images.map((i) => ({ mime: i.mime, data: i.base64 })) : [],
+        images: plan.sendImages ? images.map(modelImage) : [],
         maxTokens: settings.maxTokens,
         temperature: 0,
         baseUrl: route.baseUrl,
@@ -3153,7 +3207,8 @@ export const useStore = create<State>((set, get) => ({
             configured: [choice], catalogue, requireVision: false, allowFamilyAlternatives: false,
             probe: (models, vision) => bridge.probeModels(models,
               snapshot.settings.gatewayBaseUrl, snapshot.settings.gatewayId, vision,
-              Object.fromEntries(models.map(model => [model, endpointForModel(snapshot.settings, model)])), false),
+              Object.fromEntries(models.map(model => [model, endpointForModel(snapshot.settings, model)])), false,
+              snapshot.settings.imageStorage),
           });
           const alternative = verified.routes[0]?.model;
           if (!alternative) throw new Error(verified.rejected[0]?.reason || "Alternative failed live verification.");
@@ -3181,7 +3236,7 @@ export const useStore = create<State>((set, get) => ({
             userText: userPrompt(get().note, plan.sendImages && images.length > 0,
               plan.context, plan.sendImages ? images : [],
               solverKnowledgePack(get, `${get().note}\n\n${context}`)),
-            images: plan.sendImages ? images.map(i => ({ mime: i.mime, data: i.base64 })) : [],
+            images: plan.sendImages ? images.map(modelImage) : [],
             maxTokens: settings.maxTokens, temperature: 0,
             baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
             endpoint: endpointForModel(settings, alternative),
@@ -3336,8 +3391,10 @@ export const useStore = create<State>((set, get) => ({
     if (s.running) return;
 
     // Keep the live run aside the first time, so leaving history restores it.
-    const live = (s.viewingRunId ? liveSnapshot : null) ?? { agents: s.agents, note: s.note };
-    if (!s.viewingRunId) liveSnapshot = { agents: s.agents, note: s.note };
+    const live = (s.viewingRunId ? liveSnapshot : null) ?? {
+      agents: s.agents, note: s.note, council: s.council, review: s.review, runId: s.runId,
+    };
+    if (!s.viewingRunId) liveSnapshot = live;
 
     set({ historyError: null });
     try {
@@ -3346,7 +3403,7 @@ export const useStore = create<State>((set, get) => ({
       const byModel = new Map(detail.responses.map((r) => [r.model, r]));
 
       const agents = s.agents.map((slot) => {
-        const stored = byProvider.get(slot.provider) ?? byModel.get(slot.model);
+        const stored = byModel.get(slot.model) ?? byProvider.get(slot.provider);
         if (!stored) {
           return { ...slot, status: "idle" as AgentStatus, text: "", error: null, final: null, attemptId: null };
         }
@@ -3368,6 +3425,13 @@ export const useStore = create<State>((set, get) => ({
       set({
         agents,
         note: detail.run.asked,
+        council: detail.report?.council && typeof detail.report.council === "object"
+          ? { ...IDLE_COUNCIL, ...(detail.report.council as Partial<CouncilState>), chatSending: false }
+          : { ...IDLE_COUNCIL },
+        review: detail.report?.review && typeof detail.report.review === "object"
+          ? { ...s.review, ...(detail.report.review as Partial<State["review"]>), status: "done" }
+          : { ...s.review, status: "idle", data: null, error: null },
+        runId,
         viewingRunId: runId,
         judge: detail.verdict?.judgeText
           ? {
@@ -3381,7 +3445,7 @@ export const useStore = create<State>((set, get) => ({
     } catch (err) {
       // Nothing was replaced, so there is nothing to put back.
       if (!s.viewingRunId) liveSnapshot = null;
-      set({ agents: live.agents, note: live.note, historyError: cleanError(String(err)) });
+      set({ ...live, historyError: cleanError(String(err)) });
     }
   },
 
@@ -3392,7 +3456,7 @@ export const useStore = create<State>((set, get) => ({
     set({
       viewingRunId: null,
       historyError: null,
-      ...(kept ? { agents: kept.agents, note: kept.note } : {}),
+      ...(kept ?? {}),
       judge: { status: "idle", provider: get().settings.judgeProvider, text: "", error: null },
     });
   },
@@ -3419,7 +3483,7 @@ export const useStore = create<State>((set, get) => ({
 
     const result = s.consensus();
     try {
-      await db.saveRun({
+      const savedId = await db.saveRun({
         sessionId,
         mode: s.settings.mode,
         asked: s.note,
@@ -3468,7 +3532,19 @@ export const useStore = create<State>((set, get) => ({
                 ? councilMarkdown(councilReportFrom(get().council))
                 : null,
         },
+        report: {
+          council: { ...s.council, chatSending: false },
+          review: s.review.status === "done" ? s.review : null,
+        },
       });
+      persistedRecord = { sourceRunId: s.runId, dbRunId: savedId };
+      if (get().runId === s.runId && get().review.status === "done" && s.review.status !== "done") {
+        const current = get();
+        await db.updateRunReport(savedId, {
+          council: { ...current.council, chatSending: false },
+          review: current.review,
+        }).catch((err) => set({ sessionsError: cleanError(String(err)) }));
+      }
       await get().loadSessions();
     } catch (err) {
       // History failing must not look like the run failing. The answers are on
@@ -3899,6 +3975,13 @@ export const useStore = create<State>((set, get) => ({
           ? { ...st.review, status: "done", data, error: null }
           : { ...st.review, status: "error", data: null, error: "The reviewer did not answer in the expected form." },
       }));
+      if (data && persistedRecord?.sourceRunId === get().runId) {
+        const current = get();
+        void db.updateRunReport(persistedRecord.dbRunId, {
+          council: { ...current.council, chatSending: false },
+          review: current.review,
+        }).catch((err) => set({ sessionsError: cleanError(String(err)) }));
+      }
       publishOverlayState(get());
     } catch (err) {
       set((st) => st.review.sourceCode !== sourceCode ? {} :
@@ -4103,9 +4186,8 @@ function runCouncilSlot(
 
 /**
  * Executes every member of the field that has code, against the suites the
- * spec pass produced. Deliberately sequential: the runner spawns real
- * processes, and ten of them competing for the same CPU would measure
- * scheduling, not the code.
+ * spec pass produced. Local runs stay sequential to avoid CPU contention;
+ * E2B requests are queued together so network waits do not stack up here.
  */
 async function executeField(
   get: GetStore,
@@ -4115,7 +4197,7 @@ async function executeField(
   suites: TestSuite[],
   which: "runs" | "revisedRuns"
 ): Promise<void> {
-  for (const c of field) {
+  const runOne = async (c: Candidate) => {
     if (!councilAlive(get().council, runId)) return;
     const f = which === "revisedRuns" ? (c.revised ?? c.final) : c.final;
     const lang = f?.kind === "code" ? candidateLanguage(f) : "";
@@ -4128,19 +4210,22 @@ async function executeField(
 
     if (!f || f.kind !== "code" || !code.trim()) {
       setRun({ letter: c.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: f?.kind === "research" ? "research answer" : "no code", runtime: "" });
-      continue;
+      return;
     }
     if (!suite) {
       setRun({ letter: c.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: `no suite for ${lang || "unknown language"}`, runtime: "" });
-      continue;
+      return;
     }
     const program = spliceSuite(suite, code);
     if (!program) {
       setRun({ letter: c.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: "harness has no splice marker", runtime: "" });
-      continue;
+      return;
     }
     try {
-      const r = await bridge.runCode({ language: suite.language, code: program, timeoutMs: 20000 });
+      const settings = get().settings;
+      const sessionId = get().currentSessionId;
+      if (!sessionId) throw new Error("Sign in and save the session before E2B verification.");
+      const r = await runE2BBenchmark(sessionId, suite.language, program, settings.e2bTimeoutMs);
       const { passed, failed } = countCases(r.stdout);
       setRun({
         letter: c.letter,
@@ -4149,13 +4234,34 @@ async function executeField(
         passed,
         failed,
         durationMs: r.durationMs,
+        provider: "e2b",
+        remoteElapsedMs: "remoteElapsedMs" in r ? r.remoteElapsedMs : null,
+        peakMemoryKb: "peakMemoryKb" in r ? r.peakMemoryKb : null,
+        sandboxId: "sandboxId" in r ? r.sandboxId : null,
+        executionId: "executionId" in r ? r.executionId : undefined,
         note: r.timedOut ? "timed out" : r.exitCode !== 0 ? `exit ${r.exitCode}` : "",
         runtime: r.runtime,
       });
     } catch (err) {
       setRun({ letter: c.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: cleanError(String(err)), runtime: "" });
     }
+  };
+  await Promise.all(field.map(runOne));
+}
+
+async function runE2BBenchmark(sessionId: string, language: string, program: string, timeoutMs: number) {
+  const id = await db.createBenchmark(sessionId, language, program, timeoutMs);
+  const deadline = Date.now() + timeoutMs + 60_000;
+  while (Date.now() < deadline) {
+    const request = await db.getBenchmark(id);
+    if (request.status === "failed") throw new Error(request.error || "E2B benchmark failed.");
+    if (request.status === "completed") {
+      if (!request.result) throw new Error("E2B completed without execution evidence.");
+      return { ...request.result, timedOut: false };
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 2000));
   }
+  throw new Error("E2B benchmark did not finish before the waiting limit; no result was assumed.");
 }
 
 /**
@@ -4189,7 +4295,10 @@ async function runMutationOracle(
   if (!program) return;
 
   try {
-    const r = await bridge.runCode({ language: suite.language, code: program, timeoutMs: 20000 });
+    const settings = get().settings;
+    const sessionId = get().currentSessionId;
+    if (!sessionId) throw new Error("No session for E2B oracle execution.");
+    const r = await runE2BBenchmark(sessionId, suite.language, program, settings.e2bTimeoutMs);
     const { passed, failed } = countCases(r.stdout);
     const survived = r.ok && failed === 0 && passed > 0;
     const signal: OracleSignal = {
@@ -4336,7 +4445,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
               endpoint: endpointForModel(settings, slot.model),
               systemPrompt: contractSystemPrompt(),
               userText: contractUserPrompt({ question: s0.note, reading: s0.extraction.context }),
-              images: s0.images.map((i) => ({ mime: i.mime, data: i.base64 })),
+              images: s0.images.map(modelImage),
               maxTokens: Math.min(settings.maxTokens, 2048),
               temperature: 0,
             },
@@ -4449,7 +4558,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     settings.mode,
     resolveAnswerLanguage(settings.outputLanguage, get().extraction.agreement?.merged.language ?? "")
   );
-  const allImages = s0.images.map((i) => ({ mime: i.mime, data: i.base64 }));
+  const allImages = s0.images.map(modelImage);
   await Promise.all(
     solveSlots.map((slot, i) =>
       wait(i * COUNCIL_STEP_MS).then(() => {
@@ -4471,7 +4580,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
               knowledge,
               solutionPolicy(
                 settings.solutionLanguages?.length ? settings.solutionLanguages : undefined,
-                settings.memoryTargetKb || 20 * 1024
+                settings.memoryTargetKb || 9 * 1024
               )
             ),
             images: safeTextOnly ? [] : allImages,

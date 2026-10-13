@@ -51,6 +51,7 @@ pub async fn storage_upload(
     data: String,
     submission_id: Option<String>,
     position: Option<usize>,
+    backend: Option<String>,
 ) -> Result<Uploaded, String> {
     let bytes = unbase64(&data).ok_or("That image is not valid base64.")?;
     if bytes.is_empty() {
@@ -69,6 +70,20 @@ pub async fn storage_upload(
     } else {
         (format!("{owner}/{session_id}/{}", safe_name(&file_name)), false)
     };
+
+    if backend.as_deref() == Some("azure") {
+        // Keep the destination recoverable even against an older server API
+        // that does not yet include storageBucket in screenshot-list responses.
+        let path = format!("{owner}/azure/{session_id}/{}", safe_name(&file_name));
+        let uploaded_bytes = bytes.len();
+        crate::azure_storage::upload(&path, if mime.is_empty() { "image/png" } else { &mime }, bytes).await?;
+        return Ok(Uploaded {
+            bucket: crate::azure_storage::BUCKET.into(), path, bytes: uploaded_bytes,
+        });
+    }
+    if backend.as_deref().is_some_and(|value| value != "supabase") {
+        return Err("Unknown screenshot storage destination.".into());
+    }
 
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -123,7 +138,15 @@ pub async fn storage_signed_url(
     db: tauri::State<'_, crate::db::Db>,
     path: String,
     seconds: u32,
+    bucket: Option<String>,
 ) -> Result<String, String> {
+    if bucket.as_deref() == Some(crate::azure_storage::BUCKET) {
+        require_owned_azure_path(&path)?;
+        return crate::azure_storage::signed_read_url(&path, seconds);
+    }
+    if bucket.as_deref().is_some_and(|value| value != BUCKET) {
+        return Err("Unknown screenshot storage bucket.".into());
+    }
     #[derive(serde::Deserialize)]
     struct Signed {
         url: String,
@@ -142,7 +165,15 @@ pub async fn storage_signed_url(
 pub async fn storage_remove(
     db: tauri::State<'_, crate::db::Db>,
     path: String,
+    bucket: Option<String>,
 ) -> Result<(), String> {
+    if bucket.as_deref() == Some(crate::azure_storage::BUCKET) {
+        require_owned_azure_path(&path)?;
+        return crate::azure_storage::remove(&path).await;
+    }
+    if bucket.as_deref().is_some_and(|value| value != BUCKET) {
+        return Err("Unknown screenshot storage bucket.".into());
+    }
     let _: serde_json::Value = crate::server_api::call(
         db.inner(),
         "storage.remove",
@@ -150,6 +181,52 @@ pub async fn storage_remove(
     )
     .await?;
     Ok(())
+}
+
+fn require_owned_azure_path(path: &str) -> Result<(), String> {
+    let owner = crate::auth::current().ok_or(crate::auth::LOCKED)?.user_id;
+    if !path.starts_with(&format!("{owner}/")) || path.split('/').any(|part| part == "." || part == "..") {
+        return Err("Screenshot does not belong to this account.".into());
+    }
+    Ok(())
+}
+
+/// Reads a private Azure screenshot without requiring browser CORS access.
+#[tauri::command]
+pub async fn storage_read_azure(path: String) -> Result<String, String> {
+    require_owned_azure_path(&path)?;
+    let url = crate::azure_storage::signed_read_url(&path, 300)?;
+    let response = client()?.get(url).send().await.map_err(|e| format!("Could not read Azure screenshot: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Could not read Azure screenshot ({}).", response.status()));
+    }
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(response.bytes().await
+        .map_err(|e| format!("Could not read Azure screenshot: {e}"))?))
+}
+
+/// Exercises the saved credential against the user's private container without
+/// exposing the account key or a signed URL to the webview.
+#[tauri::command]
+pub async fn storage_test_azure() -> Result<(), String> {
+    let owner = crate::auth::current().ok_or(crate::auth::LOCKED)?.user_id;
+    let path = format!("{owner}/connection-tests/{}.txt", uuid::Uuid::new_v4());
+    let marker = b"council-editor azure connection test";
+    crate::azure_storage::upload(&path, "text/plain", marker.to_vec()).await?;
+    let checked = async {
+        let url = crate::azure_storage::signed_read_url(&path, 300)?;
+        let response = client()?.get(url).send().await
+            .map_err(|e| format!("Azure read test failed: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!("Azure read test failed ({}).", response.status()));
+        }
+        let bytes = response.bytes().await.map_err(|e| format!("Azure read test failed: {e}"))?;
+        if bytes.as_ref() != marker { return Err("Azure read test returned unexpected content.".into()); }
+        Ok(())
+    }.await;
+    let removed = crate::azure_storage::remove(&path).await;
+    checked?;
+    removed
 }
 
 /// Removes the local file, now that the bytes are somewhere else.

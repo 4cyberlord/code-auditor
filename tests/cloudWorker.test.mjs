@@ -1,6 +1,7 @@
 // Hermetic: config now comes from the database, and this test must not inherit
 // whatever is in a developer's .development.env.
 process.env.CODE_AUDITOR_CONFIG = "off";
+process.env.NODE_ENV = "test";
 process.env.SUPABASE_URL = "https://project.supabase.co";
 process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role";
 process.env.TOKENROUTER_API_KEY = "tokenrouter";
@@ -306,8 +307,21 @@ FINAL>>>`);
 
 const { runCouncilJob: runWorkerJob } = await import("../scripts/cloud-worker.mjs");
 const runCouncilJob = job => runWorkerJob({ ...job,
-  settings_snapshot: { executionProvider: "local", ...job.settings_snapshot },
+  settings_snapshot: { executionProvider: "e2b", ...job.settings_snapshot },
 });
+globalThis.__COUNCIL_E2B_TEST_DOUBLE__ = async (_language, program) => {
+  const wrong = /want:\s*99/.test(program);
+  const stdout = wrong
+    ? "FAIL empty got=0 want=99\nFAIL three got=3 want=99\n"
+    : "PASS empty\nPASS three\n";
+  return {
+    ok: !wrong, exitCode: wrong ? 1 : 0, stdout, stderr: "", durationMs: 12,
+    remoteElapsedMs: 2, peakMemoryKb: 8192, runtime: "e2b test double",
+    provider: "e2b", sandboxId: "test-sandbox", executionId: "test-execution",
+    state: wrong ? "failed" : "completed", exitVerified: true, timedOut: false,
+    truncated: false, network: "denied", bootMs: 10,
+  };
+};
 const { COUNCIL_DEFAULT_MODELS } = await import("../src/lib/council.ts");
 
 console.log("\n1. cloud worker v1 happy path");

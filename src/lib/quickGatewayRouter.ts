@@ -178,8 +178,12 @@ export async function verifyGatewayCandidates<Id extends string>(input: {
           unchanged:choice.model === grouped.find(g=>g.id===choice.id)?.configured });
         pending.delete(choice.id);
       } else {
-        failed.set(choice.model, status?.error ||
-          (input.requireVision && status?.ok ? "Vision probe did not pass" : "No successful live probe"));
+        const imageReason = input.requireVision && status?.vision === false
+          ? status.visionNote?.trim() || "The image check returned no detail."
+          : null;
+        failed.set(choice.model, status?.error
+          ? imageReason ? `${status.error}; image check: ${imageReason}` : status.error
+          : imageReason || "No successful live probe");
         last.set(choice.id, choice.model);
       }
     }

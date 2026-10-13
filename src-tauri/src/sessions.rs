@@ -42,6 +42,7 @@ pub struct Screenshot {
     pub position: i32,
     pub local_path: Option<String>,
     pub storage_path: Option<String>,
+    pub storage_bucket: Option<String>,
     pub file_name: String,
     pub bytes: i32,
     pub mime: String,
@@ -393,6 +394,7 @@ pub async fn run_save(
     extraction_agreed: Option<bool>,
     responses: Vec<ResponseIn>,
     verdict: Option<VerdictIn>,
+    report: Option<serde_json::Value>,
 ) -> Result<String, String> {
     let sid = parse_id(&session_id, "session")?;
     let answered = responses.len();
@@ -417,6 +419,7 @@ pub async fn run_save(
             "extractionAgreed": extraction_agreed,
             "responses": responses,
             "verdict": verdict,
+            "report": report,
         }),
     )
     .await?;
@@ -491,6 +494,7 @@ pub struct RunDetail {
     pub run: RunSummary,
     pub responses: Vec<StoredResponse>,
     pub verdict: Option<StoredVerdict>,
+    pub report: Option<serde_json::Value>,
 }
 
 /// Every run this session has finished, newest first.
@@ -522,6 +526,42 @@ pub async fn run_get(db: tauri::State<'_, Db>, run_id: String) -> Result<RunDeta
         serde_json::json!({ "runId": rid.to_string() }),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn benchmark_create(
+    db: tauri::State<'_, Db>, session_id: String, language: String,
+    program: String, timeout_ms: i64, stdin: Option<String>,
+) -> Result<String, String> {
+    let sid = parse_id(&session_id, "session")?;
+    #[derive(serde::Deserialize)]
+    struct Queued { id: String }
+    let queued: Queued = crate::server_api::call(
+        db.inner(), "benchmarks.create",
+        serde_json::json!({ "sessionId": sid.to_string(), "language": language,
+            "program": program, "timeoutMs": timeout_ms, "stdin": stdin.unwrap_or_default() }),
+    ).await?;
+    Ok(queued.id)
+}
+
+#[tauri::command]
+pub async fn benchmark_get(
+    db: tauri::State<'_, Db>, id: String,
+) -> Result<serde_json::Value, String> {
+    let id = parse_id(&id, "benchmark")?;
+    crate::server_api::call(db.inner(), "benchmarks.get", serde_json::json!({ "id": id.to_string() })).await
+}
+
+#[tauri::command]
+pub async fn run_report_update(
+    db: tauri::State<'_, Db>, run_id: String, report: serde_json::Value,
+) -> Result<(), String> {
+    let rid = parse_id(&run_id, "run")?;
+    let _: serde_json::Value = crate::server_api::call(
+        db.inner(), "runs.report.update",
+        serde_json::json!({ "runId": rid.to_string(), "report": report }),
+    ).await?;
+    Ok(())
 }
 
 #[tauri::command]

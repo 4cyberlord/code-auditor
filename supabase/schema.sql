@@ -89,11 +89,32 @@ create table if not exists runs (
   -- The note as it stood when the run was launched, so history shows what was
   -- actually asked rather than what the session says now.
   asked        text        not null default '',
+  report       jsonb,
   started_at   timestamptz not null default now(),
   finished_at  timestamptz
 );
 
 create index if not exists runs_session_idx on runs (session_id, started_at desc);
+
+-- Isolated execution requests. The worker alone reads code and writes evidence;
+-- the authenticated API exposes only the owner's request and result.
+create table if not exists benchmark_requests (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null,
+  session_id uuid not null references sessions(id) on delete cascade,
+  status text not null default 'queued' check (status in ('queued','running','completed','failed')),
+  language text not null check (language in ('python','cpp','rust','javascript','typescript')),
+  program text not null check (octet_length(program) between 1 and 262144),
+  stdin text not null default '' check (octet_length(stdin) <= 65536),
+  timeout_ms integer not null default 120000 check (timeout_ms between 30000 and 300000),
+  result jsonb,
+  error text,
+  created_at timestamptz not null default now(),
+  finished_at timestamptz
+);
+create index if not exists benchmark_requests_queue_idx on benchmark_requests(status, created_at);
+alter table benchmark_requests enable row level security;
+revoke all on benchmark_requests from anon, authenticated;
 
 -- --------------------------------------------------------- agent responses
 

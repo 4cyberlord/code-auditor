@@ -213,15 +213,11 @@ async function runOne(file, index, total) {
       settings_snapshot: {
         mode: "auto",
         maxTokens: Number(process.env.CODE_AUDITOR_BATCH_MAX_TOKENS || 4096),
-        // e2b | local — E2B is the default when a key is present because it
-        // keeps untrusted generated code off this Mac and returns isolated
-        // timing evidence. Check the template first: node scripts/test-e2b.mjs
-        executionProvider:
-          process.env.CODE_AUDITOR_BATCH_EXECUTION ||
-          (process.env.E2B_API_KEY ? "e2b" : "local"),
+        // Generated code executes only in E2B; a missing key fails closed.
+        executionProvider: "e2b",
         // Whatever the question is written in — the default the app now ships.
         outputLanguage: process.env.CODE_AUDITOR_BATCH_LANGUAGE || "",
-        benchmarkBackend: process.env.CODE_AUDITOR_BATCH_BACKEND || "actions",
+        benchmarkBackend: "off",
         githubRepository: process.env.GITHUB_REPOSITORY || "",
         availableModels: CATALOGUE,
       },

@@ -81,9 +81,12 @@ const unavailable=await verifyGatewayCandidates({
 assert.equal(unavailable.routes.length,0,"failed models cannot be dispatched");
 const noVision=await verifyGatewayCandidates({
   configured:candidates.slice(0,1),catalogue:choices,requireVision:true,
-  probe:async(models)=>models.map(model=>({model,ok:true,ms:9,error:null,vision:false})),
+  probe:async(models)=>models.map(model=>({model,ok:true,ms:9,error:null,vision:false,
+    visionNote:"422: This model does not support image input."})),
 });
 assert.equal(noVision.routes.length,0,"screenshot calls require a real vision probe");
+assert.match(noVision.rejected[0]?.reason ?? "",/422: This model does not support image input/,
+  "the provider's image refusal must reach the user instead of a generic probe failure");
 const newlyAvailableKimi=await verifyGatewayCandidates({
   configured:[{id:"moonshot",model:"moonshotai/kimi-k3"}],
   catalogue:["moonshotai/kimi-k3"],requireVision:false,

@@ -441,7 +441,7 @@ export const STORAGE = {
 
 export type StorageId = typeof STORAGE.id;
 
-export type KeyId = TransportId | "database-url" | StorageId;
+export type KeyId = TransportId | "database-url" | StorageId | "azure_storage_connection_string";
 
 /** The transcriber's human label. No key: the engine is on the device. */
 export const TRANSCRIBER_LABEL = "Apple Vision";

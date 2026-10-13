@@ -78,6 +78,24 @@ function ProbeBadge({
   );
 }
 
+function VisionBadge({
+  advertised, vision, note,
+}: { advertised?: boolean; vision?: boolean | null; note?: string | null }) {
+  if (vision == null && advertised == null) return null;
+  return <>
+    {advertised != null && <span className="badge" data-tone={advertised ? "good" : "warn"}
+      title={advertised
+        ? "The gateway catalogue lists image input for this model. This is not a live image-reading result."
+        : "The gateway catalogue does not list image input for this model."}>
+      {advertised ? "vision: yes (catalog)" : "vision: no (catalog)"}
+    </span>}
+    {vision != null && <span className="badge" data-tone={vision ? "good" : "warn"}
+      title={note || "The live image check has not confirmed image reading."}>
+      {vision ? "image read: verified" : "image read: not verified"}
+    </span>}
+  </>;
+}
+
 function SensitiveSettingsGate({
   title,
   detail,
@@ -174,8 +192,46 @@ function StorageCard() {
   // service-role credential from desktop users again.
   const saved = useStore((s) => s.storageKey);
   const refreshKeys = useStore((s) => s.refreshKeys);
+  const destination = useStore((s) => s.settings.imageStorage);
+  const patchSettings = useStore((s) => s.patchSettings);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [azureSaved, setAzureSaved] = useState(false);
+  const [connectionString, setConnectionString] = useState("");
+
+  useEffect(() => {
+    void bridge.hasApiKey("azure_storage_connection_string").then(setAzureSaved);
+  }, []);
+
+  const saveAzure = async () => {
+    const value = connectionString.trim();
+    if (!/(?:^|;)\s*AccountName=councilimages\s*(?:;|$)/i.test(value) ||
+        !/(?:^|;)\s*AccountKey=[A-Za-z0-9+/=]+\s*(?:;|$)/i.test(value)) {
+      setNote("Paste the full HTTPS connection string for the councilimages storage account.");
+      return;
+    }
+    setBusy(true); setNote(null);
+    try {
+      await bridge.setApiKey("azure_storage_connection_string", value);
+      setConnectionString("");
+      setAzureSaved(true);
+      patchSettings({ probes: {} });
+      await refreshKeys();
+      setNote("Azure connection saved to your signed-in account's protected secrets.");
+    } catch (err) { setNote(String(err)); }
+    finally { setBusy(false); }
+  };
+
+  const removeAzure = async () => {
+    setBusy(true); setNote(null);
+    try {
+      await bridge.deleteApiKey("azure_storage_connection_string");
+      setAzureSaved(false);
+      await refreshKeys();
+      setNote("Azure connection removed. Choose Supabase until a new key is saved.");
+    } catch (err) { setNote(String(err)); }
+    finally { setBusy(false); }
+  };
 
   const removeLegacyKey = async () => {
     setBusy(true);
@@ -196,15 +252,49 @@ function StorageCard() {
       <div className="top">
         <span className="dot" style={{ background: STORAGE.accent }} />
         <span className="name">Screenshot Storage</span>
-        <span className="vendor">Server-authorized private uploads</span>
-        <span className="badge" data-tone="good">Server-signed URLs</span>
+        <span className="vendor">Private Azure Blob or Supabase</span>
+        <span className="badge" data-tone={azureSaved ? "good" : "warn"}>
+          {azureSaved ? "Azure key saved" : "Azure setup needed"}
+        </span>
       </div>
       <p className="hint">
-        Screenshots are uploaded to the private <span className="mono">{STORAGE.bucket}</span> bucket
-        using short-lived upload URLs issued by the authenticated Council Editor server API.
-        No Supabase service-role key is required on this Mac. Uploads require a valid signed-in
-        session and a configured server connection.
+        New screenshots use the destination below. Existing screenshots stay in their original
+        private bucket and remain available. The Azure container is <span className="mono">council-images</span>
+        {" "}in <span className="mono">councilimages</span>; Supabase uses <span className="mono">{STORAGE.bucket}</span>.
       </p>
+      <div className="row">
+        <label htmlFor="image-storage">Default destination</label>
+        <select id="image-storage" className="field" value={destination}
+          onChange={(event) => patchSettings({
+            imageStorage: event.target.value as "azure" | "supabase", probes: {},
+          })}>
+          <option value="azure">Azure Blob Storage</option>
+          <option value="supabase">Supabase Storage</option>
+        </select>
+      </div>
+      <div className="row">
+        <label htmlFor="azure-connection">Azure connection string</label>
+        <div className="with-btn">
+          <input id="azure-connection" className="field mono" type="password"
+            autoComplete="off" placeholder={azureSaved ? "Saved — paste a replacement" : "Paste key1 connection string"}
+            value={connectionString} onChange={(event) => setConnectionString(event.target.value)} />
+          <button className="btn tiny ghost" disabled={busy || !connectionString.trim()}
+            onClick={() => void saveAzure()}>{busy ? "Saving…" : "Save"}</button>
+          {azureSaved && <button className="btn tiny ghost" disabled={busy}
+            onClick={() => void removeAzure()}>Remove</button>}
+          {azureSaved && <button className="btn tiny ghost" disabled={busy}
+            onClick={() => {
+              setBusy(true); setNote("Testing Azure upload, private read, and deletion…");
+              void bridge.testAzureStorage()
+                .then(() => setNote("Azure upload, private read, and deletion all passed."))
+                .catch((err) => setNote(`Azure test failed: ${String(err)}`))
+                .finally(() => setBusy(false));
+            }}>Test connection</button>}
+        </div>
+      </div>
+      <p className="hint">Paste the full connection string from Azure → councilimages → Access keys → key1.
+        It is stored as a server-side secret, never shown again in this window. Do not paste it in chat.
+        {destination === "azure" && !azureSaved ? " Azure uploads will fail until this is saved." : ""}</p>
       {saved && (
         <div className="row">
           <span>Legacy credential</span>
@@ -483,6 +573,7 @@ function GatewayCard() {
   // What the router says this key can actually reach. Null until asked, because
   // "we have not looked" and "there is nothing there" have to read differently.
   const probes = useStore((st) => st.settings.probes);
+  const advertisedVision = useStore((st) => st.settings.advertisedVision);
   const probing = useStore((st) => st.probing);
   const probeError = useStore((st) => st.probeError);
   const testModels = useStore((st) => st.testModels);
@@ -565,17 +656,27 @@ function GatewayCard() {
   // one. Derived, so it clears itself the moment the seats change.
   const tested = modelsInUse.filter((m) => probes[m]).length;
   const working = modelsInUse.filter((m) => probes[m]?.ok).length;
+  const modelsToImageCheck = modelsInUse.filter((model) => advertisedVision[model] !== false);
+  const testedVision = modelsToImageCheck.filter((model) => probes[model]?.vision != null).length;
 
   const refreshModels = useCallback(async () => {
     setListing(true);
     setListError(null);
     try {
-      const ids = primaryCatalog(await bridge.listGatewayModels(baseUrl, gatewayId));
+      const details = await bridge.listGatewayModelDetails(baseUrl, gatewayId);
+      const ids = primaryCatalog(details.map(model => model.id));
+      const approved = new Set(ids);
+      const vision = gatewayId === "cleanapis"
+        ? Object.fromEntries(details.filter(model =>
+            approved.has(model.id) && Array.isArray(model.capabilities)).map(model => [
+              model.id, model.capabilities!.some(capability => capability.toLowerCase() === "vision")
+            ]))
+        : {};
       setAvailable(ids);
       // Kept in settings, not just in this component's state: the Council reads
       // it before a run to skip seats this key cannot reach, and Settings is not
       // open when a run starts.
-      patch({ availableModels: ids });
+      patch({ availableModels: ids, advertisedVision: vision });
     } catch (err) {
       setAvailable(null);
       setListError(String(err).replace(/^Error:\s*/, ""));
@@ -617,7 +718,7 @@ function GatewayCard() {
           ? `${draft.trim()}:${draftSecret.trim()}`
           : draft.trim();
       await bridge.setApiKey(gatewayId, credential);
-      patch({ availableModels: [], probes: {} });
+      patch({ availableModels: [], advertisedVision: {}, probes: {} });
       setDraft("");
       setDraftSecret("");
       await refreshKeys();
@@ -638,7 +739,7 @@ function GatewayCard() {
     setBusy(true);
     try {
       await bridge.deleteApiKey(gatewayId);
-      patch({ availableModels: [], probes: {} });
+      patch({ availableModels: [], advertisedVision: {}, probes: {} });
       await refreshKeys();
       setAvailable(null);
       setListError(null);
@@ -700,6 +801,7 @@ function GatewayCard() {
                     gatewayBaseUrl: gw.defaultBaseUrl,
                     routerModels: { ...gw.defaultRouterModels },
                     availableModels: [],
+                    advertisedVision: {},
                     probes: {},
                   });
                   void refreshKeys();
@@ -808,13 +910,19 @@ function GatewayCard() {
                 — and only the seats actually in use are asked. */}
             <button
               className="btn tiny ghost"
-              onClick={() => void testModels(modelsInUse, true)}
-              disabled={probing}
-              title="Sends one image to each seat in use, at the governor's pace. Listing cannot tell you this."
+              onClick={() => void testModels(modelsToImageCheck, true)}
+              disabled={probing || modelsToImageCheck.length === 0}
+              title="Sends one image to each seat in use to verify the catalogue's vision claim."
             >
-              {probing ? `${tested}/${modelsInUse.length}` : "Check Which Can Read Images"}
+              {probing ? `${testedVision}/${modelsToImageCheck.length}` : "Check Which Can Read Images"}
             </button>
           </div>
+
+          {gatewayId === "cleanapis" && modelsInUse.length > 0 && modelsToImageCheck.length === 0 && (
+            <p className="hint" style={{ margin: "0 0 6px", color: "var(--warn)" }}>
+              Clean API lists no enabled approved model with vision. Screenshot tasks need a model whose catalogue capabilities include vision.
+            </p>
+          )}
 
           {probeError && (
             <p className="hint" style={{ margin: "0 0 6px", color: "var(--bad)" }}>
@@ -824,7 +932,7 @@ function GatewayCard() {
 
           {tested > 0 && (
             <p className="hint" style={{ margin: "0 0 6px" }}>
-              {working} of {tested} answered.{" "}
+              Text/API check: {working} of {tested} answered.{" "}
               {working < tested && (
                 <>
                   The rest are marked below.{" "}
@@ -846,6 +954,14 @@ function GatewayCard() {
             .map((m) => (
               <p key={`err-${m}`} className="hint" style={{ margin: "0 0 4px", color: "var(--bad)" }}>
                 <span className="mono">{m}</span> — {probes[m].error}
+              </p>
+            ))}
+
+          {modelsInUse
+            .filter((m) => probes[m]?.vision === false)
+            .map((m) => (
+              <p key={`vision-${m}`} className="hint" style={{ margin: "0 0 4px", color: "var(--warn)" }}>
+                <span className="mono">{m}</span> — {advertisedVision[m] === true ? "vision listed; " : ""}live image reading not verified: {probes[m].visionNote || "No image response detail was returned."}
               </p>
             ))}
 
@@ -907,11 +1023,8 @@ function GatewayCard() {
                       {copied === m && <span className="badge" data-tone="good">Copied</span>}
                       {roles.length > 0 && <span className="role-tag">{roles.join(" + ")}</span>}
                       {probe && <ProbeBadge probe={probe} modelId={m} />}
-                      {probe?.vision != null && (
-                        <span className="badge" data-tone={probe.vision ? "good" : "warn"} title={probe.visionNote ?? ""}>
-                          {probe.vision ? "sees images" : "text only"}
-                        </span>
-                      )}
+                      <VisionBadge advertised={advertisedVision[m]}
+                        vision={probe?.vision} note={probe?.visionNote} />
                     </div>
                   );
                 })}
@@ -943,15 +1056,8 @@ function GatewayCard() {
                   {routeModel}
                 </span>
                 {probe && <ProbeBadge probe={probe} modelId={routeModel} />}
-                {probe?.vision != null && (
-                  <span
-                    className="badge"
-                    data-tone={probe.vision ? "good" : "warn"}
-                    title={probe.visionNote ?? ""}
-                  >
-                    {probe.vision ? "sees images" : "text only"}
-                  </span>
-                )}
+                <VisionBadge advertised={advertisedVision[routeModel]}
+                  vision={probe?.vision} note={probe?.visionNote} />
               </div>
             );
           })}
@@ -1508,6 +1614,16 @@ function CouncilCard() {
       </p>
 
       <div className="row">
+        <label htmlFor="memory-target">Memory goal</label>
+        <input id="memory-target" className="field" type="number" min={1} max={1024}
+          value={Math.round(settings.memoryTargetKb / 1024)}
+          onChange={(event) => patch({ memoryTargetKb: Math.max(1, Number(event.target.value) || 1) * 1024 })}
+          style={{ flex: 1 }} />
+        <span className="vendor">MB (soft target)</span>
+      </div>
+      <p className="hint">Correctness and Big-O complexity come first. A 0 ms display is rounded timing, and interpreter or platform overhead may exceed this memory goal.</p>
+
+      <div className="row">
         <label htmlFor="council-include">Panel Answers Are Candidates</label>
         <div className="segmented" style={{ flex: 1 }}>
           {([true, false] as const).map((v) => (
@@ -1530,21 +1646,10 @@ function CouncilCard() {
 
       <div className="row">
         <label htmlFor="execution-provider">Program Tests</label>
-        <div className="segmented" style={{ flex: 1 }}>
-          {(["e2b", "local"] as const).map((v) => (
-            <button
-              key={String(v)}
-              data-on={settings.executionProvider === v}
-              style={{ flex: 1 }}
-              onClick={() => patch({ executionProvider: v })}
-            >
-              {v === "e2b" ? "E2B Sandbox" : "Local"}
-            </button>
-          ))}
-        </div>
+        <span className="chip">E2B Cloud only</span>
       </div>
 
-      {settings.executionProvider === "e2b" && (
+      {(
         <>
           <div className="row">
             <label htmlFor="e2b-timeout">E2B Timeout</label>
@@ -1568,87 +1673,6 @@ function CouncilCard() {
           </p>
         </>
       )}
-
-      <div className="row">
-        <label htmlFor="benchmark-backend">Remote Benchmark</label>
-        <div className="segmented" style={{ flex: 1 }}>
-          {(["actions", "off"] as const).map((v) => (
-            <button
-              key={String(v)}
-              data-on={settings.benchmarkBackend === v}
-              style={{ flex: 1 }}
-              onClick={() => patch({ benchmarkBackend: v })}
-            >
-              {v === "actions" ? "GitHub Actions" : "Off"}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {settings.benchmarkBackend === "actions" && (
-        <>
-          <div className="row">
-            <label htmlFor="github-repository">Repository</label>
-            <input
-              id="github-repository"
-              className="field mono"
-              type="text"
-              spellCheck={false}
-              value={settings.githubRepository}
-              onChange={(e) => patch({ githubRepository: e.target.value })}
-              placeholder="owner/repo"
-              style={{ flex: 1 }}
-            />
-          </div>
-          <div className="row">
-            <label htmlFor="github-workflow">Workflow</label>
-            <input
-              id="github-workflow"
-              className="field mono"
-              type="text"
-              spellCheck={false}
-              value={settings.githubWorkflow}
-              onChange={(e) => patch({ githubWorkflow: e.target.value })}
-              placeholder="cloud-benchmark.yml"
-              style={{ flex: 1 }}
-            />
-          </div>
-          <div className="row">
-            <label htmlFor="github-ref">Ref</label>
-            <input
-              id="github-ref"
-              className="field mono"
-              type="text"
-              spellCheck={false}
-              value={settings.githubRef}
-              onChange={(e) => patch({ githubRef: e.target.value })}
-              placeholder="main"
-              style={{ flex: 1 }}
-            />
-          </div>
-          <div className="row">
-            <label htmlFor="github-timeout">Remote Timeout</label>
-            <input
-              id="github-timeout"
-              className="field"
-              type="number"
-              min={30}
-              max={900}
-              step={30}
-              value={Math.round(settings.benchmarkTimeoutMs / 1000)}
-              onChange={(e) => patch({ benchmarkTimeoutMs: Number(e.target.value) * 1000 })}
-              style={{ flex: 1 }}
-            />
-            <span className="vendor">seconds</span>
-          </div>
-          <p className="hint">
-            Runs passing candidates on GitHub Actions and adds pass/fail, time, and memory results
-            to the Council report. Production workers should use a server-side GitHub App or
-            Actions token, not a local <span className="mono">gh</span> login.
-          </p>
-        </>
-      )}
-
       <div className="row" style={{ alignItems: "start" }}>
         <label htmlFor="council-solvers" style={{ paddingTop: 6 }}>
           Solvers

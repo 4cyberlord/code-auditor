@@ -985,7 +985,7 @@ fn build_responses_body(req: &RunRequest) -> Value {
     for img in &req.images {
         content.push(json!({
             "type": "input_image",
-            "image_url": format!("data:{};base64,{}", img.mime, img.data)
+            "image_url": img.url.clone().unwrap_or_else(|| format!("data:{};base64,{}", img.mime, img.data))
         }));
     }
     json!({
@@ -1036,14 +1036,12 @@ fn parse_responses_text(provider: &str, body_text: &str) -> Result<(String, Usag
     Ok((out, usage))
 }
 
-/// A 24x24 solid red square, as PNG.
+/// A 256x256 solid red square, as PNG.
 ///
-/// The smallest honest vision test there is. A model that can genuinely see the
-/// attachment answers "red"; one that cannot either refuses, ignores the image
-/// and guesses, or -- as observed through this gateway -- has its connection
-/// dropped before it ever replies. 88 bytes, so testing costs nothing worth
-/// counting.
-const RED_SQUARE_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAIAAABvFaqvAAAAH0lEQVR42mO4IydHFcQwatCoQaMGjRo0atCoQQNvEAD4u3YfaWxGoAAAAABJRU5ErkJggg==";
+/// The old 24x24 probe was smaller than many vision preprocessing pipelines'
+/// useful input size. Use a screenshot-sized image instead of failing a model
+/// simply because the diagnostic itself was an unusually tiny thumbnail.
+const RED_SQUARE_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAACv0lEQVR4nO3TMQ0AMAzAsCIpf1ADMxg9YskA8mTeLmTNeQEcMgBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0gxAmgFIMwBpBiDNAKQZgDQDkGYA0j6x+hBp/hy1NAAAAABJRU5ErkJggg==";
 
 /// What one model did when we actually asked it something.
 #[derive(Clone, serde::Serialize)]
@@ -1093,11 +1091,13 @@ pub async fn probe_models(
     // Automatic preflight probes are returned to their caller. Only an explicit
     // Settings test should show one toast per candidate, including fallbacks.
     notify_on_result: Option<bool>,
+    vision_transport: Option<String>,
 ) -> Result<Vec<ProbeResult>, String> {
     if models.iter().any(|model| !approved_model(model)) {
         return Err("Only the ten approved models can be probed.".into());
     }
     let want_vision = test_vision.unwrap_or(false);
+    let use_azure_vision = vision_transport.as_deref() == Some("azure") && gateway_id.as_deref() == Some("cleanapis");
     let endpoint_by_model = endpoint_by_model.unwrap_or_default();
     let gateway_id = gateway_id.unwrap_or_else(|| "tokenrouter".into());
     if !is_gateway(&gateway_id) {
@@ -1138,7 +1138,7 @@ pub async fn probe_models(
         // of the messages. Only asked when the user chose it — the flag is a
         // RequestBudget question, not a curiosity.
         let vision = if want_vision {
-            Some(probe_vision(&client, &url, &key, model, &gateway_id).await)
+            Some(probe_vision(&client, &url, &key, model, &gateway_id, use_azure_vision).await)
         } else {
             None
         };
@@ -1270,11 +1270,7 @@ pub async fn probe_models(
                     } else {
                         serde_json::from_str::<Value>(&text)
                             .ok()
-                            .and_then(|v| {
-                                v["choices"][0]["message"]["content"]
-                                    .as_str()
-                                    .map(|s| s.trim().to_string())
-                            })
+                            .map(|v| chat_message_text(&v))
                             .unwrap_or_default()
                     };
                     let reply = reply.trim().to_string();
@@ -1353,7 +1349,31 @@ async fn probe_vision(
     key: &str,
     model: &str,
     provider: &str,
+    use_azure: bool,
 ) -> (bool, String) {
+    let azure_path = if use_azure {
+        use base64::Engine as _;
+        let owner = match crate::auth::current() {
+            Some(account) => account.user_id,
+            None => return (false, "Sign in before checking Azure image delivery.".into()),
+        };
+        let path = format!("{owner}/vision-probes/{}.png", uuid::Uuid::new_v4());
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(RED_SQUARE_PNG) {
+            Ok(bytes) => bytes,
+            Err(_) => return (false, "Internal image test is invalid PNG data.".into()),
+        };
+        if let Err(error) = crate::azure_storage::upload(&path, "image/png", bytes).await {
+            return (false, format!("Azure image upload failed: {error}"));
+        }
+        Some(path)
+    } else { None };
+    let image_url = match &azure_path {
+        Some(path) => match crate::azure_storage::signed_read_url(path, 300) {
+            Ok(url) => url,
+            Err(error) => return (false, format!("Azure image link failed: {error}")),
+        },
+        None => format!("data:image/png;base64,{RED_SQUARE_PNG}"),
+    };
     let body = json!({
         "model": model,
         "messages": [{
@@ -1361,10 +1381,12 @@ async fn probe_vision(
             "content": [
                 { "type": "text", "text": "What colour is this image? Reply with one word." },
                 { "type": "image_url",
-                  "image_url": { "url": format!("data:image/png;base64,{RED_SQUARE_PNG}") } }
+                  "image_url": { "url": image_url } }
             ]
         }],
-        "max_tokens": 256,
+        // Clean APIs documents a 2,048-token floor for reasoning models. Give
+        // the vision check enough room to produce a visible one-word answer.
+        "max_tokens": if provider == "cleanapis" { 2048 } else { 256 },
     });
 
     let sent = send_for_provider(|| client
@@ -1372,6 +1394,10 @@ async fn probe_vision(
         .header("Authorization", format!("Bearer {key}"))
         .json(&body)
         .timeout(std::time::Duration::from_secs(45)), provider).await;
+
+    if let Some(path) = &azure_path {
+        let _ = crate::azure_storage::remove(path).await;
+    }
 
     match sent {
         Err(e) => (false, format!("No image reply: {}", transport_detail(&e))),
@@ -1384,14 +1410,11 @@ async fn probe_vision(
                     format!("{status}: {}", truncate(&explain(&text), 200)),
                 );
             }
-            let reply = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| {
-                    v["choices"][0]["message"]["content"]
-                        .as_str()
-                        .map(|s| s.trim().to_lowercase())
-                })
-                .unwrap_or_default();
+            let parsed = match serde_json::from_str::<Value>(&text) {
+                Ok(value) => value,
+                Err(_) => return (false, "Image endpoint returned a non-JSON answer.".into()),
+            };
+            let reply = chat_message_text(&parsed).to_lowercase();
 
             if reply.contains("red") {
                 (
@@ -1402,7 +1425,10 @@ async fn probe_vision(
                     ),
                 )
             } else if reply.is_empty() {
-                (false, "Accepted the image but replied with nothing.".into())
+                (false, format!(
+                    "Accepted the image but returned no visible text (finish_reason: {}).",
+                    parsed["choices"][0]["finish_reason"].as_str().unwrap_or("unknown")
+                ))
             } else {
                 // It answered, but not with the right colour -- so it either could
                 // not see the attachment or ignored it. Either way it must not be
@@ -1419,6 +1445,44 @@ async fn probe_vision(
     }
 }
 
+/// OpenAI-compatible gateways may return assistant content as a string or as
+/// typed text parts. Both represent a visible answer to the image check.
+fn chat_message_text(response: &Value) -> String {
+    chat_content_text(&response["choices"][0]["message"]["content"])
+}
+
+fn chat_content_text(content: &Value) -> String {
+    if let Some(text) = content.as_str() {
+        return text.to_string();
+    }
+    content.as_array().map(|parts| parts.iter().filter_map(|part| {
+        part["text"].as_str().or_else(|| part["text"]["value"].as_str())
+    }).collect::<String>()).unwrap_or_default()
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct GatewayModelDetails {
+    pub id: String,
+    /// None means this gateway did not report capabilities. An empty list means
+    /// it did report them and did not advertise vision.
+    pub capabilities: Option<Vec<String>>,
+}
+
+fn parse_gateway_model_details(value: &Value) -> Vec<GatewayModelDetails> {
+    let rows = value["data"].as_array().or_else(|| value.as_array());
+    let mut models: Vec<GatewayModelDetails> = rows.into_iter().flatten().filter_map(|row| {
+        let id = row.as_str().or_else(|| row["id"].as_str())?.trim();
+        if id.is_empty() { return None; }
+        let capabilities = row["capabilities"].as_array().map(|items| items.iter()
+            .filter_map(|item| item.as_str().map(|s| s.to_ascii_lowercase()))
+            .collect());
+        Some(GatewayModelDetails { id: id.into(), capabilities })
+    }).collect();
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models.dedup_by(|a, b| a.id == b.id);
+    models
+}
+
 /// Asks the gateway what this key can actually reach.
 ///
 /// The Settings fields for router model ids were free text with a hard-coded
@@ -1431,7 +1495,7 @@ async fn probe_vision(
 pub async fn list_gateway_models(
     base_url: Option<String>,
     gateway_id: Option<String>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<GatewayModelDetails>, String> {
     let gateway_id = gateway_id.unwrap_or_else(|| "tokenrouter".into());
     if !is_gateway(&gateway_id) {
         return Err("Unknown gateway.".into());
@@ -1465,34 +1529,11 @@ pub async fn list_gateway_models(
     let v: Value = serde_json::from_str(&text)
         .map_err(|e| format!("The model list came back in a shape we could not read: {e}"))?;
 
-    // `{"data":[{"id":...}]}` is the OpenAI shape. A bare array, and a list of
-    // plain strings, both turn up on compatible surfaces often enough to be worth
-    // accepting rather than failing over.
-    let rows = if v["data"].is_array() {
-        v["data"].as_array().cloned().unwrap_or_default()
-    } else if v.is_array() {
-        v.as_array().cloned().unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    let mut ids: Vec<String> = rows
-        .iter()
-        .filter_map(|r| {
-            r.as_str()
-                .map(|s| s.to_string())
-                .or_else(|| r["id"].as_str().map(|s| s.to_string()))
-        })
-        .filter(|s| !s.trim().is_empty())
-        .collect();
-
-    ids.sort();
-    ids.dedup();
-
-    if ids.is_empty() {
+    let models = parse_gateway_model_details(&v);
+    if models.is_empty() {
         return Err("The router answered, but listed no models for this key.".into());
     }
-    Ok(ids)
+    Ok(models)
 }
 
 /// The real reason a request failed, not reqwest's summary of it.
@@ -1814,9 +1855,14 @@ fn build_request(
                 });
             let mut content = vec![json!({ "type": "text", "text": req.user_text })];
             for img in &req.images {
+                let image_url = if req.provider == "cleanapis" {
+                    img.url.clone().unwrap_or_else(|| format!("data:{};base64,{}", img.mime, img.data))
+                } else {
+                    format!("data:{};base64,{}", img.mime, img.data)
+                };
                 content.push(json!({
                     "type": "image_url",
-                    "image_url": { "url": format!("data:{};base64,{}", img.mime, img.data) }
+                    "image_url": { "url": image_url }
                 }));
             }
             let mut body = json!({
@@ -1942,10 +1988,8 @@ fn gemini_text(v: &Value) -> String {
 
 fn extract_delta(provider: &str, v: &Value) -> String {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => v["choices"][0]["delta"]["content"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" =>
+            chat_content_text(&v["choices"][0]["delta"]["content"]),
         "anthropic" => {
             // `thinking_delta` events also arrive under `content_block_delta`, but
             // carry their payload in `thinking` rather than `text`.
@@ -1962,10 +2006,7 @@ fn extract_delta(provider: &str, v: &Value) -> String {
 
 fn extract_whole(provider: &str, v: &Value) -> String {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => v["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string(),
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => chat_message_text(v),
         "anthropic" => v["content"]
             .as_array()
             .map(|blocks| {
@@ -2173,6 +2214,30 @@ mod explain_tests {
         }
         assert!(is_gateway("cleanapis"));
         assert!(!uses_gateway_governor("cleanapis"));
+    }
+
+    #[test]
+    fn clean_catalog_retains_advertised_vision_and_unknown_capabilities() {
+        let data = json!({ "data": [
+            { "id": "gpt-5.6-sol", "capabilities": ["reasoning", "vision"] },
+            { "id": "kimi-k3", "capabilities": ["reasoning"] },
+            { "id": "claude-opus-5.5" }
+        ] });
+        let models = parse_gateway_model_details(&data);
+        assert_eq!(models.iter().find(|m| m.id == "gpt-5.6-sol").unwrap().capabilities,
+            Some(vec!["reasoning".into(), "vision".into()]));
+        assert_eq!(models.iter().find(|m| m.id == "kimi-k3").unwrap().capabilities,
+            Some(vec!["reasoning".into()]));
+        assert_eq!(models.iter().find(|m| m.id == "claude-opus-5.5").unwrap().capabilities, None);
+    }
+
+    #[test]
+    fn vision_probe_can_read_structured_chat_text() {
+        let response = json!({ "choices": [{ "message": { "content": [
+            { "type": "text", "text": "Red" }
+        ] } }] });
+        assert_eq!(chat_message_text(&response), "Red");
+        assert_eq!(chat_content_text(&json!(" world")), " world");
     }
 }
 

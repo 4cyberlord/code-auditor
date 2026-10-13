@@ -22,10 +22,7 @@ import { createSign } from "node:crypto";
 import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { readFileSync } from "node:fs";
-import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { isPrimaryModel, listedPrimaryRoute, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "../src/lib/primaryModels.ts";
 import {
@@ -175,7 +172,6 @@ const {
   harnessIsSuspect,
   letterFor,
   looksLikeCodingProblem,
-  normalizeCodeLanguage,
   partitionByVision,
   answerStanding,
   gateFor,
@@ -212,7 +208,6 @@ const {
 } = council;
 
 const MAX_OUTPUT = 64 * 1024;
-const LOCAL_RUN_TIMEOUT_MS = 20_000;
 const REMOTE_RUN_TIMEOUT_MS = 120_000;
 const TOKENROUTER_MIN_DELAY_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS || 13_000);
 const TOKENROUTER_JITTER_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_JITTER_MS || 1_500);
@@ -306,6 +301,40 @@ async function nextQueuedJob() {
     "solve_jobs?status=eq.queued&order=created_at.asc&limit=1"
   );
   return rows?.[0] || null;
+}
+
+async function nextQueuedBenchmark() {
+  try {
+    const rows = await rest("benchmark_requests?status=eq.queued&order=created_at.asc&limit=1");
+    return rows?.[0] || null;
+  } catch (err) {
+    // An older database must not stop the existing Council job queue.
+    if (/benchmark_requests.*(does not exist|schema cache)|PGRST205|42P01/i.test(String(err))) return null;
+    throw err;
+  }
+}
+
+async function runQueuedBenchmark(request) {
+  const claimed = await rest(`benchmark_requests?id=eq.${request.id}&status=eq.queued`, {
+    method: "PATCH", body: JSON.stringify({ status: "running" }),
+  });
+  if (!claimed?.length) return;
+  try {
+    await loadOwnerSecrets(request.owner_id);
+    if (!secret("E2B_API_KEY")) throw new Error("No E2B key is saved for this account.");
+    const result = await runE2BCode(request.language, request.program, request.timeout_ms, { stdin: request.stdin || "" });
+    await rest(`benchmark_requests?id=eq.${request.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "completed", result, finished_at: new Date().toISOString() }),
+    });
+  } catch (err) {
+    await rest(`benchmark_requests?id=eq.${request.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "failed", error: err instanceof Error ? err.message : String(err), finished_at: new Date().toISOString() }),
+    });
+  } finally {
+    jobSecrets = null;
+  }
 }
 
 async function patchJob(id, patch) {
@@ -705,115 +734,14 @@ function clampOutput(raw) {
   };
 }
 
-function isCommonJs(code) {
-  const stripped = code
-    .split("\n")
-    .map((line) => line.split("//")[0] || "")
-    .join("\n");
-  if (/\bimport\s|\bexport\s|import\(/.test(stripped)) return false;
-  return /require\(|module\.exports|exports\.|__dirname|__filename/.test(stripped);
-}
-
-const JAVA_COMMAND =
-  "sed -E '/^public[[:space:]]+class[[:space:]]+Main\\b/!s/^public[[:space:]]+(class|interface|enum|record)[[:space:]]+/\\1 /' Main.java > _M.java && mv _M.java Main.java && javac Main.java && java Main";
-
-function runtimeFor(language, code) {
-  // Same normaliser the suites and the candidates go through, so a fence
-  // labelled ```c++17 lands on the C++ row instead of falling off the table.
-  const lang = normalizeCodeLanguage(language);
-  if (["python", "python3", "py", "py3"].includes(lang)) return { file: "main.py", command: "python3 main.py", runtime: "python3" };
-  if (["javascript", "js", "node", "nodejs", "mjs", "cjs"].includes(lang)) {
-    if (isCommonJs(code)) return { file: "main.cjs", command: `${shellSingle(process.execPath)} main.cjs`, runtime: "node (commonjs)" };
-    return { file: "main.mjs", command: `${shellSingle(process.execPath)} main.mjs`, runtime: "node (esm)" };
-  }
-  if (["typescript", "ts"].includes(lang)) return { file: "main.ts", command: `${shellSingle(process.execPath)} --experimental-strip-types main.ts`, runtime: "node (type stripping)" };
-  if (["bash", "sh", "shell", "zsh", "console"].includes(lang)) return { file: "main.sh", command: "bash main.sh", runtime: "bash" };
-  if (["ruby", "rb"].includes(lang)) return { file: "main.rb", command: "ruby main.rb", runtime: "ruby" };
-  if (lang === "php") return { file: "main.php", command: "php main.php", runtime: "php" };
-  if (lang === "c") return { file: "main.c", command: "cc -std=c17 -O1 main.c -o prog -lm && ./prog", runtime: "cc" };
-  if (["cpp", "c++", "cc", "cxx"].includes(lang)) return { file: "main.cpp", command: "c++ -std=c++20 -O1 main.cpp -o prog && ./prog", runtime: "c++" };
-  if (lang === "java") {
-    // `java Main.java` is single-file source mode: it runs the FIRST class in
-    // the file, so a harness with the candidate's `Solution` spliced above its
-    // own `Main` dies with "can't find main(String[]) method in class: Solution"
-    // having never executed a line. That is exactly what killed Candidate A.
-    // Compiling first and naming the entry class makes the order irrelevant.
-    // The sed drops `public` from every top-level type except Main, because a
-    // second public class in one file is a compile error and `public class
-    // Solution` is the habit every LeetCode answer is written with.
-    return { file: "Main.java", command: JAVA_COMMAND, runtime: "javac + java" };
-  }
-  if (["go", "golang"].includes(lang)) return { file: "main.go", command: "go run main.go", runtime: "go" };
-  if (["rust", "rs"].includes(lang)) return { file: "main.rs", command: "rustc -O main.rs -o prog 2>&1 && ./prog", runtime: "rustc" };
-  return null;
-}
-
-async function runLocalCode(language, code, timeoutMs = LOCAL_RUN_TIMEOUT_MS) {
-  const runtime = runtimeFor(language, code);
-  if (!runtime) throw new Error(`Unsupported benchmark language: ${language || "unknown"}`);
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "council-editor-worker-"));
-  const started = Date.now();
-  let timedOut = false;
-  try {
-    await fs.writeFile(path.join(dir, runtime.file), code, "utf8");
-    const child = spawn("bash", ["-lc", runtime.command], {
-      cwd: dir,
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: process.platform !== "win32",
-    });
-    // The local mode is explicit, but hostile programs can still flood the
-    // worker's output pipes. Keep draining while bounding retained bytes.
-    let stdout = "";
-    let stderr = "";
-    let outputTruncated = false;
-    const keep = (previous, chunk) => {
-      const remaining = 65_536 - Buffer.byteLength(previous, "utf8");
-      if (remaining <= 0) {
-        outputTruncated = true;
-        return previous;
-      }
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      if (bytes.length > remaining) outputTruncated = true;
-      return previous + bytes.subarray(0, remaining).toString("utf8");
-    };
-    child.stdout.on("data", (chunk) => { stdout = keep(stdout, chunk); });
-    child.stderr.on("data", (chunk) => { stderr = keep(stderr, chunk); });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try {
-        if (process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
-        else child.kill("SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
-    }, Math.max(1000, Math.min(timeoutMs, 60_000)));
-    const exitCode = await new Promise((resolve, reject) => {
-      child.on("error", reject);
-      child.on("close", (code) => resolve(code));
-    }).finally(() => clearTimeout(timer));
-    const out = clampOutput(stdout);
-    const err = clampOutput(stderr);
-    return {
-      ok: exitCode === 0 && !timedOut,
-      runtime: runtime.runtime,
-      exitCode,
-      stdout: out.text,
-      stderr: err.text,
-      durationMs: Date.now() - started,
-      timedOut,
-      truncated: outputTruncated || out.truncated || err.truncated,
-    };
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
-  }
-}
 
 function shellSingle(s) {
   return `'${String(s).replaceAll("'", `'"'"'`)}'`;
 }
 
-function remoteScript(language, code, providerLabel = "remote") {
+function remoteScript(language, code, providerLabel = "remote", stdin = "") {
   const encoded = Buffer.from(code, "utf8").toString("base64");
+  const encodedStdin = Buffer.from(stdin, "utf8").toString("base64");
   return `set -u
 tmp="$(mktemp -d "\${TMPDIR:-/tmp}/council-editor-bench.XXXXXX")" || exit 98
 cleanup() { rm -rf "$tmp"; }
@@ -828,6 +756,10 @@ cat > code.b64 <<'CA_CODE'
 ${encoded}
 CA_CODE
 base64 -d code.b64 > code.txt
+cat > stdin.b64 <<'CA_STDIN'
+${encodedStdin}
+CA_STDIN
+base64 -d stdin.b64 > stdin.txt
 lang=${shellSingle(language)}
 lang="$(printf '%s' "$lang" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')"
 # Fourth and last copy of the language table. Same standard-stripping as the
@@ -856,14 +788,14 @@ case "$lang" in
 esac
 status=0
 if command -v /usr/bin/time >/dev/null 2>&1; then
-  /usr/bin/time -f 'CA_METRICS elapsed_s=%e maxrss_kb=%M' bash -lc "$command" >stdout.txt 2>stderr.txt || status=$?
+  /usr/bin/time -f 'CA_METRICS elapsed_s=%e maxrss_kb=%M' bash -lc "$command" <stdin.txt >stdout.txt 2>stderr.txt || status=$?
 else
   start="$(python3 - <<'PY'
 import time
 print(int(time.time() * 1000))
 PY
 )"
-  bash -lc "$command" >stdout.txt 2>stderr.txt || status=$?
+  bash -lc "$command" <stdin.txt >stdout.txt 2>stderr.txt || status=$?
   finish="$(python3 - <<'PY'
 import time
 print(int(time.time() * 1000))
@@ -880,28 +812,8 @@ exit "$status"
 `;
 }
 
-/**
- * Optional second-pass benchmark evidence after E2B/local generated tests.
- * E2B is the default execution gate; Actions is heavier, reproducible evidence
- * for passing candidates only.
- */
-/**
- * Where the *extra* remote measurement comes from, on top of the run that gates.
- *
- * This used to default to Actions whenever a repo was configured, so a candidate
- * was executed twice for one answer: once in the E2B sandbox to decide whether
- * it passes, and again on a GitHub runner to time it. E2B already reports
- * elapsed time and peak resident set — it runs the same metrics script — so the
- * second run bought a slightly different number at the cost of a dispatch, a
- * poll and an artifact download per candidate.
- *
- * The default is now "off": whatever ran the code is what measured it. Choosing
- * "actions" is an explicit decision to have GitHub do the measuring, for when a
- * neutral machine matters more than the minutes.
- */
-export function resolveBenchmarkBackend(settings = {}, env = process.env) {
-  const explicit = String(settings.benchmarkBackend || "").trim().toLowerCase();
-  if (explicit === "actions") return repoFor(env) ? "actions" : "off";
+/** E2B is the sole execution and measurement backend. */
+export function resolveBenchmarkBackend() {
   return "off";
 }
 
@@ -918,6 +830,7 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
   const bootStarted = Date.now();
   const template = String(process.env.CODE_AUDITOR_E2B_TEMPLATE || "").trim();
   const opts = {
+    apiKey: secret("E2B_API_KEY"),
     timeoutMs: Math.max(policy.timeoutMs + 30_000, 90_000),
     // E2B microVM egress is denied unless a future explicitly approved
     // network policy is implemented and tested.
@@ -937,7 +850,7 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
     async () => {
     let result;
     try {
-      result = await sandbox.commands.run(`bash -lc ${shellSingle(remoteScript(language, code, "e2b"))}`, {
+      result = await sandbox.commands.run(`bash -lc ${shellSingle(remoteScript(language, code, "e2b", options.stdin || ""))}`, {
         timeoutMs: policy.timeoutMs,
       });
     } catch (err) {
@@ -981,8 +894,7 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
 }
 
 function executionProvider(settings) {
-  // Never silently run untrusted generated code on the host when E2B is
-  // unavailable. The local runner is an explicit operator-only selection.
+  // Legacy saved settings may still say local. Fail closed to E2B only.
   const selected = String(
     settings.executionProvider ||
       process.env.CODE_AUDITOR_EXECUTION_PROVIDER ||
@@ -991,18 +903,18 @@ function executionProvider(settings) {
   if (selected !== "e2b" && selected !== "local") {
     throw new Error(`Unsupported execution provider: ${selected}`);
   }
-  return selected;
+  return "e2b";
 }
 
 async function runVerification(settings, suite, program, options = {}) {
   const provider = executionProvider(settings);
-  if (provider === "e2b") {
-    if (!secret("E2B_API_KEY")) {
-      throw new Error("No E2B key is saved for the account that owns this job.");
-    }
-    return runE2BCode(suite.language, program, Number(settings.e2bTimeoutMs || REMOTE_RUN_TIMEOUT_MS), options);
+  if (process.env.NODE_ENV === "test" && typeof globalThis.__COUNCIL_E2B_TEST_DOUBLE__ === "function") {
+    return globalThis.__COUNCIL_E2B_TEST_DOUBLE__(suite.language, program, options);
   }
-  return runLocalCode(suite.language, program, LOCAL_RUN_TIMEOUT_MS);
+  if (provider !== "e2b" || !secret("E2B_API_KEY")) {
+    throw new Error("No E2B key is saved for the account that owns this job.");
+  }
+  return runE2BCode(suite.language, program, Number(settings.e2bTimeoutMs || REMOTE_RUN_TIMEOUT_MS), options);
 }
 
 /**
@@ -2822,9 +2734,16 @@ export async function runCouncilJob(job) {
   }
 }
 
+let preferBenchmark = true;
 export async function tick() {
-  const queued = await nextQueuedJob();
+  const [benchmark, queued] = await Promise.all([nextQueuedBenchmark(), nextQueuedJob()]);
+  if (benchmark && (!queued || preferBenchmark)) {
+    preferBenchmark = false;
+    await runQueuedBenchmark(benchmark);
+    return true;
+  }
   if (!queued) return false;
+  preferBenchmark = true;
   const job = await claim(queued);
   if (!job) return true;
   const started = Date.now();

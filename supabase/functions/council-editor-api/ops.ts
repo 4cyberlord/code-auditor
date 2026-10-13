@@ -190,6 +190,7 @@ function screenshotRow(r: any) {
     sessionId: r.session_id,
     position: Number(r.position ?? 0),
     localPath: r.local_path ?? null,
+    storageBucket: r.storage_bucket ?? null,
     storagePath: r.storage_path ?? null,
     fileName: r.file_name ?? "",
     bytes: Number(r.bytes ?? 0),
@@ -664,6 +665,22 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
       console.error("run_save:", error.message ?? error);
       throw new HttpError(500, "Could not save the run.");
     }
+    if (args.report && typeof args.report === "object") {
+      const { error: reportError } = await admin.from("runs")
+        .update({ report: args.report })
+        .eq("id", data)
+        .eq("owner_id", principal.userId);
+      if (reportError) {
+        console.error("run report save:", reportError.message ?? reportError);
+        // Older installations may not have applied the report-column migration
+        // yet. Keep the already-committed run accessible; the UI will show its
+        // answers without pretending it has a structured Council report.
+        if (String(reportError.code) === "42703" || /column.*report.*does not exist/i.test(reportError.message ?? "")) {
+          return { id: data };
+        }
+        throw new HttpError(500, "Run saved, but its detailed report could not be saved.");
+      }
+    }
     return { id: data };
   },
 
@@ -695,6 +712,59 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
       run: runSummary({ ...row, verdicts }, answers.length),
       responses: answers.map(storedResponse),
       verdict: verdicts[0] ? storedVerdict(verdicts[0]) : null,
+      report: row.report ?? null,
+    };
+  },
+
+  "benchmarks.create": async ({ admin, principal }, args) => {
+    const sessionId = uuid(args.sessionId, "sessionId");
+    const language = str(args.language, "language").toLowerCase();
+    const program = typeof args.program === "string" ? args.program : "";
+    const stdin = typeof args.stdin === "string" ? args.stdin : "";
+    const timeoutMs = Number(args.timeoutMs ?? 120000);
+    if (!["python", "cpp", "rust", "javascript", "typescript"].includes(language) ||
+        !program.trim() || new TextEncoder().encode(program).length > 262144 ||
+        new TextEncoder().encode(stdin).length > 65536 ||
+        !Number.isInteger(timeoutMs) || timeoutMs < 30000 || timeoutMs > 300000) {
+      throw new HttpError(400, "Invalid benchmark language, program, or timeout.");
+    }
+    const { data: session, error: sessionError } = await admin.from("sessions")
+      .select("id").eq("id", sessionId).eq("owner_id", principal.userId).maybeSingle();
+    ok({ data: session, error: sessionError }, "check benchmark session");
+    if (!session) throw new HttpError(404, "That session no longer exists.");
+    const { count, error: countError } = await admin.from("benchmark_requests")
+      .select("id", { count: "exact", head: true })
+      .eq("owner_id", principal.userId).in("status", ["queued", "running"]);
+    ok({ data: count, error: countError }, "check benchmark queue");
+    if ((count ?? 0) >= 8) throw new HttpError(429, "Too many E2B benchmarks are already queued for this account.");
+    const { data, error } = await admin.from("benchmark_requests")
+      .insert({ owner_id: principal.userId, session_id: sessionId, language, program, stdin, timeout_ms: timeoutMs })
+      .select("id").single();
+    return { id: ok({ data, error }, "queue benchmark").id };
+  },
+
+  "runs.report.update": async ({ admin, principal }, args) => {
+    const id = uuid(args.runId, "runId");
+    if (!args.report || typeof args.report !== "object" || Array.isArray(args.report)) {
+      throw new HttpError(400, "A structured report is required.");
+    }
+    const { data, error } = await admin.from("runs").update({ report: args.report })
+      .eq("id", id).eq("owner_id", principal.userId).select("id").maybeSingle();
+    const row = ok({ data, error }, "update run report");
+    if (!row) throw new HttpError(404, "That run no longer exists.");
+    return { id: row.id };
+  },
+
+  "benchmarks.get": async ({ admin, principal }, args) => {
+    const id = uuid(args.id, "id");
+    const { data, error } = await admin.from("benchmark_requests")
+      .select("id,status,result,error,created_at,finished_at")
+      .eq("id", id).eq("owner_id", principal.userId).maybeSingle();
+    const row = ok({ data, error }, "read benchmark");
+    if (!row) throw new HttpError(404, "That benchmark no longer exists.");
+    return {
+      id: row.id, status: row.status, result: row.result, error: row.error,
+      createdAt: row.created_at, finishedAt: row.finished_at,
     };
   },
 
