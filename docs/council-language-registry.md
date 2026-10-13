@@ -41,7 +41,9 @@ Without a configured external source the bundled packs are used immediately.
    `node scripts/publish-language-packs.mjs --registry=neon-docs --confirm-database-write`.
    That initially stages drafts. After real review, use
    `--approve-reviewed` and `CODE_AUDITOR_DOC_REVIEWER` to publish.
-   The publisher requires a separate write-capable token; never give its
+   Set `CODE_AUDITOR_LANGUAGE_PUBLISH_TOKEN` with a separate write-authorized
+   external database credential in the administrative environment. The
+   publisher rejects the worker's read-only token. Never give publishing
    privileges to the production worker.
 
 The reference-implementation E2B preflight and final-only result gate remain
