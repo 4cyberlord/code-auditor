@@ -276,7 +276,7 @@ function mustEnv(name) {
 // Fetch directory records once per TTL, shared by all languages/jobs. This
 // directory is service-role-only and contains no actual programming guides.
 const languageDirectory=createRegistryDirectoryLoader(()=>
-  rest("external_service_registry?select=service_key,provider,content_category,stores_language_markdown,is_external,metadata&service_key=eq.council_language_docs&limit=1")
+  rest("external_service_registry?select=service_key,provider,project_ref,content_category,stores_language_markdown,is_external,metadata&service_key=eq.council_language_docs&limit=1")
 );
 
 async function rest(path, init = {}) {
