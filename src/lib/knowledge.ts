@@ -51,6 +51,7 @@ const RECORDS: KnowledgeRecord[] = [
       "Require a known-good reference implementation to pass and a deliberately mutated implementation to fail before trusting a harness.",
       "Separate provider, sandbox-creation, command, process, and polling timeouts; retry transient infrastructure failures, not deterministic syntax or assertion failures.",
       "Record complete stdout, stderr, exit status, and measured metrics so a failed harness can be regenerated instead of misattributed to a solver.",
+      "Retrieve the maintained Markdown pack in docs/language-runtime for the candidate language before generating its harness; these packs summarize official syntax and runner constraints.",
     ],
     sources: [
       { title: "Python language reference", url: "https://docs.python.org/3/reference/", trust: "official", note: "Scope, expressions, comprehensions, and syntax rules used by Python harness validation." },
