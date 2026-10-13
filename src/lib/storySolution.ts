@@ -57,6 +57,18 @@ export function selectStorySolution(
   return toDisplay(chosen.final, chosen.model, null, true);
 }
 
+/** A coding result is publishable only when this exact code passed execution. */
+export function selectVerifiedStorySolution(
+  agents: readonly VisibleSolver[],
+  council: CouncilSolutionEvidence,
+  representative?: string | null,
+): DisplaySolution | null {
+  if (council.phase !== "done") return null;
+  const report = selectStorySolution(agents, council, representative);
+  return report?.benchmark && gateFor(report.benchmark) === "pass" && !report.provisional
+    ? report : null;
+}
+
 export interface FunctionSignature { name: string; signature: string }
 export function extractFunctionSignatures(code: string): FunctionSignature[] {
   const found: FunctionSignature[] = [], seen = new Set<string>();

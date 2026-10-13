@@ -99,6 +99,7 @@ import {
   letterFor,
   parseReviewSet,
   parseTestSuites,
+  missingSuiteLanguages,
   parseCouncilSynthesis,
   parseJudgeReport,
   decideWinner,
@@ -3145,8 +3146,8 @@ export const useStore = create<State>((set, get) => ({
       publishOverlayState({ ...s, ...next });
       return next;
     });
-    get().maybeAutoJudge();
     get().maybeStartCouncil();
+    get().maybeAutoJudge();
   },
 
   failAgent: (e) => {
@@ -3283,8 +3284,8 @@ export const useStore = create<State>((set, get) => ({
       publishOverlayState({ ...s, ...next });
       return next;
     });
-    get().maybeAutoJudge();
     get().maybeStartCouncil();
+    get().maybeAutoJudge();
   },
 
   /**
@@ -3350,7 +3351,7 @@ export const useStore = create<State>((set, get) => ({
     // the same record.
     // The read-out is what a person actually reads, so it runs whether or not
     // the judge does — it is a different question from "did they agree".
-    void get().runReview();
+    if (!s.settings.councilEnabled) void get().runReview();
     if (willJudge) void get().runJudge();
     else void get().persistRun();
   },
@@ -3816,6 +3817,10 @@ export const useStore = create<State>((set, get) => ({
     const answered = s.agents.filter((a) => a.enabled && a.final);
     if (answered.length < COUNCIL_SIZE.solversMin && !s.settings.councilModels.length) return;
     if (s.council.phase !== "idle") return;
+    // Claim the Council synchronously at the solver→Council handoff. Otherwise
+    // the last pane briefly makes running=false, exposes a provisional answer,
+    // and starts a technical review of code that has not been chosen or tested.
+    set((state) => ({ running: true, council: { ...state.council, phase: "contracting" } }));
     void runCouncil(get, set);
   },
 
@@ -4636,40 +4641,65 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
 
   // ------------------------------------------------------- round 1.5: spec
   //
-  // One model writes the harness. Any answer that is not code skips straight
+  // A model writes the harness. Any answer that is not code skips straight
   // past this: there is nothing to execute, and asking a model to invent tests
   // for prose produces noise the gate then has to ignore anyway.
   const codeCandidates = field.filter((c) => c.final?.kind === "code" && c.final.code.trim());
-  let suites: TestSuite[] = [];
-  if (codeCandidates.length >= 2) {
+  const suites: TestSuite[] = [];
+  if (codeCandidates.length) {
     set((st) => ({ council: { ...st.council, phase: "speccing" } }));
-    const specModel = settings.synthesisModel || settings.councilJudges[0]?.model || field[0].model;
-    set((st) => ({ council: { ...st.council, specBy: specModel } }));
     const languages = Array.from(new Set(codeCandidates.map((c) => candidateLanguage(c.final!)).filter(Boolean)));
-    try {
-      const specText = await bridge.runOnce({
-        runId,
-        agentId: "council-spec",
-        attemptId: newAttemptId(),
-        provider: settings.gatewayId,
-        model: specModel,
-        systemPrompt: testSpecSystemPrompt(),
-        userText: testSpecUserPrompt({ question: `${problem}\n\n${routingGuidance(route)}`, docket: candidateDocket(field), languages, knowledge }),
-        images: [],
-        maxTokens: settings.maxTokens,
-        temperature: 0,
-        baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
-        endpoint: endpointForModel(settings, specModel),
-      });
-      suites = parseTestSuites(specText);
-    } catch (err) {
-      // A spec pass that fails costs verification, not the council: reviews and
-      // judges still run, and every prompt they see says plainly that no
-      // measured results exist.
-      console.warn("Council spec pass failed:", cleanError(String(err)));
+    const specModels = Array.from(new Set([
+      settings.synthesisModel,
+      ...settings.councilJudges.map(seat => seat.model),
+      ...field.map(candidate => candidate.model),
+    ].filter(Boolean)));
+    let specFailure = "No model produced an executable test harness.";
+    // Ask for one language at a time. A large, multi-language harness can
+    // exhaust a model's output budget and return no content at all. A second
+    // route can recover from one gateway/model's empty answer.
+    for (const language of languages) {
+      for (const model of specModels.slice(0, 3)) {
+        if (!councilAlive(get().council, runId)) return;
+        set((st) => ({ council: { ...st.council, specBy: model } }));
+        try {
+          const specText = await bridge.runOnce({
+            runId,
+            agentId: "council-spec",
+            attemptId: newAttemptId(),
+            provider: settings.gatewayId,
+            model,
+            systemPrompt: testSpecSystemPrompt(),
+            userText: testSpecUserPrompt({ question: `${problem}\n\n${routingGuidance(route)}`, docket: candidateDocket(field), languages: [language], knowledge }),
+            images: [],
+            maxTokens: Math.max(settings.maxTokens, 8192),
+            temperature: 0,
+            baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+            endpoint: endpointForModel(settings, model),
+          });
+          if (!councilAlive(get().council, runId)) return;
+          const parsed = parseTestSuites(specText).find(suite => suite.language === language);
+          if (parsed) {
+            suites.push(parsed);
+            break;
+          }
+          specFailure = `${model} returned no usable ${language} test harness.`;
+        } catch (err) {
+          specFailure = `${model}: ${cleanError(String(err))}`;
+          console.warn("Council spec pass failed:", specFailure);
+        }
+      }
     }
     set((st) => ({ council: { ...st.council, testSuites: suites } }));
     publishOverlayState(get());
+    const missing = missingSuiteLanguages(languages, suites);
+    if (missing.length) {
+      const error = `Could not test the ${missing.join(", ")} solution${missing.length === 1 ? "" : "s"} in E2B because no executable test harness was produced. Last API result: ${specFailure}`;
+      set((st) => ({ council: { ...st.council, phase: "error", error, winner: "" }, running: false }));
+      get().pushToast("err", "Solution not verified", error, { sticky: true });
+      void get().persistRun();
+      return;
+    }
   }
 
   // -------------------------------------------------------- round 2c: verify
@@ -4677,6 +4707,16 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     set((st) => ({ council: { ...st.council, phase: "verifying" } }));
     await executeField(get, set, runId, field, suites, "runs");
     await runMutationOracle(get, set, field, suites);
+    if (!councilAlive(get().council, runId)) return;
+    const runs = get().council.runs;
+    if (!field.some(candidate => gateFor(runs[candidate.letter]) === "pass")) {
+      const firstFailure = Object.values(runs).find(run => run.note)?.note;
+      const error = `No candidate passed executable tests in E2B.${firstFailure ? ` First failure: ${firstFailure}` : ""}`;
+      set((st) => ({ council: { ...st.council, phase: "error", error, winner: "" }, running: false }));
+      get().pushToast("err", "No verified solution", error, { sticky: true });
+      void get().persistRun();
+      return;
+    }
   }
   if (!councilAlive(get().council, runId)) {
     set({ running: false });
@@ -4958,6 +4998,13 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     letters: fieldNow.map((c) => c.letter),
   });
   const winner = decision.winner;
+  if (codeCandidates.length && (!winner || gateFor(gateRuns[winner]) !== "pass")) {
+    const error = "Council finished without an E2B-tested candidate that passed its executable test cases. No coding solution will be published.";
+    set((st) => ({ council: { ...st.council, phase: "error", winner: "", error, synthesis, dossier: null }, running: false }));
+    get().pushToast("err", "No verified solution", error, { sticky: true });
+    void get().persistRun();
+    return;
+  }
   if (ruling.overruledReason) {
     synthesis = `${synthesis}\n\n---\n\n**GATE OVERRULE.** ${ruling.overruledReason}`;
   }
@@ -4978,7 +5025,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   }));
   // The visible solution may have changed from a provisional pane answer to
   // the measured council winner. Review that exact code, not the old pane.
-  void get().runReview();
+  if (winner) void get().runReview();
   void get().persistRun();
 }
 

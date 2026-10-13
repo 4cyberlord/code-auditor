@@ -30,6 +30,8 @@ let cleanRateRetries = 0;
 // Flipped for the second scenario, so the generated harness rejects every
 // candidate the way a harness with a wrong expectation does.
 let HARNESS_WRONG = false;
+let EMPTY_SPEC_ONCE = true;
+let EMPTY_SPEC_ALWAYS = false;
 // Scenario 3: one route answers nothing, ever, the way a dead endpoint does.
 let DEAD_MODEL = "";
 // Scenario 5: a route with no reasoning mode, which must not read as a dead seat.
@@ -243,6 +245,10 @@ export function solve(xs) { return xs ? xs.length : 0; }
 FINAL>>>`);
     }
     if (system.includes("You write test harnesses for candidate solutions")) {
+      if (EMPTY_SPEC_ONCE || EMPTY_SPEC_ALWAYS) {
+        EMPTY_SPEC_ONCE = false;
+        return modelReply("");
+      }
       return modelReply(`<<<TESTS
 HARNESS: javascript
 \`\`\`javascript
@@ -309,7 +315,9 @@ const { runCouncilJob: runWorkerJob } = await import("../scripts/cloud-worker.mj
 const runCouncilJob = job => runWorkerJob({ ...job,
   settings_snapshot: { executionProvider: "e2b", ...job.settings_snapshot },
 });
+let EXECUTIONS = 0;
 globalThis.__COUNCIL_E2B_TEST_DOUBLE__ = async (_language, program) => {
+  EXECUTIONS++;
   const wrong = /want:\s*99/.test(program);
   const stdout = wrong
     ? "FAIL empty got=0 want=99\nFAIL three got=3 want=99\n"
@@ -346,12 +354,15 @@ check("report has winner", reports[0]?.winner === "A", String(reports[0]?.winner
 check("report has reviews", reports[0]?.report?.reviews?.length === 2, String(reports[0]?.report?.reviews?.length));
 check("report has judges", reports[0]?.report?.judges?.length === 1, String(reports[0]?.report?.judges?.length));
 check("report has benchmark suite", reports[0]?.report?.suites?.length === 1, String(reports[0]?.report?.suites?.length));
-check("report has passing local runs", reports[0]?.report?.runs?.A?.passed === 2 && reports[0]?.report?.runs?.B?.passed === 2, JSON.stringify(reports[0]?.report?.runs));
+check("empty harness response was retried with another route",
+  modelCalls.filter(c => c.messages?.[0]?.content?.includes("You write test harnesses for candidate solutions")).length >= 2);
+check("report has passing E2B runs", reports[0]?.report?.runs?.A?.passed === 2 && reports[0]?.report?.runs?.B?.passed === 2, JSON.stringify(reports[0]?.report?.runs));
 check("downloaded image for model calls", modelCalls.some((c) => Array.isArray(c.messages[1].content) && c.messages[1].content.some((p) => p.type === "image_url")));
 check("benchmark phase event recorded", events.some((e) => e.phase === "benchmark_done"));
 check("review phase event recorded", events.some((e) => e.phase === "review_done"));
 check("judge phase event recorded", events.some((e) => e.phase === "judge_done"));
 check("completion event recorded", events.some((e) => e.phase === "completed"));
+
 
 // --- the revision round, which cloud jobs used to skip entirely --------------
 check("the solvers were asked to revise", events.some((e) => e.phase === "revision_done"));
@@ -473,6 +484,25 @@ check(
   textOf(reviewCall).slice(0, 200)
 );
 
+console.log("\n1b. empty harness responses cannot publish an untested answer");
+EMPTY_SPEC_ALWAYS = true;
+const beforeUnverified = { reports: reports.length, executions: EXECUTIONS };
+let noHarnessRejected = false;
+try {
+  await runCouncilJob({ id: "job-no-harness", session_id: "session-1", settings_snapshot: {
+    mode: "auto", maxTokens: 2048,
+    councilModels: [{ id: "anthropic/claude-opus-5.5", endpoint: "chat" },
+      { id: "moonshotai/kimi-k3", endpoint: "chat" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
+  } });
+} catch (err) {
+  noHarnessRejected = /no executable .* test harness/i.test(String(err));
+}
+EMPTY_SPEC_ALWAYS = false;
+check("empty specs fail closed", noHarnessRejected, true);
+check("no unverified report was published", reports.length, beforeUnverified.reports);
+check("E2B was not falsely reported as having tested code", EXECUTIONS, beforeUnverified.executions);
+
 // --- the gate, and the harness that convicts everybody ----------------------
 console.log("\n2. a synthesis cannot promote a candidate the runner rejected");
 HARNESS_WRONG = true;
@@ -481,7 +511,8 @@ patches.length = 0;
 reports.length = 0;
 modelCalls.length = 0;
 
-await runCouncilJob({
+let rejectedUnverified = false;
+try { await runCouncilJob({
   id: "job-2",
   session_id: "session-1",
   settings_snapshot: {
@@ -494,19 +525,18 @@ await runCouncilJob({
     ],
     councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
-});
+}); } catch (err) { rejectedUnverified = /no final candidate passed executable E2B/i.test(String(err)); }
 
-const runs2 = reports[0]?.report?.runs || {};
-check("both candidates were rejected by the harness", runs2.A?.failed > 0 && runs2.B?.failed > 0, JSON.stringify(runs2));
-check("the synthesis still named A", reports[0]?.report?.synthesisClaimedWinner === "A", String(reports[0]?.report?.synthesisClaimedWinner));
-check("but no winner was recorded", !reports[0]?.winner, JSON.stringify(reports[0]?.winner));
-check("and the overrule was logged", events.some((e) => e.phase === "gate_overrule"));
+check("both candidates were executed and rejected", events.filter(e => e.phase === "benchmark_done").length >= 2,
+  JSON.stringify(events.map(e => e.phase)));
+check("no unverified coding solution was published", rejectedUnverified && reports.length === 0,
+  JSON.stringify({ rejectedUnverified, reports: reports.length }));
 check(
   "identical failures accuse the harness, not the code",
   events.some((e) => e.phase === "harness_suspect"),
   JSON.stringify(events.map((e) => e.phase))
 );
-check("the job still completed rather than dying", patches.some((p) => p.status === "completed"));
+check("the job never claimed completion", !patches.some((p) => p.status === "completed"));
 
 // --- a route that never answers is asked once, not at every stage ----------
 console.log("\n3. a model that times out is benched for the rest of the job");

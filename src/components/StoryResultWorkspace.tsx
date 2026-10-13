@@ -9,7 +9,7 @@ import { useStore } from "@/lib/store";
 import { agreedComplexityAudits, COUNCIL_SIZE, gateFor } from "@/lib/council";
 import { PORT_LABELS, PORT_LANGUAGES } from "@/lib/review";
 import { councilStageText, modelLamp } from "@/lib/storyProgress";
-import { extractFunctionSignatures, selectStorySolution } from "@/lib/storySolution";
+import { extractFunctionSignatures, selectStorySolution, selectVerifiedStorySolution } from "@/lib/storySolution";
 import "./StoryResultWorkspace.css";
 
 export default function StoryResultWorkspace() {
@@ -31,9 +31,14 @@ export default function StoryResultWorkspace() {
   // Never show the previous run's answer under that new run's progress text.
   // A solver's first answer is not the Council's choice. Keep the final-code
   // workspace empty until the full comparison settles (or explicitly fails).
-  const awaitingCouncil = settings.councilEnabled && (preparing || running);
-  const report = preparing || awaitingCouncil ? null : selectStorySolution(agents, council, consensus().representative);
-  const reviewData = preparing || awaitingCouncil ? null : review.data;
+  const awaitingCouncil = settings.councilEnabled && (preparing || running ||
+    (council.phase !== "idle" && council.phase !== "done" && council.phase !== "error" && council.phase !== "cancelled"));
+  const finalReviewPending = settings.councilEnabled && council.phase === "done" &&
+    review.status !== "done" && review.status !== "error";
+  const report = preparing || awaitingCouncil || finalReviewPending ? null : settings.councilEnabled
+    ? selectVerifiedStorySolution(agents, council, consensus().representative)
+    : selectStorySolution(agents, council, consensus().representative);
+  const reviewData = report ? review.data : null;
   const reviewRunning = !preparing && review.status === "running";
   const reviewError = preparing ? null : review.error;
   const councilPhase = preparing ? "idle" : council.phase;
@@ -91,7 +96,9 @@ export default function StoryResultWorkspace() {
     busyAgents.length ? `${readyCount} of ${active.length} answers ready. Waiting for the remaining selected models.` :
     allReady && councilPhase === "idle" && councilCanStart ? "All selected answers are ready. Council verification is starting." :
     allReady && councilPhase === "idle" ? "All selected answers are ready. Council verification is not active for this run." :
-    councilPhase === "done" && council.winner ? "Council selected a tested solution. The final report is ready." :
+    finalReviewPending ? "Council selected an E2B-tested solution. Finishing its technical report." :
+    councilPhase === "done" && report ? "Council selected an E2B-tested solution. The final report is ready." :
+    councilPhase === "done" && !report ? "Council finished without a verified coding solution. Check diagnostics." :
     councilPhase === "error" ? "Council verification needs attention; completed candidate answers remain visible." :
     issueCount ? `${issueCount} selected ${issueCount === 1 ? "model needs" : "models need"} attention. Open run diagnostics for details.` :
     report ? "A candidate answer is available while verification finishes." :
@@ -101,7 +108,8 @@ export default function StoryResultWorkspace() {
     busyAgents.length ? actuallyWorking.length ? "Solving your problem" : "Preparing solver models" :
     councilStage ? "Verifying and reviewing" :
     allReady && councilPhase === "idle" && councilCanStart ? "Starting council verification" :
-    reviewRunning ? "Reviewing the solution" :
+    finalReviewPending || reviewRunning ? "Reviewing the solution" :
+    councilPhase === "error" ? "Verification needs attention" :
     report ? language !== "original" ? "Translated port — testing pending" :
       report.provisional ? "Candidate ready — verification pending" : "Tested solution ready" :
     failed.length ? "Analysis needs attention" : running ? "Preparing analysis" : "Awaiting solution";

@@ -193,6 +193,13 @@ export function parseTestSuites(text: string): TestSuite[] {
   return suites;
 }
 
+/** A coding Council cannot claim verification until every candidate language has a harness. */
+export function missingSuiteLanguages(languages: readonly string[], suites: readonly TestSuite[]): string[] {
+  const covered = new Set(suites.map(suite => normalizeCodeLanguage(suite.language)));
+  return [...new Set(languages.map(normalizeCodeLanguage).filter(Boolean))]
+    .filter(language => !covered.has(language));
+}
+
 /**
  * Every alias that means the same runtime, collapsed to one canonical name.
  *
@@ -1382,9 +1389,16 @@ export function testSpecSystemPrompt(): string {
     "1. A line containing exactly <<<SOLUTION>>> where the candidate's code will be spliced",
     "   in, verbatim. Wrap or rename whatever the candidates disagree on (function names,",
     "   signatures) so any of them drops in cleanly.",
-    "2. A thorough test battery: the normal cases from the problem statement, then edge",
-    "   cases (empty, one element, duplicates, zeros, negatives, maximum values), then at",
-    "   least two adversarial cases designed to break a plausible-but-wrong approach.",
+    "2. A thorough test battery. If the problem statement gives example inputs and expected",
+    "   outputs, reproduce every usable example as an executable test with that expected",
+    "   output. If it gives no examples, derive normal cases and their expected outputs",
+    "   independently from the specification; do not skip testing or invent a claimed",
+    "   statement example. Add applicable edge cases (empty, one element, duplicates,",
+    "   zeros, negatives, maximum values) and at least two adversarial cases designed to",
+    "   break a plausible-but-wrong approach. Do not assume every listed edge case is",
+    "   valid: respect the input constraints and the required function signature.",
+    "   Compute expected outputs from the stated rules or a simple independent reference",
+    "   implementation, never by running a candidate or copying its answer.",
     "   Include at least one performance-shaped case when constraints are available, so",
     "   quadratic/brute-force candidates are exposed by size or structure.",
     "3. One output line per case: `PASS <name>` on success, `FAIL <name> got=<x> want=<y>` on",
@@ -1398,6 +1412,9 @@ export function testSpecSystemPrompt(): string {
     "<complete program with the <<<SOLUTION>>> marker>\n```\nHARNESS: <next language>\n```...```",
     "\nTESTS>>>",
     "",
+    "Every runnable case must assert its expected result, not merely call the code.",
+    "If the statement is too ambiguous to derive expected outputs safely, do not",
+    "fabricate a passing harness; output the block empty so verification fails clearly.",
     "Write no commentary. If no candidate is code, output the block empty.",
   ].join("\n");
 }

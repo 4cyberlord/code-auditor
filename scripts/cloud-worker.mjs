@@ -181,6 +181,7 @@ const {
   rejectedImages,
   rejectedReasoning,
   parseTestSuites,
+  missingSuiteLanguages,
   parseReviewSet,
   parseCouncilSynthesis,
   parseJudgeReport,
@@ -1121,12 +1122,12 @@ async function runMutationOracle(job, settings, suites, candidates, runs) {
 
 async function benchmarkCandidates(job, settings, baseUrl, models, judges, question, candidates, knowledge = "", bench) {
   const codeCandidates = candidates.filter((c) => c.final?.kind === "code" && c.final.code?.trim());
-  if (codeCandidates.length < 2) {
+  if (!codeCandidates.length) {
     await addEvent(
       job.id,
       "info",
       "benchmark_skipped",
-      "Fewer than two runnable code candidates; MCQ, math, research and plain-answer jobs use Council reasoning validation instead of code execution."
+      "No runnable code candidate; MCQ, math, research and plain-answer jobs use Council reasoning validation instead of code execution."
     );
     return { suites: [], runs: {}, oracles: [] };
   }
@@ -1134,41 +1135,39 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   await patchJob(job.id, { progress_phase: "speccing" });
   await addEvent(job.id, "info", "speccing", "Generating language-specific benchmark harnesses.");
   const languages = Array.from(new Set(codeCandidates.map((c) => candidateLanguage(c.final)).filter(Boolean)));
-  // A benched route would spend the whole timeout again on the one call the
-  // benchmark phase cannot proceed without.
-  const specModel = [settings.synthesisModel, judges[0]?.model, ...models.map((m) => m.id)].find(
-    (candidate) => candidate && !bench.has(candidate)
-  );
-  if (!specModel) {
-    await addEvent(job.id, "warn", "spec_failed", "Every model is benched, so no benchmark harness could be generated.");
-    return { suites: [], runs: {}, oracles: [] };
+  const specModels = [...new Set([
+    settings.synthesisModel, ...judges.map(judge => judge.model), ...models.map(model => model.id),
+  ].filter(Boolean))];
+  const suites = [];
+  let lastFailure = "No model produced an executable test harness.";
+  for (const language of languages) {
+    for (const model of specModels.filter(candidate => !bench.has(candidate)).slice(0, 3)) {
+      try {
+        const specText = await tokenRouterGenerate({
+          settings, baseUrl, model, system: testSpecSystemPrompt(),
+          user: testSpecUserPrompt({
+            question, docket: candidateDocket(candidates), languages: [language],
+            knowledge: knowledge || settings.knowledgeDigest || "",
+          }),
+          maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
+        });
+        const suite = parseTestSuites(specText).find(item => item.language === language);
+        if (suite) {
+          suites.push(suite);
+          break;
+        }
+        lastFailure = `${model} returned no usable ${language} test harness.`;
+        await addEvent(job.id, "warn", "spec_retry", lastFailure);
+      } catch (err) {
+        lastFailure = `${model}: ${err instanceof Error ? err.message : String(err)}`;
+        await bench.note(model, err, "speccing");
+        await addEvent(job.id, "warn", "spec_retry", lastFailure);
+      }
+    }
   }
-  let suites = [];
-  try {
-    const specText = await tokenRouterGenerate({
-      settings,
-      baseUrl,
-      model: specModel,
-      system: testSpecSystemPrompt(),
-      user: testSpecUserPrompt({
-        question,
-        docket: candidateDocket(candidates),
-        languages,
-        knowledge: knowledge || settings.knowledgeDigest || "",
-      }),
-      maxTokens: Number(settings.maxTokens || 4096),
-    });
-    suites = parseTestSuites(specText);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await bench.note(specModel, err, "speccing");
-    await addEvent(job.id, "warn", "spec_failed", `Benchmark spec generation failed: ${message}`);
-    return { suites: [], runs: {}, oracles: [] };
-  }
-
-  if (!suites.length) {
-    await addEvent(job.id, "warn", "benchmark_skipped", "The benchmark spec did not contain any runnable harnesses.");
-    return { suites, runs: {}, oracles: [] };
+  const missing = missingSuiteLanguages(languages, suites);
+  if (missing.length) {
+    throw new Error(`Cannot verify coding solution in E2B: no executable ${missing.join(", ")} test harness was produced. ${lastFailure}`);
   }
 
   await patchJob(job.id, { progress_phase: "verifying" });
@@ -2632,6 +2631,9 @@ export async function runCouncilJob(job) {
     runs: gateRuns,
     letters: field3.map((c) => c.letter),
   });
+  if (isCoding && (!decision.winner || gateFor(gateRuns[decision.winner]) !== "pass")) {
+    throw new Error("Council cannot publish a coding solution: no final candidate passed executable E2B test cases.");
+  }
   if (decision.disagreement) {
     await addEvent(job.id, "warn", "winner_aggregated", decision.disagreement, {
       claimedWinner: claimed,
