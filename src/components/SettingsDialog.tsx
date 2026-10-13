@@ -12,7 +12,6 @@ import {
   agentSpec,
   PROVIDERS,
   PROVIDER_ORDER,
-  VISION_PROVIDERS,
   type ProviderId,
   STORAGE,
 } from "@/lib/models";
@@ -1186,7 +1185,7 @@ function ReadingCard() {
     <div className="row"><span>Eligible configured models</span><b>{Object.values(enabled).filter(Boolean).length} / 10</b></div>
     <div className="row"><span>Models with observed vision support</span><b>{availableVision}</b></div>
     <p className="hint">
-      Use the API tab to refresh this gateway's model catalogue and run a live
+      Use the API tab to refresh this gateway&apos;s model catalogue and run a live
       image-capability check. Only verified vision-capable models receive screenshot
       bytes. The Big O knowledge library and Council test evidence guide solution
       analysis; runtime measurements are never presented as theoretical Big O.
