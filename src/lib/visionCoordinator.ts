@@ -104,16 +104,14 @@ export async function coordinateAndVerify<Id extends string>(input: {
   let reason = "Validated deterministic fallback";
   let family = "other";
   const coordinatorList = coordinatorCandidates(input.candidates,3);
-  for(const candidate of coordinatorList){
-    const checked=await verifyGatewayCandidates({
-      configured:[candidate],catalogue:input.catalogue,
-      requireVision:input.screenshotCount>0,allowFamilyAlternatives:false,probe:check,
-    });
-    rejected.push(...checked.rejected);
-    if(!checked.routes.length)continue;
-    coordinator=checked.routes[0].model;
-    break;
-  }
+  // One batched gateway probe replaces up to three serial coordinator probes.
+  // Preserve priority and require verified exact image transport.
+  const checkedCoordinators = await verifyGatewayCandidates({
+    configured:coordinatorList,catalogue:input.catalogue,
+    requireVision:input.screenshotCount>0,allowFamilyAlternatives:false,probe:check,
+  });
+  rejected.push(...checkedCoordinators.rejected);
+  coordinator=checkedCoordinators.routes[0]?.model ?? null;
   if(coordinator){
     try{
       const response=await input.ask(coordinator,

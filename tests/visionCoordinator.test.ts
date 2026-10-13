@@ -27,19 +27,26 @@ const models=[
   {id:"kimi",model:"moonshotai/kimi-k3"},
 ] as const;
 const received:{model:string;images:number}[]=[];
+const preflightBatches:string[][]=[];
 const outcome=await coordinateAndVerify({
   candidates:models,catalogue:[],note:"Regex problem",screenshotCount:3,
   fallbackOrder:["gpt","claude","gemini","kimi"],
-  probe:async (names,vision)=>names.map(model=>({
+  probe:async (names,vision)=>{
+    preflightBatches.push([...names]);
+    return names.map(model=>({
     model,ok:model!=="openai/gpt-5-6-sol",ms:11,
     error:model==="openai/gpt-5-6-sol"?"not available":null,
     vision:vision&&model!=="moonshotai/kimi-k3",
-  })),
+  }));
+  },
   ask:async (model,prompt)=>{
     received.push({model,images:JSON.parse(prompt.userText).screenshotCount});
     return '{"selected":["gemini","claude","kimi"],"family":"string","reason":"complementary reasoning"}';
   },
 });
+assert.deepEqual(preflightBatches[0],
+  ["openai/gpt-5-6-sol","claude/opus-5-5","google/gemini-3-1-pro"],
+  "coordinator probes are sent in one request");
 assert.deepEqual(received,[{model:"claude/opus-5-5",images:3}],
   "the first live-verified vision model coordinates using the screenshot metadata");
 assert.deepEqual(outcome.routes.map(c=>c.id),["gemini","claude"],

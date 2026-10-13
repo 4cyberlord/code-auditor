@@ -21,6 +21,7 @@ import "./lib/config.mjs";
 import { createSign } from "node:crypto";
 import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
+import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -934,24 +935,26 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
   const revised = Boolean(opts.revised);
   const tag = revised ? " (revised)" : "";
   const runs = {};
-  for (const candidate of candidates) {
-    if (revised && !candidate.revised) continue;
+  const selected = candidates.filter(candidate => !revised || candidate.revised);
+  const limit = workerConcurrency(process.env.CODE_AUDITOR_E2B_CONCURRENCY, 4, 9);
+  const startedAt = Date.now();
+  await parallelMap(selected, limit, async (candidate) => {
     const final = revised ? (candidate.revised ?? null) : candidate.final;
     const lang = final?.kind === "code" ? candidateLanguage(final) : "";
     const suite = suites.find((s) => s.language === lang);
     const code = final?.code || "";
     if (!final || final.kind !== "code" || !code.trim()) {
       runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: final?.kind === "research" ? "research answer" : "no code", runtime: "" };
-      continue;
+      return;
     }
     if (!suite) {
       runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: `no suite for ${lang || "unknown language"}`, runtime: "" };
-      continue;
+      return;
     }
     const program = spliceSuite(suite, code);
     if (!program) {
       runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: "harness has no splice marker", runtime: "" };
-      continue;
+      return;
     }
     const id = executionId();
     await addEvent(job.id, "info", "execution_queued",
@@ -1063,9 +1066,14 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
       runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: message, runtime: "" };
       await addEvent(job.id, "warn", "benchmark_failed", `Candidate ${candidate.letter}${tag} benchmark failed: ${message}`, runs[candidate.letter]);
     }
-  }
-
-  return runs;
+  });
+  const elapsedMs = Date.now() - startedAt;
+  await addEvent(job.id, "info", "execution_field_timing",
+    `Completed ${selected.length} ${revised ? "revised" : "original"} candidate execution(s) in ${elapsedMs}ms (concurrency limit ${limit}).`,
+    { elapsedMs, candidates: selected.length, concurrency: limit, revised });
+  // Preserve original candidate letter order despite out-of-order completions.
+  return Object.fromEntries(selected.filter(c => Object.hasOwn(runs, c.letter))
+    .map(c => [c.letter, runs[c.letter]]));
 }
 
 /**
@@ -1138,9 +1146,12 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   const specModels = [...new Set([
     settings.synthesisModel, ...judges.map(judge => judge.model), ...models.map(model => model.id),
   ].filter(Boolean))];
-  const suites = [];
+  const specStartedAt = Date.now();
   let lastFailure = "No model produced an executable test harness.";
-  for (const language of languages) {
+  // Languages are independent. Retries within one language stay sequential.
+  const suitesByLanguage = await parallelMap(languages,
+    workerConcurrency(process.env.CODE_AUDITOR_HARNESS_CONCURRENCY, 2, 3),
+    async (language) => {
     for (const model of specModels.filter(candidate => !bench.has(candidate)).slice(0, 3)) {
       try {
         const specText = await tokenRouterGenerate({
@@ -1152,10 +1163,7 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
           maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
         });
         const suite = parseTestSuites(specText).find(item => item.language === language);
-        if (suite) {
-          suites.push(suite);
-          break;
-        }
+        if (suite) return suite;
         lastFailure = `${model} returned no usable ${language} test harness.`;
         await addEvent(job.id, "warn", "spec_retry", lastFailure);
       } catch (err) {
@@ -1164,7 +1172,12 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
         await addEvent(job.id, "warn", "spec_retry", lastFailure);
       }
     }
-  }
+    return null;
+  });
+  const suites = suitesByLanguage.filter(Boolean);
+  await addEvent(job.id, "info", "harness_generation_timing",
+    `Generated ${suites.length}/${languages.length} language harness(es) in ${Date.now() - specStartedAt}ms.`,
+    { elapsedMs: Date.now() - specStartedAt, languages: languages.length, generated: suites.length });
   const missing = missingSuiteLanguages(languages, suites);
   if (missing.length) {
     throw new Error(`Cannot verify coding solution in E2B: no executable ${missing.join(", ")} test harness was produced. ${lastFailure}`);

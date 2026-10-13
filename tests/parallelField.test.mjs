@@ -1,0 +1,31 @@
+import assert from "node:assert/strict";
+import { parallelMap, workerConcurrency } from "../scripts/lib/parallelField.mjs";
+assert.equal(workerConcurrency("6"), 6);
+assert.equal(workerConcurrency("100"), 9);
+assert.equal(workerConcurrency("1"), 1);
+assert.equal(workerConcurrency("invalid"), 4);
+assert.equal(workerConcurrency("0"), 4);
+assert.equal(workerConcurrency("1.5"), 4);
+assert.deepEqual(await parallelMap([], 4, async () => 1), []);
+let running = 0, peak = 0;
+const completed = [];
+const results = await parallelMap([0,1,2,3,4,5,6], 3, async (index) => {
+  running++;
+  peak = Math.max(peak, running);
+  await new Promise(resolve => setTimeout(resolve, (7-index)*3));
+  completed.push(index);
+  running--;
+  return index*10;
+});
+assert.deepEqual(results,[0,10,20,30,40,50,60]);
+assert.equal(peak,3);
+assert.notDeepEqual(completed,[0,1,2,3,4,5,6]);
+let started = 0;
+await assert.rejects(parallelMap([0,1,2,3], 2, async index => {
+  started++;
+  if (index === 0) throw new Error("sandbox failed");
+  await new Promise(resolve => setTimeout(resolve, 2));
+}), /sandbox failed/);
+assert.ok(started <= 2,"failure stops starting new tasks");
+await assert.rejects(parallelMap([1], 0, async x => x), RangeError);
+console.log("PASS: bounded parallel verification, stable evidence order, failure behavior and rollback");
