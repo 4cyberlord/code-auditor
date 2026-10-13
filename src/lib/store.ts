@@ -56,7 +56,7 @@ import {
   type Extraction,
   type ExtractionAgreement,
 } from "./extraction.ts";
-import { routingGuidance, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
+import { routeProblem, routingGuidance, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders, type ModelCapability } from "./adaptiveModelRouting.ts";
 import { planIntelligentPanels, loadTrustedPanelMetrics } from "./intelligentPanelSelection.ts";
 import { verifyGatewayCandidates, resolveGatewayCandidates, resolveListedGatewayModel, type LiveModelProbe } from "./quickGatewayRouter.ts";
@@ -1633,7 +1633,7 @@ function ensureSolverKnowledge(get: () => State): Promise<void> {
 function solverKnowledgePack(get: () => State, query: string): string {
   return knowledgePackForLocalLibrary(query,
     get().knowledge.entries.filter(entry => entry.source === "file")
-      .map(entry => entry.record), 5, true);
+      .map(entry => entry.record), 8, true);
 }
 
 export const useStore = create<State>((set, get) => ({
@@ -2611,6 +2611,7 @@ export const useStore = create<State>((set, get) => ({
     const configured = ALL_AGENTS.filter(id => settings.enabled[id]);
     let catalogue: string[] = [];
     const availabilityProbes = { ...get().settings.probes };
+    let coordinatorTopic = "";
     if (options?.adaptivePanels && settings.useGateway && gatewayKey) {
       try {
         catalogue = await bridge.listGatewayModels(settings.gatewayBaseUrl, settings.gatewayId);
@@ -2657,6 +2658,7 @@ export const useStore = create<State>((set, get) => ({
         ]),
       });
       if (generation !== startGeneration) return;
+      coordinatorTopic = availability.family;
       for (const check of availability.probes) {
         availabilityProbes[check.model] = {
           ok: check.ok, ms: check.ms, error: check.error, at: Date.now(),
@@ -2786,7 +2788,7 @@ export const useStore = create<State>((set, get) => ({
         `No solver was started. Check the Knowledge tab, then retry. ${reason}`, { sticky: true });
       return;
     }
-    const knowledge = solverKnowledgePack(get, note);
+    const knowledge = solverKnowledgePack(get, [note, coordinatorTopic].filter(Boolean).join(" "));
     const sys = systemPrompt(
       settings.mode,
       resolveAnswerLanguage(settings.outputLanguage, "")

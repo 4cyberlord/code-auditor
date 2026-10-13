@@ -30,6 +30,7 @@
  */
 
 import type { AgentFinal } from "./parse.ts";
+import { canonicalComplexityBound, compareComplexityBounds } from "./theoryBounds.ts";
 import { isPrimaryModel, listedPrimaryRoute } from "./primaryModels.ts";
 
 // ------------------------------------------------------------------ candidates
@@ -1618,7 +1619,7 @@ const JUDGE_LABELS: [string, string[]][] = [
 function parseComplexityAudits(body: string): ComplexityAudit[] {
   const audits: ComplexityAudit[] = [];
   for (const line of body.split("\n")) {
-    const match = /^\s*(?:[-*]\s*)?([A-Z])\s*\|\s*TIME:\s*(O\([^)]+\)|UNKNOWN)\s*\|\s*SPACE:\s*(O\([^)]+\)|UNKNOWN)\s*\|\s*BASIS:\s*(.+)\s*$/i.exec(line.replace(/\*\*/g, ""));
+    const match = /^\s*(?:[-*]\s*)?([A-Z])\s*\|\s*TIME:\s*(.*?)\s*\|\s*SPACE:\s*(.*?)\s*\|\s*BASIS:\s*(.+)\s*$/i.exec(line.replace(/\*\*/g, ""));
     if (!match || audits.some(audit => audit.letter === match[1].toUpperCase())) continue;
     audits.push({ letter: match[1].toUpperCase(), time: match[2].trim(),
       space: match[3].trim(), basis: match[4].trim() });
@@ -1663,10 +1664,10 @@ export function agreedComplexityAudits(judges: readonly JudgeReading[]): Record<
   judges.forEach((judge, index) => {
     const identity = (judge as JudgeReading & { model?: string }).model || `judge-${index}`;
     for (const audit of judge.complexityAudits ?? []) {
-      if (!audit.basis || growthOrder(audit.time) === null || growthOrder(audit.space) === null) continue;
+      if (!audit.basis?.trim() || !canonicalComplexityBound(audit.time) || !canonicalComplexityBound(audit.space)) continue;
       const byBound = reports.get(audit.letter) ?? new Map();
       reports.set(audit.letter, byBound);
-      const key = `${growthOrder(audit.time)}:${growthOrder(audit.space)}`;
+      const key = canonicalComplexityBound(audit.time) + ":" + canonicalComplexityBound(audit.space);
       const vote = byBound.get(key) ?? { audit, voters: new Set<string>() };
       vote.voters.add(identity);
       byBound.set(key, vote);
@@ -1788,21 +1789,31 @@ export function decideWinner(args: {
     const audited = agreedComplexityAudits(args.judges);
     let chosen = evidence.winner;
     let reason = evidence.reason;
-    // Compare Big O only after the correctness gate, on the same coverage,
-    // and only when every contender has two agreeing code-derived audits.
-    // Otherwise measurements remain the defensible tie-breaker.
+    // Use asymptotic bounds only AFTER equal test coverage and independent
+    // judge corroboration. The symbolic comparator is a partial order: bounds
+    // in unrelated dimensions must remain incomparable rather than sorted.
     if (comparable.length > 1 && comparable.every(letter => audited[letter])) {
-      comparable.sort((a, b) =>
-        growthOrder(audited[a].time)! - growthOrder(audited[b].time)! ||
-        growthOrder(audited[a].space)! - growthOrder(audited[b].space)!);
-      const best = comparable[0];
-      const tied = comparable.filter(letter =>
-        growthOrder(audited[letter].time) === growthOrder(audited[best].time) &&
-        growthOrder(audited[letter].space) === growthOrder(audited[best].space));
-      chosen = selectVerifiedCandidate(Object.fromEntries(tied.map(letter => [letter, args.runs[letter]]))).winner ?? best;
-      reason = `Candidate ${chosen} passed ${strongestCoverage} tests and its code-derived ` +
-        `complexity audit agreed across judges (${audited[chosen].time} time, ` +
-        `${audited[chosen].space} auxiliary space). Measured performance broke any equal-bound tie.`;
+      const outranks = (better: string, worse: string): boolean => {
+        const t = compareComplexityBounds(audited[better].time, audited[worse].time).relation;
+        if (t === "left-no-worse") return true;
+        if (t !== "equivalent") return false;
+        return compareComplexityBounds(audited[better].space, audited[worse].space).relation === "left-no-worse";
+      };
+      const frontier = comparable.filter(letter =>
+        !comparable.some(other => other !== letter && outranks(other, letter)));
+      if (frontier.length && frontier.length < comparable.length) {
+        chosen = selectVerifiedCandidate(Object.fromEntries(
+          frontier.map(letter => [letter, args.runs[letter]])
+        )).winner ?? frontier[0];
+        reason = "Candidate " + chosen + " passed " + strongestCoverage +
+          " tests. Two independent judges corroborated code-derived " +
+          audited[chosen].time + " time and " + audited[chosen].space +
+          " auxiliary space; strictly dominated bounds were excluded. " +
+          "This is corroborated theoretical reasoning, not a formal proof or timing measurement.";
+      }
+      // If no unique asymptotic decision is justified, retain the tested,
+      // measured winner. Conflicting dimensions and memory/time trade-offs
+      // are not coerced into one arbitrary scalar.
     }
     return { winner: chosen, source: "evidence", overruledReason: ruling.overruledReason,
       disagreement: args.claimed && args.claimed !== chosen

@@ -56,10 +56,14 @@ This is a programming problem. Work it as a senior engineer would:
 3. Write a complete, runnable solution. Not pseudocode, not a sketch.
 4. Trace your solution by hand against at least one example and any edge case that
    worries you. If the trace fails, fix the code and say what you changed.
-5. Derive worst-case time and auxiliary-space complexity from your actual code:
-   name the input dimensions, count preprocessing and repeated queries, and
-   distinguish expected or amortized costs from worst-case guarantees. If you
-   cannot justify a bound, say it is uncertain rather than guessing.
+5. Derive worst-case time and auxiliary-space complexity from your ACTUAL code:
+   name every input dimension (including V, E, queries, capacity, or output size),
+   identify loop bounds and dependent iteration counts, resolve all callees,
+   and solve any recurrence with its theorem conditions. Check recursion stack,
+   allocations and worst-case data-structure operations separately. Distinguish
+   worst-case, expected, and amortized bounds. If a cost model, parameter
+   relation, or proof obligation is missing, say the result is an estimate.
+   Never treat a finite benchmark or two agreeing reviewers as formal proof.
 
 Runtime discipline: optimise for the fastest correct approach the constraints justify.
 For LeetCode-style answers, aim for a practical runtime at or below 17ms when that is

@@ -16,6 +16,9 @@ console.log("\n1. the local knowledge library has useful coding records");
 {
   const records = allKnowledgeRecords();
   check("several records", records.length >= 25, String(records.length));
+  check("academic theory records included", records.filter(r=>r.id.startsWith("theory-")).length >= 25);
+  check("Akra-Bazzi source cited", records.some(r=>r.sources?.some(s=>s.url.includes("10.1023/A:1018373005182"))));
+  check("MIT professor sources cite primary material", records.some(r=>r.sources?.some(s=>s.url.includes("ocw.mit.edu"))));
   check("runtime discipline exists", records.some((r) => r.id === "runtime-discipline"));
   check("zero-ms contract exists", records.some((r) => r.id === "zero-ms-memory-contract"));
   check("Rosetta Code is a linked source", records.some((r) => r.sources?.some((s) => s.url === "https://rosettacode.org/wiki/Runtime_evaluation")));

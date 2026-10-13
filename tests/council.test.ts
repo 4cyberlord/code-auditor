@@ -558,5 +558,20 @@ BEST ANSWER: B`) });
   check("history aggregation combines separately supplied reports", same[0].candidateAttempts === 2 && same[0].verified === 2);
 }
 
+{
+  const audit = (model: string) => ({model, ...parseJudgeReport(
+    "VERDICT: verified\nRANKING: B, A\nCORRECT: A, B\nCOMPLEXITY AUDIT:\n" +
+    "A | TIME: O(V^2) | SPACE: O(V) | BASIS: adjacency-matrix row scans and queue\n" +
+    "B | TIME: O(V+E) | SPACE: O(V) | BASIS: adjacency-list traversal and queue\nBEST ANSWER: B"
+  )});
+  const assumptions = [audit("academic-1"),audit("academic-2")];
+  const supported = agreedComplexityAudits(assumptions);
+  check("multi-variable theoretical audits parse and corroborate", !!supported.B && supported.B.time === "O(V+E)");
+  const run = (letter:string) => ({letter,ran:true,ok:true,passed:8,failed:0,durationMs:20} as CandidateRun);
+  const ranked = decideWinner({claimed:"A",judges:assumptions,
+    runs:{A:run("A"),B:run("B")},letters:["A","B"]});
+  check("unconstrained E,V bounds do not invent a graph density", ranked.winner === "A");
+}
+
 console.log(fail ? `\n${fail} FAILURES\n` : "\nall council checks passed\n");
 process.exit(fail ? 1 : 0);

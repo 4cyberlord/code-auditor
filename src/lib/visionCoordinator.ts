@@ -80,6 +80,7 @@ export async function coordinateAndVerify<Id extends string>(input: {
   rejected: { id: Id; model: string; reason: string }[];
   coordinator: string | null;
   reason: string;
+  family: string;
 }> {
   const probes: LiveModelProbe[] = [];
   const rejected: {id:Id;model:string;reason:string}[] = [];
@@ -101,6 +102,7 @@ export async function coordinateAndVerify<Id extends string>(input: {
   let coordinator: string | null = null;
   let assigned: Id[] = [];
   let reason = "Validated deterministic fallback";
+  let family = "other";
   const coordinatorList = coordinatorCandidates(input.candidates,3);
   for(const candidate of coordinatorList){
     const checked=await verifyGatewayCandidates({
@@ -120,6 +122,8 @@ export async function coordinateAndVerify<Id extends string>(input: {
       if(choice){
         assigned=choice.selected;
         reason=choice.reason || "Approved vision coordinator assignment";
+        const allowed = new Set(["array","string","graph","tree","linked_list","heap","math","geometry","database","concurrency","greedy","backtracking","dynamic_programming","other"]);
+        family=allowed.has(choice.family) ? choice.family : "other";
       }
     }catch{
       reason="Coordinator timed out or failed; validated deterministic fallback";
@@ -145,5 +149,5 @@ export async function coordinateAndVerify<Id extends string>(input: {
     routes.push(...checked.routes);
     rejected.push(...checked.rejected);
   }
-  return {routes,probes,rejected,coordinator,reason};
+  return {routes,probes,rejected,coordinator,reason,family};
 }

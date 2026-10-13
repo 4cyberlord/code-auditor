@@ -1,5 +1,7 @@
 "use client";
 
+import { THEORETICAL_COMPLEXITY_RECORDS } from "./theoreticalComplexityKnowledge.ts";
+
 /**
  * The first Knowledge/RAG slice.
  *
@@ -35,6 +37,7 @@ export interface KnowledgeHit {
 }
 
 const RECORDS: KnowledgeRecord[] = [
+  ...THEORETICAL_COMPLEXITY_RECORDS,
   {
     id: "asymptotic-analysis-core",
     title: "Big O, tight bounds, and problem-size reasoning",
