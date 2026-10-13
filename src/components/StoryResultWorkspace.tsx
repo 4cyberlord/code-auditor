@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { highlight } from "@/lib/highlight";
 import { describeCodeLanguage } from "@/lib/solutionLanguage";
 import { agentSpec, gatewayPreset } from "@/lib/models";
@@ -9,7 +9,7 @@ import { useStore } from "@/lib/store";
 import { agreedComplexityAudits, COUNCIL_SIZE, gateFor } from "@/lib/council";
 import { PORT_LABELS, PORT_LANGUAGES } from "@/lib/review";
 import { councilStageText, modelLamp } from "@/lib/storyProgress";
-import { extractFunctionSignatures, selectStorySolution, selectVerifiedStorySolution } from "@/lib/storySolution";
+import { extractFunctionSignatures, selectVerifiedStorySolution } from "@/lib/storySolution";
 import "./StoryResultWorkspace.css";
 
 export default function StoryResultWorkspace() {
@@ -38,15 +38,27 @@ export default function StoryResultWorkspace() {
     (council.phase !== "idle" && council.phase !== "done" && council.phase !== "error" && council.phase !== "cancelled"));
   const finalReviewPending = !viewingRunId && settings.councilEnabled && council.phase === "done" &&
     review.status !== "done" && review.status !== "error";
-  const report = preparing || awaitingCouncil || finalReviewPending ? null : settings.councilEnabled
-    ? selectVerifiedStorySolution(agents, council, consensus().representative)
-    : selectStorySolution(agents, council, consensus().representative);
+  const report = preparing || awaitingCouncil || finalReviewPending || !settings.councilEnabled
+    ? null : selectVerifiedStorySolution(agents, council, consensus().representative);
   const reviewData = report ? review.data : null;
   const reviewRunning = !preparing && review.status === "running";
   const reviewError = preparing ? null : review.error;
   const councilPhase = preparing ? "idle" : council.phase;
+  const [phaseTimes,setPhaseTimes]=useState<Record<string,number>>({});
+  const phaseClock=useRef({phase:"idle",at:Date.now(),runId:""});
+  useEffect(()=>{
+    const tick=Date.now(),previous=phaseClock.current;
+    if(previous.runId!==runId){
+      phaseClock.current={phase:councilPhase,at:tick,runId};
+      setPhaseTimes({});
+    }else if(previous.phase!==councilPhase){
+      if(previous.phase!=="idle")setPhaseTimes(times=>({...times,[previous.phase]:(times[previous.phase]||0)+Math.max(0,tick-previous.at)}));
+      phaseClock.current={phase:councilPhase,at:tick,runId};
+    }
+  },[councilPhase,runId]);
   const councilError = preparing ? null : council.error;
-  const ports = PORT_LANGUAGES.filter(lang => !!reviewData?.ports[lang]);
+  // A translated port has not inherited source-code E2B evidence; keep it hidden.
+  const ports = PORT_LANGUAGES.slice(0,0);
   const sourceCode = language === "original" ? report?.code : reviewData?.ports[language as "cpp" | "rust" | "python"];
   const code = sourceCode || report?.code || "";
   const syntax = describeCodeLanguage(code, language === "original" ? report?.language : language);
@@ -105,10 +117,10 @@ export default function StoryResultWorkspace() {
     finalReviewPending ? "Council selected an E2B-tested solution. Finishing its technical report." :
     councilPhase === "done" && report ? "Council selected an E2B-tested solution. The final report is ready." :
     councilPhase === "done" && !report ? "Council finished without a verified coding solution. Check diagnostics." :
-    councilPhase === "error" ? "Council verification needs attention; completed candidate answers remain visible." :
+    councilPhase === "error" ? "Council verification needs attention; unverified code remains hidden." :
     issueCount ? `${issueCount} selected ${issueCount === 1 ? "model needs" : "models need"} attention. Open run diagnostics for details.` :
-    report ? "A candidate answer is available while verification finishes." :
-    "The solution will appear here when a selected model returns usable code.";
+    report ? "The fully verified solution is ready." :
+    "The working solution will appear only after Council verification succeeds.";
   const progress = preparing ? "Checking vision-capable models" :
     active.length === 0 && running ? "Selecting best agents" :
     busyAgents.length ? actuallyWorking.length ? "Solving your problem" : "Preparing solver models" :
@@ -126,6 +138,9 @@ export default function StoryResultWorkspace() {
       <div><strong>{progress}</strong><span>{active.length ? `${readyCount} of ${active.length} selected answers ready` : preparing ? "Checking API routes" : "The engine is preparing the problem"}</span></div>
       <span className="story-result-status-note">{active.length ? "Independent image analysis" : "Direct vision · no extraction"}</span>
     </header>
+    {Object.keys(phaseTimes).length>0 && <div className="story-process-text" aria-label="Completed Council stage timing">
+      {Object.entries(phaseTimes).map(([phase,ms])=><span key={phase} style={{marginRight:12}}>{phase}: {(ms/1000).toFixed(1)}s</span>)}
+    </div>}
     <section className="story-agent-progress" aria-label="Selected API model progress">
       <div className="story-agent-progress-heading">
         <strong>Selected API agents</strong>

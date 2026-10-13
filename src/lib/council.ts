@@ -170,6 +170,8 @@ export function reviewsOf(sets: ReviewSet[], letter: string): CandidateReview[] 
 export interface TestSuite {
   language: string;
   harness: string;
+  /** Independent reference supplied by a harness author for E2B self-check. */
+  referenceCode?: string;
 }
 
 /**
@@ -182,7 +184,15 @@ export function harnessPreflightDiagnostics(language: string, harness: string): 
   const text = String(harness || "");
   const errors: string[] = [];
   if (!text.includes(SPLICE_MARKER)) errors.push("missing solution splice marker");
+  if (text.split(SPLICE_MARKER).length !== 2) errors.push("expected exactly one splice marker");
   if (!text.trim()) errors.push("empty harness");
+  if (lang === "java") {
+    const publicClasses=[...text.matchAll(/\bpublic\s+(?:final\s+|abstract\s+)?class\s+(\w+)/g)].map(match=>match[1]);
+    if (publicClasses.length>1 || publicClasses.some(name=>name!=="Main"))
+      errors.push("Java harness must have at most one public Main class");
+  }
+  if (lang === "go" && !/^\s*package\s+main\b/m.test(text))
+    errors.push("Go harness must use package main");
   if (lang === "python") {
     if (/Traceback|NameError|SyntaxError/i.test(text)) errors.push("contains Python traceback/error text");
     // Catch the exact class of failure that escaped into production: a
@@ -217,7 +227,12 @@ export function parseTestSuites(text: string): TestSuite[] {
   while ((m = re.exec(body))) {
     const harness = m[2].trim();
     if (harness.includes(SPLICE_MARKER) && harnessPreflightDiagnostics(m[1], harness).length === 0) {
-      suites.push({ language: normalizeCodeLanguage(m[1]), harness });
+      const remaining=body.slice(m.index+m[0].length);
+      const nextHarness=remaining.search(/HARNESS\s*:/);
+      const section=nextHarness<0 ? remaining : remaining.slice(0,nextHarness);
+      const independent=/REFERENCE\s*:\s*[a-zA-Z0-9+#._-]+\s*\n+\s*```[^\n]*\n([\s\S]*?)```/.exec(section);
+      const referenceCode=independent?.[1]?.trim();
+      suites.push({ language: normalizeCodeLanguage(m[1]), harness, ...(referenceCode ? {referenceCode} : {}) });
     }
   }
   return suites;
@@ -1442,6 +1457,10 @@ export function testSpecSystemPrompt(): string {
     "<complete program with the <<<SOLUTION>>> marker>\n```\nHARNESS: <next language>\n```...```",
     "\nTESTS>>>",
     "",
+    "When the question permits an independent known-correct implementation, append",
+    "REFERENCE: <language> and a fenced complete implementation using the same",
+    "signature as the harness marker. Do not copy a candidate or its proposed",
+    "expected values. Omit the reference if it cannot be independently established.",
     "Every runnable case must assert its expected result, not merely call the code.",
     "Before emitting the harness, perform a language-level self-review: every variable in a",
     "comprehension, loop, closure, and expected-value expression must be defined in scope;",

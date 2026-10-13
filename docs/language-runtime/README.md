@@ -1,11 +1,16 @@
-# Language runtime knowledge packs
+# Language runtime Markdown registry
 
-These Markdown packs are a maintained local summary of official language and runtime rules used when generating E2B harnesses. They are deliberately summaries, not mirrors of vendor manuals. The source links are authoritative and the review date identifies when the pack should be refreshed.
+Each E2B runner language has a reviewed Markdown guide:
+- Python 3: python.md
+- Node ESM JavaScript: javascript.md
+- TypeScript with Node strip-types: typescript.md
+- Java: java.md
+- C17: c.md
+- C++20: cpp.md
+- Rust stable: rust.md
+- Go: go.md
+- PHP CLI: php.md
+- Ruby CLI: ruby.md
+- Bash: bash.md
 
-The Council should retrieve the pack matching the candidate language before writing a harness. A pack provides guidance; the executable preflight and E2B known-good/mutation checks remain the final authority.
-
-Packs:
-
-- [Python](python.md)
-- [JavaScript and TypeScript](javascript-typescript.md)
-- [Java, C/C++, Rust, and Go](java-cpp-rust-go.md)
+The worker prefers checksum-validated PostgreSQL documentation with five-minute in-memory cache. Bundled guides are a trusted offline fallback. Knowledge is guidance and cannot replace verified execution and mutation testing.
