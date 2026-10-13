@@ -311,7 +311,13 @@ FINAL>>>`);
   throw new Error(`Unexpected fetch: ${href}`);
 };
 
-const { runCouncilJob: runWorkerJob } = await import("../scripts/cloud-worker.mjs");
+const { runCouncilJob: runWorkerJob, remoteScript } = await import("../scripts/cloud-worker.mjs");
+const javaScript = remoteScript("java", "class Main {}", "e2b");
+check("Java E2B command is concrete, not an undefined template variable",
+  javaScript.includes("command='javac Main.java && java Main'") && !javaScript.includes("JAVA_COMMAND"));
+check("every supported E2B language builds a runner script",
+  ["python", "javascript", "typescript", "bash", "ruby", "php", "c", "cpp", "java", "go", "rust"]
+    .every((language) => remoteScript(language, "// smoke", "e2b").includes("CA_EXIT:")));
 const runCouncilJob = job => runWorkerJob({ ...job,
   settings_snapshot: { executionProvider: "e2b", ...job.settings_snapshot },
 });

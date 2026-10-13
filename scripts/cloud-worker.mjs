@@ -740,7 +740,7 @@ function shellSingle(s) {
   return `'${String(s).replaceAll("'", `'"'"'`)}'`;
 }
 
-function remoteScript(language, code, providerLabel = "remote", stdin = "") {
+export function remoteScript(language, code, providerLabel = "remote", stdin = "") {
   const encoded = Buffer.from(code, "utf8").toString("base64");
   const encodedStdin = Buffer.from(stdin, "utf8").toString("base64");
   return `set -u
@@ -782,7 +782,7 @@ case "$lang" in
   php) file=main.php; cp code.txt "$file"; command='php main.php'; runtime='${providerLabel} php' ;;
   c) file=main.c; cp code.txt "$file"; command='cc -std=c17 -O2 main.c -o prog -lm && ./prog'; runtime='${providerLabel} cc -O2' ;;
   cpp|c++|cc|cxx) file=main.cpp; cp code.txt "$file"; command='c++ -std=c++20 -O2 main.cpp -o prog && ./prog'; runtime='${providerLabel} c++ -O2' ;;
-  java) file=Main.java; cp code.txt "$file"; command="${JAVA_COMMAND}"; runtime='${providerLabel} javac + java' ;;
+  java) file=Main.java; cp code.txt "$file"; command='javac Main.java && java Main'; runtime='${providerLabel} javac + java' ;;
   go|golang) file=main.go; cp code.txt "$file"; command='go run main.go'; runtime='${providerLabel} go' ;;
   rust|rs) file=main.rs; cp code.txt "$file"; command='rustc -O main.rs -o prog 2>&1 && ./prog'; runtime='${providerLabel} rustc -O' ;;
   *) echo "Unsupported remote benchmark language: $lang" >&2; exit 97 ;;
@@ -2304,6 +2304,12 @@ export async function runCouncilJob(job) {
   const infraFailures = attempted.filter((r) =>
     /sandbox|e2b|timed out|econn|network|unauthor|api key|rate limit/i.test(String(r.note))
   );
+  const codeRuns = field.filter((candidate) => candidate.final?.kind === "code" && candidate.final.code?.trim())
+    .map((candidate) => benchmark.runs[candidate.letter]).filter(Boolean);
+  if (benchmark.suites.length && codeRuns.length && codeRuns.every((run) => !run.ran)) {
+    const firstRunnerError = codeRuns.find((run) => run.note)?.note || "unknown runner failure";
+    throw new Error(`E2B could not execute any candidate; no solution was tested. First runner error: ${firstRunnerError}`);
+  }
   if (benchmark.suites.length && infraFailures.length && infraFailures.length === attempted.length) {
     await addEvent(
       job.id,

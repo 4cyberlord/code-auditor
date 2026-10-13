@@ -171,8 +171,8 @@ export default function StoryResultWorkspace() {
               )}</code></pre>
             </div> :
               <div className="story-code-empty"><div className="story-code-empty-icon">{"{ }"}</div><h2>{progress}</h2>
-                <p>{failed.length ? failed.map(a => a.error || a.model + " failed").join("; ") :
-                  "The AI agents work in the background. Your finished code will appear here automatically."}</p>
+                <p>{councilError || (failed.length ? failed.map(a => a.error || a.model + " failed").join("; ") :
+                  "The AI agents work in the background. Your finished code will appear here automatically.")}</p>
               </div>}
           </div>
         </div>
@@ -182,7 +182,7 @@ export default function StoryResultWorkspace() {
           {diagnostics.map((entry, index) => <p key={index}><strong>{entry.label}:</strong> {entry.message}</p>)}
           {!running && !preparing && !report && (failed.length > 0 || diagnostics.length > 0) &&
             <button type="button" className="story-subtle-button" onClick={() => void start({ adaptivePanels: true })}>
-              Retry with verified vision models
+              Retry analysis and verification
             </button>}
         </details>}
       </section>

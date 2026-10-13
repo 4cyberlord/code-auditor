@@ -4711,9 +4711,14 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     const runs = get().council.runs;
     if (!field.some(candidate => gateFor(runs[candidate.letter]) === "pass")) {
       const firstFailure = Object.values(runs).find(run => run.note)?.note;
-      const error = `No candidate passed executable tests in E2B.${firstFailure ? ` First failure: ${firstFailure}` : ""}`;
+      const codeRuns = field.filter(candidate => candidate.final?.kind === "code" && candidate.final.code?.trim())
+        .map(candidate => runs[candidate.letter]).filter(Boolean);
+      const runnerFailed = codeRuns.length > 0 && codeRuns.every(run => !run.ran);
+      const error = runnerFailed
+        ? `E2B could not execute any candidate; no solution was tested.${firstFailure ? ` First runner error: ${firstFailure}` : ""}`
+        : `No candidate passed executable tests in E2B.${firstFailure ? ` First failure: ${firstFailure}` : ""}`;
       set((st) => ({ council: { ...st.council, phase: "error", error, winner: "" }, running: false }));
-      get().pushToast("err", "No verified solution", error, { sticky: true });
+      get().pushToast("err", runnerFailed ? "E2B execution failed" : "No verified solution", error, { sticky: true });
       void get().persistRun();
       return;
     }
