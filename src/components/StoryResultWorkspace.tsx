@@ -152,7 +152,6 @@ export default function StoryResultWorkspace() {
             </div> :
               <div className="story-code-empty"><div className="story-code-empty-icon">{"{ }"}</div><h2>{progress}</h2>
                 <p>{failed.length ? failed.map(a => a.error || a.model + " failed").join("; ") :
-                  extraction.status === "error" ? extraction.error || "The screenshot could not be interpreted." :
                   "The AI agents work in the background. Your finished code will appear here automatically."}</p>
               </div>}
           </div>
