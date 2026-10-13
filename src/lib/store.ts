@@ -56,7 +56,7 @@ import {
   type Extraction,
   type ExtractionAgreement,
 } from "./extraction.ts";
-import { routeProblem, routingGuidance, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
+import { routingGuidance, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders, type ModelCapability } from "./adaptiveModelRouting.ts";
 import { planIntelligentPanels, loadTrustedPanelMetrics } from "./intelligentPanelSelection.ts";
 import { verifyGatewayCandidates, resolveGatewayCandidates, resolveListedGatewayModel, selectGatewayGpt, parseGatewayRouterChoice, gatewayRouterPrompt, type LiveModelProbe } from "./quickGatewayRouter.ts";
@@ -67,7 +67,7 @@ import { attachSignedBenchmarkMetrics } from "./authenticatedBenchmarkRouting.ts
 import { captureNameOf } from "./image.ts";
 import { reviewedFixturesFor } from "./trustedPropertyFixtures.ts";
 import { assessPropertyFixtures } from "./propertyAssessment.ts";
-import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
+import { planFor, type ContextMode } from "./payload.ts";
 import { selectStorySolution } from "./storySolution.ts";
 import * as bridge from "./bridge.ts";
 import * as db from "./sessions.ts";
@@ -2589,6 +2589,9 @@ export const useStore = create<State>((set, get) => ({
     try {
     const { settings, images, note, keys, gatewayKey } = get();
     if (!images.length && !note.trim()) return;
+    if (options?.adaptivePanels && (!settings.useGateway || !gatewayKey)) {
+      throw new Error("Select and connect Wiro, TokenRouter or Clean APIs in Settings. The fixed ten-model roster must be routed through your active API gateway.");
+    }
     liveSnapshot = null;
     set(state => ({
       runId: null, viewingRunId: null, runPersisted: false,
