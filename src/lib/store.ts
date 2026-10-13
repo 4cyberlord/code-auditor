@@ -59,7 +59,7 @@ import {
 import { routingGuidance, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders, type ModelCapability } from "./adaptiveModelRouting.ts";
 import { planIntelligentPanels, loadTrustedPanelMetrics } from "./intelligentPanelSelection.ts";
-import { verifyGatewayCandidates, resolveGatewayCandidates, resolveListedGatewayModel, selectGatewayGpt, parseGatewayRouterChoice, gatewayRouterPrompt, type LiveModelProbe } from "./quickGatewayRouter.ts";
+import { verifyGatewayCandidates, resolveGatewayCandidates, resolveListedGatewayModel, type LiveModelProbe } from "./quickGatewayRouter.ts";
 import { coordinateAndVerify } from "./visionCoordinator.ts";
 import { isPrimaryModel, preferredPrimaryRoute, primaryCatalog, primaryModelFamily, primaryModelId } from "./primaryModels.ts";
 import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
@@ -2610,7 +2610,6 @@ export const useStore = create<State>((set, get) => ({
     const routes = new Map<AgentId, Route>();
     const configured = ALL_AGENTS.filter(id => settings.enabled[id]);
     let catalogue: string[] = [];
-    let verifiedGatewayModels: string[] = [];
     const availabilityProbes = { ...get().settings.probes };
     if (options?.adaptivePanels && settings.useGateway && gatewayKey) {
       try {
@@ -2682,7 +2681,6 @@ export const useStore = create<State>((set, get) => ({
         baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
         viaGateway: true,
       });
-      verifiedGatewayModels = availability.routes.map(c=>c.model);
       if (!availability.routes.length) {
         get().pushToast("err", "Gateway has no verified models",
           "The configured candidates and their compatible alternatives failed live availability checks on " +
@@ -2809,38 +2807,10 @@ export const useStore = create<State>((set, get) => ({
         trustedMetrics,
         probes: currentProbes,
       });
-      // A fast GPT router may refine the deterministic, safety-filtered field.
-      // The gateway's catalogue, probe evidence and ID allowlist stay authoritative.
-      let selectedByGpt: AgentId[] | null = null;
-      const routerModel = settings.useGateway && gatewayKey
-        ? selectGatewayGpt(verifiedGatewayModels, currentProbes) : null;
-      if (routerModel && decision.confidence === "limited" && decision.selected.length > 1) {
-        try {
-          const eligible = decision.selected.map(id => ({ id, model: routes.get(id)!.model }));
-          const prompt = gatewayRouterPrompt(
-            [note, images.length ? `${images.length} untranscribed screenshot image(s)` : ""].filter(Boolean).join("\n").slice(0, 6500),
-            eligible, decision.selected);
-          const response = await Promise.race([
-            bridge.runOnce({
-              runId: `router-${runId}`, agentId: "quick-gpt-router",
-              attemptId: newAttemptId(), provider: settings.gatewayId,
-              model: routerModel, systemPrompt: prompt.systemPrompt,
-              userText: prompt.userText, images: [], maxTokens: 350,
-              temperature: 0, baseUrl: settings.gatewayBaseUrl ||
-                gatewayPreset(settings.gatewayId).defaultBaseUrl,
-              endpoint: endpointForModel(settings, routerModel),
-            }),
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error("Router timeout")), 8_000)),
-          ]);
-          selectedByGpt = parseGatewayRouterChoice(response, decision.selected)?.selected ?? null;
-        } catch {
-          // The verified deterministic choice remains available if GPT is slow,
-          // fails, or supplies malformed or disallowed IDs.
-        }
-      }
-      if (!get().running || get().runId !== runId) return;
-      active = selectedByGpt ?? decision.selected;
+      // The image-reading coordinator already assigned eligible solver seats.
+      // Do not override it with a second text-only router that never saw the
+      // screenshots. Every route here passed the live gateway preflight.
+      active = [...routes.keys()];
       if (active.length) {
         get().pushToast(decision.confidence === "verified" ? "ok" : "warn",
           `Selected ${active.length} AI ${active.length === 1 ? "agent" : "agents"}`,
