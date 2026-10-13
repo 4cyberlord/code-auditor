@@ -24,6 +24,7 @@ import HelperCard from "./HelperCard";
 import { classifyProbeResult } from "@/lib/probeFit";
 import { PRIMARY_MODEL_IDS, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "@/lib/primaryModels";
 import { PIN_LENGTH, authReauthenticate, reason, sanitizePin } from "@/lib/auth";
+import { refreshOfficialLanguageSources, type LanguageRefreshResult } from "@/lib/languageKnowledge";
 
 /**
  * One probe truth badge.
@@ -1270,6 +1271,13 @@ function ReadingCard() {
   const probes = useStore(s => s.settings.probes);
   const enabled = useStore(s => s.settings.enabled);
   const availableVision = Object.values(probes).filter(p => p.ok && p.vision === true).length;
+  const [refreshingDocs, setRefreshingDocs] = useState(false);
+  const [docResults, setDocResults] = useState<LanguageRefreshResult[] | null>(null);
+  const refreshDocs = async () => {
+    setRefreshingDocs(true);
+    try { setDocResults(await refreshOfficialLanguageSources()); }
+    finally { setRefreshingDocs(false); }
+  };
   return <div className="provider-card">
     <div className="top">
       <span className="name">Independent screenshot vision</span>
@@ -1281,6 +1289,15 @@ function ReadingCard() {
       you select. Wiro, TokenRouter and Clean APIs only change the transport and
       exact model-ID spelling. No gateway is allowed to introduce an eleventh model.
     </p>
+    <div className="row" style={{ alignItems: "center", gap: 12 }}>
+      <span>Official language documentation</span>
+      <button className="btn ghost" disabled={refreshingDocs} onClick={() => void refreshDocs()}>
+        {refreshingDocs ? "Checking…" : "Refresh official docs"}
+      </button>
+    </div>
+    {docResults && <p className="hint" role="status">
+      {docResults.filter(result => result.ok).length}/{docResults.length} official sources reachable. The local Markdown packs remain the offline fallback.
+    </p>}
     <p className="hint">
       Every selected AI agent sees the original images and independently determines the
       question and solution. There is no shared OCR or image extraction, no separate
