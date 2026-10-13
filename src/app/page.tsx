@@ -199,16 +199,13 @@ function Workbench() {
       void listen("shortcut://solve", () => {
         const s = useStore.getState();
         if (s.running || s.preparing) return;
-        setWorkspace("council");
         if (!s.images.length && !s.note.trim()) {
-          setStoryMode(false);
-          setIntakeOpen(true);
           s.setShortcutError("Capture or add a question before pressing 14 to start analysis.");
           return;
         }
-        setIntakeOpen(false);
-        setStoryMode(true);
-        if (s.viewingRunId) s.exitHistory();
+        // Shortcut 14 is a background action. Keep the user's current
+        // workspace (coding, knowledge, history, or another app's context)
+        // unchanged; they can switch to Council when they want to watch it.
         void useStore.getState().start();
       }).then((off) => {
         if (disposed) off();
