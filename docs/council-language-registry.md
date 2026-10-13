@@ -34,16 +34,20 @@ requires an approved status, review timestamp, size bound and SHA256 checksum.
 A secure worker may discover the Neon endpoint from the service-role-only
 `public.external_service_registry` table in Supabase when explicit registry
 configuration is absent. This directory is metadata only and is cached for
-five minutes. The worker additionally requires a separate
-`NEON_LANGUAGE_DOCS_TOKEN` in its server environment and the directory's
-`credential_state` must be set to `verified` after a successful authenticated
-test. This value must be a valid Neon Auth JWT, not a Neon management API key
-or a Supabase service-role key.
+five minutes. The Neon Data API now allows anonymous `SELECT` on
+`public.language_runtime_packs` only, with a row-level-security policy that
+admits validated, reviewed documents whose SHA-256 content checksums match.
+Anonymous access to proposals and registry peers, and all anonymous writes
+to language documents, remain denied. This public documentation path
+requires **no Neon Auth token**.
 
-Until the signed service token and its lifecycle are configured and verified,
-the metadata intentionally remains `pending-verified-service-identity`, so
-the worker continues using the bundled Markdown guides without attempting
-unauthorized API requests.
+Council Editor workers can discover this endpoint using the private Supabase
+service registry, then read the publicly approved Neon guide directly. The
+application database does not store a copy of the guide. The previous
+`credential_state` field refers to an abandoned service-JWT integration and
+is no longer needed for the public-documentation path. No production
+worker deployment or live end-to-end HTTP validation is implied by the
+GitHub branch commit. On API errors, the bundled Markdown is used.
 
 ## External database deployment and publishing
 

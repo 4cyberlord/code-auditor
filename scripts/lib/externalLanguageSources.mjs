@@ -62,22 +62,22 @@ export function configuredLanguageRegistries(environment=process.env) {
 /**
  * Only server-side, service-role authenticated application metadata may define
  * which *external* database to contact. This directory does not contain docs
- * or tokens. The worker must supply its own Neon Auth access token separately.
+ * or tokens. Validated published Markdown can be read anonymously under
+ * Neon's anonymous role and row-level security. No JWT is sent for public reads.
  */
-export function registriesFromDirectory(rows,environment=process.env) {
-  const token=environment.NEON_LANGUAGE_DOCS_TOKEN;
-  if(typeof token!=="string"||!token.trim()||!Array.isArray(rows))return [];
+export function registriesFromDirectory(rows) {
+  if(!Array.isArray(rows))return [];
   return rows.filter(row=>
     row && row.service_key==="council_language_docs" &&
     row.provider==="neon" && row.content_category==="language_documentation" &&
     row.stores_language_markdown===true && row.is_external===true &&
-    row.metadata?.credential_state==="verified" &&
+    row.project_ref==="rough-lake-58845101" &&
     row.metadata?.data_api_status==="active" &&
     typeof row.metadata?.data_api_url==="string" &&
     /^https:\/\/[^/]+\.neon\.tech\//.test(row.metadata.data_api_url)
   ).slice(0,1).map(row=>({
     id:"neon-docs",endpoint:externalRegistryUrl(row.metadata.data_api_url),
-    token:token.trim(),
+    // No Authorization header: only public, validated records are visible.
   }));
 }
 
@@ -102,7 +102,7 @@ export function createRegistryDirectoryLoader(fetchRows, ttlMs=300000) {
 export async function fetchExternalLanguageRows(language,{environment=process.env,fetchImpl=fetch,registryDirectory}={}){
   const id=canonicalLanguage(language);
   let registries=configuredLanguageRegistries(environment);
-  if(!registries.length && typeof registryDirectory==="function" && environment.NEON_LANGUAGE_DOCS_TOKEN) {
+  if(!registries.length && typeof registryDirectory==="function") {
     const rows=await registryDirectory();
     registries=registriesFromDirectory(rows,environment);
   }
@@ -117,7 +117,9 @@ export async function fetchExternalLanguageRows(language,{environment=process.en
       endpoint.searchParams.set("limit","1");
       const response=await fetchImpl(endpoint.href,{
         method:"GET",redirect:"error",signal:AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        headers:{Authorization:"Bearer "+registry.token,Accept:"application/json"}
+        headers:registry.token
+          ? {Authorization:"Bearer "+registry.token,Accept:"application/json"}
+          : {Accept:"application/json"}
       });
       if(!response.ok)continue;
       if(Number(response.headers?.get?.("content-length")||0)>MAX_RESPONSE_BYTES)continue;

@@ -41,14 +41,16 @@ assert.deepEqual(none,[]);
 clearLanguagePackCache();
 assert.equal((await loadLanguagePack("java",{fetchRows:id=>fetchExternalLanguageRows(id,{environment:{},fetchImpl})})).source,"bundle");
 const knownNeon="https://ep-flat-forest-akcqqd8f.apirest.c-3.us-west-2.aws.neon.tech/language_docs/rest/v1";
-const directory=[{service_key:"council_language_docs",provider:"neon",
+const directory=[{service_key:"council_language_docs",provider:"neon",project_ref:"rough-lake-58845101",
   content_category:"language_documentation",stores_language_markdown:true,is_external:true,
   metadata:{data_api_url:knownNeon,data_api_status:"active",credential_state:"verified"}
 }];
 const envDirect={NEON_LANGUAGE_DOCS_TOKEN:"short-lived-jwt"};
 assert.equal(registriesFromDirectory(directory,envDirect)[0].id,"neon-docs");
-assert.deepEqual(registriesFromDirectory(directory,{}),[]);
-assert.deepEqual(registriesFromDirectory([{...directory[0],metadata:{...directory[0].metadata,credential_state:"pending"}}],envDirect),[]);
+assert.equal(registriesFromDirectory(directory,{})[0].id,"neon-docs");
+assert.equal(registriesFromDirectory([{...directory[0],metadata:{...directory[0].metadata,credential_state:"pending"}}],envDirect).length,1);
+assert.deepEqual(registriesFromDirectory([{...directory[0],project_ref:"wrong-project"}],{}),[]);
+assert.deepEqual(registriesFromDirectory([{...directory[0],metadata:{...directory[0].metadata,data_api_status:"disabled"}}],{}),[]);
 assert.deepEqual(registriesFromDirectory([{...directory[0],metadata:{...directory[0].metadata,data_api_url:"https://attacker.example.org/rest/v1"}}],envDirect),[]);
 let reads=0;
 const directoryLoader=createRegistryDirectoryLoader(async()=>{reads++;return directory});
@@ -56,11 +58,12 @@ assert.equal((await Promise.all([directoryLoader(),directoryLoader()])).length,2
 assert.equal(reads,1);
 let apiCalls=0;
 const secureRows=await fetchExternalLanguageRows("python",{
- environment:envDirect, registryDirectory:directoryLoader,
+ environment:{}, registryDirectory:directoryLoader,
  fetchImpl:async (url,options)=>{
    apiCalls++;
    assert.ok(url.startsWith(knownNeon+"/language_runtime_packs?"));
-   assert.equal(options.headers.Authorization,"Bearer short-lived-jwt");
+   assert.equal(options.headers.Authorization,undefined);
+   assert.equal(options.headers.Accept,"application/json");
    return {ok:true,headers:new Headers(),text:async()=>JSON.stringify([{
      language:"python",runtime_version:"3.13",content_md:p.markdown,
      checksum:p.checksum,status:"validated",reviewed_at:"2026-10-13T00:00:00Z"

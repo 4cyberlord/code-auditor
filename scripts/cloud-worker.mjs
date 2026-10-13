@@ -1174,7 +1174,8 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   // Database packs are checksum validated; verified bundled packs remain an offline fallback.
   const languagePacks = await Promise.all(languages.map(language => loadLanguagePack(language, {
     // Supabase supplies only external-service *metadata*, never language
-    // documents or Neon authentication secrets.
+    // documents. Approved Neon guides are publicly readable through
+    // an RLS-guarded SELECT-only Data API; no Neon token is needed.
     fetchRows: id => fetchExternalLanguageRows(id,{registryDirectory:languageDirectory}),
   })));
   const packsByLanguage = new Map(languagePacks.map(pack => [pack.language,pack]));
