@@ -85,10 +85,9 @@ export async function coordinateAndVerify<Id extends string>(input: {
   const rejected: {id:Id;model:string;reason:string}[] = [];
   const verified = new Map<string,LiveModelProbe>();
   const check = async (models:string[], vision:boolean) => {
-    const missing=models.filter(model=>{
-      const prior=verified.get(model);
-      return !prior || !prior.ok || (vision && prior.vision !== true);
-    });
+    // One probe per exact route for this run. A failed model cannot be
+    // promoted to usable by another attempt a few milliseconds later.
+    const missing=models.filter(model=>!verified.has(model));
     const fresh=missing.length ? await input.probe(missing,vision) : [];
     for(const probe of fresh){
       if(!missing.includes(probe.model))continue;
