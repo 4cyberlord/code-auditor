@@ -60,6 +60,7 @@ import { routingGuidance, reconcileProblemReadings, routeUnparsedProblem } from 
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders, type ModelCapability } from "./adaptiveModelRouting.ts";
 import { planIntelligentPanels, loadTrustedPanelMetrics } from "./intelligentPanelSelection.ts";
 import { verifyGatewayCandidates, resolveGatewayCandidates, resolveListedGatewayModel, selectGatewayGpt, parseGatewayRouterChoice, gatewayRouterPrompt, type LiveModelProbe } from "./quickGatewayRouter.ts";
+import { coordinatorCandidates, coordinatorPrompt, verifyCoordinatorAssignment } from "./visionCoordinator.ts";
 import { isPrimaryModel, preferredPrimaryRoute, primaryCatalog, primaryModelFamily, primaryModelId } from "./primaryModels.ts";
 import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { loadAuthenticatedBenchmarkCapabilities } from "./benchmarkFeed.ts";
