@@ -212,12 +212,12 @@ console.log("\n9. defaults hold the shape the design specifies");
   check(
     "the requested solver roster is installed",
     COUNCIL_DEFAULT_MODELS.map((m) => m.id).join(",") ===
-      "moonshotai/kimi-k3,z-ai/glm-5.3,x-ai/grok-4.6,google/gemini-3.7-flash"
+      "moonshotai/kimi-k3,z-ai/glm-5.3,x-ai/grok-4.6,qwen/qwen3.8-max"
   );
   check(
     "the requested judge roster is installed",
     COUNCIL_DEFAULT_JUDGES.map((j) => `${j.model}/${j.emphasis}`).join(",") ===
-      "openai/gpt-5.6-sol/performance,anthropic/claude-opus-5/security"
+      "openai/gpt-5.6-sol/performance,anthropic/claude-opus-5.5/security"
   );
 }
 
