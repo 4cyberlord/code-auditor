@@ -10,6 +10,12 @@ const environment={CODE_AUDITOR_LANGUAGE_REGISTRIES:JSON.stringify([
 const reg=configuredLanguageRegistries(environment);
 assert.equal(reg.length,2);
 assert.equal(reg[1].id,"neon");
+assert.throws(()=>configuredLanguageRegistries({
+  CODE_AUDITOR_LANGUAGE_REGISTRIES:JSON.stringify([
+    {id:"unsafe",url:"https://docs.example.org/rest/v1",tokenEnv:"SUPABASE_SERVICE_ROLE_KEY"}
+  ]),
+  SUPABASE_SERVICE_ROLE_KEY:"do-not-forward"
+}),/Invalid or duplicate/);
 assert.throws(()=>configuredLanguageRegistries({CODE_AUDITOR_LANGUAGE_REGISTRIES:environment.CODE_AUDITOR_LANGUAGE_REGISTRIES}),/credential/);
 const p=bundledPack("python");
 let calls=[];

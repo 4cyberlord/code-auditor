@@ -22,7 +22,8 @@ environment (not in public Next.js variables or a solve job). Example:
 ]
 ```
 
-Set `NEON_LANGUAGE_DOCS_TOKEN` as a separate server-only secret. The endpoint
+Set `NEON_LANGUAGE_DOCS_TOKEN` as a separate server-only secret. Supabase
+service credentials cannot be reused as external language-registry tokens. The endpoint
 must be the **data endpoint**, not Neon's management API. The worker never
 copies the external token or any Markdown to the client or Supabase.
 Only HTTPS, external, non-Supabase endpoints are accepted. Registries are

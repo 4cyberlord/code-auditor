@@ -13,6 +13,10 @@ const REQUEST_TIMEOUT_MS=2500;
 const MAX_RESPONSE_BYTES=40*1024;
 const REGISTRY_ID=/^[a-z][a-z0-9_-]{0,47}$/;
 const TOKEN_NAME=/^[A-Z][A-Z0-9_]{3,90}$/;
+const UNSAFE_SHARED_SECRETS=new Set([
+  "DATABASE_URL","SUPABASE_URL","SUPABASE_SERVICE_ROLE_KEY","SUPABASE_SERVICE_KEY",
+  "SUPABASE_ANON_KEY","SUPABASE_PUBLISHABLE_KEY"
+]);
 
 export function externalRegistryUrl(raw) {
   if(typeof raw!=="string")throw new TypeError("External registry URL must be a string");
@@ -20,7 +24,7 @@ export function externalRegistryUrl(raw) {
   const h=url.hostname.toLowerCase();
   if(url.protocol!=="https:"||url.username||url.password||url.search||url.hash
     ||!h.includes(".")||h==="localhost"
-    ||/^(?:\\d{1,3}\\.){3}\\d{1,3}$/.test(h)
+    ||/^(?:\d{1,3}\.){3}\d{1,3}$/.test(h)
     ||h.endsWith(".localhost")||h.endsWith(".internal")
     ||h==="supabase.co"||h.endsWith(".supabase.co")
     ||h==="supabase.com"||h.endsWith(".supabase.com")
@@ -40,7 +44,7 @@ export function configuredLanguageRegistries(environment=process.env) {
   const ids=new Set();
   return data.map(entry=>{
     if(!entry||typeof entry!=="object"||!REGISTRY_ID.test(entry.id||"")||ids.has(entry.id)
-      ||!TOKEN_NAME.test(entry.tokenEnv||""))
+      ||!TOKEN_NAME.test(entry.tokenEnv||"")||UNSAFE_SHARED_SECRETS.has(entry.tokenEnv))
       throw new Error("Invalid or duplicate external language database definition.");
     ids.add(entry.id);
     const endpoint=externalRegistryUrl(entry.url);
