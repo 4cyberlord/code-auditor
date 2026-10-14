@@ -58,20 +58,26 @@ import {
 } from "./extraction.ts";
 import { routeProblem, routingGuidance, reconcileProblemReadings, routeUnparsedProblem } from "./problemRouting.ts";
 import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot, selectVerifiedContractReaders, type ModelCapability } from "./adaptiveModelRouting.ts";
+import { planIntelligentPanels, loadTrustedPanelMetrics } from "./intelligentPanelSelection.ts";
+import { verifyGatewayCandidates, resolveGatewayCandidates, resolveListedGatewayModel, type LiveModelProbe } from "./quickGatewayRouter.ts";
+import { coordinateAndVerify } from "./visionCoordinator.ts";
+import { isPrimaryModel, preferredPrimaryRoute, primaryCatalog, primaryModelFamily, primaryModelId } from "./primaryModels.ts";
 import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { loadAuthenticatedBenchmarkCapabilities } from "./benchmarkFeed.ts";
 import { attachSignedBenchmarkMetrics } from "./authenticatedBenchmarkRouting.ts";
 import { captureNameOf } from "./image.ts";
 import { reviewedFixturesFor } from "./trustedPropertyFixtures.ts";
 import { assessPropertyFixtures } from "./propertyAssessment.ts";
-import { planFor, needsExtraction, type ContextMode } from "./payload.ts";
+import { planFor, type ContextMode } from "./payload.ts";
+import { selectStorySolution } from "./storySolution.ts";
 import * as bridge from "./bridge.ts";
 import * as db from "./sessions.ts";
+import { savedRunQuestion, savedRunTitle } from "./historyPresentation.ts";
 import { detectZone, isUsableZone, formatWhen } from "./when.ts";
 import { titleFor, placeholderTitle, isPlaceholder } from "./title.ts";
 import { resolveAnswerLanguage } from "./answerLanguage.ts";
 import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from "./probeFit.ts";
-import { allKnowledgeRecords, knowledgePackFor, type KnowledgeRecord } from "./knowledge.ts";
+import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
 import { buildOverlayState } from "./overlayState.ts";
 import {
@@ -94,6 +100,7 @@ import {
   letterFor,
   parseReviewSet,
   parseTestSuites,
+  missingSuiteLanguages,
   parseCouncilSynthesis,
   parseJudgeReport,
   decideWinner,
@@ -347,6 +354,8 @@ export interface ImageAsset {
   mime: string;
   /** base64 without the data: prefix */
   base64: string;
+  /** One run's short-lived Azure read URL, shared by its selected models. */
+  modelUrl?: string;
   dataUrl: string;
   bytes: number;
   /** 1 when it was sent untouched; below that, how much it was shrunk. */
@@ -449,6 +458,8 @@ interface JudgeState {
 }
 
 interface Settings {
+  /** Migrates older four-provider configurations to the fixed ten-model pool. */
+  primaryRosterVersion: number;
   mode: Mode;
   threshold: number;
   maxTokens: number;
@@ -534,6 +545,8 @@ interface Settings {
   raiseOnCapture: boolean;
   /** Images per run, 1..MAX_IMAGES. Every one is sent to every enabled agent. */
   maxImages: number;
+  /** Where new screenshots are stored; existing screenshots keep their original bucket. */
+  imageStorage: "azure" | "supabase";
   /** Which helper overlay workflow to use for background captures. */
   overlayMode: OverlayMode;
   /** Model id used for helper-only multiple-choice answers. */
@@ -624,14 +637,14 @@ interface Settings {
   /**
    * Where generated candidate programs are actually executed.
    *
-   * E2B is the default for cloud work because it keeps untrusted generated code
+   * E2B is the default because it keeps untrusted generated code
    * off the user's Mac while still returning timing and memory evidence.
    */
-  executionProvider: "e2b" | "local";
+  executionProvider: "e2b";
   /** Wall-clock ceiling for one E2B command, after sandbox creation. */
   e2bTimeoutMs: number;
   /** Optional second-pass benchmark evidence after the fast E2B/local gate. */
-  benchmarkBackend: "actions" | "off";
+  benchmarkBackend: "off";
   /**
    * Every model id the router last said this key can reach.
    *
@@ -642,6 +655,8 @@ interface Settings {
    * "nothing available" — so an empty list never disqualifies anything.
    */
   availableModels: string[];
+  /** Vision claims supplied by this key's model catalogue. A missing entry is unknown. */
+  advertisedVision: Record<string, boolean>;
   /**
    * A running worker's tick endpoint, if there is one.
    *
@@ -727,11 +742,13 @@ interface Settings {
 interface State {
   agents: AgentSlot[];
   images: ImageAsset[];
-  /** A fresh capture stays here until the person has reviewed it. */
+  /** Fresh captures wait for an explicit review before a normal Council run. */
   captureReviewOpen: boolean;
   note: string;
   runId: string | null;
   running: boolean;
+  /** Live model checks before a solver run has begun. */
+  preparing: boolean;
   settings: Settings;
   settingsOpen: boolean;
   keys: Record<ProviderId, boolean>;
@@ -776,7 +793,7 @@ interface State {
   /** The session captures attach to. Null when no database is configured. */
   currentSessionId: string | null;
 
-  /** Past runs in this session, newest first. Empty until asked for. */
+  /** Past runs across all owned sessions, newest first. */
   history: db.RunSummary[];
   historyLoading: boolean;
   historyError: string | null;
@@ -787,6 +804,8 @@ interface State {
    * back on exit, so opening an old answer never costs you the one on screen.
    */
   viewingRunId: string | null;
+  historyQuestion: string;
+  historyImages: ImageAsset[];
   loadHistory: () => Promise<void>;
   openRun: (runId: string) => Promise<void>;
   exitHistory: () => void;
@@ -886,7 +905,7 @@ interface State {
   /** Apple Vision's text, for the models to check characters against. Never the reading itself. */
   ocrHintFor: (key: string) => Promise<string>;
 
-  start: () => Promise<void>;
+  start: (options?: { adaptivePanels?: boolean }) => Promise<void>;
   cancel: () => Promise<void>;
   retry: (agentId: string) => Promise<void>;
   reset: () => void;
@@ -906,6 +925,7 @@ interface State {
     status: "idle" | "running" | "done" | "error";
     data: SolutionReview | null;
     error: string | null;
+    sourceCode?: string | null;
     /** Which port tab is showing. Sticky, so switching runs keeps your choice. */
     language: PortLanguage;
   };
@@ -940,10 +960,10 @@ const DB_SETTINGS_KEY = "app.v1";
  * Images per run.
  *
  * Every one of these is sent to every enabled agent, so the payload is this
- * number times the number of panes -- four images across four agents is sixteen
+ * number times the number of panes -- ten images across four agents is forty
  * image uploads in one press. Worth knowing when a run costs more than expected.
  */
-export const MAX_IMAGES = 4;
+export const MAX_IMAGES = 10;
 
 function publishOverlayState(s: State): void {
   const consensus = computeConsensus(
@@ -975,6 +995,7 @@ function publishOverlayState(s: State): void {
 }
 
 const defaultSettings = (): Settings => ({
+  primaryRosterVersion: 1,
   mode: "auto",
   threshold: 0.55,
   maxTokens: 8192,
@@ -987,14 +1008,13 @@ const defaultSettings = (): Settings => ({
   baseUrls: Object.fromEntries(
     PROVIDER_ORDER.map((p) => [p, PROVIDERS[p].defaultBaseUrl])
   ) as Record<ProviderId, string>,
-  // The four vendors on, the free extras off. Turning a pane on is a decision;
-  // finding six panes you did not ask for is not.
+  // All ten are eligible; the task planner dispatches at most four.
   enabled: Object.fromEntries(
-    ALL_AGENTS.map((a) => [a, !extraAgent(a)])
+    ALL_AGENTS.map((a) => [a, true])
   ) as Record<AgentId, boolean>,
   judgeProvider: "anthropic",
   autoJudge: "prose",
-  contextMode: "auto",
+  contextMode: "images",
   gatewayPerMinute: 5,
   timeZone: detectZone(),
   // One reader, not two.
@@ -1008,8 +1028,9 @@ const defaultSettings = (): Settings => ({
   railPanel: "consensus",
   raiseOnCapture: false,
   maxImages: MAX_IMAGES,
+  imageStorage: "azure",
   overlayMode: "auto",
-  mcqModel: "anthropic/claude-fable-5",
+  mcqModel: "anthropic/claude-fable-5.1",
   mcqEndpoint: "auto",
   useGateway: true,
   gatewayId: GATEWAY.id,
@@ -1032,6 +1053,7 @@ const defaultSettings = (): Settings => ({
   // to "actions" is an explicit choice to have GitHub do the measuring instead.
   benchmarkBackend: "off",
   availableModels: [],
+  advertisedVision: {},
   workerTickUrl: "",
   workerTickSecret: "",
   reasoningEffort: "high",
@@ -1042,7 +1064,7 @@ const defaultSettings = (): Settings => ({
   codingTemperature: 0.2,
   codingReasoning: true,
   solutionLanguages: ["C++", "Python"],
-  memoryTargetKb: 20 * 1024,
+  memoryTargetKb: 9 * 1024,
   transcribeScreenshots: false,
   githubRepository: "",
   githubWorkflow: "cloud-benchmark.yml",
@@ -1080,7 +1102,10 @@ const freshAgent = (provider: AgentId, model: string, enabled: boolean): AgentSl
 /** The model id a pane would be asked for right now, whichever route it is on. */
 export function modelLabelFor(id: AgentId, s: Settings): string {
   const extra = extraAgent(id);
-  if (extra) return extra.model;
+  if (extra) {
+    const approved = primaryModelId(extra.model);
+    return approved && s.useGateway ? preferredPrimaryRoute(approved, s.gatewayId) : extra.model;
+  }
   return s.useGateway ? s.routerModels[id as ProviderId] : s.models[id as ProviderId];
 }
 
@@ -1093,34 +1118,21 @@ const THRESHOLD_RANGE = { min: 0.2, max: 0.9 } as const;
 const clampTo = (n: unknown, lo: number, hi: number, fallback: number) =>
   typeof n === "number" && Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback;
 
-/**
- * Remaps pane router-model IDs that were saved when they were the app default
- * but are no longer accessible on most standard TokenRouter keys.
- *
- * This runs on every settings load so a user who saved a stale id does not
- * have to hunt down a Settings field; it is fixed silently on the next launch.
- * The table maps old-id → replacement, verified against the TokenRouter
- * catalogue 2026-08-25. Only the per-provider pane ids are touched; the
- * council roster is a user choice and is left alone.
- */
-const ROUTER_MODEL_MIGRATIONS: Partial<Record<string, string>> = {
-  // claude-opus-5 was briefly the Anthropic pane default but most keys do not
-  // have access to it. claude-opus-4.6 is the stable, broadly-entitled model.
-  "anthropic/claude-opus-5":      "anthropic/claude-opus-4.6",
-  "anthropic/claude-opus-5-fast": "anthropic/claude-opus-4.8-fast",
-  "anthropic/claude-sonnet-5":    "anthropic/claude-sonnet-4.6",
+const paneFamily: Record<ProviderId, string> = {
+  openai: "openai", moonshot: "moonshot", anthropic: "anthropic", gemini: "google",
 };
 
+function approvedPaneModel(provider: ProviderId, model: string): boolean {
+  return primaryModelFamily(model) === paneFamily[provider];
+}
+
 function migrateRouterModels(
-  saved: Record<ProviderId, string>
+  saved: Record<ProviderId, string>, gatewayId: GatewayId
 ): Record<ProviderId, string> {
-  const defaults = defaultSettings().routerModels;
-  const out = { ...defaults, ...saved };
-  for (const [k, v] of Object.entries(out) as [ProviderId, string][]) {
-    const replacement = ROUTER_MODEL_MIGRATIONS[v];
-    if (replacement) out[k] = replacement;
-  }
-  return out;
+  const defaults = gatewayPreset(gatewayId).defaultRouterModels;
+  return Object.fromEntries(PROVIDER_ORDER.map(id => [id,
+    approvedPaneModel(id, saved?.[id] ?? "") ? saved[id].trim() : defaults[id],
+  ])) as Record<ProviderId, string>;
 }
 
 /**
@@ -1131,16 +1143,22 @@ function migrateRouterModels(
  */
 function normalizeSettings(s: Settings): Settings {
   const base = defaultSettings();
+  const savedBaseUrl = typeof s.gatewayBaseUrl === "string" ? s.gatewayBaseUrl : "";
+  const gatewayId: GatewayId = s.gatewayId === "cleanapis" || savedBaseUrl.includes("cleanapis.com")
+    ? "cleanapis" : s.gatewayId === "wiro" || savedBaseUrl.includes("llm.wiro.ai")
+      ? "wiro" : GATEWAY.id;
   return {
     ...s,
+    primaryRosterVersion: 1,
+    enabled: s.primaryRosterVersion === 1 ? s.enabled :
+      Object.fromEntries(ALL_AGENTS.map(id => [id, true])) as Record<AgentId, boolean>,
     mode: (["auto", "code", "research"] as const).includes(s.mode) ? s.mode : base.mode,
     autoJudge: (["off", "prose", "always"] as const).includes(s.autoJudge)
       ? s.autoJudge
       : base.autoJudge,
     judgeProvider: PROVIDER_ORDER.includes(s.judgeProvider) ? s.judgeProvider : base.judgeProvider,
-    contextMode: (["auto", "images", "extract", "both"] as const).includes(s.contextMode)
-      ? s.contextMode
-      : base.contextMode,
+    // Migrate legacy persisted extraction preferences to direct image delivery.
+    contextMode: "images",
     extractors: normalizeExtractors(s.extractors, base.extractors),
     // 1 is a legal budget and 600 is effectively none. Clamped rather than
     // trusted, because a saved zero would queue every request forever and look
@@ -1157,24 +1175,17 @@ function normalizeSettings(s: Settings): Settings {
     raiseOnCapture:
       typeof s.raiseOnCapture === "boolean" ? s.raiseOnCapture : base.raiseOnCapture,
     maxImages: Math.round(clampTo(s.maxImages, 1, MAX_IMAGES, base.maxImages)),
+    imageStorage: s.imageStorage === "supabase" ? "supabase" : "azure",
     overlayMode: normalizeOverlayMode(s.overlayMode),
     mcqModel:
-      typeof s.mcqModel === "string" && s.mcqModel.trim()
+      typeof s.mcqModel === "string" && isPrimaryModel(s.mcqModel)
         ? s.mcqModel.trim()
         : base.mcqModel,
     mcqEndpoint: normalizeMcqEndpoint(s.mcqEndpoint),
     useGateway: typeof s.useGateway === "boolean" ? s.useGateway : base.useGateway,
-    // Older settings predate distinct gateway credentials. Infer the known
-    // gateway from its endpoint so a saved credential is not silently hidden
-    // behind the TokenRouter default after an upgrade.
-    gatewayId:
-      s.gatewayId === "cleanapis" ||
-      (typeof s.gatewayBaseUrl === "string" && s.gatewayBaseUrl.includes("cleanapis.com"))
-        ? "cleanapis"
-        : s.gatewayId === "wiro" ||
-      (typeof s.gatewayBaseUrl === "string" && s.gatewayBaseUrl.includes("llm.wiro.ai"))
-        ? "wiro"
-        : GATEWAY.id,
+    // Older settings predate distinct gateway credentials. Infer Wiro from its
+    // endpoint so an existing Wiro setup comes back as Wiro after upgrading.
+    gatewayId,
     gatewayBaseUrl:
       typeof s.gatewayBaseUrl === "string" && s.gatewayBaseUrl.trim()
         ? s.gatewayBaseUrl.trim()
@@ -1188,7 +1199,7 @@ function normalizeSettings(s: Settings): Settings {
     councilModels: normalizeCouncilModels(s.councilModels, base.councilModels),
     councilJudges: normalizeCouncilJudges(s.councilJudges, base.councilJudges),
     synthesisModel:
-      typeof s.synthesisModel === "string" && s.synthesisModel.trim()
+      typeof s.synthesisModel === "string" && isPrimaryModel(s.synthesisModel)
         ? s.synthesisModel.trim()
         : base.synthesisModel,
     threshold: clampTo(s.threshold, THRESHOLD_RANGE.min, THRESHOLD_RANGE.max, base.threshold),
@@ -1200,15 +1211,15 @@ function normalizeSettings(s: Settings): Settings {
     // deciding what counts as a language.
     outputLanguage:
       typeof s.outputLanguage === "string" ? s.outputLanguage.trim() : base.outputLanguage,
-    executionProvider: (["e2b", "local"] as const).includes(
-      s.executionProvider as "e2b"
-    )
-      ? s.executionProvider
-      : base.executionProvider,
+    executionProvider: "e2b",
     e2bTimeoutMs: Math.round(clampTo(s.e2bTimeoutMs, 30_000, 300_000, base.e2bTimeoutMs)),
     availableModels: Array.isArray(s.availableModels)
-      ? (s.availableModels as string[]).filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim())
+      ? primaryCatalog((s.availableModels as string[]).filter((x) => typeof x === "string" && x.trim())).map((x) => x.trim())
       : base.availableModels,
+    advertisedVision: s.advertisedVision && typeof s.advertisedVision === "object" && !Array.isArray(s.advertisedVision)
+      ? Object.fromEntries(Object.entries(s.advertisedVision).filter(([model, vision]) =>
+          isPrimaryModel(model) && typeof vision === "boolean"))
+      : base.advertisedVision,
     workerTickUrl: typeof s.workerTickUrl === "string" ? s.workerTickUrl.trim() : base.workerTickUrl,
     workerTickSecret:
       typeof s.workerTickSecret === "string" ? s.workerTickSecret : base.workerTickSecret,
@@ -1217,7 +1228,8 @@ function normalizeSettings(s: Settings): Settings {
     )
       ? (s.reasoningEffort as Settings["reasoningEffort"])
       : base.reasoningEffort,
-    codingModel: typeof s.codingModel === "string" ? s.codingModel.trim() : base.codingModel,
+    codingModel: typeof s.codingModel === "string" && (!s.codingModel.trim() || isPrimaryModel(s.codingModel))
+      ? s.codingModel.trim() : base.codingModel,
     codingProjectRoot:
       typeof s.codingProjectRoot === "string" ? s.codingProjectRoot.trim() : base.codingProjectRoot,
     codingProjectName:
@@ -1233,16 +1245,12 @@ function normalizeSettings(s: Settings): Settings {
         ? (s.solutionLanguages as string[]).filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim())
         : base.solutionLanguages,
     memoryTargetKb:
-      typeof s.memoryTargetKb === "number" && Number.isFinite(s.memoryTargetKb) && s.memoryTargetKb > 0
+      typeof s.memoryTargetKb === "number" && Number.isFinite(s.memoryTargetKb) && s.memoryTargetKb > 0 && s.memoryTargetKb !== 20 * 1024
         ? Math.round(s.memoryTargetKb)
         : base.memoryTargetKb,
     transcribeScreenshots:
       typeof s.transcribeScreenshots === "boolean" ? s.transcribeScreenshots : base.transcribeScreenshots,
-    benchmarkBackend: (["actions", "off"] as const).includes(
-      s.benchmarkBackend as "actions"
-    )
-      ? s.benchmarkBackend
-      : base.benchmarkBackend,
+    benchmarkBackend: "off",
     githubRepository:
       typeof s.githubRepository === "string" ? s.githubRepository.trim() : base.githubRepository,
     githubWorkflow:
@@ -1257,7 +1265,10 @@ function normalizeSettings(s: Settings): Settings {
     benchmarkTimeoutMs: Math.round(
       clampTo(s.benchmarkTimeoutMs, 30_000, 900_000, base.benchmarkTimeoutMs)
     ),
-    routerModels: migrateRouterModels(s.routerModels),
+    models: Object.fromEntries(PROVIDER_ORDER.map(id => [id,
+      approvedPaneModel(id, s.models?.[id] ?? "") ? s.models[id].trim() : base.models[id],
+    ])) as Record<ProviderId, string>,
+    routerModels: migrateRouterModels(s.routerModels, gatewayId),
   };
 }
 
@@ -1281,23 +1292,7 @@ function normalizeSettings(s: Settings): Settings {
  * the id: {"id": "openai/gpt-5.3-codex", "endpoint": "responses"}. A plain
  * string is the same thing with the default wire.
  */
-/**
- * Vendor prefixes that are permanently out of scope for this project.
- *
- * Any council solver or judge seat whose model id starts with one of these is
- * silently dropped when saved settings are loaded. The drop is permanent: the
- * seat is not replaced with a fallback, it is simply gone. If the removal
- * shrinks the roster below the minimum, `normalizeCouncilModels` falls back to
- * the default bench as it already does for any undersized saved list.
- */
-const COUNCIL_MODEL_BLOCKLIST: readonly string[] = [
-  "deepseek/",
-  "qwen/",
-];
-
-const isBlocklisted = (modelId: string): boolean =>
-  COUNCIL_MODEL_BLOCKLIST.some((prefix) => modelId.startsWith(prefix));
-
+/** Drop legacy seats outside the user's approved ten-model pool. */
 function normalizeCouncilModels(saved: unknown, fallback: CouncilModelSpec[]): CouncilModelSpec[] {
   if (!Array.isArray(saved)) return fallback;
   const out: CouncilModelSpec[] = [];
@@ -1312,7 +1307,7 @@ function normalizeCouncilModels(saved: unknown, fallback: CouncilModelSpec[]): C
               endpoint: ((raw as Record<string, unknown>).endpoint === "responses" ? "responses" : "chat") as "chat" | "responses",
             }
           : null;
-    if (!spec || spec.id.length < 2 || seen.has(spec.id) || isBlocklisted(spec.id)) continue;
+    if (!spec || !isPrimaryModel(spec.id) || seen.has(spec.id)) continue;
     seen.add(spec.id);
     out.push(spec);
   }
@@ -1328,7 +1323,7 @@ function normalizeCouncilJudges(saved: unknown, fallback: JudgeSeat[]): JudgeSea
       if (!j || typeof j !== "object") return null;
       const o = j as Record<string, unknown>;
       if (typeof o.model !== "string" || !o.model.trim()) return null;
-      if (isBlocklisted(o.model.trim())) return null;
+      if (!isPrimaryModel(o.model.trim())) return null;
       return {
         model: o.model.trim(),
         emphasis: (emphases.has(String(o.emphasis)) ? o.emphasis : "correctness") as JudgeSeat["emphasis"],
@@ -1365,6 +1360,7 @@ function mergeSettings(saved: Partial<Settings> | null | undefined): Settings {
   return normalizeSettings({
     ...base,
     ...saved,
+    primaryRosterVersion: saved.primaryRosterVersion ?? 0,
     models: { ...base.models, ...(saved.models ?? {}) },
     routerModels: { ...base.routerModels, ...(saved.routerModels ?? {}) },
     baseUrls: { ...base.baseUrls, ...(saved.baseUrls ?? {}) },
@@ -1425,7 +1421,9 @@ function applySettings(
           model:
             routeFor(a.provider, settings, s.keys, s.gatewayKey)?.model ??
             modelLabelFor(a.provider, settings),
-          enabled: settings.enabled[a.provider],
+          // Saving probes during a run must not restore configured flags over
+          // the task-specific adaptive selection.
+          enabled: s.runId && !s.viewingRunId ? a.enabled : settings.enabled[a.provider],
         }
   );
   const judge =
@@ -1455,13 +1453,6 @@ export interface Route {
   viaGateway: boolean;
 }
 
-/**
- * Wiro's gateway currently has no Moonshot/Kimi route. Keep this narrow and
- * explicit: a model is not rejected merely because it is absent from Wiro's
- * public listing, since team access is decided when it runs.
- */
-const WIRO_UNAVAILABLE_MODELS = new Set(["moonshotai/kimi-k3"]);
-
 function isPermanentGatewayFailure(error: string | null | undefined): boolean {
   const message = (error ?? "").toLowerCase();
   return (
@@ -1474,7 +1465,6 @@ function isPermanentGatewayFailure(error: string | null | undefined): boolean {
 
 function unavailableWiroGatewayModel(model: string, s: Settings): boolean {
   if (s.gatewayId !== "wiro") return false;
-  if (WIRO_UNAVAILABLE_MODELS.has(model)) return true;
   const probe = s.probes[model];
   return !!probe && !probe.ok && isPermanentGatewayFailure(probe.error);
 }
@@ -1495,9 +1485,11 @@ export function routeFor(
   const extra = extraAgent(provider);
   if (extra) {
     if (!(s.useGateway && gatewayKey)) return null;
+    const approved = primaryModelId(extra.model);
+    if (!approved) return null;
     return {
       provider: s.gatewayId,
-      model: extra.model,
+      model: preferredPrimaryRoute(approved, s.gatewayId),
       baseUrl: s.gatewayBaseUrl || gatewayPreset(s.gatewayId).defaultBaseUrl,
       viaGateway: true,
     };
@@ -1526,8 +1518,35 @@ export function routeFor(
 }
 
 function endpointForModel(s: Settings, model: string): "chat" | "responses" {
+  // Clean APIs and Wiro publish this roster on Chat Completions. A
+  // TokenRouter-specific Responses hint must not cross to another wire.
+  if (s.gatewayId !== "tokenrouter") return "chat";
   const id = model.trim();
   return endpointForCouncilModel(s.councilModels, id);
+}
+
+/** A recent successful live check is sufficient for another step in this run.
+ * Failures are never cached here: a rate or quota change can recover. */
+async function probeGatewayWithRecentSuccess(
+  models: string[], vision: boolean, settings: Settings
+): Promise<LiveModelProbe[]> {
+  const now = Date.now();
+  const cached: LiveModelProbe[] = [];
+  const missing: string[] = [];
+  for (const model of models) {
+    const probe = settings.probes[model];
+    if (probe?.ok && now - probe.at >= 0 && now - probe.at < 5 * 60_000 &&
+        (!vision || probe.vision === true)) {
+      cached.push({ model, ok: true, ms: probe.ms, error: null,
+        vision: probe.vision ?? null, visionNote: probe.visionNote });
+    } else missing.push(model);
+  }
+  if (!missing.length) return cached;
+  const fresh = await bridge.probeModels(missing, settings.gatewayBaseUrl,
+    settings.gatewayId, vision,
+    Object.fromEntries(missing.map(model => [model, endpointForModel(settings, model)])), false,
+    settings.imageStorage);
+  return [...cached, ...fresh];
 }
 
 /**
@@ -1568,9 +1587,13 @@ export function canSeeVia(agentId: AgentId, route: Route | null, s: Settings): b
  * exactly like a pasted one everywhere downstream — the panel sends base64, and
  * a URL that expires in an hour is not something to hand a model.
  */
-async function fetchStored(path: string, mime: string): Promise<{ dataUrl: string } | null> {
+async function fetchStored(path: string, mime: string, bucket?: string | null): Promise<{ dataUrl: string } | null> {
   try {
-    const url = await bridge.signedUrl(path, 3600);
+    if (bucket === "azure:council-images") {
+      const base64 = await bridge.readAzureScreenshot(path);
+      return { dataUrl: `data:${mime || "image/png"};base64,${base64}` };
+    }
+    const url = await bridge.signedUrl(path, 3600, bucket ?? undefined);
     const blob = await (await fetch(url)).blob();
     const buf = new Uint8Array(await blob.arrayBuffer());
     let binary = "";
@@ -1585,8 +1608,20 @@ async function fetchStored(path: string, mime: string): Promise<{ dataUrl: strin
   }
 }
 
+const modelImage = (image: ImageAsset): bridge.ImageInput => ({
+  mime: image.mime, data: image.base64, ...(image.modelUrl ? { url: image.modelUrl } : {}),
+});
+
 /** The live run, kept aside while history is being read. Never rendered. */
-let liveSnapshot: { agents: AgentSlot[]; note: string } | null = null;
+let liveSnapshot: {
+  agents: AgentSlot[];
+  note: string;
+  council: CouncilState;
+  review: State["review"];
+  runId: string | null;
+} | null = null;
+let persistedRecord: { sourceRunId: string | null; dbRunId: string } | null = null;
+let persistRunPromise: Promise<void> | null = null;
 
 /**
  * How long to wait for a pane that has not started before judging without it.
@@ -1610,6 +1645,25 @@ const LATE_STARTER_GRACE_MS = Number(process.env.NEXT_PUBLIC_LATE_STARTER_GRACE_
 const LATE_STARTER_TRIES = 3;
 let lateStarterCheck: ReturnType<typeof setTimeout> | null = null;
 let lateStarterWaits = 0;
+const runtimeRecoveryAttempts = new Set<string>();
+let solverKnowledgeLoad: Promise<void> | null = null;
+let startGeneration = 0;
+
+/** Join one local Knowledge-folder read before any solver is dispatched. It
+ * starts alongside model checks, so it does not add a sequential startup step. */
+function ensureSolverKnowledge(get: () => State): Promise<void> {
+  if (!bridge.inTauri() || get().knowledge.folder) return Promise.resolve();
+  if (!solverKnowledgeLoad) {
+    solverKnowledgeLoad = get().loadKnowledge().finally(() => { solverKnowledgeLoad = null; });
+  }
+  return solverKnowledgeLoad;
+}
+
+function solverKnowledgePack(get: () => State, query: string): string {
+  return knowledgePackForLocalLibrary(query,
+    get().knowledge.entries.filter(entry => entry.source === "file")
+      .map(entry => entry.record), 8, true);
+}
 
 export const useStore = create<State>((set, get) => ({
   agents: buildAgents(defaultSettings()),
@@ -1618,6 +1672,7 @@ export const useStore = create<State>((set, get) => ({
   note: "",
   runId: null,
   running: false,
+  preparing: false,
   settings: defaultSettings(),
   settingsOpen: false,
   keys: Object.fromEntries(PROVIDER_ORDER.map((p) => [p, false])) as Record<ProviderId, boolean>,
@@ -1626,7 +1681,7 @@ export const useStore = create<State>((set, get) => ({
   uploads: {},
   toasts: [],
   probing: false,
-  review: { status: "idle", data: null, error: null, language: "cpp" },
+  review: { status: "idle", data: null, error: null, language: "cpp", sourceCode: null },
   probeError: null,
   judge: { status: "idle", provider: "anthropic", text: "", error: null },
   council: IDLE_COUNCIL,
@@ -1640,6 +1695,8 @@ export const useStore = create<State>((set, get) => ({
   historyLoading: false,
   historyError: null,
   viewingRunId: null,
+  historyQuestion: "",
+  historyImages: [],
   sessionsError: null,
   sessionsLoading: false,
   runPersisted: false,
@@ -1697,8 +1754,8 @@ export const useStore = create<State>((set, get) => ({
     // Counted in screenshots, not in images.
     //
     // A whole-screen capture becomes several tiles, and charging those against
-    // the limit would silently make a four-image review hold fewer than four
-    // captures, which is worse than refusing the extra capture as a whole.
+    // the limit meant "10 images" silently became five screenshots -- and then
+    // dropped half of the sixth, which is worse than refusing it.
     const current = get().images;
     const seen = new Set(current.map((i) => i.group ?? i.name));
     const room = Math.max(0, get().settings.maxImages - seen.size);
@@ -1725,16 +1782,18 @@ export const useStore = create<State>((set, get) => ({
     // to that set retires it rather than letting a later retry quote a
     // transcription of a picture that is no longer part of the question.
     if (taken.length) {
-      set((s) => ({
-        images: [...s.images, ...taken],
-        captureReviewOpen: true,
-        shortcutError: null,
-        extraction: IDLE_EXTRACTION,
+    set((s) => ({
+      images: [...s.images, ...taken],
+      captureReviewOpen: taken.length > 0 || s.captureReviewOpen,
+      shortcutError: null,
+      extraction: IDLE_EXTRACTION,
       }));
 
+      // Story Strip uses independent model vision. Saving a capture must not
+      // start a shared transcription or a separate image-reader workflow.
       // And the bytes go where they are meant to live. Not awaited: an upload
-      // that takes a second must not hold up the review. Uploading is storage,
-      // not analysis; the first model request still waits for Continue.
+      // that takes a second must not hold up the reading or the panel, and the
+      // only thing depending on it finishing is history.
       void get().stashImages(taken);
     }
     // Reported in screenshots too, so the message matches what was pressed.
@@ -1745,11 +1804,7 @@ export const useStore = create<State>((set, get) => ({
   removeImage: (index) =>
     set((s) => {
       const images = s.images.filter((_, i) => i !== index);
-      return {
-        images,
-        captureReviewOpen: images.length ? s.captureReviewOpen : false,
-        extraction: IDLE_EXTRACTION,
-      };
+      return { images, captureReviewOpen: images.length > 0 && s.captureReviewOpen, extraction: IDLE_EXTRACTION };
     }),
   clearImages: () => set({ images: [], captureReviewOpen: false, extraction: IDLE_EXTRACTION }),
   approveCaptureReview: () => set({ captureReviewOpen: false }),
@@ -1787,7 +1842,8 @@ export const useStore = create<State>((set, get) => ({
 
   newSession: async (title = "") => {
     try {
-      const id = await db.createSession(title);
+      const name = title.trim() || placeholderTitle(formatWhen(Date.now(), get().settings.timeZone, "short"));
+      const id = await db.createSession(name);
       await get().loadSessions("active");
       set({ currentSessionId: id, sessionsError: null });
       // A new session is a fresh start: nothing carried over from the last one.
@@ -1813,8 +1869,10 @@ export const useStore = create<State>((set, get) => ({
         // From the project, not from this machine. The local file was deleted
         // the moment its row existed, which is exactly what makes a session
         // openable from a different device — the point of putting it there.
+        const bucket = shot.storageBucket ??
+          (shot.storagePath?.split("/")[1] === "azure" ? "azure:council-images" : undefined);
         const file = shot.storagePath
-          ? await fetchStored(shot.storagePath, shot.mime)
+          ? await fetchStored(shot.storagePath, shot.mime, bucket)
           : shot.localPath
             ? await bridge.readCapture(shot.localPath)
             : null;
@@ -1868,9 +1926,29 @@ export const useStore = create<State>((set, get) => ({
   },
 
   stashImages: async (imgs) => {
-    if (!imgs.length || !get().storageKey) return;
-    const sessionId = await get().ensureSession();
-    if (!sessionId) return;
+    // Screenshot uploads are authorized by the authenticated server API.
+    // A locally stored Supabase service-role key is neither required nor safe.
+    if (!imgs.length) return;
+    let sessionId: string | null;
+    try {
+      sessionId = await get().ensureSession();
+      if (!sessionId) throw new Error("Screenshot upload requires a signed-in server session.");
+    } catch (err) {
+      // Rejected authentication/network calls must retain local captures and
+      // report an upload error, just like a missing session.
+      const why = cleanError(String(err));
+      set((st) => ({
+        sessionsError: why,
+        uploads: {
+          ...st.uploads,
+          ...Object.fromEntries(imgs.map((img) => [
+            img.group ?? img.name,
+            { state: "failed" as const, why },
+          ])),
+        },
+      }));
+      return;
+    }
 
     const keyOf = (i: ImageAsset) => i.group ?? i.name;
     /** Local file -> whether every upload sourced from it has succeeded. */
@@ -1890,6 +1968,7 @@ export const useStore = create<State>((set, get) => ({
           fileName: img.name,
           mime: img.mime,
           data: img.base64,
+          backend: get().settings.imageStorage,
         });
         await db.addScreenshot({
           sessionId,
@@ -1936,7 +2015,7 @@ export const useStore = create<State>((set, get) => ({
   },
 
   autoTitle: async () => {
-    const { currentSessionId, sessions, extraction, note } = get();
+    const { currentSessionId, sessions, extraction, note, council, agents } = get();
     if (!currentSessionId) return;
     const current = sessions.find((x) => x.id === currentSessionId);
     // A name the user chose outranks anything inferable.
@@ -1945,6 +2024,15 @@ export const useStore = create<State>((set, get) => ({
     const suggested = titleFor({
       extraction: extraction.agreement?.merged ?? null,
       note,
+      answers: [
+        ...council.candidates.filter(candidate => candidate.letter === council.winner)
+          .map(candidate => candidate.revised ?? candidate.final)
+          .filter((answer): answer is AgentFinal => Boolean(answer))
+          .map(answer => ({ answer: answer.answer, code: answer.code, language: answer.language })),
+        ...agents.filter(agent => agent.final).map(agent => ({
+          answer: agent.final?.answer, code: agent.final?.code, language: agent.final?.language,
+        })),
+      ],
     });
     if (!suggested || suggested === current?.title) return;
     try {
@@ -1989,16 +2077,24 @@ export const useStore = create<State>((set, get) => ({
     }),
 
   reset: () =>
-    set((s) => ({
+    set((s) => {
+      startGeneration += 1;
+      return {
       agents: buildAgents(s.settings),
       runId: null,
       running: false,
+      preparing: false,
+      viewingRunId: null,
+      historyQuestion: "",
+      historyImages: [],
       council: IDLE_COUNCIL,
+      review: { status: "idle", data: null, error: null, language: s.review.language, sourceCode: null },
       judge: { status: "idle", provider: s.settings.judgeProvider, text: "", error: null },
       // The reading belonged to the images of the run being cleared. Keeping it
       // would let the next run inherit a transcription of a different picture.
       extraction: IDLE_EXTRACTION,
-    })),
+      };
+    }),
 
   recordProbe: (r) => {
     const probes = { ...get().settings.probes };
@@ -2104,7 +2200,9 @@ export const useStore = create<State>((set, get) => ({
         settings.gatewayBaseUrl,
         settings.gatewayId,
         testVision,
-        endpointByModel
+        endpointByModel,
+        true,
+        settings.imageStorage
       );
       const at = Date.now();
       const probes = { ...get().settings.probes };
@@ -2317,27 +2415,69 @@ export const useStore = create<State>((set, get) => ({
       const done = await get().runOcrReading(key);
       if (done) return done;
     }
+    // Mark the image set in-flight before the local OCR hint too. Start can be
+    // clicked while Apple Vision is still reading; it must join this attempt,
+    // not launch a duplicate set of paid model calls.
+    set({ extraction: { ...IDLE_EXTRACTION, status: "running", for: key } });
     const ocrHint = await get().ocrHintFor(key);
-
-    const routes = settings.extractors
+    let routes = settings.extractors
       .map((p) => [p, routeFor(p, settings, keys, gatewayKey)] as const)
       .filter((pair): pair is readonly [ProviderId, Route] => pair[1] !== null);
 
+    if (settings.useGateway && gatewayKey) {
+      let readerCatalog: string[] = [];
+      try {
+        readerCatalog = await bridge.listGatewayModels(settings.gatewayBaseUrl, settings.gatewayId);
+      } catch {
+        // An absent catalogue is unknown availability, not zero access.
+      }
+      // A configured reader may be absent from this gateway. Choose the same
+      // approved model where listed, then another approved reader family.
+      const readerIds = [...settings.extractors, ...PROVIDER_ORDER.filter(id => !settings.extractors.includes(id))];
+      const pool = readerIds.flatMap(id => {
+        const configuredModel = settings.routerModels[id];
+        const model = readerCatalog.length ? resolveListedGatewayModel(configuredModel, readerCatalog) : configuredModel;
+        return model && isPrimaryModel(model) ? [{ id, model }] : [];
+      });
+      const verifiedRoutes: { id: ProviderId; model: string }[] = [];
+      const readerProbes: LiveModelProbe[] = [];
+      const target = Math.max(1, Math.min(2, settings.extractors.length));
+      for (let offset = 0, wave = 0; offset < pool.length && verifiedRoutes.length < target && wave < 2; wave++) {
+        const count = target - verifiedRoutes.length;
+        const batch = pool.slice(offset, offset + count);
+        offset += count;
+        const verified = await verifyGatewayCandidates({
+          configured: batch, catalogue: readerCatalog, requireVision: true,
+          allowFamilyAlternatives: false,
+          probe: (models, vision) => probeGatewayWithRecentSuccess(models, vision, get().settings),
+        });
+        verifiedRoutes.push(...verified.routes);
+        readerProbes.push(...verified.probes);
+      }
+      routes = verifiedRoutes.map(({ id, model }) => [id, {
+        provider: settings.gatewayId, model, viaGateway: true,
+        baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+      }] as const);
+      const probes = { ...get().settings.probes };
+      for (const p of readerProbes) probes[p.model] = {
+        ok: p.ok, ms: p.ms, at: Date.now(), error: p.error,
+        vision: p.vision, visionNote: p.visionNote ?? null,
+      };
+      get().patchSettings({ probes });
+    }
+
+    if (get().extraction.for !== key) return null;
     if (!routes.length) {
-      const names = settings.extractors.map((p) => PROVIDERS[p].vendor).join(" or ");
       set({
         extraction: {
-          ...IDLE_EXTRACTION,
-          status: "error",
-          error: `Reading the screenshot needs a route to ${names} — either a ${GATEWAY.label} key, or a key for the vendor itself. Add one in Settings, or set Context to "Images" to have each agent read the picture itself.`,
+          ...IDLE_EXTRACTION, status: "error", for: key,
+          error: "No configured image reader passed live gateway and vision checks. Check your API connection, available model IDs and screenshot support in Settings.",
         },
       });
       return null;
     }
 
-    set({ extraction: { ...IDLE_EXTRACTION, status: "running", for: key } });
-
-    const payload = images.map((i) => ({ mime: i.mime, data: i.base64 }));
+    const payload = images.map(modelImage);
     const runId = `extract-${Date.now().toString(36)}`;
 
     // Both readers go at once, and one failing does not take the other with it:
@@ -2495,23 +2635,161 @@ export const useStore = create<State>((set, get) => ({
     return agreement;
   },
 
-  start: async () => {
-    // Global shortcuts honour the same boundary as the visible control.
+  start: async (options) => {
     if (get().captureReviewOpen) return;
-    const { settings, images, note, keys, gatewayKey } = get();
-
-    // One route per pane, decided once. A pane with no route is not an error
-    // the user caused by pressing the wrong button -- it simply has no way to
-    // reach a model, and says so in the pane rather than failing mid-stream.
-    const routes = new Map<AgentId, Route>();
-    for (const p of ALL_AGENTS) {
-      if (!settings.enabled[p]) continue;
-      const r = routeFor(p, settings, keys, gatewayKey);
-      if (r) routes.set(p, r);
+    if (get().running || get().preparing) return;
+    options = { ...options, adaptivePanels: options?.adaptivePanels !== false };
+    const generation = ++startGeneration;
+    set({ preparing: true });
+    try {
+    let { images } = get();
+    const { settings, note, keys, gatewayKey } = get();
+    if (!images.length && !note.trim()) return;
+    if (options?.adaptivePanels && (!settings.useGateway || !gatewayKey)) {
+      throw new Error("Select and connect Wiro, TokenRouter or Clean APIs in Settings. The fixed ten-model roster must be routed through your active API gateway.");
     }
+    if (images.length && settings.imageStorage === "azure" && settings.gatewayId === "cleanapis") {
+      const sessionId = await get().ensureSession();
+      if (!sessionId) throw new Error("Sign in before uploading screenshots to Azure.");
+      // One URL per screenshot for this job; every selected model receives the
+      // same ordered list, rather than a new upload for each model request.
+      images = await Promise.all(images.map(async (image) => {
+        const uploaded = await bridge.uploadScreenshot({
+          sessionId, fileName: image.name, mime: image.mime,
+          data: image.base64, backend: "azure",
+        });
+        const modelUrl = await bridge.signedUrl(uploaded.path, 7200, uploaded.bucket);
+        return { ...image, modelUrl };
+      }));
+      set({ images });
+    }
+    liveSnapshot = null;
+    set(state => ({
+      runId: null, viewingRunId: null, runPersisted: false,
+      agents: buildAgents(settings), council: IDLE_COUNCIL,
+      judge: { status: "idle", provider: settings.judgeProvider, text: "", error: null },
+      review: { status: "idle", data: null, error: null, language: state.review.language, sourceCode: null },
+    }));
+    const knowledgeReady = ensureSolverKnowledge(get);
+    const trustedMetricsReady = options?.adaptivePanels ? loadTrustedPanelMetrics() : Promise.resolve([]);
 
-    const active = [...routes.keys()];
+    // No shared reading/extraction stage. The selected solvers will each
+    // receive the original screenshots after their own verified vision probe.
+    // A gateway listing can be broken or incomplete. Probe candidate routes
+    // with the ACTIVE gateway credential before submitting the real problem.
+    const routes = new Map<AgentId, Route>();
+    const configured = ALL_AGENTS.filter(id => settings.enabled[id]);
+    let catalogue: string[] = [];
+    let advertisedVision: Record<string, boolean> = {};
+    const availabilityProbes = { ...get().settings.probes };
+    let coordinatorTopic = "";
+    let hadRouteFailure = false;
+    if (options?.adaptivePanels && settings.useGateway && gatewayKey) {
+      try {
+        const details = await bridge.listGatewayModelDetails(settings.gatewayBaseUrl, settings.gatewayId);
+        catalogue = details.map(model => model.id);
+        if (settings.gatewayId === "cleanapis") {
+          advertisedVision = Object.fromEntries(details.filter(model =>
+            Array.isArray(model.capabilities)).map(model => [model.id,
+              model.capabilities!.some(capability => capability.toLowerCase() === "vision")]));
+        }
+      } catch {
+        // Catalogue unavailability means UNKNOWN, not zero available models.
+        catalogue = [];
+      }
+      const seenModels = new Set<string>();
+      const candidates = configured.flatMap(id => {
+        const configuredModel = modelLabelFor(id, settings);
+        const model = catalogue.length ? resolveListedGatewayModel(configuredModel, catalogue) : configuredModel;
+        const canonical = model ? primaryModelId(model) : null;
+        if (!model || !canonical || seenModels.has(canonical)) return [];
+        if (images.length > 0 && settings.gatewayId === "cleanapis" && advertisedVision[model] === false) return [];
+        seenModels.add(canonical);
+        return [{ id, model, canSeeImages: agentSpec(id).vision }];
+      });
+      // Screenshots have no pre-extracted text. Only a successful image
+      // transport probe can authorize dispatch of their original bytes.
+      const taskRoute = routeUnparsedProblem(note, images.length > 0);
+      // A verified member of the ten-model roster reads the original images
+      // only to assign specialists. The actual solvers read those same images
+      // independently and never receive a coordinator transcription.
+      const shortlist = planIntelligentPanels({
+        candidates, route: taskRoute, hasImages: false, safeTextOnly: true,
+        trustedMetrics: await trustedMetricsReady, probes: availabilityProbes,
+        maxPanels: 4,
+      });
+      const availability = await coordinateAndVerify({
+        candidates, catalogue, note, screenshotCount: images.length,
+        fallbackOrder: shortlist.selected,
+        probe: (models, vision) => probeGatewayWithRecentSuccess(models, vision, get().settings),
+        ask: async (model, prompt) => Promise.race([
+          bridge.runOnce({
+            runId: `coordinator-${generation}`, agentId: "vision-coordinator",
+            attemptId: newAttemptId(), provider: settings.gatewayId, model,
+            systemPrompt: prompt.systemPrompt, userText: prompt.userText,
+            images: images.map(modelImage),
+            maxTokens: 360, temperature: 0,
+            baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+            endpoint: endpointForModel(settings, model),
+          }),
+          new Promise<never>((_, reject) => setTimeout(
+            () => reject(new Error("Coordinator timed out")), 15_000)),
+        ]),
+      });
+      if (generation !== startGeneration) return;
+      coordinatorTopic = availability.family;
+      for (const check of availability.probes) {
+        availabilityProbes[check.model] = {
+          ok: check.ok, ms: check.ms, error: check.error, at: Date.now(),
+          vision: check.vision ?? availabilityProbes[check.model]?.vision ?? null,
+          visionNote: check.visionNote ?? availabilityProbes[check.model]?.visionNote ?? null,
+        };
+      }
+      const routerModels = { ...settings.routerModels };
+      for (const candidate of availability.routes) {
+        const id = candidate.id as ProviderId;
+        const saved = routerModels[id];
+        // Persist only a proven spelling of the same model. A temporary
+        // fallback to another version must not overwrite the user's choice.
+        if (saved && saved !== candidate.model &&
+            resolveListedGatewayModel(saved, [candidate.model]) === candidate.model) {
+          routerModels[id] = candidate.model;
+        }
+      }
+      get().patchSettings({ probes: availabilityProbes, routerModels });
+      for (const candidate of availability.routes) routes.set(candidate.id, {
+        provider: settings.gatewayId, model: candidate.model,
+        baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+        viaGateway: true,
+      });
+      if (!availability.routes.length) {
+        hadRouteFailure = true;
+        get().pushToast("err", "Gateway has no verified models",
+          candidates.length === 0 && configured.length > 0 && catalogue.length > 0 &&
+          images.length > 0 && settings.gatewayId === "cleanapis"
+            ? "Clean API's model catalogue does not advertise image input for any enabled approved model. Enable a model with the vision capability on this key, then refresh the list."
+            : "The configured candidates failed live availability checks on " + settings.gatewayId + ". " +
+              availability.rejected.slice(0, 3).map(r=>r.model + ": " + r.reason).join("; "),
+          { sticky: true });
+      }
+    } else {
+      for (const id of configured) {
+        const route = routeFor(id, settings, keys, gatewayKey);
+        if (route) routes.set(id, route);
+      }
+    }
+    if (generation !== startGeneration) return;
+    let active = [...routes.keys()];
+    if (!options?.adaptivePanels) active = active.slice(0, 4);
+    if (get().running) return;
     if (!active.length) {
+      if (options?.adaptivePanels && !hadRouteFailure) {
+        get().pushToast("err", "No usable AI models found",
+          settings.useGateway
+            ? "The selected gateway has no verified model from the approved ten-model roster. Refresh its catalog or switch gateways in Settings."
+            : "Enable a reachable model or connect a gateway before starting analysis.",
+          { sticky: true });
+      }
       set({ settingsOpen: true });
       return;
     }
@@ -2521,16 +2799,11 @@ export const useStore = create<State>((set, get) => ({
     const attempts = Object.fromEntries(
       ALL_AGENTS.map((p) => [p, newAttemptId()])
     ) as Record<AgentId, string>;
-    const sys = systemPrompt(
-      settings.mode,
-      resolveAnswerLanguage(settings.outputLanguage, get().extraction.agreement?.merged.language ?? "")
-    );
-    let knowledge = knowledgePackFor(note, 5);
-
     // A new run leaves history: the panes are about to be overwritten anyway,
     // and keeping a snapshot of an old run to "return" to would put stale
     // answers back on screen after a fresh one finished.
     liveSnapshot = null;
+    runtimeRecoveryAttempts.clear();
     // A fresh run gets a fresh patience budget, or a second run inherits an
     // exhausted one and never waits for its own late seat.
     lateStarterWaits = 0;
@@ -2542,16 +2815,17 @@ export const useStore = create<State>((set, get) => ({
     set((s) => ({
       runId,
       running: true,
+      preparing: false,
       runPersisted: false,
       viewingRunId: null,
       extraction: IDLE_EXTRACTION,
       council: IDLE_COUNCIL,
       judge: { status: "idle", provider: s.settings.judgeProvider, text: "", error: null },
-      review: { status: "idle", data: null, error: null, language: s.review.language },
+      review: { status: "idle", data: null, error: null, language: s.review.language, sourceCode: null },
       agents: s.agents.map((a) => {
         const route = routes.get(a.provider);
         const spec = agentSpec(a.provider);
-        if (!settings.enabled[a.provider]) {
+        if (!settings.enabled[a.provider] || (!options?.adaptivePanels && !active.includes(a.provider)) || (options?.adaptivePanels && !route)) {
           return { ...freshAgent(a.provider, modelLabelFor(a.provider, settings), false) };
         }
         if (!route) {
@@ -2562,12 +2836,12 @@ export const useStore = create<State>((set, get) => ({
             error: unavailable
               ? `${unavailable} is unavailable through Wiro, so it was not called. Choose another Wiro model for this pane, or use that provider's direct key.`
               : spec.routerOnly
-              ? `${spec.label} is only reachable through ${GATEWAY.label}. Add a ${GATEWAY.label} key, or switch this pane off.`
-              : `No route to ${spec.vendor}. Add a ${GATEWAY.label} key to reach every model with one credential, or a ${spec.vendor} key to reach just this one.`,
+              ? `${spec.label} is only reachable through ${gatewayPreset(settings.gatewayId).label}. Add that gateway key, or switch this pane off.`
+              : `No route to ${spec.vendor}. Add a ${gatewayPreset(settings.gatewayId).label} key for this approved model, or a ${spec.vendor} direct key.`,
           };
         }
         return {
-          ...freshAgent(a.provider, route.model, true),
+          ...freshAgent(a.provider, route.model, !options?.adaptivePanels),
           status: "queued" as const,
           startedAt: Date.now(),
           attemptId: attempts[a.provider],
@@ -2577,27 +2851,71 @@ export const useStore = create<State>((set, get) => ({
     }));
     publishOverlayState(get());
 
-    // The vision pass, when asked for, happens before anyone reasons. The panes
-    // sit at "queued" through it, which is the truth: they are waiting on the
-    // reading, not on a model.
-    // Demand-driven: the transcription only costs two extra calls when somebody
-    // in the panel actually cannot see the picture.
-    const anyBlind = active.some((p) => !canSeeVia(p, routes.get(p) ?? null, settings));
-    let context = "";
-    if (needsExtraction(settings.contextMode, images.length > 0, anyBlind)) {
-      await get().runExtraction();
-
-      // Extraction is slow enough that Stop is a real possibility during it, and
-      // a run that was stopped must not then launch four requests.
-      const now = get();
-      if (!now.running || now.runId !== runId) return;
-      // Read it back from the store rather than from the return value, so the
-      // agents and the panel are quoting the same text by construction.
-      context = now.extraction.context;
-      knowledge = knowledgePackFor(`${note}\n\n${context}`, 5);
+    // Every selected agent interprets the original screenshots independently.
+    // There is no shared OCR, model extraction, or agreed transcription.
+    const context = "";
+    // The readers identify the task first. Then every solver gets relevant
+    // notes from the user's local library as well as the bundled patterns.
+    await knowledgeReady;
+    if (!get().running || get().runId !== runId) return;
+    if (bridge.inTauri() && !get().knowledge.folder) {
+      const reason = get().knowledge.error || "The Knowledge folder could not be loaded.";
+      set(state => ({ running: false,
+        agents: state.agents.map(agent => agent.status === "queued"
+          ? { ...agent, status: "error" as const,
+              error: `Personal knowledge was unavailable, so no solver was started. ${reason}` }
+          : agent),
+      }));
+      get().pushToast("err", "Knowledge unavailable",
+        `No solver was started. Check the Knowledge tab, then retry. ${reason}`, { sticky: true });
+      return;
     }
+    const knowledge = solverKnowledgePack(get, [note, coordinatorTopic].filter(Boolean).join(" "));
+    const sys = systemPrompt(
+      settings.mode,
+      resolveAnswerLanguage(settings.outputLanguage, "")
+    );
 
-    const allImages = images.map((i) => ({ mime: i.mime, data: i.base64 }));
+    if (options?.adaptivePanels) {
+      const currentProbes = { ...availabilityProbes, ...get().settings.probes };
+      const taskRoute = routeUnparsedProblem(note, images.length > 0);
+      const trustedMetrics = await trustedMetricsReady;
+      if (!get().running || get().runId !== runId) return;
+      const decision = planIntelligentPanels({
+        candidates: [...routes].map(([id, route]) => ({
+          id, model: route.model, canSeeImages: canSeeVia(id, route, get().settings),
+        })),
+        route: taskRoute,
+        hasImages: images.length > 0,
+        safeTextOnly: false,
+        trustedMetrics,
+        probes: currentProbes,
+      });
+      // The image-reading coordinator already assigned eligible solver seats.
+      // Do not override it with a second text-only router that never saw the
+      // screenshots. Every route here passed the live gateway preflight.
+      active = [...routes.keys()];
+      if (active.length) {
+        get().pushToast(decision.confidence === "verified" ? "ok" : "warn",
+          `Selected ${active.length} AI ${active.length === 1 ? "agent" : "agents"}`,
+          `${taskRoute.families.join(", ")} · ${active.map(id => routes.get(id)?.model ?? id).join(", ")}${decision.confidence === "limited" ? " · limited benchmark evidence" : ""}`);
+      }
+      const selected = new Set(active);
+      set(state => ({
+        agents: state.agents.map(agent => ({
+          ...agent, enabled: selected.has(agent.provider),
+          status: !selected.has(agent.provider) && agent.status === "queued" ? "idle" as const : agent.status,
+        })),
+      }));
+      if (!active.length) {
+        set({ running: false });
+        get().pushToast("err", "No verified image-capable agents",
+          "No approved model on this gateway passed the required live image check. Verify your vision-capable model access in API Settings.");
+        return;
+      }
+      publishOverlayState(get());
+    }
+    const allImages = images.map(modelImage);
 
     // Fire all of them at once; each streams back independently.
     await Promise.all(
@@ -2607,11 +2925,17 @@ export const useStore = create<State>((set, get) => ({
         // the right thing to send a vision model and useless to send a text-only
         // one, and both are in the panel now.
         const plan = planFor({
-          mode: settings.contextMode,
-          canSee: canSeeVia(provider, route, settings),
+          mode: "images",
+          canSee: images.length === 0 || (get().settings.probes[route.model]?.ok === true &&
+            get().settings.probes[route.model]?.vision === true),
           hasImages: images.length > 0,
           context,
         });
+        if (plan.blind) {
+          get().failAgent({ runId, agentId: provider, attemptId: attempts[provider],
+            message: `${route.model} was not called: it has not passed live vision verification on the selected gateway. Choose an approved vision-capable model.` });
+          return;
+        }
         try {
           await bridge.runAgent({
             runId,
@@ -2650,14 +2974,30 @@ export const useStore = create<State>((set, get) => ({
         }
       })
     );
+    } catch (err) {
+      if (generation === startGeneration) {
+        const message = cleanError(String(err));
+        set(state => ({
+          running: false,
+          agents: state.agents.map(agent => agent.status === "queued"
+            ? { ...agent, status: "error" as const, error: message }
+            : agent),
+        }));
+        get().pushToast("err", "Analysis could not start", message, { sticky: true });
+      }
+    } finally {
+      if (generation === startGeneration && get().preparing) set({ preparing: false });
+    }
   },
 
   cancel: async () => {
+    startGeneration += 1;
     const { runId, council } = get();
     if (runId) await bridge.cancelRun(runId);
     if (council.runId && council.runId !== runId) await bridge.cancelRun(council.runId);
     set((s) => ({
       running: false,
+      preparing: false,
       council:
         s.council.phase === "idle"
           ? s.council
@@ -2680,11 +3020,19 @@ export const useStore = create<State>((set, get) => ({
   },
 
   retry: async (agentId) => {
-    const { settings, images, note, runId, keys, gatewayKey, extraction } = get();
+    const { settings, images, note, runId, keys, gatewayKey } = get();
     const provider = agentId as AgentId;
     const route = routeFor(provider, settings, keys, gatewayKey);
     if (!route) {
       set({ settingsOpen: true });
+      return;
+    }
+    await ensureSolverKnowledge(get);
+    // A Knowledge load may outlive the run this retry belonged to.
+    if (get().runId !== runId || readingKey(get().images) !== readingKey(images)) return;
+    if (bridge.inTauri() && !get().knowledge.folder) {
+      get().pushToast("err", "Knowledge unavailable",
+        get().knowledge.error || "Check the Knowledge tab, then retry this agent.", { sticky: true });
       return;
     }
     const id = runId ?? `run-${Date.now().toString(36)}`;
@@ -2714,17 +3062,24 @@ export const useStore = create<State>((set, get) => ({
       ),
     }));
     publishOverlayState(get());
-    // Reuse the reading the rest of the panel was given rather than extracting
-    // again: a second vision pass could transcribe slightly differently, and this
-    // pane's answer would then be to a subtly different question than its
-    // neighbours' -- which would show up in the consensus as a real disagreement.
-    const plan = planFor({
-      mode: settings.contextMode,
-      canSee: canSeeVia(provider, route, settings),
-      hasImages: images.length > 0,
-      context: extraction.context,
-    });
-    const knowledge = knowledgePackFor(`${note}\n\n${extraction.context}`, 5);
+    // A retry is also a fresh direct-vision request; never fall back to OCR.
+    let canSee = images.length === 0;
+    if (images.length && route.viaGateway && gatewayKey) {
+      const checked = await verifyGatewayCandidates({
+        configured: [{ id: provider, model: route.model }],
+        catalogue: [], requireVision: true, allowFamilyAlternatives: false,
+        probe: (models, vision) => probeGatewayWithRecentSuccess(models, vision, get().settings),
+      });
+      canSee = checked.routes.length > 0;
+    }
+    const plan = planFor({ mode: "images", canSee,
+      hasImages: images.length > 0, context: "" });
+    if (plan.blind) {
+      get().failAgent({ runId: id, agentId, attemptId,
+        message: "Retry stopped: model has no verified vision access on the active gateway." });
+      return;
+    }
+    const knowledge = solverKnowledgePack(get, note);
 
     try {
       await bridge.runAgent({
@@ -2735,16 +3090,16 @@ export const useStore = create<State>((set, get) => ({
         model: route.model,
         systemPrompt: systemPrompt(
           settings.mode,
-          resolveAnswerLanguage(settings.outputLanguage, get().extraction.agreement?.merged.language ?? "")
+          resolveAnswerLanguage(settings.outputLanguage, "")
         ),
         userText: userPrompt(
           note,
           plan.sendImages && images.length > 0,
-          plan.context,
+          "",
           plan.sendImages ? images : [],
           knowledge
         ),
-        images: plan.sendImages ? images.map((i) => ({ mime: i.mime, data: i.base64 })) : [],
+        images: plan.sendImages ? images.map(modelImage) : [],
         maxTokens: settings.maxTokens,
         temperature: 0,
         baseUrl: route.baseUrl,
@@ -2818,8 +3173,8 @@ export const useStore = create<State>((set, get) => ({
       publishOverlayState({ ...s, ...next });
       return next;
     });
-    get().maybeAutoJudge();
     get().maybeStartCouncil();
+    get().maybeAutoJudge();
   },
 
   failAgent: (e) => {
@@ -2855,6 +3210,76 @@ export const useStore = create<State>((set, get) => ({
     }
     if (isStale(s0, e)) return;
     const failed = s0.agents.find((a) => a.id === e.agentId && a.attemptId === e.attemptId);
+    const recoveryKey = `${e.runId}:${e.agentId}`;
+    const failureReason = classifyProbeResult(failed?.model ?? e.agentId, false, e.message).reason;
+    if (failed?.viaGateway && s0.gatewayKey && !runtimeRecoveryAttempts.has(recoveryKey) &&
+        ["unknown-model", "wrong-endpoint", "unknown", "empty", "timeout"].includes(failureReason)) {
+      runtimeRecoveryAttempts.add(recoveryKey);
+      set(state => ({ agents: state.agents.map(a => a.id === e.agentId
+        ? { ...a, status: "queued" as const, error: `Trying a verified alternative after ${cleanError(e.message)}` }
+        : a) }));
+      void (async () => {
+        let replacementAttemptId: string | null = null;
+        try {
+          const snapshot = get();
+          const occupied = new Set(snapshot.agents.filter(agent => agent.enabled && agent.id !== e.agentId &&
+            !["error", "cancelled"].includes(agent.status)).map(agent => primaryModelId(agent.model)));
+          const catalogue = (await bridge.listGatewayModels(snapshot.settings.gatewayBaseUrl,
+            snapshot.settings.gatewayId)).filter(model => model !== failed.model && !occupied.has(primaryModelId(model)));
+          const choice = resolveGatewayCandidates({
+            configured: [{ id: e.agentId, model: failed.model }], catalogue,
+            probes: snapshot.settings.probes,
+          })[0];
+          if (!choice) throw new Error("No same-provider alternative is listed by the gateway.");
+          const verified = await verifyGatewayCandidates({
+            configured: [choice], catalogue, requireVision: false, allowFamilyAlternatives: false,
+            probe: (models, vision) => bridge.probeModels(models,
+              snapshot.settings.gatewayBaseUrl, snapshot.settings.gatewayId, vision,
+              Object.fromEntries(models.map(model => [model, endpointForModel(snapshot.settings, model)])), false,
+              snapshot.settings.imageStorage),
+          });
+          const alternative = verified.routes[0]?.model;
+          if (!alternative) throw new Error(verified.rejected[0]?.reason || "Alternative failed live verification.");
+          if (isStale(get(), e)) return;
+          const attemptId = newAttemptId();
+          replacementAttemptId = attemptId;
+          const images = get().images;
+          const context = get().extraction.context;
+          const plan = planFor({ mode: get().settings.contextMode,
+            canSee: verified.probes.some(p => p.model === alternative && p.vision === true),
+            hasImages: images.length > 0, context });
+          if (plan.blind) throw new Error("Alternative has no verified image route or reading.");
+          set(state => ({ agents: state.agents.map(a => a.id === e.agentId
+            ? { ...a, model: alternative, attemptId, status: "queued" as const,
+                error: null, text: "", final: null }
+            : a) }));
+          get().pushToast("warn", "Trying an alternative model",
+            `${failed.model} failed; ${alternative} passed a live check on the same gateway.`);
+          const settings = get().settings;
+          await bridge.runAgent({
+            runId: e.runId, agentId: e.agentId, attemptId,
+            provider: settings.gatewayId, model: alternative,
+            systemPrompt: systemPrompt(settings.mode,
+              resolveAnswerLanguage(settings.outputLanguage, get().extraction.agreement?.merged.language ?? "")),
+            userText: userPrompt(get().note, plan.sendImages && images.length > 0,
+              plan.context, plan.sendImages ? images : [],
+              solverKnowledgePack(get, `${get().note}\n\n${context}`)),
+            images: plan.sendImages ? images.map(modelImage) : [],
+            maxTokens: settings.maxTokens, temperature: 0,
+            baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+            endpoint: endpointForModel(settings, alternative),
+          });
+        } catch (error) {
+          const current = get().agents.find(a => a.id === e.agentId);
+          if (!current || get().runId !== e.runId ||
+              !["queued", "streaming"].includes(current.status) ||
+              (current.attemptId !== e.attemptId && current.attemptId !== replacementAttemptId)) return;
+          get().failAgent({ ...e, attemptId: current.attemptId ?? e.attemptId,
+            message: `${cleanError(e.message)} Alternative recovery: ${cleanError(String(error))}` });
+        }
+      })();
+      return;
+    }
     if (
       failed?.viaGateway &&
       s0.settings.gatewayId === "wiro" &&
@@ -2886,8 +3311,8 @@ export const useStore = create<State>((set, get) => ({
       publishOverlayState({ ...s, ...next });
       return next;
     });
-    get().maybeAutoJudge();
     get().maybeStartCouncil();
+    get().maybeAutoJudge();
   },
 
   /**
@@ -2953,7 +3378,7 @@ export const useStore = create<State>((set, get) => ({
     // the same record.
     // The read-out is what a person actually reads, so it runs whether or not
     // the judge does — it is a different question from "did they agree".
-    void get().runReview();
+    if (!s.settings.councilEnabled) void get().runReview();
     if (willJudge) void get().runJudge();
     else void get().persistRun();
   },
@@ -2967,14 +3392,21 @@ export const useStore = create<State>((set, get) => ({
    */
   /** The runs this session has finished. */
   loadHistory: async () => {
-    const sessionId = get().currentSessionId;
-    if (!sessionId) {
-      set({ history: [], historyError: null });
-      return;
-    }
     set({ historyLoading: true, historyError: null });
     try {
-      set({ history: await db.listRuns(sessionId), historyLoading: false });
+      const groups = await Promise.all([db.listSessions("active"), db.listSessions("archived")]);
+      const sessions = groups.flat();
+      const batches = await Promise.all(sessions.map(session => db.listRuns(session.id)));
+      const titles = new Map(sessions.map(session => [session.id, session.title]));
+      const rows = batches.flat().sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+      const history = await Promise.all(rows.map(async row => {
+        // A screenshot-only run has no typed note. Its stored winner is the
+        // source of a useful per-task name, even when several old runs share a
+        // session and that session has only one title.
+        const detail = row.asked.trim() ? null : await db.getRun(row.id).catch(() => null);
+        return { ...row, title: savedRunTitle(row, titles.get(row.sessionId) ?? "", detail) };
+      }));
+      set({ history, historyLoading: false });
     } catch (err) {
       set({ historyLoading: false, historyError: cleanError(String(err)) });
     }
@@ -2994,22 +3426,22 @@ export const useStore = create<State>((set, get) => ({
     if (s.running) return;
 
     // Keep the live run aside the first time, so leaving history restores it.
-    const live = (s.viewingRunId ? liveSnapshot : null) ?? { agents: s.agents, note: s.note };
-    if (!s.viewingRunId) liveSnapshot = { agents: s.agents, note: s.note };
+    const live = (s.viewingRunId ? liveSnapshot : null) ?? {
+      agents: s.agents, note: s.note, council: s.council, review: s.review, runId: s.runId,
+    };
+    if (!s.viewingRunId) liveSnapshot = live;
 
     set({ historyError: null });
     try {
       const detail = await db.getRun(runId);
-      const byProvider = new Map(detail.responses.map((r) => [r.provider, r]));
-      const byModel = new Map(detail.responses.map((r) => [r.model, r]));
-
-      const agents = s.agents.map((slot) => {
-        const stored = byProvider.get(slot.provider) ?? byModel.get(slot.model);
-        if (!stored) {
-          return { ...slot, status: "idle" as AgentStatus, text: "", error: null, final: null, attemptId: null };
-        }
+      const agents = detail.responses.flatMap((stored, index) => {
+        const slot = s.agents.find(agent => agent.model === stored.model) ??
+          s.agents.find(agent => agent.provider === stored.provider) ?? s.agents[index];
+        if (!slot) return [];
         return {
           ...slot,
+          id: `saved-${index}`,
+          enabled: true,
           model: stored.model,
           status: (stored.status === "done" ? "done" : stored.status === "cancelled" ? "cancelled" : "error") as AgentStatus,
           text: stored.body,
@@ -3023,9 +3455,31 @@ export const useStore = create<State>((set, get) => ({
         };
       });
 
+      const screenshots = await db.listScreenshots(detail.run.sessionId).catch(() => []);
+      const historyImages = (await Promise.all(screenshots.filter(shot => !shot.purged).map(async shot => {
+        try {
+          const bucket = shot.storageBucket ??
+            (shot.storagePath?.split("/")[1] === "azure" ? "azure:council-images" : undefined);
+          const file = shot.storagePath
+            ? await fetchStored(shot.storagePath, shot.mime, bucket)
+            : shot.localPath ? await bridge.readCapture(shot.localPath) : null;
+          return file ? { name: shot.fileName, mime: shot.mime, dataUrl: file.dataUrl,
+            base64: file.dataUrl.slice(file.dataUrl.indexOf(",") + 1), bytes: shot.bytes } : null;
+        } catch { return null; }
+      }))).filter((image): image is ImageAsset => Boolean(image));
+
       set({
         agents,
         note: detail.run.asked,
+        historyQuestion: savedRunQuestion(detail),
+        historyImages,
+        council: detail.report?.council && typeof detail.report.council === "object"
+          ? { ...IDLE_COUNCIL, ...(detail.report.council as Partial<CouncilState>), chatSending: false }
+          : { ...IDLE_COUNCIL },
+        review: detail.report?.review && typeof detail.report.review === "object"
+          ? { ...s.review, ...(detail.report.review as Partial<State["review"]>), status: "done" }
+          : { ...s.review, status: "idle", data: null, error: null },
+        runId,
         viewingRunId: runId,
         judge: detail.verdict?.judgeText
           ? {
@@ -3039,7 +3493,7 @@ export const useStore = create<State>((set, get) => ({
     } catch (err) {
       // Nothing was replaced, so there is nothing to put back.
       if (!s.viewingRunId) liveSnapshot = null;
-      set({ agents: live.agents, note: live.note, historyError: cleanError(String(err)) });
+      set({ ...live, historyError: cleanError(String(err)) });
     }
   },
 
@@ -3050,18 +3504,21 @@ export const useStore = create<State>((set, get) => ({
     set({
       viewingRunId: null,
       historyError: null,
-      ...(kept ? { agents: kept.agents, note: kept.note } : {}),
+      historyQuestion: "",
+      historyImages: [],
+      ...(kept ?? {}),
       judge: { status: "idle", provider: get().settings.judgeProvider, text: "", error: null },
     });
   },
 
   persistRun: async () => {
+    if (persistRunPromise) return persistRunPromise;
     const s = get();
     if (s.runPersisted || s.running) return;
     const sessionId = s.currentSessionId;
     if (!sessionId) return;
 
-      const answered = s.agents.filter((a) => a.enabled && (a.final || a.error));
+    const answered = s.agents.filter((a) => a.enabled && (a.final || a.error));
     if (!answered.length) return;
 
     // A council run persists when the council settles, not here. Its record
@@ -3073,11 +3530,13 @@ export const useStore = create<State>((set, get) => ({
 
     // Claim it before the await, so two callers landing together cannot both
     // pass the guard and write the run twice.
-    set({ runPersisted: true });
+    set({ runPersisted: true, sessionsError: null });
+
+    persistRunPromise = (async () => {
 
     const result = s.consensus();
     try {
-      await db.saveRun({
+      const savedId = await db.saveRun({
         sessionId,
         mode: s.settings.mode,
         asked: s.note,
@@ -3126,13 +3585,29 @@ export const useStore = create<State>((set, get) => ({
                 ? councilMarkdown(councilReportFrom(get().council))
                 : null,
         },
+        report: {
+          council: { ...s.council, chatSending: false },
+          review: s.review.status === "done" ? s.review : null,
+        },
       });
+      persistedRecord = { sourceRunId: s.runId, dbRunId: savedId };
+      if (get().runId === s.runId && get().review.status === "done" && s.review.status !== "done") {
+        const current = get();
+        await db.updateRunReport(savedId, {
+          council: { ...current.council, chatSending: false },
+          review: current.review,
+        }).catch((err) => set({ sessionsError: cleanError(String(err)) }));
+      }
       await get().loadSessions();
+      await get().loadHistory();
     } catch (err) {
       // History failing must not look like the run failing. The answers are on
       // screen either way.
       set({ runPersisted: false, sessionsError: cleanError(String(err)) });
     }
+    })();
+    try { await persistRunPromise; }
+    finally { persistRunPromise = null; }
   },
 
   consensus: () => {
@@ -3398,6 +3873,10 @@ export const useStore = create<State>((set, get) => ({
     const answered = s.agents.filter((a) => a.enabled && a.final);
     if (answered.length < COUNCIL_SIZE.solversMin && !s.settings.councilModels.length) return;
     if (s.council.phase !== "idle") return;
+    // Claim the Council synchronously at the solver→Council handoff. Otherwise
+    // the last pane briefly makes running=false, exposes a provisional answer,
+    // and starts a technical review of code that has not been chosen or tested.
+    set((state) => ({ running: true, council: { ...state.council, phase: "contracting" } }));
     void runCouncil(get, set);
   },
 
@@ -3405,7 +3884,7 @@ export const useStore = create<State>((set, get) => ({
     const text = message.trim();
     if (!text) return;
     const s = get();
-    const chosen = Array.from(new Set(models.map((m) => m.trim()).filter(Boolean)));
+    const chosen = Array.from(new Set(models.map((m) => m.trim()).filter(isPrimaryModel)));
     if (!chosen.length) return;
     if (!s.settings.useGateway || !s.gatewayKey) {
       set({ settingsOpen: true });
@@ -3442,12 +3921,14 @@ export const useStore = create<State>((set, get) => ({
     const replies = await Promise.all(
       chosen.map(async (model) => {
         try {
+          const route = gatewayRoute(model, s.settings);
+          if (!route) throw new Error(`${model} is not an approved model on this gateway.`);
           const reply = await bridge.runOnce({
             runId: `council-chat-${Date.now().toString(36)}`,
             agentId: `council-chat:${model}`,
             attemptId: newAttemptId(),
-            provider: s.settings.gatewayId,
-            model,
+            provider: route.provider,
+            model: route.model,
             systemPrompt: councilFollowupSystemPrompt(),
             userText: councilFollowupUserPrompt({
               question: s.note,
@@ -3458,8 +3939,8 @@ export const useStore = create<State>((set, get) => ({
             images: [],
             maxTokens: s.settings.maxTokens,
             temperature: 0,
-            baseUrl: s.settings.gatewayBaseUrl || gatewayPreset(s.settings.gatewayId).defaultBaseUrl,
-            endpoint: endpointForModel(s.settings, model),
+            baseUrl: route.baseUrl,
+            endpoint: endpointForModel(s.settings, route.model),
           });
           return {
             id: `chat-reply-${model}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
@@ -3503,16 +3984,11 @@ export const useStore = create<State>((set, get) => ({
    */
   runReview: async () => {
     const s = get();
-    if (s.review.status === "running") return;
+    const solution = selectStorySolution(s.agents, s.council, s.consensus().representative);
+    if (s.review.status === "running" && s.review.sourceCode === solution?.code) return;
+    if (s.review.status === "done" && s.review.sourceCode === solution?.code) return;
 
-    const consensus = s.consensus();
-    const answered = s.agents.filter((a) => a.enabled && a.final?.code?.trim());
-    const pick =
-      answered.find((a) => a.id === consensus.representative) ??
-      answered.find((a) => a.final?.wellFormed) ??
-      answered[0];
-
-    if (!pick?.final) {
+    if (!solution?.code) {
       set((st) => ({
         review: { ...st.review, status: "error", data: null, error: "No agent produced code to review." },
       }));
@@ -3529,7 +4005,9 @@ export const useStore = create<State>((set, get) => ({
       return;
     }
 
-    set((st) => ({ review: { ...st.review, status: "running", error: null } }));
+    const sourceCode = solution.code;
+    set((st) => ({ review: { ...st.review, status: "running", data: null,
+      error: null, sourceCode } }));
     publishOverlayState(get());
     try {
       const text = await bridge.runOnce({
@@ -3541,9 +4019,9 @@ export const useStore = create<State>((set, get) => ({
         systemPrompt: reviewSystemPromptFor(),
         userText: reviewUserPromptFor({
           question: `${s.note}\n\n${s.extraction.context}`.trim(),
-          language: pick.final.language,
-          code: pick.final.code,
-          answer: pick.final.answer,
+          language: solution.language,
+          code: sourceCode,
+          answer: solution.answer,
         }),
         images: [],
         maxTokens: s.settings.maxTokens,
@@ -3553,14 +4031,22 @@ export const useStore = create<State>((set, get) => ({
       });
 
       const data = parseReview(text);
-      set((st) => ({
+      set((st) => st.review.sourceCode !== sourceCode ? {} : ({
         review: data
           ? { ...st.review, status: "done", data, error: null }
           : { ...st.review, status: "error", data: null, error: "The reviewer did not answer in the expected form." },
       }));
+      if (data && persistedRecord?.sourceRunId === get().runId) {
+        const current = get();
+        void db.updateRunReport(persistedRecord.dbRunId, {
+          council: { ...current.council, chatSending: false },
+          review: current.review,
+        }).catch((err) => set({ sessionsError: cleanError(String(err)) }));
+      }
       publishOverlayState(get());
     } catch (err) {
-      set((st) => ({ review: { ...st.review, status: "error", data: null, error: cleanError(String(err)) } }));
+      set((st) => st.review.sourceCode !== sourceCode ? {} :
+        ({ review: { ...st.review, status: "error", data: null, error: cleanError(String(err)) } }));
       publishOverlayState(get());
     }
   },
@@ -3599,7 +4085,8 @@ export const useStore = create<State>((set, get) => ({
         model: route.model,
         systemPrompt:
           "You are an exacting technical reviewer. You verify claims yourself instead of deferring to the majority, and you say plainly when you cannot determine the answer.",
-        userText: judgePromptWithKnowledge(entries, note, knowledgePackFor(note, 5)),
+        userText: judgePromptWithKnowledge(entries, note,
+          solverKnowledgePack(get, `${note}\n\n${get().extraction.context}`)),
         images: [],
         maxTokens: settings.maxTokens,
         temperature: 0,
@@ -3647,12 +4134,13 @@ function councilAlive(c: CouncilState, runId: string): boolean {
 /**
  * The model id a gateway request should ask for, namespaced or not.
  *
- * The free-text fields in Settings accept both spellings and the router
- * accepts both spellings, so this is only trimming: the gateway namespaces by
- * vendor on its catalogue pages but serves the bare id identically.
+ * Resolve the same approved identity to the current gateway's listed spelling.
  */
 function gatewayRoute(model: string, s: Settings): { provider: TransportId; model: string; baseUrl: string } | null {
-  const id = model.trim();
+  const approved = primaryModelId(model);
+  if (!approved) return null;
+  const id = resolveListedGatewayModel(model, s.availableModels) ??
+    preferredPrimaryRoute(approved, s.gatewayId);
   if (unavailableWiroGatewayModel(id, s)) return null;
   return {
     provider: s.gatewayId,
@@ -3698,12 +4186,10 @@ function runCouncilSlot(
   return new Promise<CouncilSlot>((resolve) => {
     let settled = false;
     let timer: ReturnType<typeof setInterval> | null = null;
-    // A reasoning seat can legitimately think for minutes and the gateway
-    // holds the stream open the whole time. That is not a hang and the prompt
-    // is told so. What a hang looks like is no first token by dawn; twelve
-    // minutes is long enough for one slow thinking round and short enough to
-    // not eat the council indefinitely.
-    const giveUpAt = Date.now() + 12 * 60 * 1000;
+    // The native request now has a four-minute hard ceiling. This timer is a
+    // short UI backstop if its completion event is lost, not another twelve
+    // minutes of silence on top of the provider deadline.
+    const giveUpAt = Date.now() + 4 * 60 * 1000 + 15_000;
     const finish = () => {
       if (settled) return;
       settled = true;
@@ -3720,7 +4206,7 @@ function runCouncilSlot(
             ...st.council,
             slots: st.council.slots.map((x) =>
               x.id === live.id
-                ? { ...x, status: "error" as const, error: "Gave no first token inside 12 minutes — the governor will keep it out of the way next time." }
+                ? { ...x, status: "error" as const, error: "Council model did not complete within four minutes. Other completed answers remain available." }
                 : x
             ),
           },
@@ -3761,9 +4247,8 @@ function runCouncilSlot(
 
 /**
  * Executes every member of the field that has code, against the suites the
- * spec pass produced. Deliberately sequential: the runner spawns real
- * processes, and ten of them competing for the same CPU would measure
- * scheduling, not the code.
+ * spec pass produced. Local runs stay sequential to avoid CPU contention;
+ * E2B requests are queued together so network waits do not stack up here.
  */
 async function executeField(
   get: GetStore,
@@ -3773,7 +4258,7 @@ async function executeField(
   suites: TestSuite[],
   which: "runs" | "revisedRuns"
 ): Promise<void> {
-  for (const c of field) {
+  const runOne = async (c: Candidate) => {
     if (!councilAlive(get().council, runId)) return;
     const f = which === "revisedRuns" ? (c.revised ?? c.final) : c.final;
     const lang = f?.kind === "code" ? candidateLanguage(f) : "";
@@ -3786,19 +4271,22 @@ async function executeField(
 
     if (!f || f.kind !== "code" || !code.trim()) {
       setRun({ letter: c.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: f?.kind === "research" ? "research answer" : "no code", runtime: "" });
-      continue;
+      return;
     }
     if (!suite) {
       setRun({ letter: c.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: `no suite for ${lang || "unknown language"}`, runtime: "" });
-      continue;
+      return;
     }
     const program = spliceSuite(suite, code);
     if (!program) {
       setRun({ letter: c.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: "harness has no splice marker", runtime: "" });
-      continue;
+      return;
     }
     try {
-      const r = await bridge.runCode({ language: suite.language, code: program, timeoutMs: 20000 });
+      const settings = get().settings;
+      const sessionId = get().currentSessionId;
+      if (!sessionId) throw new Error("Sign in and save the session before E2B verification.");
+      const r = await runE2BBenchmark(sessionId, suite.language, program, settings.e2bTimeoutMs);
       const { passed, failed } = countCases(r.stdout);
       setRun({
         letter: c.letter,
@@ -3807,13 +4295,42 @@ async function executeField(
         passed,
         failed,
         durationMs: r.durationMs,
+        provider: "e2b",
+        remoteElapsedMs: "remoteElapsedMs" in r ? r.remoteElapsedMs : null,
+        peakMemoryKb: "peakMemoryKb" in r ? r.peakMemoryKb : null,
+        sandboxId: "sandboxId" in r ? r.sandboxId : null,
+        executionId: "executionId" in r ? r.executionId : undefined,
         note: r.timedOut ? "timed out" : r.exitCode !== 0 ? `exit ${r.exitCode}` : "",
         runtime: r.runtime,
       });
     } catch (err) {
       setRun({ letter: c.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: cleanError(String(err)), runtime: "" });
     }
+  };
+  await Promise.all(field.map(runOne));
+}
+
+async function runE2BBenchmark(sessionId: string, language: string, program: string, timeoutMs: number) {
+  const id = await db.createBenchmark(sessionId, language, program, timeoutMs);
+  // The execution limit starts only after a cloud worker has claimed the job.
+  // A cold worker or another candidate ahead of this one can legitimately use
+  // more than a minute, so do not falsely mark a still-queued benchmark as an
+  // E2B execution failure. Five minutes is also a bounded, visible wait rather
+  // than an indefinite spinner when the worker is unavailable.
+  const queueGraceMs = 3 * 60_000;
+  const deadline = Date.now() + timeoutMs + queueGraceMs;
+  let lastStatus: "queued" | "running" = "queued";
+  while (Date.now() < deadline) {
+    const request = await db.getBenchmark(id);
+    if (request.status === "failed") throw new Error(request.error || "E2B benchmark failed.");
+    if (request.status === "completed") {
+      if (!request.result) throw new Error("E2B completed without execution evidence.");
+      return { ...request.result, timedOut: false };
+    }
+    lastStatus = request.status;
+    await new Promise<void>((resolve) => setTimeout(resolve, 2000));
   }
+  throw new Error(`E2B benchmark remained ${lastStatus} before the waiting limit; no result was assumed. Retry when the cloud worker is available.`);
 }
 
 /**
@@ -3847,7 +4364,10 @@ async function runMutationOracle(
   if (!program) return;
 
   try {
-    const r = await bridge.runCode({ language: suite.language, code: program, timeoutMs: 20000 });
+    const settings = get().settings;
+    const sessionId = get().currentSessionId;
+    if (!sessionId) throw new Error("No session for E2B oracle execution.");
+    const r = await runE2BBenchmark(sessionId, suite.language, program, settings.e2bTimeoutMs);
     const { passed, failed } = countCases(r.stdout);
     const survived = r.ok && failed === 0 && passed > 0;
     const signal: OracleSignal = {
@@ -3888,11 +4408,47 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // Read the knowledge folder once per session, here rather than at launch: a
   // library nobody has opened should not cost a disk read on every start, and a
   // council that is about to search it is exactly when it is worth reading.
-  if (!get().knowledge.folder && bridge.inTauri()) await get().loadKnowledge();
+  await ensureSolverKnowledge(get);
+  if (bridge.inTauri() && !get().knowledge.folder) {
+    const error = get().knowledge.error || "The Knowledge folder could not be loaded.";
+    set(state => ({ council: { ...state.council, phase: "error", error }, running: false }));
+    get().pushToast("err", "Knowledge unavailable", error, { sticky: true });
+    return;
+  }
   const s0 = get();
-  const settings = s0.settings;
+  const savedSettings = s0.settings;
   const runId = `council-${Date.now().toString(36)}`;
   set(() => ({ council: { ...IDLE_COUNCIL, phase: "solving" as const, runId } }));
+
+  // A saved Council roster can have IDs from another gateway. Ask the current
+  // gateway for its spellings before any solver, judge or synthesis request.
+  // Unlisted seats are excluded; a catalogue entry alone never marks a model
+  // as proven healthy or image-capable.
+  let catalogue: string[] = [];
+  try {
+    catalogue = await bridge.listGatewayModels(
+      savedSettings.gatewayBaseUrl, savedSettings.gatewayId);
+  } catch (err) {
+    // The pane models just answered through this gateway in this run. They are
+    // safer fallback evidence than an old list saved under another gateway.
+    catalogue = s0.agents.filter(agent => agent.enabled && agent.final)
+      .map(agent => agent.model);
+    get().pushToast("warn", "Council model list unavailable",
+      cleanError(String(err)), { sticky: true });
+  }
+  const listed = (id: string) => resolveListedGatewayModel(id, catalogue);
+  const settings: Settings = {
+    ...savedSettings,
+    councilModels: savedSettings.councilModels.flatMap(model => {
+      const id = listed(model.id);
+      return id ? [{ ...model, id }] : [];
+    }),
+    councilJudges: savedSettings.councilJudges.flatMap(judge => {
+      const model = listed(judge.model);
+      return model ? [{ ...judge, model }] : [];
+    }),
+    synthesisModel: listed(savedSettings.synthesisModel) ?? "",
+  };
 
   // ---------------------------------------------------------- round 1: solve
   //
@@ -3958,7 +4514,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
               endpoint: endpointForModel(settings, slot.model),
               systemPrompt: contractSystemPrompt(),
               userText: contractUserPrompt({ question: s0.note, reading: s0.extraction.context }),
-              images: s0.images.map((i) => ({ mime: i.mime, data: i.base64 })),
+              images: s0.images.map(modelImage),
               maxTokens: Math.min(settings.maxTokens, 2048),
               temperature: 0,
             },
@@ -4065,19 +4621,13 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // records in your knowledge folder laid over it by id. Something you wrote
   // this morning is in front of the solvers this afternoon, with no deploy and
   // no sync — the cloud worker is the leg that waits for a publish.
-  const localRecords = get().knowledge.entries.map((e) => e.record);
-  const library = new Map(allKnowledgeRecords().map((r) => [r.id, r]));
-  for (const record of localRecords) if (record.id) library.set(record.id, record);
-  const knowledge = knowledgePackFor(
-    [s0.note, extractionCtx, contractQuery(contract)].filter((x) => x && x.trim()).join("\n\n"),
-    5,
-    [...library.values()]
-  );
+  const knowledge = solverKnowledgePack(get,
+    [s0.note, extractionCtx, contractQuery(contract)].filter((x) => x && x.trim()).join("\n\n"));
   const sys = systemPrompt(
     settings.mode,
     resolveAnswerLanguage(settings.outputLanguage, get().extraction.agreement?.merged.language ?? "")
   );
-  const allImages = s0.images.map((i) => ({ mime: i.mime, data: i.base64 }));
+  const allImages = s0.images.map(modelImage);
   await Promise.all(
     solveSlots.map((slot, i) =>
       wait(i * COUNCIL_STEP_MS).then(() => {
@@ -4099,7 +4649,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
               knowledge,
               solutionPolicy(
                 settings.solutionLanguages?.length ? settings.solutionLanguages : undefined,
-                settings.memoryTargetKb || 20 * 1024
+                settings.memoryTargetKb || 9 * 1024
               )
             ),
             images: safeTextOnly ? [] : allImages,
@@ -4155,40 +4705,65 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
 
   // ------------------------------------------------------- round 1.5: spec
   //
-  // One model writes the harness. Any answer that is not code skips straight
+  // A model writes the harness. Any answer that is not code skips straight
   // past this: there is nothing to execute, and asking a model to invent tests
   // for prose produces noise the gate then has to ignore anyway.
   const codeCandidates = field.filter((c) => c.final?.kind === "code" && c.final.code.trim());
-  let suites: TestSuite[] = [];
-  if (codeCandidates.length >= 2) {
+  const suites: TestSuite[] = [];
+  if (codeCandidates.length) {
     set((st) => ({ council: { ...st.council, phase: "speccing" } }));
-    const specModel = settings.synthesisModel || settings.councilJudges[0]?.model || field[0].model;
-    set((st) => ({ council: { ...st.council, specBy: specModel } }));
     const languages = Array.from(new Set(codeCandidates.map((c) => candidateLanguage(c.final!)).filter(Boolean)));
-    try {
-      const specText = await bridge.runOnce({
-        runId,
-        agentId: "council-spec",
-        attemptId: newAttemptId(),
-        provider: settings.gatewayId,
-        model: specModel,
-        systemPrompt: testSpecSystemPrompt(),
-        userText: testSpecUserPrompt({ question: `${problem}\n\n${routingGuidance(route)}`, docket: candidateDocket(field), languages, knowledge }),
-        images: [],
-        maxTokens: settings.maxTokens,
-        temperature: 0,
-        baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
-        endpoint: endpointForModel(settings, specModel),
-      });
-      suites = parseTestSuites(specText);
-    } catch (err) {
-      // A spec pass that fails costs verification, not the council: reviews and
-      // judges still run, and every prompt they see says plainly that no
-      // measured results exist.
-      console.warn("Council spec pass failed:", cleanError(String(err)));
+    const specModels = Array.from(new Set([
+      settings.synthesisModel,
+      ...settings.councilJudges.map(seat => seat.model),
+      ...field.map(candidate => candidate.model),
+    ].filter(Boolean)));
+    let specFailure = "No model produced an executable test harness.";
+    // Ask for one language at a time. A large, multi-language harness can
+    // exhaust a model's output budget and return no content at all. A second
+    // route can recover from one gateway/model's empty answer.
+    for (const language of languages) {
+      for (const model of specModels.slice(0, 3)) {
+        if (!councilAlive(get().council, runId)) return;
+        set((st) => ({ council: { ...st.council, specBy: model } }));
+        try {
+          const specText = await bridge.runOnce({
+            runId,
+            agentId: "council-spec",
+            attemptId: newAttemptId(),
+            provider: settings.gatewayId,
+            model,
+            systemPrompt: testSpecSystemPrompt(),
+            userText: testSpecUserPrompt({ question: `${problem}\n\n${routingGuidance(route)}`, docket: candidateDocket(field), languages: [language], knowledge }),
+            images: [],
+            maxTokens: Math.max(settings.maxTokens, 8192),
+            temperature: 0,
+            baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+            endpoint: endpointForModel(settings, model),
+          });
+          if (!councilAlive(get().council, runId)) return;
+          const parsed = parseTestSuites(specText).find(suite => suite.language === language);
+          if (parsed) {
+            suites.push(parsed);
+            break;
+          }
+          specFailure = `${model} returned no usable ${language} test harness.`;
+        } catch (err) {
+          specFailure = `${model}: ${cleanError(String(err))}`;
+          console.warn("Council spec pass failed:", specFailure);
+        }
+      }
     }
     set((st) => ({ council: { ...st.council, testSuites: suites } }));
     publishOverlayState(get());
+    const missing = missingSuiteLanguages(languages, suites);
+    if (missing.length) {
+      const error = `Could not test the ${missing.join(", ")} solution${missing.length === 1 ? "" : "s"} in E2B because no executable test harness was produced. Last API result: ${specFailure}`;
+      set((st) => ({ council: { ...st.council, phase: "error", error, winner: "" }, running: false }));
+      get().pushToast("err", "Solution not verified", error, { sticky: true });
+      void get().persistRun();
+      return;
+    }
   }
 
   // -------------------------------------------------------- round 2c: verify
@@ -4196,6 +4771,21 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     set((st) => ({ council: { ...st.council, phase: "verifying" } }));
     await executeField(get, set, runId, field, suites, "runs");
     await runMutationOracle(get, set, field, suites);
+    if (!councilAlive(get().council, runId)) return;
+    const runs = get().council.runs;
+    if (!field.some(candidate => gateFor(runs[candidate.letter]) === "pass")) {
+      const firstFailure = Object.values(runs).find(run => run.note)?.note;
+      const codeRuns = field.filter(candidate => candidate.final?.kind === "code" && candidate.final.code?.trim())
+        .map(candidate => runs[candidate.letter]).filter(Boolean);
+      const runnerFailed = codeRuns.length > 0 && codeRuns.every(run => !run.ran);
+      const error = runnerFailed
+        ? `E2B could not execute any candidate; no solution was tested.${firstFailure ? ` First runner error: ${firstFailure}` : ""}`
+        : `No candidate passed executable tests in E2B.${firstFailure ? ` First failure: ${firstFailure}` : ""}`;
+      set((st) => ({ council: { ...st.council, phase: "error", error, winner: "" }, running: false }));
+      get().pushToast("err", runnerFailed ? "E2B execution failed" : "No verified solution", error, { sticky: true });
+      void get().persistRun();
+      return;
+    }
   }
   if (!councilAlive(get().council, runId)) {
     set({ running: false });
@@ -4477,6 +5067,13 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     letters: fieldNow.map((c) => c.letter),
   });
   const winner = decision.winner;
+  if (codeCandidates.length && (!winner || gateFor(gateRuns[winner]) !== "pass")) {
+    const error = "Council finished without an E2B-tested candidate that passed its executable test cases. No coding solution will be published.";
+    set((st) => ({ council: { ...st.council, phase: "error", winner: "", error, synthesis, dossier: null }, running: false }));
+    get().pushToast("err", "No verified solution", error, { sticky: true });
+    void get().persistRun();
+    return;
+  }
   if (ruling.overruledReason) {
     synthesis = `${synthesis}\n\n---\n\n**GATE OVERRULE.** ${ruling.overruledReason}`;
   }
@@ -4495,6 +5092,10 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     council: { ...st.council, phase: error ? "error" : "done", synthesis, winner, dossier, error },
     running: false,
   }));
+  void get().autoTitle();
+  // The visible solution may have changed from a provisional pane answer to
+  // the measured council winner. Review that exact code, not the old pane.
+  if (winner) void get().runReview();
   void get().persistRun();
 }
 

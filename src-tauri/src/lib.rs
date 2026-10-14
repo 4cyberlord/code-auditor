@@ -5,7 +5,6 @@ mod coding_tools;
 mod config;
 mod db;
 pub mod deployment;
-mod exec;
 pub mod ghost_mode;
 mod helper_auth;
 mod knowledge;
@@ -13,12 +12,12 @@ mod overlay;
 mod overlay_state;
 mod platform_base;
 mod providers;
-mod runner;
 mod screen_recording;
 mod secrets;
 mod server_api;
 mod sessions;
 mod storage;
+mod azure_storage;
 mod updates;
 mod vision;
 
@@ -139,6 +138,13 @@ fn center_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.center();
     }
+}
+
+/// Close the desktop application from its in-app Quit control. Tauri tears
+/// down active webviews and native tasks as the process exits.
+#[tauri::command]
+fn app_quit(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 #[cfg(desktop)]
@@ -331,6 +337,7 @@ pub fn run() {
         .manage(RunRegistry::default())
         .manage(Db::default())
         .invoke_handler(tauri::generate_handler![
+            app_quit,
             auth::require,
             auth::set_pin,
             auth::auth_status,
@@ -380,6 +387,8 @@ pub fn run() {
             storage::storage_upload,
             storage::storage_signed_url,
             storage::storage_remove,
+            storage::storage_read_azure,
+            storage::storage_test_azure,
             storage::forget_local_file,
             background_helper::background_helper_status,
             background_helper::background_helper_install,
@@ -407,13 +416,14 @@ pub fn run() {
             sessions::run_save,
             sessions::run_list,
             sessions::run_get,
+            sessions::run_report_update,
+            sessions::benchmark_create,
+            sessions::benchmark_get,
             sessions::solve_job_create,
             sessions::solve_job_list,
             sessions::solve_job_event_list,
             sessions::solve_job_image_list,
             sessions::council_report_get,
-            runner::run_code,
-            runner::runnable_languages,
         ])
         .setup(move |app| {
             #[cfg(desktop)]
@@ -601,7 +611,11 @@ pub fn run() {
         // app back, which is what a macOS user expects from a background app.
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen { .. } = event {
-            reveal(app);
+            // Numeric 14 submits work silently, without stealing focus from
+            // the application the user is currently working in.
+            if !background_helper::recent_headless_process() {
+                reveal(app);
+            }
         }
         #[cfg(not(target_os = "macos"))]
         {

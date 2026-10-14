@@ -16,13 +16,11 @@ type Step = "checking" | "needs-permission" | "restart" | "settings" | "hidden";
  * need, and must not show, a macOS privacy prompt.
  */
 export default function ScreenRecordingPermission() {
-  const [step, setStep] = useState<Step>(() => (inTauri() ? "checking" : "hidden"));
+  const [step, setStep] = useState<Step>(() => inTauri() ? "checking" : "hidden");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!inTauri()) {
-      return;
-    }
+    if (!inTauri()) return;
 
     void screenRecordingPermissionStatus()
       .then((permission) => setStep(permission.granted ? "hidden" : "needs-permission"))

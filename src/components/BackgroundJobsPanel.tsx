@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { forgetLocalFile, pokeWorker, signedUrl, uploadScreenshot } from "@/lib/bridge";
 import { CLOUD_SOLVER_MAX_IMAGES, sanitizedSettingsSnapshot } from "@/lib/cloudJobs";
 import {
@@ -46,15 +46,19 @@ export default function BackgroundJobsPanel() {
   const [selected, setSelected] = useState<string | null>(null);
   const [events, setEvents] = useState<SolveJobEvent[]>([]);
   const [images, setImages] = useState<Array<SolveJobImage & { url?: string }>>([]);
+  const [urlRefresh, setUrlRefresh] = useState(0);
   const [report, setReport] = useState<CouncilReportSummary | null>(null);
   const [loading, setLoading] = useState(false);
+  const refreshInFlight = useRef(false);
+  const failedPreviewUrls = useRef(new Set<string>());
+  const lastPreviewRecovery = useRef(0);
+  const loadedDetailJobId = useRef<string | null>(null);
   const [queueing, setQueueing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   const workspaceImages = useStore((s) => s.images);
   const settings = useStore((s) => s.settings);
-  const storageKey = useStore((s) => s.storageKey);
   const ensureSession = useStore((s) => s.ensureSession);
   const zone = useStore((s) => s.settings.timeZone);
   const selectSession = useStore((s) => s.selectSession);
@@ -105,6 +109,9 @@ export default function BackgroundJobsPanel() {
   };
 
   const refresh = async () => {
+    // A slow response must not overlap the next polling tick or manual refresh.
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
     setLoading(true);
     setError(null);
     devLog("cloud-jobs", "refresh started");
@@ -119,30 +126,53 @@ export default function BackgroundJobsPanel() {
       setError(String(err));
       devLog("cloud-jobs", "refresh failed", { error: String(err) });
     } finally {
+      refreshInFlight.current = false;
       setLoading(false);
     }
   };
 
   useEffect(() => {
+    // The collapsed rail needs no background network polling. Opening it
+    // revalidates the list; the independent helper continues cloud work.
+    if (!open) return;
     void refresh();
-    const refreshTimer = window.setInterval(() => void refresh(), 15000);
+    const refreshTimer = window.setInterval(() => {
+      if (!document.hidden) void refresh();
+    }, 15000);
     const clockTimer = window.setInterval(() => setNow(Date.now()), 15000);
+    // Signed previews expire after 15 minutes; renew them before expiry.
+    const urlTimer = window.setInterval(() => setUrlRefresh((version) => version + 1), 12 * 60_000);
+    // A window can be hidden for hours. Reconcile immediately on return,
+    // rather than leaving a completed cloud job stale for another poll cycle.
+    const onVisibilityChange = () => {
+      if (!document.hidden) {
+        void refresh();
+        setUrlRefresh((version) => version + 1);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       window.clearInterval(refreshTimer);
       window.clearInterval(clockTimer);
+      window.clearInterval(urlTimer);
     };
-  }, []);
+  }, [open]);
 
   const queueCurrent = async () => {
     setQueueing(true);
     setError(null);
     devLog("cloud-jobs", "queue current started", { images: workspaceImages.length });
     try {
+      if (settings.imageStorage === "azure") {
+        throw new Error("Cloud Jobs currently require Supabase Storage. Switch the screenshot destination to Supabase in Settings before queuing a background job; desktop Council runs can use Azure.");
+      }
       if (!workspaceImages.length) throw new Error("Load at least one screenshot before queuing a cloud job.");
       if (workspaceImages.length > CLOUD_SOLVER_MAX_IMAGES) {
         throw new Error(`A cloud job can hold at most ${CLOUD_SOLVER_MAX_IMAGES} screenshots.`);
       }
-      if (!storageKey) throw new Error("Save the Supabase Storage service-role key in Settings first.");
+      // The Rust bridge obtains a scoped signed upload URL from the authenticated server API.
+      // A service-role key must not be required on the desktop.
       const sessionId = await ensureSession();
       if (!sessionId) throw new Error("Set up the Supabase database connection before queuing cloud jobs.");
 
@@ -182,6 +212,7 @@ export default function BackgroundJobsPanel() {
             sessionId: submission.sessionId, fileName: image.name,
             mime: image.mime, data: image.base64,
             submissionId: submission.submissionId, position,
+            backend: "supabase", // The cloud worker currently reads Supabase objects.
           });
           submission.images[position] = {
             position, storageBucket: uploaded.bucket, storagePath: uploaded.path,
@@ -211,8 +242,14 @@ export default function BackgroundJobsPanel() {
     }
   };
 
+  const selectedDetailId = selectedJob?.id;
+  const selectedDetailStatus = selectedJob?.status;
+  const selectedDetailVersion = selectedJob?.updatedAt;
+
   useEffect(() => {
-    if (!selectedJob) {
+    if (!open) return;
+    if (!selectedDetailId) {
+      loadedDetailJobId.current = null;
       queueMicrotask(() => {
         setEvents([]);
         setImages([]);
@@ -221,42 +258,59 @@ export default function BackgroundJobsPanel() {
       return;
     }
     let live = true;
-    queueMicrotask(() => setError(null));
-    devLog("cloud-jobs", "detail load started", { jobId: selectedJob.id });
-    void Promise.all([
-      listSolveJobEvents(selectedJob.id),
-      listSolveJobImages(selectedJob.id),
-      getCouncilReport(selectedJob.id),
-    ])
-      .then(async ([nextEvents, nextImages, nextReport]) => {
+    // Only clear when the selected job changes. URL renewal and status updates
+    // should preserve valid previews/reports while fresh data is in flight.
+    const changedJob = loadedDetailJobId.current !== selectedDetailId;
+    loadedDetailJobId.current = selectedDetailId;
+    queueMicrotask(() => {
+      if (!live) return;
+      setError(null);
+      if (changedJob) {
+        setEvents([]);
+        setImages([]);
+        setReport(null);
+      }
+    });
+    devLog("cloud-jobs", "detail load started", { jobId: selectedDetailId });
+    // Each detail endpoint recovers independently: a temporary report failure
+    // must not hide available screenshots, and a signing error must not hide events.
+    void Promise.allSettled([
+      listSolveJobEvents(selectedDetailId),
+      listSolveJobImages(selectedDetailId),
+      getCouncilReport(selectedDetailId),
+    ]).then(async ([eventResult, imageResult, reportResult]) => {
+      if (!live) return;
+      if (eventResult.status === "fulfilled") setEvents(eventResult.value);
+      if (reportResult.status === "fulfilled") setReport(reportResult.value);
+      if (imageResult.status === "fulfilled") {
         const withUrls = await Promise.all(
-          nextImages.map(async (image) => {
+          imageResult.value.map(async (image) => {
             try {
-              return { ...image, url: await signedUrl(image.storagePath, 900) };
+              return { ...image, url: await signedUrl(image.storagePath, 900, image.storageBucket) };
             } catch {
               return image;
             }
           })
         );
-        if (!live) return;
-        setEvents(nextEvents);
-        setImages(withUrls);
-        setReport(nextReport);
-        devLog("cloud-jobs", "detail load completed", {
-          jobId: selectedJob.id,
-          events: nextEvents.length,
-          images: withUrls.length,
-          hasReport: Boolean(nextReport),
-        });
-      })
-      .catch((err) => {
-        if (live) setError(String(err));
-        devLog("cloud-jobs", "detail load failed", { jobId: selectedJob.id, error: String(err) });
+        if (live) setImages(withUrls);
+      }
+      if (!live) return;
+      const failures = [eventResult, imageResult, reportResult]
+        .filter((result) => result.status === "rejected")
+        .map((result) => String((result as PromiseRejectedResult).reason));
+      if (failures.length) setError(`Could not load all cloud job details: ${failures.join("; ")}`);
+      devLog("cloud-jobs", "detail load settled", {
+        jobId: selectedDetailId,
+        failedRequests: failures.length,
       });
+    });
     return () => {
       live = false;
     };
-  }, [selectedJob]);
+  // A refreshed listing creates new objects even if the job did not change.
+  // Depend on its identity/version, not its object reference: this prevents
+  // re-signing every image URL and reloading the report every 15 seconds.
+  }, [open, selectedDetailId, selectedDetailStatus, selectedDetailVersion, urlRefresh]);
 
   return (
     <section className="background-jobs" data-open={open}>
@@ -373,7 +427,23 @@ export default function BackgroundJobsPanel() {
                 <div className="job-images">
                   {images.map((image) =>
                     image.url ? (
-                      <img key={image.id} src={image.url} alt={image.fileName} />
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        key={image.id}
+                        src={image.url}
+                        alt={image.fileName}
+                        onError={() => {
+                          // An expired or revoked signed URL can fail before its
+                          // scheduled renewal. Refresh once per failed URL and
+                          // throttle repeated failures to avoid retry storms.
+                          if (!image.url || failedPreviewUrls.current.has(image.url)) return;
+                          failedPreviewUrls.current.add(image.url);
+                          const now = Date.now();
+                          if (now - lastPreviewRecovery.current < 30_000) return;
+                          lastPreviewRecovery.current = now;
+                          setUrlRefresh((version) => version + 1);
+                        }}
+                      />
                     ) : (
                       <div key={image.id} className="job-image-missing">
                         {image.position + 1}

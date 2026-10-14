@@ -37,6 +37,8 @@ export interface SolutionReview {
   approach: { current: string; suggested: string; keyIdea: string };
   efficiency: { currentTime: string; currentSpace: string; suggestedTime: string; suggestedSpace: string; note: string };
   style: { readability: Grade; structure: Grade; note: string };
+  /** Reviewer-written, function-specific behavior in the original solution. */
+  functions?: Record<string, string>;
 
   /** The same solution in each language, keyed by language. Missing is normal. */
   ports: Partial<Record<PortLanguage, string>>;
@@ -48,6 +50,7 @@ export const EMPTY_REVIEW: SolutionReview = {
   approach: { current: "", suggested: "", keyIdea: "" },
   efficiency: { currentTime: "", currentSpace: "", suggestedTime: "", suggestedSpace: "", note: "" },
   style: { readability: "", structure: "", note: "" },
+  functions: {},
   ports: {},
 };
 
@@ -60,11 +63,16 @@ export function reviewSystemPromptFor(): string {
     "Be specific and short. 'Perfectly optimized' is only worth writing when you can name the",
     "bound it reaches. If the solution is wrong, say so plainly in VALID and name the case it",
     "fails — a review that softens a wrong answer is worse than no review.",
+    "Derive TIME and SPACE from the actual code, including preprocessing, repeated",
+    "queries, recursion, and auxiliary allocations. State assumptions if a bound",
+    "is expected or amortized rather than worst-case. Do not confuse a measured",
+    "millisecond or MB figure with asymptotic complexity.",
     "",
     "Then write the same algorithm in C++, Rust and Python. Same approach in all three, each",
     "idiomatic for its language and complete enough to compile or run. Do not change the",
     "algorithm between them, and do not optimise one and not the others — they exist to be",
-    "compared, so the only difference should be the language.",
+    "compared, so the only difference should be the language. A port is fresh code and",
+    "does not inherit the original implementation's test or benchmark result.",
     "",
     "Output exactly this block and nothing else:",
     "",
@@ -82,6 +90,8 @@ export function reviewSystemPromptFor(): string {
     "READABILITY: excellent | good | fair | poor",
     "STRUCTURE: excellent | good | fair | poor",
     "STYLE_NOTE: <one line>",
+    "FUNCTION <name>: <one sentence explaining what this function actually computes or changes>",
+    "Repeat FUNCTION for each named function in the original solution; do not invent functions.",
     "PORT cpp",
     "```cpp",
     "<complete C++ implementation>",
@@ -118,6 +128,15 @@ function field(body: string, name: string): string {
 function grade(raw: string): Grade {
   const v = raw.trim().toLowerCase();
   return v === "excellent" || v === "good" || v === "fair" || v === "poor" ? v : "";
+}
+
+function functionExplanations(body: string): Record<string, string> {
+  const explanations: Record<string, string> = {};
+  for (const match of body.matchAll(/^FUNCTION\s+([A-Za-z_][\w]*)\s*:\s*(.+)$/gim)) {
+    if (Object.keys(explanations).length >= 20) break;
+    explanations[match[1]] = match[2].trim().slice(0, 500);
+  }
+  return explanations;
 }
 
 /**
@@ -176,6 +195,7 @@ export function parseReview(text: string): SolutionReview | null {
       structure: grade(field(body, "STRUCTURE")),
       note: field(body, "STYLE_NOTE"),
     },
+    functions: functionExplanations(body),
     ports: ports(body),
   };
 }

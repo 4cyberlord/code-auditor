@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "../scripts/lib/phase2Execution.mjs";
 assert.match(executionId(), /^[a-f0-9-]{36}$/);
 assert.notEqual(executionId(), executionId());
-for (const lang of ["python","javascript","typescript","rust","go","php","java","c","cpp"]) {
+for (const lang of ["python","javascript","typescript","rust","go","php","java","cpp"]) {
   assert.equal(validateExecution(lang, "print('ok')", 120000).language, lang);
 }
 assert.equal(validateExecution("python", "x", 400000).timeoutMs, 300000);
 assert.throws(() => validateExecution("unknown","x",1000),/Unsupported/);
+assert.throws(() => validateExecution("c","x",1000),/Unsupported/);
 assert.throws(() => validateExecution("python","x".repeat(262145),1000),/256 KiB/);
 assert.throws(() => validateExecution("python","",1000),/No program/);
 const output="CA_STDOUT_BEGIN\nPASS test\nCA_STDOUT_END\nCA_STDERR_BEGIN\nCA_METRICS elapsed_s=0.013 maxrss_kb=2048\nCA_STDERR_END\nCA_EXIT:0\nCA_RUNTIME:e2b python3\n";

@@ -56,7 +56,14 @@ This is a programming problem. Work it as a senior engineer would:
 3. Write a complete, runnable solution. Not pseudocode, not a sketch.
 4. Trace your solution by hand against at least one example and any edge case that
    worries you. If the trace fails, fix the code and say what you changed.
-5. State time and space complexity.
+5. Derive worst-case time and auxiliary-space complexity from your ACTUAL code:
+   name every input dimension (including V, E, queries, capacity, or output size),
+   identify loop bounds and dependent iteration counts, resolve all callees,
+   and solve any recurrence with its theorem conditions. Check recursion stack,
+   allocations and worst-case data-structure operations separately. Distinguish
+   worst-case, expected, and amortized bounds. If a cost model, parameter
+   relation, or proof obligation is missing, say the result is an estimate.
+   Never treat a finite benchmark or two agreeing reviewers as formal proof.
 
 Runtime discipline: optimise for the fastest correct approach the constraints justify.
 For LeetCode-style answers, aim for a practical runtime at or below 17ms when that is
@@ -204,7 +211,7 @@ export function formatMemory(kb: number): string {
   return value >= 1024 ? `${Number((value / 1024).toFixed(value % 1024 === 0 ? 0 : 1))} MB` : `${value} KB`;
 }
 
-export function solutionPolicy(languages: string[] = ["C++", "Python"], memoryKb = 20480): string {
+export function solutionPolicy(languages: string[] = ["C++", "Python"], memoryKb = 9 * 1024): string {
   const list = languages.filter((l) => l.trim());
   if (!list.length) return "";
   const order =
@@ -213,7 +220,7 @@ export function solutionPolicy(languages: string[] = ["C++", "Python"], memoryKb
       : list[0];
   return [
     `If the problem does not itself fix the language, write the solution in ${order}, in that order of preference.`,
-    `${list[0]} is preferred because the bar here is measured, not asserted: the targets are a runtime that rounds to 0ms and a peak resident set no larger than ${formatMemory(memoryKb)}.`,
+    `Prefer the lowest proven asymptotic time, then minimize measured runtime and peak memory; aim for at most ${formatMemory(memoryKb)} if the language and platform permit it. A displayed 0 ms is rounding, not zero work.`,
     "If you choose a language other than the first, say in one line why the first was unsuitable.",
     "Do not state a runtime or a memory figure you did not measure — these are targets to design toward, not numbers to report.",
   ].join(" ");

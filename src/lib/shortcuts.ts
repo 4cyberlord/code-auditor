@@ -119,12 +119,6 @@ export async function captureIntoApp(kind: CaptureKind) {
   }
 }
 
-function solveNow() {
-  const store = useStore.getState();
-  if (store.running) return;
-  void store.start();
-}
-
 export function useGlobalShortcuts() {
   useEffect(() => {
     if (!bridge.inTauri()) return;
@@ -139,7 +133,6 @@ export function useGlobalShortcuts() {
       listen("shortcut://capture-screen", () => void captureIntoApp("screen")),
       listen("shortcut://capture-left", () => void captureIntoApp("left")),
       listen("shortcut://capture-right", () => void captureIntoApp("right")),
-      listen("shortcut://solve", solveNow),
     ])
       .then((fns) => {
         if (disposed) fns.forEach((f) => f());

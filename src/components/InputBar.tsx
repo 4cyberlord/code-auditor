@@ -25,7 +25,6 @@ export default function InputBar() {
   const running = useStore((s) => s.running);
   const keys = useStore((s) => s.keys);
   const gatewayKey = useStore((s) => s.gatewayKey);
-  const storageKey = useStore((s) => s.storageKey);
   const uploads = useStore((s) => s.uploads);
   const settings = useStore((s) => s.settings);
   const enabled = useStore((s) => s.settings.enabled);
@@ -260,7 +259,7 @@ export default function InputBar() {
               background, and "it is somewhere other than this laptop" is a promise
               worth being able to see rather than assume. Sits under the images
               themselves, since it describes them, not the question field. */}
-          {storageKey && stored.total > 0 && (
+          {stored.total > 0 && (
             <span
               className="preflight"
               data-tone={stored.failed ? "bad" : stored.pending ? "warn" : "good"}

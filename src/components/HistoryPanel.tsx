@@ -150,13 +150,11 @@ export default function HistoryPanel() {
             </div>
           )}
 
-          {current && history.length > 0 && (
+          {history.length > 0 && (
             <div className="history-list">
               {history.map((r) => {
                 const isCurrent = r.id === viewingRunId;
-                const askedText = r.asked.trim()
-                  ? r.asked.trim().split("\n")[0]
-                  : "(no note — solved from screenshot)";
+                const askedText = r.title || "Captured question";
 
                 return (
                   <button

@@ -13,6 +13,7 @@ import BootScreen from "@/components/BootScreen";
 import HistoryPanel from "@/components/HistoryPanel";
 import InputBar from "@/components/InputBar";
 import StoryStripIntake from "@/components/StoryStripIntake";
+import StoryResultWorkspace from "@/components/StoryResultWorkspace";
 import ReadingPanel from "@/components/ReadingPanel";
 import SettingsDialog from "@/components/SettingsDialog";
 import SessionSidebar from "@/components/SessionSidebar";
@@ -25,9 +26,10 @@ import { useWindowChrome } from "@/lib/windowChrome";
 import { useStore } from "@/lib/store";
 import Toasts from "@/components/Toasts";
 import LoginScreen from "@/components/LoginScreen";
-import { inTauri } from "@/lib/bridge";
+import { inTauri, quitApplication } from "@/lib/bridge";
 import { gateFor, useAuth } from "@/lib/auth";
 import { devLog } from "@/lib/devLog";
+import { PRIMARY_MODEL_IDS } from "@/lib/primaryModels";
 
 // The desktop session is stored in the system Keychain for thirty days. Do not
 // discard it after a short idle or sleep; doing so defeats saved sign-in and
@@ -89,17 +91,26 @@ export default function Page() {
 function Workbench() {
   type Workspace = "council" | "coding" | "knowledge";
   const [workspace, setWorkspace] = useState<Workspace>("council");
-  const [storyIntakeOpen, setStoryIntakeOpen] = useState(true);
+  const [intakeOpen, setIntakeOpen] = useState(true);
+  const [storyMode, setStoryMode] = useState(false);
+  const [topMenu, setTopMenu] = useState<"history" | "about" | null>(null);
   const agents = useStore((s) => s.agents);
   const hydrated = useStore((s) => s.hydrated);
   const hydrate = useStore((s) => s.hydrate);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const running = useStore((s) => s.running);
-  const start = useStore((s) => s.start);
-  const approveCaptureReview = useStore((s) => s.approveCaptureReview);
+  const preparing = useStore((s) => s.preparing);
+  const councilPhase = useStore((s) => s.council.phase);
+  const reviewRunning = useStore((s) => s.review.status === "running");
+  const storyRunId = useStore((s) => s.runId);
+  const startAnalysis = useStore((s) => s.start);
   const signOut = useAuth((s) => s.signOut);
   const sessionsOpen = useStore((s) => s.settings.railPanel === "sessions");
   const historyOpen = useStore((s) => s.settings.railPanel === "history");
+  const history = useStore(s => s.history);
+  const historyError = useStore(s => s.historyError);
+  const loadHistory = useStore(s => s.loadHistory);
+  const openRun = useStore(s => s.openRun);
 
   // Only enabled providers get a pane. With five to choose from, rendering the
   // switched-off ones as placeholders would spend half the screen on nothing --
@@ -108,10 +119,17 @@ function Workbench() {
   const exitHistory = useStore((s) => s.exitHistory);
   const viewingAsked = useStore((s) => {
     const row = s.history.find((r) => r.id === s.viewingRunId);
-    return row?.asked.trim().split("\n")[0] ?? "";
+    return row?.title ?? "";
   });
 
   const panes = agents.filter((a) => a.enabled);
+  // Any run launched via a global shortcut should reveal the live workspace.
+  useEffect(() => useStore.subscribe((current, previous) => {
+    if ((current.preparing && !previous.preparing) || (current.running && !previous.running)) {
+      setIntakeOpen(false);
+      setStoryMode(true);
+    }
+  }), []);
 
   useAgentEvents();
   useGlobalShortcuts();
@@ -164,6 +182,8 @@ function Workbench() {
   useEffect(() => {
     let unlistenSettings: (() => void) | undefined;
     let unlistenWorkspace: (() => void) | undefined;
+    let unlistenSolve: (() => void) | undefined;
+    let disposed = false;
     if (inTauri()) {
       void listen("settings://open", () => setSettingsOpen(true)).then((off) => {
         unlistenSettings = off;
@@ -175,6 +195,21 @@ function Workbench() {
         }
       }).then((off) => {
         unlistenWorkspace = off;
+      });
+      void listen("shortcut://solve", () => {
+        const s = useStore.getState();
+        if (s.running || s.preparing) return;
+        if (!s.images.length && !s.note.trim()) {
+          s.setShortcutError("Capture or add a question before pressing 14 to start analysis.");
+          return;
+        }
+        // Shortcut 14 is a background action. Keep the user's current
+        // workspace (coding, knowledge, history, or another app's context)
+        // unchanged; they can switch to Council when they want to watch it.
+        void useStore.getState().start();
+      }).then((off) => {
+        if (disposed) off();
+        else unlistenSolve = off;
       });
     }
 
@@ -191,9 +226,11 @@ function Workbench() {
     };
     window.addEventListener("keydown", onKey);
     return () => {
+      disposed = true;
       window.removeEventListener("keydown", onKey);
       unlistenSettings?.();
       unlistenWorkspace?.();
+      unlistenSolve?.();
     };
   }, [setSettingsOpen]);
 
@@ -205,6 +242,8 @@ function Workbench() {
           <span data-tauri-drag-region>
             {running
               ? "running"
+              : preparing ? "reading and selecting models"
+              : !storyRunId ? `${PRIMARY_MODEL_IDS.length} approved models · up to 4 per task`
               : `${panes.length} ${panes.length === 1 ? "model" : "models"}, one problem, one verdict`}
           </span>
         </span>
@@ -214,6 +253,33 @@ function Workbench() {
             browser preview
           </span>
         )}
+        {storyMode && <div style={{ display: "flex", gap: 7, position: "relative" }}>
+          <button className="btn tiny ghost" disabled={preparing || running || reviewRunning || !["idle", "done", "error", "cancelled"].includes(councilPhase)} onClick={() => void (async () => {
+            setTopMenu(null);
+            const before = useStore.getState().currentSessionId;
+            await useStore.getState().persistRun();
+            if (useStore.getState().sessionsError) return;
+            await useStore.getState().newSession();
+            if (useStore.getState().currentSessionId === before) return;
+            setStoryMode(false);
+            setIntakeOpen(true);
+          })()} title="Begin a new screenshot intake in its own saved session">New capture</button>
+          <button className="btn tiny ghost" onClick={() => setTopMenu(topMenu === "about" ? null : "about")}>About</button>
+          {topMenu === "about" && <div style={{ position: "absolute", zIndex: 50, right: 0, top: 34, width: 310, background: "var(--panel)", border: "1px solid var(--line-strong)", borderRadius: 12, padding: 14, boxShadow: "var(--shadow)" }}>
+            <strong>Council Editor</strong><p className="hint" style={{ lineHeight: 1.6 }}>Capture a problem, let the intelligence engine select eligible AI agents, then review one solution and its measured evidence.</p>
+          </div>}
+        </div>}
+        <div style={{ position: "relative" }}>
+          <button className="btn tiny ghost" onClick={() => { setTopMenu(topMenu === "history" ? null : "history"); void loadHistory(); }}>History</button>
+          {topMenu === "history" && <div style={{ position: "absolute", zIndex: 50, right: 0, top: 34, width: 350, maxHeight: 430, overflowY: "auto", background: "var(--panel)", border: "1px solid var(--line-strong)", borderRadius: 12, padding: 14, boxShadow: "var(--shadow)" }}>
+            <strong style={{ fontSize: 13 }}>Saved solutions</strong>
+            {historyError && <p className="hint" role="alert">{historyError}</p>}
+            {history.length ? history.map(item => <button key={item.id} className="btn tiny ghost" style={{ display: "block", width: "100%", textAlign: "left", height: "auto", padding: "12px 8px", marginTop: 5 }} disabled={running} onClick={() => { setIntakeOpen(false); setStoryMode(true); void openRun(item.id); setTopMenu(null); }}>
+              <span style={{ display: "block" }}>{item.title || "Captured question"}</span>
+              <small className="hint">{new Date(item.startedAt).toLocaleString()} · {item.answered} answers · {item.verdict || "No verdict"}</small>
+            </button>) : !historyError && <p className="hint">No saved analyses yet.</p>}
+          </div>}
+        </div>
         <button
           className="btn tiny ghost"
           onClick={() => setSettingsOpen(true)}
@@ -221,6 +287,13 @@ function Workbench() {
         >
           Settings
         </button>
+        {inTauri() && <button
+          className="btn tiny ghost"
+          onClick={() => void quitApplication()}
+          title="Quit Council Editor and stop in-flight work"
+        >
+          Quit app
+        </button>}
       </div>
 
       {/* The panes are showing a past run. Said plainly, because every control
@@ -242,24 +315,28 @@ function Workbench() {
       {/* The reading strip is about the screenshot the council is reasoning
           from, so it belongs to that workspace rather than to the window. On
           the Knowledge tab it was describing a run nobody had started. */}
-      {workspace === "council" && <ReadingPanel />}
+      {workspace === "council" && !intakeOpen && !storyMode && <ReadingPanel />}
 
-      {workspace === "council" && storyIntakeOpen && (
-        <StoryStripIntake
-          running={running}
-          onStartAnalysis={() => {
-            approveCaptureReview();
-            setStoryIntakeOpen(false);
-            void start();
-          }}
-        />
+      {workspace === "council" && intakeOpen && (
+        <StoryStripIntake running={running} onStartAnalysis={() => {
+          // The store chooses available routes, initializes the selected agents,
+          // and starts independent image reasoning. Reveal the result workspace now:
+          // route discovery performs live gateway checks before it flips
+          // `running`, so waiting for that flag leaves the click looking inert.
+          setStoryMode(true);
+          setIntakeOpen(false);
+          void startAnalysis({ adaptivePanels: true });
+        }} />
       )}
-
-      <div
-        className="workspace-stage"
-        data-workspace={workspace}
-        style={{ display: workspace === "council" && storyIntakeOpen ? "none" : undefined }}
-      >
+      {workspace === "council" && !storyMode && !intakeOpen && !running && !viewingRunId && (
+        <div className="story-return-bar">
+          <button className="btn tiny ghost" onClick={() => setIntakeOpen(true)}>
+            ← Back to captures
+          </button>
+        </div>
+      )}
+      {workspace === "council" && storyMode && !intakeOpen && <StoryResultWorkspace key={storyRunId ?? "awaiting-run"} />}
+      <div className="workspace-stage" data-workspace={workspace} style={{ display: workspace === "council" && (intakeOpen || storyMode) ? "none" : undefined }}>
         <div
           className="workspace-panel"
           data-active={workspace === "council"}
@@ -270,7 +347,7 @@ function Workbench() {
             {/* The count drives the pane layout in CSS; hard-wiring 2x2 broke the
                 moment a fifth provider joined. */}
             <div className="grid" data-count={panes.length}>
-              {panes.map((a) => (
+              {!intakeOpen && panes.map((a) => (
                 <AgentPane key={a.id} agent={a} />
               ))}
             </div>
@@ -290,12 +367,12 @@ function Workbench() {
 
             {/* The verdict, and the drawers in one column. */}
             <div className="rail" data-sessions={sessionsOpen} data-history={historyOpen}>
-              <CouncilPanel />
-              <SolutionCard />
-              <div className="solution-divider" aria-hidden="true" />
-              <ConsensusPanel />
-              <BackgroundJobsPanel />
-              <HistoryPanel />
+              {!storyMode && <CouncilPanel />}
+              <SolutionCard alwaysOpen={storyMode} />
+              {!storyMode && <div className="solution-divider" aria-hidden="true" />}
+              {!storyMode && <ConsensusPanel />}
+              {!storyMode && <BackgroundJobsPanel />}
+              {!storyMode && <HistoryPanel />}
               {sessionsOpen && (
                 <Splitter
                   axis="row"
@@ -335,11 +412,11 @@ function Workbench() {
 
       <div
         className="workspace-input"
-        data-active={workspace === "council" && !storyIntakeOpen}
-        aria-hidden={workspace !== "council" || storyIntakeOpen}
-        inert={workspace !== "council" || storyIntakeOpen}
+        data-active={workspace === "council" && !intakeOpen && !storyMode}
+        aria-hidden={workspace !== "council" || intakeOpen || storyMode}
+        inert={workspace !== "council" || intakeOpen || storyMode}
       >
-        {!storyIntakeOpen && <InputBar />}
+        {!intakeOpen && !storyMode && <InputBar />}
       </div>
 
       <SettingsDialog />

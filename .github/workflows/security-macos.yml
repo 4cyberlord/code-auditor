@@ -3,6 +3,7 @@ on:
   pull_request:
     branches:
       - main
+      - feat/cloud-thin-client-phase1
   workflow_dispatch:
 concurrency:
   group: security-macos-${{ github.event.pull_request.number || github.ref }}
@@ -12,8 +13,8 @@ jobs:
   macos-validation:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: npm
@@ -56,9 +57,9 @@ jobs:
         run: npm run app:build
 
   docker-runtime-containment:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Pull test image (CI only; app never pulls implicitly)
         run: |
           if docker pull public.ecr.aws/docker/library/alpine:3.20; then
@@ -77,11 +78,11 @@ jobs:
   e2b-live-smoke:
     # Secrets never enter pull-request builds. Run explicitly on the trusted branch.
     if: ${{ github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '24'
           cache: npm

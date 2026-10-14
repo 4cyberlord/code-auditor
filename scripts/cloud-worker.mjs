@@ -21,12 +21,16 @@ import "./lib/config.mjs";
 import { createSign } from "node:crypto";
 import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
+import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
+import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
+import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/externalLanguageSources.mjs";
+import { fetchLanguageViaGateway } from "./lib/supabaseLanguageGateway.mjs";
+import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
+import { phaseTimer } from "./lib/phaseTimings.mjs";
 import { readFileSync } from "node:fs";
-import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { isPrimaryModel, listedPrimaryRoute, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "../src/lib/primaryModels.ts";
 import {
   captureWorkerException,
   closeObservability,
@@ -52,7 +56,6 @@ const SUPABASE_SERVICE_ROLE_KEY = mustEnv("SUPABASE_SERVICE_ROLE_KEY");
  * worker's own environment for settings that are genuinely worker-wide.
  */
 let jobSecrets = null;
-let jobGatewayApiKey = "";
 
 /** Platform rows are owned by the nil UUID. */
 const PLATFORM_OWNER = "00000000-0000-0000-0000-000000000000";
@@ -76,7 +79,6 @@ function secret(name) {
 }
 
 async function loadOwnerSecrets(ownerId) {
-  jobGatewayApiKey = "";
   if (!ownerId) {
     jobSecrets = null;
     return null;
@@ -93,32 +95,6 @@ async function loadOwnerSecrets(ownerId) {
     if (row.value) jobSecrets.set(row.key, row.value);
   }
   return jobSecrets;
-}
-
-/**
- * Gateway credentials are stored under the selected gateway's id. In
- * particular, a Clean API job must never be sent with the historical
- * TokenRouter credential merely because both speak an OpenAI-compatible wire.
- */
-function gatewayCredential(settings) {
-  const baseUrl = String(settings?.gatewayBaseUrl || "");
-  const gatewayId = settings?.gatewayId === "cleanapis" || baseUrl.includes("cleanapis.com")
-    ? "cleanapis"
-    : settings?.gatewayId === "wiro" || baseUrl.includes("llm.wiro.ai")
-      ? "wiro"
-      : "tokenrouter";
-  const legacyName = gatewayId === "tokenrouter" ? "TOKENROUTER_API_KEY" : `${gatewayId.toUpperCase()}_API_KEY`;
-  return { gatewayId, value: secret(gatewayId) || secret(legacyName) };
-}
-
-function selectGatewayCredential(settings) {
-  const credential = gatewayCredential(settings);
-  jobGatewayApiKey = credential.value;
-  return credential;
-}
-
-function activeGatewayApiKey() {
-  return jobGatewayApiKey || secret("TOKENROUTER_API_KEY");
 }
 const WORKER_ID = process.env.CODE_AUDITOR_WORKER_ID || `worker-${process.pid}`;
 const POLL_MS = Number(process.env.CODE_AUDITOR_WORKER_POLL_MS || 5000);
@@ -138,6 +114,8 @@ const [
   extraction,
   { knowledgePackFor },
   knowledgeLibrary,
+  runtimeGuidance,
+  revisionPolicy,
   mcq,
 ] = await Promise.all([
   import("../src/lib/prompts.ts"),
@@ -148,11 +126,15 @@ const [
   import("../src/lib/extraction.ts"),
   import("../src/lib/knowledge.ts"),
   import("../src/lib/knowledgeLibrary.ts"),
+  import("../src/lib/languageRuntimeGuidance.ts"),
+  import("../src/lib/revisionPolicy.ts"),
   import("../src/lib/mcq.ts"),
 ]);
 
 const { detectMcq, parseMcqAnswer, resolveMcqSelection, formatMcqSelection } = mcq;
 const { loadKnowledgeLibrary } = knowledgeLibrary;
+const { runtimeGuidanceFor } = runtimeGuidance;
+const { needsCandidateRevision } = revisionPolicy;
 
 /**
  * The library this job reasons from.
@@ -202,7 +184,6 @@ const {
   harnessIsSuspect,
   letterFor,
   looksLikeCodingProblem,
-  normalizeCodeLanguage,
   partitionByVision,
   answerStanding,
   gateFor,
@@ -211,6 +192,7 @@ const {
   rejectedImages,
   rejectedReasoning,
   parseTestSuites,
+  missingSuiteLanguages,
   parseReviewSet,
   parseCouncilSynthesis,
   parseJudgeReport,
@@ -235,11 +217,12 @@ const {
   synthesisUserPrompt,
   testSpecSystemPrompt,
   testSpecUserPrompt,
+  harnessPreflightDiagnostics,
 } = council;
 
 const MAX_OUTPUT = 64 * 1024;
-const LOCAL_RUN_TIMEOUT_MS = 20_000;
 const REMOTE_RUN_TIMEOUT_MS = 120_000;
+const E2B_TIMEOUT_ATTEMPTS = Math.max(1, Number(process.env.CODE_AUDITOR_E2B_TIMEOUT_ATTEMPTS || 2));
 const TOKENROUTER_MIN_DELAY_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS || 13_000);
 const TOKENROUTER_JITTER_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_JITTER_MS || 1_500);
 const TOKENROUTER_REQUEST_TIMEOUT_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_REQUEST_TIMEOUT_MS || 75_000);
@@ -296,6 +279,12 @@ function mustEnv(name) {
   return v;
 }
 
+// Fetch directory records once per TTL, shared by all languages/jobs. This
+// directory is service-role-only and contains no actual programming guides.
+const languageDirectory=createRegistryDirectoryLoader(()=>
+  rest("external_service_registry?select=service_key,provider,project_ref,content_category,stores_language_markdown,is_external,metadata&service_key=eq.council_language_docs&limit=1")
+);
+
 async function rest(path, init = {}) {
   const res = await fetch(`${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/${path}`, {
     ...init,
@@ -332,6 +321,40 @@ async function nextQueuedJob() {
     "solve_jobs?status=eq.queued&order=created_at.asc&limit=1"
   );
   return rows?.[0] || null;
+}
+
+async function nextQueuedBenchmark() {
+  try {
+    const rows = await rest("benchmark_requests?status=eq.queued&order=created_at.asc&limit=1");
+    return rows?.[0] || null;
+  } catch (err) {
+    // An older database must not stop the existing Council job queue.
+    if (/benchmark_requests.*(does not exist|schema cache)|PGRST205|42P01/i.test(String(err))) return null;
+    throw err;
+  }
+}
+
+async function runQueuedBenchmark(request) {
+  const claimed = await rest(`benchmark_requests?id=eq.${request.id}&status=eq.queued`, {
+    method: "PATCH", body: JSON.stringify({ status: "running" }),
+  });
+  if (!claimed?.length) return;
+  try {
+    await loadOwnerSecrets(request.owner_id);
+    if (!secret("E2B_API_KEY")) throw new Error("No E2B key is saved for this account.");
+    const result = await runE2BCode(request.language, request.program, request.timeout_ms, { stdin: request.stdin || "" });
+    await rest(`benchmark_requests?id=eq.${request.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "completed", result, finished_at: new Date().toISOString() }),
+    });
+  } catch (err) {
+    await rest(`benchmark_requests?id=eq.${request.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: "failed", error: err instanceof Error ? err.message : String(err), finished_at: new Date().toISOString() }),
+    });
+  } finally {
+    jobSecrets = null;
+  }
 }
 
 async function patchJob(id, patch) {
@@ -399,7 +422,7 @@ function chatModels(settings) {
     // spoke chat-completions. It now speaks both, so dropping a seat the user
     // deliberately configured would be silently discarding their roster.
     .filter((model) => model?.id)
-    .slice(0, Number(process.env.CODE_AUDITOR_WORKER_SOLVERS || 4));
+    .slice(0, Math.min(4, Math.max(1, Number(process.env.CODE_AUDITOR_WORKER_SOLVERS || 4))));
 }
 
 function chatJudges(settings) {
@@ -411,12 +434,31 @@ function chatJudges(settings) {
     .slice(0, Number(process.env.CODE_AUDITOR_WORKER_JUDGES || 3));
 }
 
+function gatewayBaseUrl(settings) {
+  return settings?.gatewayBaseUrl || ({
+    cleanapis: "https://cleanapis.com/v1",
+    wiro: "https://llm.wiro.ai/v1",
+    tokenrouter: "https://api.tokenrouter.com/v1",
+  })[settings?.gatewayId || "tokenrouter"] || "https://api.tokenrouter.com/v1";
+}
+
+function gatewayId(settings) {
+  const baseUrl = String(settings?.gatewayBaseUrl || "");
+  if (settings?.gatewayId === "cleanapis" || baseUrl.includes("cleanapis.com")) return "cleanapis";
+  if (settings?.gatewayId === "wiro" || baseUrl.includes("llm.wiro.ai")) return "wiro";
+  return "tokenrouter";
+}
+
+function gatewayCredential(settings) {
+  const id = gatewayId(settings);
+  return secret(id) || secret(`${id.toUpperCase()}_API_KEY`) ||
+    (id === "tokenrouter" ? secret("TOKENROUTER_API_KEY") : "");
+}
+
 /**
- * Settings retain provider-qualified ids so the desktop can route them (for
- * example `openai/gpt-5.6-sol`), while gateway catalogues return the wire id
- * (`gpt-5.6-sol`). Match either representation and send the catalogue's exact
- * value to the gateway. Without this, a healthy key can make every Council
- * seat look unreachable before a single model request is made.
+ * Settings use provider-qualified ids (for example `openai/gpt-5.6-sol`),
+ * while gateway catalogues often return only a wire id (`gpt-5.6-sol`).
+ * Resolve either spelling, then use the catalogue spelling for the request.
  */
 function canonicalCouncilSeats(seats, idOf, key, catalogue) {
   if (!Array.isArray(catalogue) || !catalogue.length) return seats;
@@ -432,21 +474,41 @@ function canonicalCouncilSeats(seats, idOf, key, catalogue) {
 function unreachableCouncilSeatIds(seats, idOf, catalogue) {
   if (!Array.isArray(catalogue) || !catalogue.length) return [];
   const available = new Set(catalogue);
-  return seats
-    .map(idOf)
-    .map((id) => String(id || "").trim())
-    .filter((id) => {
-      const wireId = id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : id;
-      return !available.has(id) && !available.has(wireId);
+  return seats.map(idOf).map((id) => String(id || "").trim()).filter((id) => {
+    const wireId = id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : id;
+    return !available.has(id) && !available.has(wireId);
+  });
+}
+
+function gatewayModel(model, settings) {
+  const approved = primaryModelId(model);
+  if (!approved) throw new Error(`${model} is outside the approved ten-model roster.`);
+  return listedPrimaryRoute(model, settings?.availableModels ?? []) ||
+    preferredPrimaryRoute(approved, gatewayId(settings));
+}
+
+async function discoverWorkerCatalog(settings) {
+  // A saved list may belong to the gateway selected before this job. Never use
+  // it as evidence about the current credential.
+  settings.availableModels = [];
+  try {
+    const response = await fetch(`${gatewayBaseUrl(settings).replace(/\/$/, "")}/models`, {
+      headers: { authorization: `Bearer ${gatewayCredential(settings)}` },
+      signal: AbortSignal.timeout(10_000),
     });
+    if (!response.ok) return;
+    const body = await response.json();
+    const rows = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
+    settings.availableModels = primaryCatalog(rows.map(row => typeof row === "string" ? row : row?.id).filter(Boolean));
+  } catch {
+    // An unavailable catalogue is unknown, not permission to use other models.
+  }
 }
 
-function gatewayBaseUrl(settings) {
-  return settings?.gatewayBaseUrl || "https://api.tokenrouter.com/v1";
-}
-
-function retryDelayMs(status, text, attempt) {
+function retryDelayMs(status, text, attempt, retryAfter) {
   if (status !== 429) return 0;
+  const seconds = retryAfter == null ? NaN : Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds * 1000, 90_000);
   const minuteLimit = /within\s+1\s+minutes?/i.test(text);
   const explicit = /retry(?:\s|-)?after["':\s]+(\d+)/i.exec(text);
   if (explicit) return Math.min(Number(explicit[1]) * 1000, 90_000);
@@ -469,7 +531,8 @@ async function tokenRouterTurn() {
   await run;
 }
 
-async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off" }) {
+async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off", apiKey, paced = true }) {
+  if (!isPrimaryModel(model)) throw new Error(`${model} is outside the approved ten-model roster.`);
   const content = [{ type: "text", text: user }];
   for (const image of images) {
     content.push({ type: "image_url", image_url: { url: image.dataUrl } });
@@ -480,7 +543,7 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
   let timeouts = 0;
   let think = noReasoning.has(model) ? "off" : reasoning;
   for (let attempt = 0; attempt < 3; attempt++) {
-    await tokenRouterTurn();
+    if (paced) await tokenRouterTurn();
     const controller = new AbortController();
     const budget = thinkingBudget(think);
     const timeout = setTimeout(() => controller.abort(), budget);
@@ -490,7 +553,7 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
         method: "POST",
         signal: controller.signal,
         headers: {
-          authorization: `Bearer ${activeGatewayApiKey()}`,
+          authorization: `Bearer ${apiKey}`,
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -561,14 +624,15 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
       continue;
     }
 
-    const waitMs = retryDelayMs(resp.status, text, attempt);
+    const waitMs = retryDelayMs(resp.status, text, attempt, resp.headers.get("retry-after"));
     if (!waitMs || attempt === 2) break;
     await sleep(waitMs);
   }
   throw new Error(`${model}: ${last}`);
 }
 
-async function tokenRouterResponses({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off" }) {
+async function tokenRouterResponses({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off", apiKey, paced = true }) {
+  if (!isPrimaryModel(model)) throw new Error(`${model} is outside the approved ten-model roster.`);
   const content = [{ type: "input_text", text: user }];
   for (const image of images) {
     content.push({ type: "input_image", image_url: image.dataUrl });
@@ -578,7 +642,7 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
   let timeouts = 0;
   let think = noReasoning.has(model) ? "off" : reasoning;
   for (let attempt = 0; attempt < 3; attempt++) {
-    await tokenRouterTurn();
+    if (paced) await tokenRouterTurn();
     const controller = new AbortController();
     const budget = thinkingBudget(think);
     const timeout = setTimeout(() => controller.abort(), budget);
@@ -588,7 +652,7 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
         method: "POST",
         signal: controller.signal,
         headers: {
-          authorization: `Bearer ${activeGatewayApiKey()}`,
+          authorization: `Bearer ${apiKey}`,
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -636,7 +700,7 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
       continue;
     }
 
-    const waitMs = retryDelayMs(resp.status, text, attempt);
+    const waitMs = retryDelayMs(resp.status, text, attempt, resp.headers.get("retry-after"));
     if (!waitMs || attempt === 2) break;
     await sleep(waitMs);
   }
@@ -667,11 +731,13 @@ function responseText(json) {
  * configured model did nothing on the cloud path.
  */
 async function tokenRouterGenerate({ settings, ...args }) {
-  const endpoint = endpointForCouncilModel(settings?.councilModels, args.model);
+  const endpoint = gatewayId(settings) === "tokenrouter"
+    ? endpointForCouncilModel(settings?.councilModels, args.model) : "chat";
   // Decided here rather than at six call sites, so no phase can quietly forget
   // to ask a model to think.
   const reasoning = reasoningForModel(settings, args.model);
-  const withThinking = { ...args, reasoning };
+  const withThinking = { ...args, model: gatewayModel(args.model, settings),
+    apiKey: gatewayCredential(settings), paced: gatewayId(settings) !== "cleanapis", reasoning };
   return endpoint === "responses"
     ? tokenRouterResponses(withThinking)
     : tokenRouterChat(withThinking);
@@ -716,115 +782,14 @@ function clampOutput(raw) {
   };
 }
 
-function isCommonJs(code) {
-  const stripped = code
-    .split("\n")
-    .map((line) => line.split("//")[0] || "")
-    .join("\n");
-  if (/\bimport\s|\bexport\s|import\(/.test(stripped)) return false;
-  return /require\(|module\.exports|exports\.|__dirname|__filename/.test(stripped);
-}
-
-const JAVA_COMMAND =
-  "sed -E '/^public[[:space:]]+class[[:space:]]+Main\\b/!s/^public[[:space:]]+(class|interface|enum|record)[[:space:]]+/\\1 /' Main.java > _M.java && mv _M.java Main.java && javac Main.java && java Main";
-
-function runtimeFor(language, code) {
-  // Same normaliser the suites and the candidates go through, so a fence
-  // labelled ```c++17 lands on the C++ row instead of falling off the table.
-  const lang = normalizeCodeLanguage(language);
-  if (["python", "python3", "py", "py3"].includes(lang)) return { file: "main.py", command: "python3 main.py", runtime: "python3" };
-  if (["javascript", "js", "node", "nodejs", "mjs", "cjs"].includes(lang)) {
-    if (isCommonJs(code)) return { file: "main.cjs", command: "node main.cjs", runtime: "node (commonjs)" };
-    return { file: "main.mjs", command: "node main.mjs", runtime: "node (esm)" };
-  }
-  if (["typescript", "ts"].includes(lang)) return { file: "main.ts", command: "node --experimental-strip-types main.ts", runtime: "node (type stripping)" };
-  if (["bash", "sh", "shell", "zsh", "console"].includes(lang)) return { file: "main.sh", command: "bash main.sh", runtime: "bash" };
-  if (["ruby", "rb"].includes(lang)) return { file: "main.rb", command: "ruby main.rb", runtime: "ruby" };
-  if (lang === "php") return { file: "main.php", command: "php main.php", runtime: "php" };
-  if (lang === "c") return { file: "main.c", command: "cc -std=c17 -O1 main.c -o prog -lm && ./prog", runtime: "cc" };
-  if (["cpp", "c++", "cc", "cxx"].includes(lang)) return { file: "main.cpp", command: "c++ -std=c++20 -O1 main.cpp -o prog && ./prog", runtime: "c++" };
-  if (lang === "java") {
-    // `java Main.java` is single-file source mode: it runs the FIRST class in
-    // the file, so a harness with the candidate's `Solution` spliced above its
-    // own `Main` dies with "can't find main(String[]) method in class: Solution"
-    // having never executed a line. That is exactly what killed Candidate A.
-    // Compiling first and naming the entry class makes the order irrelevant.
-    // The sed drops `public` from every top-level type except Main, because a
-    // second public class in one file is a compile error and `public class
-    // Solution` is the habit every LeetCode answer is written with.
-    return { file: "Main.java", command: JAVA_COMMAND, runtime: "javac + java" };
-  }
-  if (["go", "golang"].includes(lang)) return { file: "main.go", command: "go run main.go", runtime: "go" };
-  if (["rust", "rs"].includes(lang)) return { file: "main.rs", command: "rustc -O main.rs -o prog 2>&1 && ./prog", runtime: "rustc" };
-  return null;
-}
-
-async function runLocalCode(language, code, timeoutMs = LOCAL_RUN_TIMEOUT_MS) {
-  const runtime = runtimeFor(language, code);
-  if (!runtime) throw new Error(`Unsupported benchmark language: ${language || "unknown"}`);
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "council-editor-worker-"));
-  const started = Date.now();
-  let timedOut = false;
-  try {
-    await fs.writeFile(path.join(dir, runtime.file), code, "utf8");
-    const child = spawn("bash", ["-lc", runtime.command], {
-      cwd: dir,
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: process.platform !== "win32",
-    });
-    // The local mode is explicit, but hostile programs can still flood the
-    // worker's output pipes. Keep draining while bounding retained bytes.
-    let stdout = "";
-    let stderr = "";
-    let outputTruncated = false;
-    const keep = (previous, chunk) => {
-      const remaining = 65_536 - Buffer.byteLength(previous, "utf8");
-      if (remaining <= 0) {
-        outputTruncated = true;
-        return previous;
-      }
-      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      if (bytes.length > remaining) outputTruncated = true;
-      return previous + bytes.subarray(0, remaining).toString("utf8");
-    };
-    child.stdout.on("data", (chunk) => { stdout = keep(stdout, chunk); });
-    child.stderr.on("data", (chunk) => { stderr = keep(stderr, chunk); });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try {
-        if (process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
-        else child.kill("SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
-    }, Math.max(1000, Math.min(timeoutMs, 60_000)));
-    const exitCode = await new Promise((resolve, reject) => {
-      child.on("error", reject);
-      child.on("close", (code) => resolve(code));
-    }).finally(() => clearTimeout(timer));
-    const out = clampOutput(stdout);
-    const err = clampOutput(stderr);
-    return {
-      ok: exitCode === 0 && !timedOut,
-      runtime: runtime.runtime,
-      exitCode,
-      stdout: out.text,
-      stderr: err.text,
-      durationMs: Date.now() - started,
-      timedOut,
-      truncated: outputTruncated || out.truncated || err.truncated,
-    };
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
-  }
-}
 
 function shellSingle(s) {
   return `'${String(s).replaceAll("'", `'"'"'`)}'`;
 }
 
-function remoteScript(language, code, providerLabel = "remote") {
+export function remoteScript(language, code, providerLabel = "remote", stdin = "") {
   const encoded = Buffer.from(code, "utf8").toString("base64");
+  const encodedStdin = Buffer.from(stdin, "utf8").toString("base64");
   return `set -u
 tmp="$(mktemp -d "\${TMPDIR:-/tmp}/council-editor-bench.XXXXXX")" || exit 98
 cleanup() { rm -rf "$tmp"; }
@@ -839,6 +804,10 @@ cat > code.b64 <<'CA_CODE'
 ${encoded}
 CA_CODE
 base64 -d code.b64 > code.txt
+cat > stdin.b64 <<'CA_STDIN'
+${encodedStdin}
+CA_STDIN
+base64 -d stdin.b64 > stdin.txt
 lang=${shellSingle(language)}
 lang="$(printf '%s' "$lang" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')"
 # Fourth and last copy of the language table. Same standard-stripping as the
@@ -846,7 +815,6 @@ lang="$(printf '%s' "$lang" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')"
 # so a c++17 fence compiles here too instead of exiting 97 unrun.
 case "$lang" in
   c++*|cpp*|cxx*) lang=cpp ;;
-  c[0-9][0-9]) lang=c ;;
   python3.*) lang=python3 ;;
   node[0-9]*|es[0-9][0-9][0-9][0-9]) lang=javascript ;;
 esac
@@ -858,23 +826,22 @@ case "$lang" in
   bash|sh|shell) file=main.sh; cp code.txt "$file"; command='bash main.sh'; runtime='${providerLabel} bash' ;;
   ruby|rb) file=main.rb; cp code.txt "$file"; command='ruby main.rb'; runtime='${providerLabel} ruby' ;;
   php) file=main.php; cp code.txt "$file"; command='php main.php'; runtime='${providerLabel} php' ;;
-  c) file=main.c; cp code.txt "$file"; command='cc -std=c17 -O2 main.c -o prog -lm && ./prog'; runtime='${providerLabel} cc -O2' ;;
   cpp|c++|cc|cxx) file=main.cpp; cp code.txt "$file"; command='c++ -std=c++20 -O2 main.cpp -o prog && ./prog'; runtime='${providerLabel} c++ -O2' ;;
-  java) file=Main.java; cp code.txt "$file"; command="${JAVA_COMMAND}"; runtime='${providerLabel} javac + java' ;;
+  java) file=Main.java; cp code.txt "$file"; command='javac Main.java && java Main'; runtime='${providerLabel} javac + java' ;;
   go|golang) file=main.go; cp code.txt "$file"; command='go run main.go'; runtime='${providerLabel} go' ;;
   rust|rs) file=main.rs; cp code.txt "$file"; command='rustc -O main.rs -o prog 2>&1 && ./prog'; runtime='${providerLabel} rustc -O' ;;
   *) echo "Unsupported remote benchmark language: $lang" >&2; exit 97 ;;
 esac
 status=0
 if command -v /usr/bin/time >/dev/null 2>&1; then
-  /usr/bin/time -f 'CA_METRICS elapsed_s=%e maxrss_kb=%M' bash -lc "$command" >stdout.txt 2>stderr.txt || status=$?
+  /usr/bin/time -f 'CA_METRICS elapsed_s=%e maxrss_kb=%M' bash -lc "$command" <stdin.txt >stdout.txt 2>stderr.txt || status=$?
 else
   start="$(python3 - <<'PY'
 import time
 print(int(time.time() * 1000))
 PY
 )"
-  bash -lc "$command" >stdout.txt 2>stderr.txt || status=$?
+  bash -lc "$command" <stdin.txt >stdout.txt 2>stderr.txt || status=$?
   finish="$(python3 - <<'PY'
 import time
 print(int(time.time() * 1000))
@@ -891,28 +858,8 @@ exit "$status"
 `;
 }
 
-/**
- * Optional second-pass benchmark evidence after E2B/local generated tests.
- * E2B is the default execution gate; Actions is heavier, reproducible evidence
- * for passing candidates only.
- */
-/**
- * Where the *extra* remote measurement comes from, on top of the run that gates.
- *
- * This used to default to Actions whenever a repo was configured, so a candidate
- * was executed twice for one answer: once in the E2B sandbox to decide whether
- * it passes, and again on a GitHub runner to time it. E2B already reports
- * elapsed time and peak resident set — it runs the same metrics script — so the
- * second run bought a slightly different number at the cost of a dispatch, a
- * poll and an artifact download per candidate.
- *
- * The default is now "off": whatever ran the code is what measured it. Choosing
- * "actions" is an explicit decision to have GitHub do the measuring, for when a
- * neutral machine matters more than the minutes.
- */
-export function resolveBenchmarkBackend(settings = {}, env = process.env) {
-  const explicit = String(settings.benchmarkBackend || "").trim().toLowerCase();
-  if (explicit === "actions") return repoFor(env) ? "actions" : "off";
+/** E2B is the sole execution and measurement backend. */
+export function resolveBenchmarkBackend() {
   return "off";
 }
 
@@ -929,6 +876,7 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
   const bootStarted = Date.now();
   const template = String(process.env.CODE_AUDITOR_E2B_TEMPLATE || "").trim();
   const opts = {
+    apiKey: secret("E2B_API_KEY"),
     timeoutMs: Math.max(policy.timeoutMs + 30_000, 90_000),
     // E2B microVM egress is denied unless a future explicitly approved
     // network policy is implemented and tested.
@@ -948,7 +896,7 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
     async () => {
     let result;
     try {
-      result = await sandbox.commands.run(`bash -lc ${shellSingle(remoteScript(language, code, "e2b"))}`, {
+      result = await sandbox.commands.run(`bash -lc ${shellSingle(remoteScript(language, code, "e2b", options.stdin || ""))}`, {
         timeoutMs: policy.timeoutMs,
       });
     } catch (err) {
@@ -992,8 +940,7 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
 }
 
 function executionProvider(settings) {
-  // Never silently run untrusted generated code on the host when E2B is
-  // unavailable. The local runner is an explicit operator-only selection.
+  // Legacy saved settings may still say local. Fail closed to E2B only.
   const selected = String(
     settings.executionProvider ||
       process.env.CODE_AUDITOR_EXECUTION_PROVIDER ||
@@ -1002,18 +949,30 @@ function executionProvider(settings) {
   if (selected !== "e2b" && selected !== "local") {
     throw new Error(`Unsupported execution provider: ${selected}`);
   }
-  return selected;
+  return "e2b";
 }
 
 async function runVerification(settings, suite, program, options = {}) {
   const provider = executionProvider(settings);
-  if (provider === "e2b") {
-    if (!secret("E2B_API_KEY")) {
-      throw new Error("No E2B key is saved for the account that owns this job.");
-    }
-    return runE2BCode(suite.language, program, Number(settings.e2bTimeoutMs || REMOTE_RUN_TIMEOUT_MS), options);
+  if (process.env.NODE_ENV === "test" && typeof globalThis.__COUNCIL_E2B_TEST_DOUBLE__ === "function") {
+    return globalThis.__COUNCIL_E2B_TEST_DOUBLE__(suite.language, program, options);
   }
-  return runLocalCode(suite.language, program, LOCAL_RUN_TIMEOUT_MS);
+  if (provider !== "e2b" || !secret("E2B_API_KEY")) {
+    throw new Error("No E2B key is saved for the account that owns this job.");
+  }
+  const timeoutMs = Number(settings.e2bTimeoutMs || REMOTE_RUN_TIMEOUT_MS);
+  let last;
+  for (let attempt = 1; attempt <= E2B_TIMEOUT_ATTEMPTS; attempt += 1) {
+    try {
+      const result = await runE2BCode(suite.language, program, timeoutMs, options);
+      if (!result.timedOut || attempt === E2B_TIMEOUT_ATTEMPTS) return result;
+      last = new Error(`E2B execution timed out (attempt ${attempt})`);
+    } catch (error) {
+      if (!/timed out|timeout|deadline_exceeded|unavailable/i.test(String(error)) || attempt === E2B_TIMEOUT_ATTEMPTS) throw error;
+      last = error;
+    }
+  }
+  throw last || new Error("E2B execution timed out");
 }
 
 /**
@@ -1032,24 +991,26 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
   const revised = Boolean(opts.revised);
   const tag = revised ? " (revised)" : "";
   const runs = {};
-  for (const candidate of candidates) {
-    if (revised && !candidate.revised) continue;
+  const selected = candidates.filter(candidate => !revised || candidate.revised);
+  const limit = workerConcurrency(process.env.CODE_AUDITOR_E2B_CONCURRENCY, 4, 9);
+  const startedAt = Date.now();
+  await parallelMap(selected, limit, async (candidate) => {
     const final = revised ? (candidate.revised ?? null) : candidate.final;
     const lang = final?.kind === "code" ? candidateLanguage(final) : "";
     const suite = suites.find((s) => s.language === lang);
     const code = final?.code || "";
     if (!final || final.kind !== "code" || !code.trim()) {
       runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: final?.kind === "research" ? "research answer" : "no code", runtime: "" };
-      continue;
+      return;
     }
     if (!suite) {
       runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: `no suite for ${lang || "unknown language"}`, runtime: "" };
-      continue;
+      return;
     }
     const program = spliceSuite(suite, code);
     if (!program) {
       runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: "harness has no splice marker", runtime: "" };
-      continue;
+      return;
     }
     const id = executionId();
     await addEvent(job.id, "info", "execution_queued",
@@ -1118,10 +1079,8 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
       // A program that never started did not fail its tests — the harness did.
       // Naming it distinctly keeps a build problem out of the evidence the
       // judges weigh, where it would read as "this candidate is wrong".
-      const brokenHarness =
-        /could not find or load main class|error: cannot find symbol|no such file or directory|command not found|compilation failed|error: expected/i.test(
-          diagnostic
-        );
+      const brokenHarness = harnessPreflightDiagnostics(suite.language,suite.harness).length>0;
+      const compileIssue = /could not find or load main class|cannot find symbol|no such file or directory|command not found|compilation failed|error: expected|traceback \(most recent call last\)|nameerror:|syntaxerror:|typeerror:/i.test(diagnostic);
       runs[candidate.letter] = {
         letter: candidate.letter,
         ran: true,
@@ -1132,7 +1091,8 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
         note: local.timedOut
           ? "timed out"
           : brokenHarness
-            ? "the generated harness did not build or start"
+            ? "generated harness failed static preflight"
+            : compileIssue ? "candidate/harness integration or compilation failed; inspect stderr"
             : local.exitCode !== 0
               ? `exit ${local.exitCode}`
               : "",
@@ -1161,9 +1121,14 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
       runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: message, runtime: "" };
       await addEvent(job.id, "warn", "benchmark_failed", `Candidate ${candidate.letter}${tag} benchmark failed: ${message}`, runs[candidate.letter]);
     }
-  }
-
-  return runs;
+  });
+  const elapsedMs = Date.now() - startedAt;
+  await addEvent(job.id, "info", "execution_field_timing",
+    `Completed ${selected.length} ${revised ? "revised" : "original"} candidate execution(s) in ${elapsedMs}ms (concurrency limit ${limit}).`,
+    { elapsedMs, candidates: selected.length, concurrency: limit, revised });
+  // Preserve original candidate letter order despite out-of-order completions.
+  return Object.fromEntries(selected.filter(c => Object.hasOwn(runs, c.letter))
+    .map(c => [c.letter, runs[c.letter]]));
 }
 
 /**
@@ -1220,12 +1185,12 @@ async function runMutationOracle(job, settings, suites, candidates, runs) {
 
 async function benchmarkCandidates(job, settings, baseUrl, models, judges, question, candidates, knowledge = "", bench) {
   const codeCandidates = candidates.filter((c) => c.final?.kind === "code" && c.final.code?.trim());
-  if (codeCandidates.length < 2) {
+  if (!codeCandidates.length) {
     await addEvent(
       job.id,
       "info",
       "benchmark_skipped",
-      "Fewer than two runnable code candidates; MCQ, math, research and plain-answer jobs use Council reasoning validation instead of code execution."
+      "No runnable code candidate; MCQ, math, research and plain-answer jobs use Council reasoning validation instead of code execution."
     );
     return { suites: [], runs: {}, oracles: [] };
   }
@@ -1233,41 +1198,103 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   await patchJob(job.id, { progress_phase: "speccing" });
   await addEvent(job.id, "info", "speccing", "Generating language-specific benchmark harnesses.");
   const languages = Array.from(new Set(codeCandidates.map((c) => candidateLanguage(c.final)).filter(Boolean)));
-  // A benched route would spend the whole timeout again on the one call the
-  // benchmark phase cannot proceed without.
-  const specModel = [settings.synthesisModel, judges[0]?.model, ...models.map((m) => m.id)].find(
-    (candidate) => candidate && !bench.has(candidate)
-  );
-  if (!specModel) {
-    await addEvent(job.id, "warn", "spec_failed", "Every model is benched, so no benchmark harness could be generated.");
-    return { suites: [], runs: {}, oracles: [] };
-  }
-  let suites = [];
-  try {
-    const specText = await tokenRouterGenerate({
-      settings,
-      baseUrl,
-      model: specModel,
-      system: testSpecSystemPrompt(),
-      user: testSpecUserPrompt({
-        question,
-        docket: candidateDocket(candidates),
-        languages,
-        knowledge: knowledge || settings.knowledgeDigest || "",
+  const specModels = [...new Set([
+    settings.synthesisModel, ...judges.map(judge => judge.model), ...models.map(model => model.id),
+  ].filter(Boolean))];
+  const specStartedAt = Date.now();
+  const failures = new Map();
+  // Database packs are checksum validated; verified bundled packs remain an offline fallback.
+  const languagePacks = await Promise.all(languages.map(language => loadLanguagePack(language, {
+    // The Supabase RPC queries an external Neon foreign table; it never
+    // stores Markdown in Supabase. Neon Data API currently requires JWT
+    // even for anonymous readers, so prefer the authenticated FDW path.
+    // If the user mapping is not configured, keep the trusted bundled fallback.
+    fetchRows: id => fetchLanguageViaGateway(id,{
+      queryGateway: language => rest("rpc/fetch_council_language_pack",{
+        method:"POST",body:JSON.stringify({p_language:language}),
       }),
-      maxTokens: Number(settings.maxTokens || 4096),
-    });
-    suites = parseTestSuites(specText);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await bench.note(specModel, err, "speccing");
-    await addEvent(job.id, "warn", "spec_failed", `Benchmark spec generation failed: ${message}`);
-    return { suites: [], runs: {}, oracles: [] };
-  }
-
-  if (!suites.length) {
-    await addEvent(job.id, "warn", "benchmark_skipped", "The benchmark spec did not contain any runnable harnesses.");
-    return { suites, runs: {}, oracles: [] };
+      fallback: language => fetchExternalLanguageRows(language,{
+        registryDirectory:languageDirectory,
+      }),
+    }),
+  })));
+  const packsByLanguage = new Map(languagePacks.map(pack => [pack.language,pack]));
+  await addEvent(job.id,"info","language_packs_ready",
+    `Loaded ${languagePacks.length} language-specific guides.`,
+    {languages:languagePacks.map(pack=>({language:pack.language,source:pack.source,database:pack.databaseId??null,checksum:pack.checksum.slice(0,12)}))});
+  // Independent languages run concurrently; within-language retry remains bounded and serial.
+  const suitesByLanguage = await parallelMap(languages,
+    workerConcurrency(process.env.CODE_AUDITOR_HARNESS_CONCURRENCY, 3, 4),
+    async (language) => {
+    const pack = packsByLanguage.get(language);
+    let lastError = "";
+    // The model gets the contract for this language only. Giving it every
+    // language's syntax rules is noise and was one source of cross-language
+    // harness mistakes; runtime execution below remains the final check.
+    const languageKnowledge = [
+      knowledge || settings.knowledgeDigest || "",
+      runtimeGuidanceFor(language),
+      languagePrompt(pack),
+    ].filter(Boolean).join("\n\n");
+    for (const model of specModels.filter(candidate => !bench.has(candidate)).slice(0, 3)) {
+      try {
+        const specText = await tokenRouterGenerate({
+          settings, baseUrl, model, system: testSpecSystemPrompt(),
+          user: testSpecUserPrompt({
+            question, docket: candidateDocket(candidates), languages: [language],
+            knowledge: [
+              languageKnowledge,
+              lastError ? `THE PRIOR HARNESS WAS REJECTED: ${lastError.slice(0, 650)}. Repair only the harness.` : "",
+            ].filter(Boolean).join("\n\n"),
+          }),
+          maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
+        });
+        const suite = parseTestSuites(specText).find(item => item.language === language);
+        if (!suite) throw new Error("No valid executable harness block parsed.");
+        // One independent reference run catches malformed harnesses *before*
+        // all candidates are tested. Successful evidence can be reused only for
+        // identical code, harness and execution environment.
+        if (suite.referenceCode) {
+          const referenceProgram=spliceSuite(suite,suite.referenceCode);
+          if (!referenceProgram) throw new Error("Reference could not be inserted.");
+          const version = pack.version + ":" + (process.env.CODE_AUDITOR_E2B_TEMPLATE || "default");
+          const key=referenceKey(language,suite.harness,suite.referenceCode,version);
+          if (!isReferenceValidated(key)) {
+            const outcome=await runVerification(settings,suite,referenceProgram);
+            const cases=countCases(outcome.stdout);
+            if (!outcome.ok || cases.failed!==0 || cases.passed<2)
+              throw new Error(`Reference self-test failed: ${cases.passed} passed and ${cases.failed} failed; ${String(outcome.stderr||outcome.stdout||"no diagnostics").slice(0,600)}`);
+            markReferenceValidated(key);
+          }
+          await addEvent(job.id,"info","harness_preflight_pass",
+            `${language}: independent reference passed E2B.`,
+            {language,checksum:key.slice(0,12)});
+        } else {
+          await addEvent(job.id,"warn","harness_reference_missing",
+            `${language} harness has no independent reference; candidate tests and mutation oracle remain required.`,{language});
+        }
+        return suite;
+      } catch (err) {
+        lastError=err instanceof Error?err.message:String(err);
+        // A failed E2B account, network or sandbox is not an invalid harness.
+        // Do not spend two more provider generations on an infrastructure fault.
+        if (/No E2B key|E2B_API_KEY|quota|rate limit|sandbox unavailable|ECONNREFUSED|ETIMEDOUT|deadline_exceeded/i.test(lastError))
+          throw err;
+        failures.set(language,`${model}: ${lastError}`);
+        await bench.note(model,err,"speccing");
+        await addEvent(job.id,"warn","spec_retry",
+          `${model} generated an invalid ${language} harness: ${lastError}`);
+      }
+    }
+    return null;
+  });
+  const suites = suitesByLanguage.filter(Boolean);
+  await addEvent(job.id, "info", "harness_generation_timing",
+    `Generated ${suites.length}/${languages.length} language harness(es) in ${Date.now() - specStartedAt}ms.`,
+    { elapsedMs: Date.now() - specStartedAt, languages: languages.length, generated: suites.length });
+  const missing = missingSuiteLanguages(languages, suites);
+  if (missing.length) {
+    throw new Error(`Cannot verify coding solution in E2B: no executable ${missing.join(", ")} test harness was produced. ${missing.map(language=>failures.get(language)).filter(Boolean).join(" | ")}`);
   }
 
   await patchJob(job.id, { progress_phase: "verifying" });
@@ -1533,7 +1560,7 @@ async function selectKnowledge(job, settings, { candidates = [], reading = null,
 
   const limit = Math.max(1, Number(settings.knowledgeLimit || 5));
   const library = await libraryFor(settings);
-  const pack = knowledgePackFor(query, limit, library.records);
+  const pack = knowledgePackFor(query, limit, library.records, true);
   await addEvent(
     job.id,
     pack.trim() ? "info" : "warn",
@@ -1751,19 +1778,22 @@ function mcqUserPrompt({ readingText, knowledge, detection, model }) {
 }
 
 function mcqEndpointFor(settings, model) {
+  if (gatewayId(settings) !== "tokenrouter") return "chat";
   if (settings?.mcqEndpoint === "chat" || settings?.mcqEndpoint === "responses") return settings.mcqEndpoint;
   return endpointForCouncilModel(settings?.councilModels, model);
 }
 
 async function mcqGenerate({ settings, baseUrl, model, system, user, images = [], maxTokens = 2048 }) {
-  const args = { baseUrl, model, system, user, images, maxTokens, reasoning: reasoningForModel(settings, model) };
+  const args = { baseUrl, model: gatewayModel(model, settings), system, user, images, maxTokens,
+    apiKey: gatewayCredential(settings), paced: gatewayId(settings) !== "cleanapis",
+    reasoning: reasoningForModel(settings, model) };
   return mcqEndpointFor(settings, model) === "responses"
     ? tokenRouterResponses(args)
     : tokenRouterChat(args);
 }
 
 function mcqModel(settings, models) {
-  const preferred = String(settings?.mcqModel || "anthropic/claude-fable-5").trim();
+  const preferred = String(settings?.mcqModel || "anthropic/claude-fable-5.1").trim();
   const available = canonicalCouncilSeats([{ id: preferred }], (m) => m?.id, "id", settings?.availableModels);
   if (available.length) return available[0].id;
   return models[0]?.id || preferred;
@@ -1774,17 +1804,16 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
   await notify(job.id, APP_DISPLAY_NAME, "MCQ job started.");
   await addEvent(job.id, "info", "mcq", "MCQ overlay workflow selected.");
   await loadOwnerSecrets(job.owner_id);
-  const settings = job.settings_snapshot || {};
-  const credential = selectGatewayCredential(settings);
-  if (!credential.value) {
-    const label = credential.gatewayId === "cleanapis" ? "Clean API" : credential.gatewayId === "wiro" ? "Wiro" : "TokenRouter";
-    const message = `No ${label} key is saved for the account that owns this job.`;
+  const settings = { ...(job.settings_snapshot || {}) };
+  if (!gatewayCredential(settings)) {
+    const message = `No ${gatewayId(settings)} key is saved for the account that owns this job.`;
     await addEvent(job.id, "error", "needs_attention", message);
     await patchJob(job.id, { status: "needs_attention", progress_phase: "needs_attention", error: message, finished_at: new Date().toISOString() });
     return;
   }
 
   const baseUrl = gatewayBaseUrl(settings);
+  await discoverWorkerCatalog(settings);
   const roster = Array.isArray(settings.councilModels) && settings.councilModels.length
     ? settings.councilModels
     : COUNCIL_DEFAULT_MODELS;
@@ -1986,28 +2015,27 @@ export async function runCouncilJob(job) {
 
   // Whose job is this, and therefore whose keys pay for it.
   await loadOwnerSecrets(job.owner_id);
-  const settings = job.settings_snapshot || {};
-  const credential = selectGatewayCredential(settings);
-  const gatewayLabel = credential.gatewayId === "cleanapis" ? "Clean API" : credential.gatewayId === "wiro" ? "Wiro" : "TokenRouter";
+  const settings = { ...(job.settings_snapshot || {}) };
 
-  if (!credential.value) {
+  if (!gatewayCredential(settings)) {
+    const message = `No ${gatewayId(settings)} key is saved for the account that owns this job.`;
     await addEvent(
       job.id,
       "error",
       "needs_attention",
-      `No ${gatewayLabel} key is saved for the account that owns this job.`
+      message
     );
     await patchJob(job.id, {
       status: "needs_attention",
       progress_phase: "needs_attention",
-      error: `No ${gatewayLabel} key is saved for the account that owns this job.`,
+      error: message,
       finished_at: new Date().toISOString(),
     });
-    await notify(job.id, APP_DISPLAY_NAME, `Council job needs ${gatewayLabel} configuration.`);
+    await notify(job.id, APP_DISPLAY_NAME, `Council job needs ${gatewayId(settings)} configuration.`);
     await notifyOps({
       level: "warn",
       title: "Council job needs attention",
-      body: `No ${gatewayLabel} key is saved for the account that owns this job.`,
+      body: message,
       jobId: job.id,
       phase: "needs_attention",
     }).catch(() => {});
@@ -2015,6 +2043,7 @@ export async function runCouncilJob(job) {
   }
 
   const baseUrl = gatewayBaseUrl(settings);
+  await discoverWorkerCatalog(settings);
   const models = chatModels(settings);
   const judges = chatJudges(settings);
 
@@ -2026,13 +2055,11 @@ export async function runCouncilJob(job) {
   const missing = [
     ...unreachableCouncilSeatIds(
       Array.isArray(settings.councilModels) ? settings.councilModels : COUNCIL_DEFAULT_MODELS,
-      (m) => m?.id,
-      settings.availableModels
+      (m) => m?.id, settings.availableModels
     ),
     ...unreachableCouncilSeatIds(
       Array.isArray(settings.councilJudges) ? settings.councilJudges : COUNCIL_DEFAULT_JUDGES,
-      (j) => j?.model,
-      settings.availableModels
+      (j) => j?.model, settings.availableModels
     ),
   ];
   if (missing.length) {
@@ -2169,10 +2196,6 @@ export async function runCouncilJob(job) {
     : { extraction: null, context: "", markdown: "", readers: [], agreement: null };
 
   const overlayReadingText = [reading.context, reading.markdown].filter(Boolean).join("\n\n");
-  // A multi-capture coding batch often contains numbered lines and snippets
-  // that resemble answer choices. Auto-routing is deliberately conservative:
-  // a real multi-page MCQ can still use explicit MCQ mode, while a coding run
-  // with several screenshots remains a Council job.
   if (settings.overlayMode === "auto" && images.length === 1 && overlayReadingText && detectMcq(overlayReadingText).isMcq) {
     await addEvent(job.id, "info", "mcq_detected", "Auto overlay mode detected multiple-choice answer options.");
     await runMcqJob({ ...job, settings_snapshot: settings, mode: "mcq" }, { images, reading, bench });
@@ -2213,6 +2236,8 @@ export async function runCouncilJob(job) {
   // Everything the desktop path sends, which until now none of was sent: the
   // reading of the picture, the knowledge selected for this question, a real
   // manifest, and the house preference for what to write it in.
+  const timer = phaseTimer();
+  timer.enter("contract");
   const policy = solutionPolicy(
     Array.isArray(settings.solutionLanguages) && settings.solutionLanguages.length
       ? settings.solutionLanguages
@@ -2294,6 +2319,7 @@ export async function runCouncilJob(job) {
   const solverSystem = systemPrompt(settings.mode || "auto", answerLanguage);
   const candidates = [];
 
+  timer.enter("solving");
   await bench.announce("solving", models.filter((m) => bench.has(m.id)).map((m) => m.id));
   await addEvent(
     job.id,
@@ -2397,6 +2423,7 @@ export async function runCouncilJob(job) {
     knowledge = await selectKnowledge(job, settings, { candidates: field, reading });
   }
 
+  timer.enter("benchmark");
   const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field, knowledge, bench);
   const docket = candidateDocket(field);
   // An execution backend that is down makes every candidate "untested", which
@@ -2406,6 +2433,12 @@ export async function runCouncilJob(job) {
   const infraFailures = attempted.filter((r) =>
     /sandbox|e2b|timed out|econn|network|unauthor|api key|rate limit/i.test(String(r.note))
   );
+  const codeRuns = field.filter((candidate) => candidate.final?.kind === "code" && candidate.final.code?.trim())
+    .map((candidate) => benchmark.runs[candidate.letter]).filter(Boolean);
+  if (benchmark.suites.length && codeRuns.length && codeRuns.every((run) => !run.ran)) {
+    const firstRunnerError = codeRuns.find((run) => run.note)?.note || "unknown runner failure";
+    throw new Error(`E2B could not execute any candidate; no solution was tested. First runner error: ${firstRunnerError}`);
+  }
   if (benchmark.suites.length && infraFailures.length && infraFailures.length === attempted.length) {
     await addEvent(
       job.id,
@@ -2437,6 +2470,7 @@ export async function runCouncilJob(job) {
     await addEvent(job.id, "warn", "benchmark_pending", execution);
   }
 
+  timer.enter("reviewing");
   await patchJob(job.id, { progress_phase: "reviewing" });
 
   const reviewSets = [];
@@ -2485,18 +2519,23 @@ export async function runCouncilJob(job) {
   // re-answering a question already answered.
   let field3 = field;
   let revisedRuns = {};
-  const hasReviews = reviewSets.some((set) => set.reviews.length > 0);
-  // Failed executions trigger one bounded repair round even with no peer
-  // critique. The corrected program is retested by the same E2B gate.
-  const failedCandidates = field.filter((c) => requiresRepair(benchmark.runs[c.letter]));
-  if (hasReviews || failedCandidates.length > 0) {
+  const revisionCandidates = field.filter((candidate) =>
+    needsCandidateRevision(benchmark.runs[candidate.letter], reviewsOf(reviewSets, candidate.letter))
+  );
+  // Reviews still reach every judge and the final synthesis. Only candidates
+  // with execution failure or a substantive correctness concern incur a second
+  // generation and sandbox pass.
+  if (revisionCandidates.length > 0) {
+    timer.enter("revising");
     await patchJob(job.id, { progress_phase: "revising" });
     const revising = bench.keep(
-      field.filter((c) => (c.final || c.text) && (hasReviews || requiresRepair(benchmark.runs[c.letter]))),
+      revisionCandidates.filter((candidate) => candidate.final || candidate.text),
       (c) => c.model
     );
     await bench.announce("revising", field.filter((c) => bench.has(c.model)).map((c) => c.model));
-    await addEvent(job.id, "info", "revising", `Asking ${revising.length} solver(s) to revise after review.`);
+    await addEvent(job.id, "info", "revising", `Asking ${revising.length} solver(s) to repair execution failures or substantive review concerns.`, {
+      letters: revising.map(candidate => candidate.letter),
+    });
     const revisions = new Map();
     await Promise.all(
       revising.map(async (candidate) => {
@@ -2558,6 +2597,7 @@ export async function runCouncilJob(job) {
     });
 
     if (benchmark.suites.length && field3.some((c) => c.revised)) {
+  timer.enter("reverifying");
       await patchJob(job.id, { progress_phase: "reverifying" });
       await addEvent(job.id, "info", "reverifying", "Re-running the revised field against the same harnesses.");
       revisedRuns = await executeField(job, settings, benchmark.suites, field3, { revised: true });
@@ -2593,6 +2633,7 @@ export async function runCouncilJob(job) {
     .filter(Boolean)
     .join("\n\n");
 
+  timer.enter("judging");
   await patchJob(job.id, { progress_phase: "judging" });
 
   const judgeReports = [];
@@ -2634,6 +2675,7 @@ export async function runCouncilJob(job) {
     })
   );
 
+  timer.enter("synthesizing");
   await patchJob(job.id, { progress_phase: "synthesizing" });
   await addEvent(job.id, "info", "synthesizing", "Synthesizing the cloud Council result.");
 
@@ -2706,6 +2748,7 @@ export async function runCouncilJob(job) {
   // panel, the helper overlay, the dossier below — reads these instead of
   // scraping markdown, so a model drifting from the report format degrades one
   // parser rather than every surface at once.
+  timer.enter("final_gate");
   const parsedSynthesis = parseCouncilSynthesis(synthesis);
   const judgeReadings = judgeReports.map((j) => ({
     model: j.model,
@@ -2724,15 +2767,18 @@ export async function runCouncilJob(job) {
   }
   const ruling = enforceWinnerGate(claimed, gateRuns);
 
-  // Scoring is counting, and counting does not need a language model. The gate
-  // decides what may win, the judges' Borda tally decides between what is left,
-  // and the synthesis narrates the result it no longer gets to choose.
+  // Scoring is deterministic: execution gates correctness, independent code
+  // audits can establish comparable Big O bounds, and measured performance
+  // breaks remaining ties. Synthesis narrates the result.
   const decision = decideWinner({
     claimed,
     judges: judgeReadings,
     runs: gateRuns,
     letters: field3.map((c) => c.letter),
   });
+  if (isCoding && (!decision.winner || gateFor(gateRuns[decision.winner]) !== "pass")) {
+    throw new Error("Council cannot publish a coding solution: no final candidate passed executable E2B test cases.");
+  }
   if (decision.disagreement) {
     await addEvent(job.id, "warn", "winner_aggregated", decision.disagreement, {
       claimedWinner: claimed,
@@ -2758,7 +2804,10 @@ export async function runCouncilJob(job) {
     });
   }
 
+  const phaseTimings=timer.snapshot();
+  await addEvent(job.id,"info","council_phase_timings","Council stage timing (milliseconds).",phaseTimings);
   const report = {
+    phaseTimings,
     candidates: field3,
     suites: benchmark.suites,
     runs: benchmark.runs,
@@ -2835,9 +2884,16 @@ export async function runCouncilJob(job) {
   }
 }
 
+let preferBenchmark = true;
 export async function tick() {
-  const queued = await nextQueuedJob();
+  const [benchmark, queued] = await Promise.all([nextQueuedBenchmark(), nextQueuedJob()]);
+  if (benchmark && (!queued || preferBenchmark)) {
+    preferBenchmark = false;
+    await runQueuedBenchmark(benchmark);
+    return true;
+  }
   if (!queued) return false;
+  preferBenchmark = true;
   const job = await claim(queued);
   if (!job) return true;
   const started = Date.now();
@@ -2880,21 +2936,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   console.log(`${APP_DISPLAY_NAME} cloud worker ${WORKER_ID} polling ${SUPABASE_URL}`);
   try {
     do {
-      try {
-        const worked = await tick();
-        if (ONCE) break;
-        if (!worked) await new Promise((resolve) => setTimeout(resolve, POLL_MS));
-      } catch (err) {
-        // A transient network failure while polling must not strand every later
-        // job. Individual job failures are recorded in tick(); this is only
-        // the worker's transport to Supabase, so wait and resume polling.
-        console.error(`${APP_DISPLAY_NAME} worker poll failed:`, err);
-        if (ONCE) {
-          process.exitCode = 1;
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, POLL_MS));
-      }
+      const worked = await tick();
+      if (ONCE) break;
+      if (!worked) await new Promise((resolve) => setTimeout(resolve, POLL_MS));
     } while (true);
   } finally {
     await closeObservability();

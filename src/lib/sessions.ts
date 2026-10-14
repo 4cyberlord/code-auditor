@@ -31,6 +31,7 @@ export interface StoredScreenshot {
   position: number;
   localPath: string | null;
   storagePath: string | null;
+  storageBucket?: string | null;
   fileName: string;
   bytes: number;
   mime: string;
@@ -238,6 +239,7 @@ export async function saveRun(args: {
   extractionAgreed: boolean | null;
   responses: ResponseIn[];
   verdict: VerdictIn | null;
+  report?: Record<string, unknown> | null;
 }): Promise<string> {
   if (!inTauri()) throw new Error(NO_SHELL);
   return invoke<string>("run_save", args);
@@ -251,6 +253,8 @@ export async function saveRun(args: {
 export interface RunSummary {
   id: string;
   sessionId: string;
+  /** Client-derived from this run's saved answer; not a database column. */
+  title?: string;
   mode: string;
   /** The note as it stood when the run was launched, not as the session reads now. */
   asked: string;
@@ -298,6 +302,7 @@ export interface RunDetail {
   run: RunSummary;
   responses: StoredResponse[];
   verdict: StoredVerdict | null;
+  report?: Record<string, unknown> | null;
 }
 
 /** Every finished run in this session, newest first. */
@@ -308,6 +313,39 @@ export async function listRuns(sessionId: string): Promise<RunSummary[]> {
 /** One run in full — every model's answer as it was stored. */
 export async function getRun(runId: string): Promise<RunDetail> {
   return invoke<RunDetail>("run_get", { runId });
+}
+
+export async function updateRunReport(runId: string, report: Record<string, unknown>): Promise<void> {
+  if (!inTauri()) throw new Error(NO_SHELL);
+  await invoke("run_report_update", { runId, report });
+}
+
+export interface BenchmarkRequest {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  result: {
+    ok: boolean;
+    exitCode: number | null;
+    stdout: string;
+    stderr: string;
+    durationMs: number;
+    remoteElapsedMs: number | null;
+    peakMemoryKb: number | null;
+    runtime: string;
+    sandboxId: string | null;
+    executionId: string;
+  } | null;
+  error: string | null;
+}
+
+export async function createBenchmark(sessionId: string, language: string, program: string, timeoutMs: number, stdin = ""): Promise<string> {
+  if (!inTauri()) throw new Error(NO_SHELL);
+  return invoke<string>("benchmark_create", { sessionId, language, program, timeoutMs, stdin });
+}
+
+export async function getBenchmark(id: string): Promise<BenchmarkRequest> {
+  if (!inTauri()) throw new Error(NO_SHELL);
+  return invoke<BenchmarkRequest>("benchmark_get", { id });
 }
 
 export async function createSolveJob(job: {

@@ -30,10 +30,12 @@
  */
 
 import type { AgentFinal } from "./parse.ts";
+import { canonicalComplexityBound, compareComplexityBounds } from "./theoryBounds.ts";
+import { isPrimaryModel, listedPrimaryRoute } from "./primaryModels.ts";
 
 // ------------------------------------------------------------------ candidates
 
-/** Candidate names. Ten solvers is the design; the alphabet past J is spare. */
+/** Candidate names. At most four independent solvers are dispatched per task. */
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 
 export const letterFor = (i: number): string => LETTERS[i] ?? `?${i}`;
@@ -168,6 +170,46 @@ export function reviewsOf(sets: ReviewSet[], letter: string): CandidateReview[] 
 export interface TestSuite {
   language: string;
   harness: string;
+  /** Independent reference supplied by a harness author for E2B self-check. */
+  referenceCode?: string;
+}
+
+/**
+ * Static checks applied before a generated suite is allowed into E2B. These
+ * are intentionally conservative: rejecting a suspicious suite causes a
+ * regeneration, while accepting one never counts as proof of correctness.
+ */
+export function harnessPreflightDiagnostics(language: string, harness: string): string[] {
+  const lang = normalizeCodeLanguage(language);
+  const text = String(harness || "");
+  const errors: string[] = [];
+  if (!text.includes(SPLICE_MARKER)) errors.push("missing solution splice marker");
+  if (text.split(SPLICE_MARKER).length !== 2) errors.push("expected exactly one splice marker");
+  if (!text.trim()) errors.push("empty harness");
+  if (lang === "java") {
+    const publicClasses=[...text.matchAll(/\bpublic\s+(?:final\s+|abstract\s+)?class\s+(\w+)/g)].map(match=>match[1]);
+    if (publicClasses.length>1 || publicClasses.some(name=>name!=="Main"))
+      errors.push("Java harness must have at most one public Main class");
+  }
+  if (lang === "go" && !/^\s*package\s+main\b/m.test(text))
+    errors.push("Go harness must use package main");
+  if (lang === "python") {
+    if (/Traceback|NameError|SyntaxError/i.test(text)) errors.push("contains Python traceback/error text");
+    // Catch the exact class of failure that escaped into production: a
+    // comprehension refers to a different variable than its iterator.
+    const comprehensions = text.matchAll(/\[[^\n\]]*\b([A-Za-z_]\w*)\s*%[^\n\]]*\s+for\s+([A-Za-z_]\w*)\s+in\s+/g);
+    for (const match of comprehensions) {
+      const referenced = match[1];
+      const iterator = match[2];
+      if (referenced !== iterator && referenced !== "range" && referenced !== "len") {
+        errors.push(`comprehension references '${referenced}' but iterates '${iterator}'`);
+      }
+    }
+  }
+  if (["cpp", "c", "java", "go", "rust"].includes(lang) && /<<<<<<<|>>>>>>>|<<<<<<< HEAD/.test(text)) {
+    errors.push("contains unresolved merge markers");
+  }
+  return [...new Set(errors)];
 }
 
 export const SPLICE_MARKER = "<<<SOLUTION>>>";
@@ -184,11 +226,23 @@ export function parseTestSuites(text: string): TestSuite[] {
   let m: RegExpExecArray | null;
   while ((m = re.exec(body))) {
     const harness = m[2].trim();
-    if (harness.includes(SPLICE_MARKER)) {
-      suites.push({ language: normalizeCodeLanguage(m[1]), harness });
+    if (harness.includes(SPLICE_MARKER) && harnessPreflightDiagnostics(m[1], harness).length === 0) {
+      const remaining=body.slice(m.index+m[0].length);
+      const nextHarness=remaining.search(/HARNESS\s*:/);
+      const section=nextHarness<0 ? remaining : remaining.slice(0,nextHarness);
+      const independent=/REFERENCE\s*:\s*[a-zA-Z0-9+#._-]+\s*\n+\s*```[^\n]*\n([\s\S]*?)```/.exec(section);
+      const referenceCode=independent?.[1]?.trim();
+      suites.push({ language: normalizeCodeLanguage(m[1]), harness, ...(referenceCode ? {referenceCode} : {}) });
     }
   }
   return suites;
+}
+
+/** A coding Council cannot claim verification until every candidate language has a harness. */
+export function missingSuiteLanguages(languages: readonly string[], suites: readonly TestSuite[]): string[] {
+  const covered = new Set(suites.map(suite => normalizeCodeLanguage(suite.language)));
+  return [...new Set(languages.map(normalizeCodeLanguage).filter(Boolean))]
+    .filter(language => !covered.has(language));
 }
 
 /**
@@ -240,8 +294,6 @@ export function normalizeCodeLanguage(raw: string): string {
   // ```c++17, ```cpp20, ```cxx2x  ->  cpp   (checked before bare C, so the
   // "++" is never mistaken for a C standard suffix)
   if (/^(?:c\+\+|cpp|cxx)(?:\d{2}|\dx|2x)?$/.test(lang)) return "cpp";
-  // ```c99, ```c11, ```c17, ```c23  ->  c
-  if (/^c(?:\d{2})?$/.test(lang) && lang !== "cc") return "c";
   // ```python3.11, ```python3  ->  python
   if (/^python3(?:\.\d+)*$/.test(lang)) return "python";
   // ```node20, ```es2022  ->  javascript
@@ -361,13 +413,30 @@ export function selectVerifiedCandidate(runs: Record<string, CandidateRun>): {
   passed.sort(([letterA, a], [letterB, b]) => {
     // More passing cases are stronger coverage evidence, not a popularity vote.
     if (a.passed !== b.passed) return b.passed - a.passed;
-    // A reliable elapsed metric can break ties, but missing data cannot win.
+    // Compare actual execution measurements, never wall-clock orchestration
+    // duration. A 0-ms sample is a timer-resolution reading, not free work.
     const elapsedA = a.remoteElapsedMs;
     const elapsedB = b.remoteElapsedMs;
     const validA = typeof elapsedA === "number" && Number.isFinite(elapsedA) && elapsedA >= 0;
     const validB = typeof elapsedB === "number" && Number.isFinite(elapsedB) && elapsedB >= 0;
+    const memoryA = a.peakMemoryKb;
+    const memoryB = b.peakMemoryKb;
+    const measuredA = typeof memoryA === "number" && Number.isFinite(memoryA) && memoryA >= 0;
+    const measuredB = typeof memoryB === "number" && Number.isFinite(memoryB) && memoryB >= 0;
+    // A candidate that is no slower and uses no more memory is strictly
+    // preferable when both measurements come from the same test coverage.
+    if (validA && validB && measuredA && measuredB) {
+      if (elapsedA <= elapsedB && memoryA <= memoryB &&
+          (elapsedA < elapsedB || memoryA < memoryB)) return -1;
+      if (elapsedB <= elapsedA && memoryB <= memoryA &&
+          (elapsedB < elapsedA || memoryB < memoryA)) return 1;
+    }
+    // For a speed/memory trade-off, prefer measured speed, then memory. The
+    // report retains both numbers so this policy remains visible to the user.
     if (validA && validB && elapsedA !== elapsedB) return elapsedA - elapsedB;
     if (validA !== validB) return validA ? -1 : 1;
+    if (measuredA && measuredB && memoryA !== memoryB) return memoryA - memoryB;
+    if (measuredA !== measuredB) return measuredA ? -1 : 1;
     return letterA.localeCompare(letterB);
   });
   return {
@@ -605,15 +674,15 @@ export const COUNCIL_DEFAULT_MODELS: CouncilModelSpec[] = [
   { id: "moonshotai/kimi-k3", endpoint: "chat" },
   { id: "z-ai/glm-5.3", endpoint: "chat" },
   { id: "x-ai/grok-4.6", endpoint: "chat" },
-  { id: "google/gemini-3.7-flash", endpoint: "chat" },
+  { id: "qwen/qwen3.8-max", endpoint: "chat" },
 ];
 
 export const COUNCIL_DEFAULT_JUDGES: JudgeSeat[] = [
   { model: "openai/gpt-5.6-sol", emphasis: "performance" },
-  { model: "anthropic/claude-opus-5", emphasis: "security" },
+  { model: "anthropic/claude-opus-5.5", emphasis: "security" },
 ];
 
-export const COUNCIL_SIZE = { solversMin: 2, solversMax: 10, judgesMin: 1, judgesMax: 7 } as const;
+export const COUNCIL_SIZE = { solversMin: 2, solversMax: 4, judgesMin: 1, judgesMax: 7 } as const;
 
 /**
  * Gateway models that speak `/responses` rather than `/chat/completions`.
@@ -624,7 +693,7 @@ export const COUNCIL_SIZE = { solversMin: 2, solversMax: 10, judgesMin: 1, judge
  * wrong wire by the other, and that failure looks like a model refusing rather
  * than a router misdialling. One copy, in the file both sides already import.
  */
-export const RESPONSES_MODELS = new Set(["openai/gpt-5.3-codex", "openai/gpt-5.6-sol"]);
+export const RESPONSES_MODELS = new Set(["openai/gpt-5.6-sol"]);
 
 /**
  * Which wire a model answers on.
@@ -655,7 +724,7 @@ export function endpointForCouncilModel(
  * can be shown. So neither the vendor's word nor the gateway's is worth much.
  * Only measurement is, and this is where measurements are remembered.
  */
-export const BLIND_GATEWAY_ROUTES = new Set(["google/gemini-3.7-flash"]);
+export const BLIND_GATEWAY_ROUTES = new Set<string>();
 
 /**
  * How hard this model should think before answering.
@@ -792,12 +861,14 @@ export function reachableSeats<T>(
   idOf: (seat: T) => string,
   catalogue: string[] | undefined
 ): { reachable: T[]; unreachable: T[] } {
-  if (!catalogue?.length) return { reachable: seats, unreachable: [] };
-  const known = new Set(catalogue);
+  if (!catalogue?.length) return {
+    reachable: seats.filter(seat => isPrimaryModel(idOf(seat))),
+    unreachable: seats.filter(seat => !isPrimaryModel(idOf(seat))),
+  };
   const reachable: T[] = [];
   const unreachable: T[] = [];
   for (const seat of seats) {
-    (known.has(idOf(seat)) ? reachable : unreachable).push(seat);
+    (listedPrimaryRoute(idOf(seat), catalogue) ? reachable : unreachable).push(seat);
   }
   return { reachable, unreachable };
 }
@@ -986,10 +1057,15 @@ export function judgeSystemPrompt(emphasis: Emphasis): string {
     "every opinion including yours: a candidate whose tests failed is wrong, full stop.",
     "Among correct candidates, prefer the one with the strongest complexity and smallest",
     "auxiliary memory. Treat Runtime: 0ms / Memory <=10MB as measured claims only.",
+    "Derive each coding candidate's worst-case time and auxiliary space from its actual",
+    "code, not its COMPLEXITY claim. Name the dominant loops, recursion, data-structure",
+    "costs, and input dimensions in BASIS. If a bound is uncertain, write UNKNOWN.",
     "",
     "Report:\nVERDICT: <one line>\nRANKING: <letters, best first>\nCORRECT: <letters you",
     "verified correct yourself>\nWHY: <what separates the winner>\nDEFECTS: <per letter, the",
-    "failures you found>\nBEST ANSWER: <the answer you would ship, in full - corrected code",
+    "failures you found>\nCOMPLEXITY AUDIT:\n<one line per coding candidate:",
+    "A | TIME: O(n) | SPACE: O(1) | BASIS: one scan, fixed counters>",
+    "Use UNKNOWN for any bound you cannot justify.\nBEST ANSWER: <the answer you would ship, in full - corrected code",
     "if relevant>",
   ].join("\n");
 }
@@ -1356,9 +1432,16 @@ export function testSpecSystemPrompt(): string {
     "1. A line containing exactly <<<SOLUTION>>> where the candidate's code will be spliced",
     "   in, verbatim. Wrap or rename whatever the candidates disagree on (function names,",
     "   signatures) so any of them drops in cleanly.",
-    "2. A thorough test battery: the normal cases from the problem statement, then edge",
-    "   cases (empty, one element, duplicates, zeros, negatives, maximum values), then at",
-    "   least two adversarial cases designed to break a plausible-but-wrong approach.",
+    "2. A thorough test battery. If the problem statement gives example inputs and expected",
+    "   outputs, reproduce every usable example as an executable test with that expected",
+    "   output. If it gives no examples, derive normal cases and their expected outputs",
+    "   independently from the specification; do not skip testing or invent a claimed",
+    "   statement example. Add applicable edge cases (empty, one element, duplicates,",
+    "   zeros, negatives, maximum values) and at least two adversarial cases designed to",
+    "   break a plausible-but-wrong approach. Do not assume every listed edge case is",
+    "   valid: respect the input constraints and the required function signature.",
+    "   Compute expected outputs from the stated rules or a simple independent reference",
+    "   implementation, never by running a candidate or copying its answer.",
     "   Include at least one performance-shaped case when constraints are available, so",
     "   quadratic/brute-force candidates are exposed by size or structure.",
     "3. One output line per case: `PASS <name>` on success, `FAIL <name> got=<x> want=<y>` on",
@@ -1372,6 +1455,22 @@ export function testSpecSystemPrompt(): string {
     "<complete program with the <<<SOLUTION>>> marker>\n```\nHARNESS: <next language>\n```...```",
     "\nTESTS>>>",
     "",
+    "When the question permits an independent known-correct implementation, append",
+    "REFERENCE: <language> and a fenced complete implementation using the same",
+    "signature as the harness marker. Do not copy a candidate or its proposed",
+    "expected values. Omit the reference if it cannot be independently established.",
+    "Every runnable case must assert its expected result, not merely call the code.",
+    "Before emitting the harness, perform a language-level self-review: every variable in a",
+    "comprehension, loop, closure, and expected-value expression must be defined in scope;",
+    "the harness must be syntactically valid for its stated language; and the harness itself",
+    "must not contain traceback text, placeholder variables, or code copied from a candidate",
+    "as an expected answer. Prefer a small independent oracle over a large fragile generator.",
+    "Python: use the actual comprehension variable (for example `for i in range(n)` when",
+    "the expression references i), and avoid relying on globals or implementation details.",
+    "Java: emit exactly one public Main class. C/C++/Rust/Go: keep the harness compilable",
+    "as a single standalone source file with imports/includes included.",
+    "If the statement is too ambiguous to derive expected outputs safely, do not",
+    "fabricate a passing harness; output the block empty so verification fails clearly.",
     "Write no commentary. If no candidate is code, output the block empty.",
   ].join("\n");
 }
@@ -1566,9 +1665,18 @@ export interface JudgeReading {
   correct: string[];
   why: string;
   defects: string;
+  complexityAudits?: ComplexityAudit[];
   best: string;
   preamble: string;
   wellFormed: boolean;
+}
+
+/** An independent judge's code-derived claim, never a measured fact or proof. */
+export interface ComplexityAudit {
+  letter: string;
+  time: string;
+  space: string;
+  basis: string;
 }
 
 const JUDGE_LABELS: [string, string[]][] = [
@@ -1577,8 +1685,20 @@ const JUDGE_LABELS: [string, string[]][] = [
   ["correct", ["CORRECT"]],
   ["why", ["WHY"]],
   ["defects", ["DEFECTS"]],
+  ["complexityAudit", ["COMPLEXITY AUDIT"]],
   ["best", ["BEST ANSWER", "BEST"]],
 ];
+
+function parseComplexityAudits(body: string): ComplexityAudit[] {
+  const audits: ComplexityAudit[] = [];
+  for (const line of body.split("\n")) {
+    const match = /^\s*(?:[-*]\s*)?([A-Z])\s*\|\s*TIME:\s*(.*?)\s*\|\s*SPACE:\s*(.*?)\s*\|\s*BASIS:\s*(.+)\s*$/i.exec(line.replace(/\*\*/g, ""));
+    if (!match || audits.some(audit => audit.letter === match[1].toUpperCase())) continue;
+    audits.push({ letter: match[1].toUpperCase(), time: match[2].trim(),
+      space: match[3].trim(), basis: match[4].trim() });
+  }
+  return audits;
+}
 
 export function parseJudgeReport(text: string): JudgeReading {
   const { fields, preamble, matched } = readLabels(text || "", JUDGE_LABELS);
@@ -1588,10 +1708,55 @@ export function parseJudgeReport(text: string): JudgeReading {
     correct: lettersInOrder(fields.correct.split("\n")[0] || ""),
     why: fields.why,
     defects: fields.defects,
+    complexityAudits: parseComplexityAudits(fields.complexityAudit || ""),
     best: fields.best,
     preamble,
     wellFormed: matched,
   };
+}
+
+/** Rank only simple, same-input-size families. Multi-parameter or conditional
+ * bounds are left unranked instead of pretending O(V+E) equals O(n). */
+export function growthOrder(bound: string): number | null {
+  const outer = /^O\((.*)\)$/i.exec(bound.trim());
+  if (!outer) return null;
+  const expression = outer[1].toLowerCase().replace(/\s+/g, "").replace(/[×*]/g, "")
+    .replace(/²/g, "^2").replace(/³/g, "^3").replace(/log_?2\(?n\)?/g, "logn");
+  const orders: Record<string, number> = {
+    "1": 0, "logn": 1, "n": 2, "nlogn": 3, "n^2": 4,
+    "n^2logn": 5, "n^3": 6, "2^n": 7, "n!": 8,
+  };
+  return orders[expression] ?? null;
+}
+
+/** Two independent, code-based audits must agree before an asymptotic claim
+ * influences selection. A missing or unfamiliar expression is not a fast one. */
+export function agreedComplexityAudits(judges: readonly JudgeReading[]): Record<string, ComplexityAudit> {
+  const reports = new Map<string, Map<string, { audit: ComplexityAudit; voters: Set<string> }>>();
+  const totals = new Map<string, Set<string>>();
+  judges.forEach((judge, index) => {
+    const identity = (judge as JudgeReading & { model?: string }).model || `judge-${index}`;
+    for (const audit of judge.complexityAudits ?? []) {
+      if (!audit.basis?.trim() || !canonicalComplexityBound(audit.time) || !canonicalComplexityBound(audit.space)) continue;
+      const byBound = reports.get(audit.letter) ?? new Map();
+      reports.set(audit.letter, byBound);
+      const key = canonicalComplexityBound(audit.time) + ":" + canonicalComplexityBound(audit.space);
+      const vote = byBound.get(key) ?? { audit, voters: new Set<string>() };
+      vote.voters.add(identity);
+      byBound.set(key, vote);
+      const everyone = totals.get(audit.letter) ?? new Set<string>();
+      everyone.add(identity);
+      totals.set(audit.letter, everyone);
+    }
+  });
+  const agreed: Record<string, ComplexityAudit> = {};
+  for (const [letter, alternatives] of reports) {
+    const winner = [...alternatives.values()].sort((a, b) => b.voters.size - a.voters.size)[0];
+    if (winner && winner.voters.size >= 2 && winner.voters.size * 2 > (totals.get(letter)?.size ?? 0)) {
+      agreed[letter] = winner.audit;
+    }
+  }
+  return agreed;
 }
 
 // ------------------------------------------------ the deterministic winner
@@ -1669,13 +1834,11 @@ export interface WinnerDecision {
  * the first real run showed when it reinterpreted a failed execution until the
  * gate appeared not to apply.
  *
- * So the order here is: the gate first (execution beats everything), then the
- * judges' counted scoreboard, and the synthesis last, as the narrator. A
- * synthesis pick that clears the gate normally stands — it read the same
- * evidence and it wrote the answer text. It is displaced only when the judges
- * put a *gate-passing* candidate strictly above it, which is the one case where
- * the prose and the arithmetic genuinely disagree, and the disagreement is
- * recorded either way so a reader can see it happened.
+ * For executed code: require a passing run, compare equal-coverage candidates
+ * by independently agreed asymptotic bounds when available, then use measured
+ * runtime and memory for equal bounds or missing audits. The synthesis narrates
+ * the result; a model's uncorroborated complexity claim cannot award a win.
+ * Reasoning-only questions retain the judge/synthesis policy below.
  */
 export function decideWinner(args: {
   claimed: string;
@@ -1694,10 +1857,41 @@ export function decideWinner(args: {
       return { winner: "", source: "none", overruledReason: ruling.overruledReason,
         disagreement: evidence.reason, tally };
     }
-    return { winner: evidence.winner, source: "evidence", overruledReason: ruling.overruledReason,
-      disagreement: args.claimed && args.claimed !== evidence.winner
-        ? `The synthesis preferred Candidate ${args.claimed}, but ${evidence.reason}`
-        : evidence.reason, tally };
+    const strongestCoverage = Math.max(...evidence.eligible.map(letter => args.runs[letter].passed));
+    const comparable = evidence.eligible.filter(letter => args.runs[letter].passed === strongestCoverage);
+    const audited = agreedComplexityAudits(args.judges);
+    let chosen = evidence.winner;
+    let reason = evidence.reason;
+    // Use asymptotic bounds only AFTER equal test coverage and independent
+    // judge corroboration. The symbolic comparator is a partial order: bounds
+    // in unrelated dimensions must remain incomparable rather than sorted.
+    if (comparable.length > 1 && comparable.every(letter => audited[letter])) {
+      const outranks = (better: string, worse: string): boolean => {
+        const t = compareComplexityBounds(audited[better].time, audited[worse].time).relation;
+        if (t === "left-no-worse") return true;
+        if (t !== "equivalent") return false;
+        return compareComplexityBounds(audited[better].space, audited[worse].space).relation === "left-no-worse";
+      };
+      const frontier = comparable.filter(letter =>
+        !comparable.some(other => other !== letter && outranks(other, letter)));
+      if (frontier.length && frontier.length < comparable.length) {
+        chosen = selectVerifiedCandidate(Object.fromEntries(
+          frontier.map(letter => [letter, args.runs[letter]])
+        )).winner ?? frontier[0];
+        reason = "Candidate " + chosen + " passed " + strongestCoverage +
+          " tests. Two independent judges corroborated code-derived " +
+          audited[chosen].time + " time and " + audited[chosen].space +
+          " auxiliary space; strictly dominated bounds were excluded. " +
+          "This is corroborated theoretical reasoning, not a formal proof or timing measurement.";
+      }
+      // If no unique asymptotic decision is justified, retain the tested,
+      // measured winner. Conflicting dimensions and memory/time trade-offs
+      // are not coerced into one arbitrary scalar.
+    }
+    return { winner: chosen, source: "evidence", overruledReason: ruling.overruledReason,
+      disagreement: args.claimed && args.claimed !== chosen
+        ? `The synthesis preferred Candidate ${args.claimed}, but ${reason}`
+        : reason, tally };
   }
   const eligible = tally.filter((row) => (executed ? row.gate === "pass" : true) && row.points > 0);
   const leader = eligible[0];
@@ -1938,6 +2132,7 @@ export function buildPresentation(report: CouncilReport): Presentation {
 
   const winnerCandidate = report.candidates.find((c) => c.letter === report.winner);
   const winnerFinal = winnerCandidate?.revised ?? winnerCandidate?.final ?? null;
+  const winnerAudit = agreedComplexityAudits(report.dossier?.judges ?? [])[report.winner];
   const synth = report.dossier?.synthesis;
   return {
     standing: standing.standing,
@@ -1946,7 +2141,9 @@ export function buildPresentation(report: CouncilReport): Presentation {
     winnerSource: report.dossier?.winnerSource ?? (report.winner ? "synthesis" : "none"),
     provenance: winnerCandidate ? `Candidate ${winnerCandidate.letter} — ${winnerCandidate.model}` : "",
     approach: synth?.approach || "",
-    complexity: report.contract?.complexity || winnerFinal?.complexity || "",
+    complexity: winnerAudit
+      ? `Time ${winnerAudit.time}, auxiliary space ${winnerAudit.space} (independent code audits)`
+      : winnerFinal?.complexity || "",
     evidence,
     dissent,
     rejected: bullets(synth?.rejected || ""),

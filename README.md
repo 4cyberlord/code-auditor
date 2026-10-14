@@ -243,6 +243,10 @@ npm run app:dev
 This also builds the local Tauri sidecar under `src-tauri/binaries/`.
 Those binaries are machine-specific generated outputs and are intentionally not
 committed.
+The development app also starts the port-3000 frontend and a two-worker E2B
+queue pool. It is intentionally development-only: production needs its own
+always-on worker deployment rather than a desktop process to consume benchmark
+requests.
 On macOS the helper is signed with `APPLE_SIGNING_IDENTITY` or
 `CODESIGN_IDENTITY` when set, otherwise the scripts pick Developer ID
 Application and then Apple Development. Set `CODE_AUDITOR_ALLOW_ADHOC=1` only

@@ -13,6 +13,8 @@ import {
   parseTestSuites,
   parseCouncilSynthesis,
   parseJudgeReport,
+  agreedComplexityAudits,
+  growthOrder,
   parseProblemContract,
   mergeProblemContracts,
   contractBlock,
@@ -210,12 +212,12 @@ console.log("\n9. defaults hold the shape the design specifies");
   check(
     "the requested solver roster is installed",
     COUNCIL_DEFAULT_MODELS.map((m) => m.id).join(",") ===
-      "moonshotai/kimi-k3,z-ai/glm-5.3,x-ai/grok-4.6,google/gemini-3.7-flash"
+      "moonshotai/kimi-k3,z-ai/glm-5.3,x-ai/grok-4.6,qwen/qwen3.8-max"
   );
   check(
     "the requested judge roster is installed",
     COUNCIL_DEFAULT_JUDGES.map((j) => `${j.model}/${j.emphasis}`).join(",") ===
-      "openai/gpt-5.6-sol/performance,anthropic/claude-opus-5/security"
+      "openai/gpt-5.6-sol/performance,anthropic/claude-opus-5.5/security"
   );
 }
 
@@ -419,6 +421,39 @@ CONTRACT>>>`);
   check("failed candidates are ineligible", ranking.eligible.join(",") === "B,C");
   const tied = selectVerifiedCandidate({ B: run("B", 10, 0, 8), A: run("A", 10, 0, 5) });
   check("runtime evidence resolves equal passing coverage", tied.winner === "A");
+  const memory = selectVerifiedCandidate({
+    A: { ...run("A", 10, 0, 5), peakMemoryKb: 20_000 },
+    B: { ...run("B", 10, 0, 5), peakMemoryKb: 10_000 },
+  });
+  check("lower measured memory resolves equal correct runtime", memory.winner === "B");
+  const dominates = selectVerifiedCandidate({
+    A: { ...run("A", 10, 0, 8), peakMemoryKb: 20_000 },
+    B: { ...run("B", 10, 0, 5), peakMemoryKb: 10_000 },
+  });
+  check("a passing candidate better in runtime and memory wins", dominates.winner === "B");
+  const missingMemory = selectVerifiedCandidate({
+    A: { ...run("A", 10, 0, 5), peakMemoryKb: null },
+    B: { ...run("B", 10, 0, 5), peakMemoryKb: 10_000 },
+  });
+  check("missing memory is not treated as zero", missingMemory.winner === "B");
+  const audit = (model: string) => ({ model, ...parseJudgeReport(`VERDICT: both pass
+RANKING: B, A
+CORRECT: A, B
+COMPLEXITY AUDIT:
+A | TIME: O(n^2) | SPACE: O(1) | BASIS: nested scans over all input pairs
+B | TIME: O(n) | SPACE: O(n) | BASIS: one scan with a lookup table
+BEST ANSWER: B`) });
+  const auditedRuns = {
+    A: { ...run("A", 10, 0, 1), peakMemoryKb: 1_000 },
+    B: { ...run("B", 10, 0, 5), peakMemoryKb: 10_000 },
+  };
+  const audited = decideWinner({ claimed: "A", judges: [audit("first"), audit("second")],
+    runs: auditedRuns, letters: ["A", "B"] });
+  check("two code-derived audits prefer scalable time over one fast sample", audited.winner === "B");
+  check("audited bound is retained with its code basis", agreedComplexityAudits([audit("first"), audit("second")]).B.basis.includes("lookup table"));
+  const single = decideWinner({ claimed: "A", judges: [audit("first")], runs: auditedRuns, letters: ["A", "B"] });
+  check("one uncorroborated complexity claim cannot override measurements", single.winner === "A");
+  check("multi-dimensional expressions are not given a fake order", growthOrder("O(V+E)") === null);
   const noTests = selectVerifiedCandidate({ A: run("A", 0, 0, 0) });
   check("zero passed tests is not verification", noTests.winner === null);
   const allFailed = selectVerifiedCandidate({ A: run("A", 1, 1) });
@@ -521,6 +556,21 @@ CONTRACT>>>`);
     synthesis: "", winner: "A" };
   const same = modelPerformance([report, report]);
   check("history aggregation combines separately supplied reports", same[0].candidateAttempts === 2 && same[0].verified === 2);
+}
+
+{
+  const audit = (model: string) => ({model, ...parseJudgeReport(
+    "VERDICT: verified\nRANKING: B, A\nCORRECT: A, B\nCOMPLEXITY AUDIT:\n" +
+    "A | TIME: O(V^2) | SPACE: O(V) | BASIS: adjacency-matrix row scans and queue\n" +
+    "B | TIME: O(V+E) | SPACE: O(V) | BASIS: adjacency-list traversal and queue\nBEST ANSWER: B"
+  )});
+  const assumptions = [audit("academic-1"),audit("academic-2")];
+  const supported = agreedComplexityAudits(assumptions);
+  check("multi-variable theoretical audits parse and corroborate", !!supported.B && supported.B.time === "O(V+E)");
+  const run = (letter:string) => ({letter,ran:true,ok:true,passed:8,failed:0,durationMs:20} as CandidateRun);
+  const ranked = decideWinner({claimed:"A",judges:assumptions,
+    runs:{A:run("A"),B:run("B")},letters:["A","B"]});
+  check("unconstrained E,V bounds do not invent a graph density", ranked.winner === "A");
 }
 
 console.log(fail ? `\n${fail} FAILURES\n` : "\nall council checks passed\n");

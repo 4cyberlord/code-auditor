@@ -17,6 +17,7 @@ EFFICIENCY_NOTE: Already at the theoretical bound; every bar is visited once.
 READABILITY: excellent
 STRUCTURE: excellent
 STYLE_NOTE: Clear names and a single loop with no special cases.
+FUNCTION trap: Computes the total trapped rainwater by advancing the side with the lower running maximum.
 PORT cpp
 \`\`\`cpp
 int trap(vector<int>& h) { return 0; }
@@ -41,6 +42,7 @@ assert.equal(r.efficiency.currentTime, "O(n)");
 assert.equal(r.efficiency.currentSpace, "O(1)");
 assert.equal(r.style.readability, "excellent");
 assert.equal(r.style.structure, "excellent");
+assert.match(r.functions?.trap ?? "", /trapped rainwater/);
 
 // All three ports, keyed by language, with the fences stripped.
 for (const lang of PORT_LANGUAGES) assert.ok(r.ports[lang], `${lang} port missing`);

@@ -19,7 +19,7 @@ const merged=mergeVerifiedOutcomes([trusted],[{...trusted,correct:false}]);
 if (merged.length !== 1 || merged[0].correct !== false) throw Error("idempotent update failed");
 console.log("PASS: trusted evaluation ingestion");
 
-const spoofed = rows.map(({provenance, ...row}) => row);
+const spoofed = rows.map(({provenance, ...row}) => { void provenance; return row; });
 if (summarizeVerifiedOutcomes(spoofed).some(x=>x.verifiedAccuracy !== undefined)) throw Error("legacy unproven records accepted");
 if (mergeVerifiedOutcomes([], spoofed).length !== 0) throw Error("unproven records persisted");
 console.log("PASS: unproven history cannot influence routing");

@@ -7,13 +7,11 @@ import {
   ALL_AGENTS,
   EXTRA_AGENTS,
   FREE_ROUTER_MODELS,
-  GATEWAY,
   KNOWN_GATEWAYS,
   gatewayPreset,
   agentSpec,
   PROVIDERS,
   PROVIDER_ORDER,
-  VISION_PROVIDERS,
   type ProviderId,
   STORAGE,
 } from "@/lib/models";
@@ -24,7 +22,9 @@ import * as bridge from "@/lib/bridge";
 import AccountCard from "./AccountCard";
 import HelperCard from "./HelperCard";
 import { classifyProbeResult } from "@/lib/probeFit";
+import { PRIMARY_MODEL_IDS, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "@/lib/primaryModels";
 import { PIN_LENGTH, authReauthenticate, reason, sanitizePin } from "@/lib/auth";
+import { refreshOfficialLanguageSources, type LanguageRefreshResult } from "@/lib/languageKnowledge";
 
 /**
  * One probe truth badge.
@@ -77,6 +77,24 @@ function ProbeBadge({
       {rep.status === "unsupported" ? "different endpoint" : "failed"}
     </span>
   );
+}
+
+function VisionBadge({
+  advertised, vision, note,
+}: { advertised?: boolean; vision?: boolean | null; note?: string | null }) {
+  if (vision == null && advertised == null) return null;
+  return <>
+    {advertised != null && <span className="badge" data-tone={advertised ? "good" : "warn"}
+      title={advertised
+        ? "The gateway catalogue lists image input for this model. This is not a live image-reading result."
+        : "The gateway catalogue does not list image input for this model."}>
+      {advertised ? "vision: yes (catalog)" : "vision: no (catalog)"}
+    </span>}
+    {vision != null && <span className="badge" data-tone={vision ? "good" : "warn"}
+      title={note || "The live image check has not confirmed image reading."}>
+      {vision ? "image read: verified" : "image read: not verified"}
+    </span>}
+  </>;
 }
 
 function SensitiveSettingsGate({
@@ -171,34 +189,60 @@ function SensitiveSettingsGate({
  * holding is asking them to do our work. One field, one key.
  */
 function StorageCard() {
+  // Retain the legacy key's removal path, but never request a privileged
+  // service-role credential from desktop users again.
   const saved = useStore((s) => s.storageKey);
   const refreshKeys = useStore((s) => s.refreshKeys);
-  const [draft, setDraft] = useState("");
+  const destination = useStore((s) => s.settings.imageStorage);
+  const patchSettings = useStore((s) => s.patchSettings);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [azureSaved, setAzureSaved] = useState(false);
+  const [connectionString, setConnectionString] = useState("");
 
-  const save = async () => {
-    if (!draft.trim()) return;
+  useEffect(() => {
+    void bridge.hasApiKey("azure_storage_connection_string").then(setAzureSaved);
+  }, []);
+
+  const saveAzure = async () => {
+    const value = connectionString.trim();
+    if (!/(?:^|;)\s*AccountName=councilimages\s*(?:;|$)/i.test(value) ||
+        !/(?:^|;)\s*AccountKey=[A-Za-z0-9+/=]+\s*(?:;|$)/i.test(value)) {
+      setNote("Paste the full HTTPS connection string for the councilimages storage account.");
+      return;
+    }
+    setBusy(true); setNote(null);
+    try {
+      await bridge.setApiKey("azure_storage_connection_string", value);
+      setConnectionString("");
+      setAzureSaved(true);
+      patchSettings({ probes: {} });
+      await refreshKeys();
+      setNote("Azure connection saved to your signed-in account's protected secrets.");
+    } catch (err) { setNote(String(err)); }
+    finally { setBusy(false); }
+  };
+
+  const removeAzure = async () => {
+    setBusy(true); setNote(null);
+    try {
+      await bridge.deleteApiKey("azure_storage_connection_string");
+      setAzureSaved(false);
+      await refreshKeys();
+      setNote("Azure connection removed. Choose Supabase until a new key is saved.");
+    } catch (err) { setNote(String(err)); }
+    finally { setBusy(false); }
+  };
+
+  const removeLegacyKey = async () => {
     setBusy(true);
     setNote(null);
     try {
-      await bridge.setApiKey(STORAGE.id, draft.trim());
-      setDraft("");
-      await refreshKeys();
-      setNote("Saved. Screenshots go to the project now, and the local file is deleted.");
-    } catch (err) {
-      setNote(String(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const remove = async () => {
-    setBusy(true);
-    try {
       await bridge.deleteApiKey(STORAGE.id);
       await refreshKeys();
-      setNote("Removed. Screenshots stay on this machine again.");
+      setNote("Legacy service-role credential removed from this device.");
+    } catch (err) {
+      setNote(String(err));
     } finally {
       setBusy(false);
     }
@@ -208,65 +252,62 @@ function StorageCard() {
     <div className="provider-card">
       <div className="top">
         <span className="dot" style={{ background: STORAGE.accent }} />
-        <span className="name">{STORAGE.label}</span>
-        <span className="vendor">Where screenshots live</span>
-        {saved ? (
-          <span className="badge" data-tone="good">
-            Uploading
-          </span>
-        ) : (
-          <span className="badge" data-tone="warn">
-            No key
-          </span>
-        )}
-        <span className="spacer" />
-        <a className="btn tiny ghost" href={STORAGE.keyUrl} target="_blank" rel="noreferrer">
-          Get the key
-        </a>
+        <span className="name">Screenshot Storage</span>
+        <span className="vendor">Private Azure Blob or Supabase</span>
+        <span className="badge" data-tone={azureSaved ? "good" : "warn"}>
+          {azureSaved ? "Azure key saved" : "Azure setup needed"}
+        </span>
       </div>
-
-      {/* Label first, then the field and its buttons inside `.with-btn`. `.row` is
-          a two-column grid sized for a label, so an input placed directly in it
-          takes the 92px label column and the button takes the rest — which is
-          exactly backwards, and is what this looked like before. */}
+      <p className="hint">
+        New screenshots use the destination below. Existing screenshots stay in their original
+        private bucket and remain available. The Azure container is <span className="mono">council-images</span>
+        {" "}in <span className="mono">councilimages</span>; Supabase uses <span className="mono">{STORAGE.bucket}</span>.
+      </p>
       <div className="row">
-        <label htmlFor="storage-key">Service Key</label>
+        <label htmlFor="image-storage">Default destination</label>
+        <select id="image-storage" className="field" value={destination}
+          onChange={(event) => patchSettings({
+            imageStorage: event.target.value as "azure" | "supabase", probes: {},
+          })}>
+          <option value="azure">Azure Blob Storage</option>
+          <option value="supabase">Supabase Storage</option>
+        </select>
+      </div>
+      <div className="row">
+        <label htmlFor="azure-connection">Azure connection string</label>
         <div className="with-btn">
-          <input
-            id="storage-key"
-            className="field mono"
-            type="password"
-            autoComplete="off"
-            spellCheck={false}
-            placeholder={saved ? "••••••••  saved" : STORAGE.keyHint}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void save();
-            }}
-          />
-          <button className="btn tiny" onClick={() => void save()} disabled={busy || !draft.trim()}>
-            Save
-          </button>
-          {saved && (
-            <button className="btn tiny ghost" onClick={() => void remove()} disabled={busy}>
-              Remove
-            </button>
-          )}
+          <input id="azure-connection" className="field mono" type="password"
+            autoComplete="off" placeholder={azureSaved ? "Saved — paste a replacement" : "Paste key1 connection string"}
+            value={connectionString} onChange={(event) => setConnectionString(event.target.value)} />
+          <button className="btn tiny ghost" disabled={busy || !connectionString.trim()}
+            onClick={() => void saveAzure()}>{busy ? "Saving…" : "Save"}</button>
+          {azureSaved && <button className="btn tiny ghost" disabled={busy}
+            onClick={() => void removeAzure()}>Remove</button>}
+          {azureSaved && <button className="btn tiny ghost" disabled={busy}
+            onClick={() => {
+              setBusy(true); setNote("Testing Azure upload, private read, and deletion…");
+              void bridge.testAzureStorage()
+                .then(() => setNote("Azure upload, private read, and deletion all passed."))
+                .catch((err) => setNote(`Azure test failed: ${String(err)}`))
+                .finally(() => setBusy(false));
+            }}>Test connection</button>}
         </div>
       </div>
-
-      <p className="hint">
-        Screenshots go to the private <span className="mono">{STORAGE.bucket}</span> bucket in
-        your Supabase project, then are deleted from this Mac. This lets sessions open on another
-        device. You need {STORAGE.requires}; the project URL comes from your database connection.
-      </p>
-
-      {note && (
-        <p className="hint" style={{ color: "var(--text)" }}>
-          {note}
-        </p>
+      <p className="hint">Paste the full connection string from Azure → councilimages → Access keys → key1.
+        It is stored as a server-side secret, never shown again in this window. Do not paste it in chat.
+        {destination === "azure" && !azureSaved ? " Azure uploads will fail until this is saved." : ""}</p>
+      {saved && (
+        <div className="row">
+          <span>Legacy credential</span>
+          <div className="with-btn">
+            <span className="hint">An older storage credential is still saved locally.</span>
+            <button className="btn tiny ghost" disabled={busy} onClick={() => void removeLegacyKey()}>
+              {busy ? "Removing…" : "Remove old key"}
+            </button>
+          </div>
+        </div>
       )}
+      {note && <p className="hint" style={{ color: "var(--text)" }}>{note}</p>}
     </div>
   );
 }
@@ -281,7 +322,7 @@ interface CodingModelChoice {
 }
 
 function supportsCodingTools(route: Route | null): boolean {
-  return !!route && ["openai", "moonshot", "tokenrouter", "wiro"].includes(route.provider);
+  return !!route && ["openai", "moonshot", "tokenrouter", "wiro", "cleanapis"].includes(route.provider);
 }
 
 function projectNameFromPath(path: string): string {
@@ -300,7 +341,8 @@ function CodingSettingsCard() {
       ALL_AGENTS.filter((id) => settings.enabled[id]).map((id) => {
         const spec = agentSpec(id);
         const route = routeFor(id, settings, keys, gatewayKey);
-        const endpoint = route ? endpointForCouncilModel(settings.councilModels, route.model) : "chat";
+        const endpoint = route && settings.gatewayId === "tokenrouter"
+          ? endpointForCouncilModel(settings.councilModels, route.model) : "chat";
         const unsupportedEndpoint = endpoint !== "chat";
         const unsupportedProvider = !supportsCodingTools(route);
         const available = !!route && !unsupportedEndpoint && !unsupportedProvider;
@@ -520,6 +562,7 @@ function GatewayCard() {
   const gatewayId = useStore((s) => s.settings.gatewayId);
   const baseUrl = useStore((s) => s.settings.gatewayBaseUrl);
   const routerModels = useStore((s) => s.settings.routerModels);
+  const enabledAgents = useStore((s) => s.settings.enabled);
   const patch = useStore((s) => s.patchSettings);
   const refreshKeys = useStore((s) => s.refreshKeys);
 
@@ -531,6 +574,7 @@ function GatewayCard() {
   // What the router says this key can actually reach. Null until asked, because
   // "we have not looked" and "there is nothing there" have to read differently.
   const probes = useStore((st) => st.settings.probes);
+  const advertisedVision = useStore((st) => st.settings.advertisedVision);
   const probing = useStore((st) => st.probing);
   const probeError = useStore((st) => st.probeError);
   const testModels = useStore((st) => st.testModels);
@@ -547,6 +591,10 @@ function GatewayCard() {
   const councilJudges = useStore((s) => s.settings.councilJudges);
   const synthesisModel = useStore((s) => s.settings.synthesisModel);
   const councilEnabled = useStore((s) => s.settings.councilEnabled);
+  const gatewayRoute = useCallback((model: string) => {
+    const id = primaryModelId(model);
+    return id ? preferredPrimaryRoute(id, gatewayId) : "";
+  }, [gatewayId]);
 
   // Panes, the judge, both readers, and the council roster — everything the
   // app will actually ask for, not just the four panes. Testing the router's
@@ -556,18 +604,21 @@ function GatewayCard() {
   const modelsInUse = useMemo(() => {
     const ids = new Set<string>();
     for (const p of PROVIDER_ORDER) ids.add(routerModels[p] || PROVIDERS[p].defaultRouterModel);
-    for (const e of EXTRA_AGENTS) ids.add(e.model);
+    for (const e of EXTRA_AGENTS) {
+      const id = primaryModelId(e.model);
+      if (enabledAgents[e.id] && id) ids.add(preferredPrimaryRoute(id, gatewayId));
+    }
     ids.add(routerModels[judgeProvider] || PROVIDERS[judgeProvider].defaultRouterModel);
     for (const x of extractors) {
       ids.add(routerModels[x] || PROVIDERS[x].defaultRouterModel);
     }
     if (councilEnabled) {
-      for (const m of councilModels) ids.add(m.id);
-      for (const j of councilJudges) ids.add(j.model);
-      if (synthesisModel.trim()) ids.add(synthesisModel.trim());
+      for (const m of councilModels) ids.add(gatewayRoute(m.id));
+      for (const j of councilJudges) ids.add(gatewayRoute(j.model));
+      if (synthesisModel.trim()) ids.add(gatewayRoute(synthesisModel));
     }
     return [...ids].filter(Boolean);
-  }, [routerModels, judgeProvider, extractors, councilEnabled, councilModels, councilJudges, synthesisModel]);
+  }, [routerModels, enabledAgents, gatewayId, gatewayRoute, judgeProvider, extractors, councilEnabled, councilModels, councilJudges, synthesisModel]);
 
   /** The catalogue as shown: every id the key can reach, narrowed by the filter. */
   const catalogue = useMemo(() => {
@@ -583,7 +634,10 @@ function GatewayCard() {
       const id = routerModels[p] || PROVIDERS[p].defaultRouterModel;
       if (id === m) roles.push(PROVIDERS[p].label.toLowerCase());
     }
-    for (const e of EXTRA_AGENTS) if (e.model === m) roles.push(e.label.toLowerCase());
+    for (const e of EXTRA_AGENTS) {
+      const id = primaryModelId(e.model);
+      if (id && preferredPrimaryRoute(id, gatewayId) === m) roles.push(e.label.toLowerCase());
+    }
     const judgeId = routerModels[judgeProvider] || PROVIDERS[judgeProvider].defaultRouterModel;
     if (judgeId === m) roles.push("judge");
     for (const x of extractors) {
@@ -591,10 +645,10 @@ function GatewayCard() {
       if (id === m) roles.push("reader");
     }
     if (councilEnabled) {
-      if (councilModels.some((x) => x.id === m)) roles.push("solver");
-      const seat = councilJudges.find((j) => j.model === m);
+      if (councilModels.some((x) => gatewayRoute(x.id) === m)) roles.push("solver");
+      const seat = councilJudges.find((j) => gatewayRoute(j.model) === m);
       if (seat) roles.push(`judge/${seat.emphasis}`);
-      if (synthesisModel.trim() === m) roles.push("synthesis");
+      if (gatewayRoute(synthesisModel) === m) roles.push("synthesis");
     }
     return roles;
   };
@@ -603,17 +657,27 @@ function GatewayCard() {
   // one. Derived, so it clears itself the moment the seats change.
   const tested = modelsInUse.filter((m) => probes[m]).length;
   const working = modelsInUse.filter((m) => probes[m]?.ok).length;
+  const modelsToImageCheck = modelsInUse.filter((model) => advertisedVision[model] !== false);
+  const testedVision = modelsToImageCheck.filter((model) => probes[model]?.vision != null).length;
 
   const refreshModels = useCallback(async () => {
     setListing(true);
     setListError(null);
     try {
-      const ids = await bridge.listGatewayModels(baseUrl, gatewayId);
+      const details = await bridge.listGatewayModelDetails(baseUrl, gatewayId);
+      const ids = primaryCatalog(details.map(model => model.id));
+      const approved = new Set(ids);
+      const vision = gatewayId === "cleanapis"
+        ? Object.fromEntries(details.filter(model =>
+            approved.has(model.id) && Array.isArray(model.capabilities)).map(model => [
+              model.id, model.capabilities!.some(capability => capability.toLowerCase() === "vision")
+            ]))
+        : {};
       setAvailable(ids);
       // Kept in settings, not just in this component's state: the Council reads
       // it before a run to skip seats this key cannot reach, and Settings is not
       // open when a run starts.
-      patch({ availableModels: ids });
+      patch({ availableModels: ids, advertisedVision: vision });
     } catch (err) {
       setAvailable(null);
       setListError(String(err).replace(/^Error:\s*/, ""));
@@ -655,6 +719,7 @@ function GatewayCard() {
           ? `${draft.trim()}:${draftSecret.trim()}`
           : draft.trim();
       await bridge.setApiKey(gatewayId, credential);
+      patch({ availableModels: [], advertisedVision: {}, probes: {} });
       setDraft("");
       setDraftSecret("");
       await refreshKeys();
@@ -675,6 +740,7 @@ function GatewayCard() {
     setBusy(true);
     try {
       await bridge.deleteApiKey(gatewayId);
+      patch({ availableModels: [], advertisedVision: {}, probes: {} });
       await refreshKeys();
       setAvailable(null);
       setListError(null);
@@ -691,7 +757,7 @@ function GatewayCard() {
       <div className="top">
         <span className="dot" style={{ background: currentGateway.accent }} />
         <span className="name">{currentGateway.label} Gateway</span>
-        <span className="vendor">one key, every model</span>
+        <span className="vendor">one key, approved models</span>
         {active ? (
           <span className="badge" data-tone="good">
             Routing all panes
@@ -735,8 +801,14 @@ function GatewayCard() {
                     gatewayId: gw.id,
                     gatewayBaseUrl: gw.defaultBaseUrl,
                     routerModels: { ...gw.defaultRouterModels },
+                    availableModels: [],
+                    advertisedVision: {},
+                    probes: {},
                   });
                   void refreshKeys();
+                  setDraft("");
+                  setDraftSecret("");
+                  setNote(null);
                   setAvailable(null);
                   setListError(null);
                 }}
@@ -812,7 +884,7 @@ function GatewayCard() {
             className="section-label"
             style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center" }}
           >
-            <span>Everything this key can reach</span>
+            <span>Approved models listed by this key</span>
             <span className="spacer" />
               {available ? (
                 <span className="chip">{available.length} on this key</span>
@@ -839,13 +911,19 @@ function GatewayCard() {
                 — and only the seats actually in use are asked. */}
             <button
               className="btn tiny ghost"
-              onClick={() => void testModels(modelsInUse, true)}
-              disabled={probing}
-              title="Sends one image to each seat in use, at the governor's pace. Listing cannot tell you this."
+              onClick={() => void testModels(modelsToImageCheck, true)}
+              disabled={probing || modelsToImageCheck.length === 0}
+              title="Sends one image to each seat in use to verify the catalogue's vision claim."
             >
-              {probing ? `${tested}/${modelsInUse.length}` : "Check Which Can Read Images"}
+              {probing ? `${testedVision}/${modelsToImageCheck.length}` : "Check Which Can Read Images"}
             </button>
           </div>
+
+          {gatewayId === "cleanapis" && modelsInUse.length > 0 && modelsToImageCheck.length === 0 && (
+            <p className="hint" style={{ margin: "0 0 6px", color: "var(--warn)" }}>
+              Clean API lists no enabled approved model with vision. Screenshot tasks need a model whose catalogue capabilities include vision.
+            </p>
+          )}
 
           {probeError && (
             <p className="hint" style={{ margin: "0 0 6px", color: "var(--bad)" }}>
@@ -855,11 +933,11 @@ function GatewayCard() {
 
           {tested > 0 && (
             <p className="hint" style={{ margin: "0 0 6px" }}>
-              {working} of {tested} answered.{" "}
+              Text/API check: {working} of {tested} answered.{" "}
               {working < tested && (
                 <>
                   The rest are marked below.{" "}
-                  <b>Hover a failed badge to see the exact error TokenRouter returned</b>{" "}
+                  <b>Hover a failed badge to see the exact error {currentGateway.label} returned</b>{" "}
                   — that string is the whole diagnosis: <span className="mono">model_not_found</span>{" "}
                   means the id or entitlement, <span className="mono">429</span> means the
                   key&rsquo;s budget, <span className="mono">Timeout</span> means the model sat
@@ -877,6 +955,14 @@ function GatewayCard() {
             .map((m) => (
               <p key={`err-${m}`} className="hint" style={{ margin: "0 0 4px", color: "var(--bad)" }}>
                 <span className="mono">{m}</span> — {probes[m].error}
+              </p>
+            ))}
+
+          {modelsInUse
+            .filter((m) => probes[m]?.vision === false)
+            .map((m) => (
+              <p key={`vision-${m}`} className="hint" style={{ margin: "0 0 4px", color: "var(--warn)" }}>
+                <span className="mono">{m}</span> — {advertisedVision[m] === true ? "vision listed; " : ""}live image reading not verified: {probes[m].visionNote || "No image response detail was returned."}
               </p>
             ))}
 
@@ -938,11 +1024,8 @@ function GatewayCard() {
                       {copied === m && <span className="badge" data-tone="good">Copied</span>}
                       {roles.length > 0 && <span className="role-tag">{roles.join(" + ")}</span>}
                       {probe && <ProbeBadge probe={probe} modelId={m} />}
-                      {probe?.vision != null && (
-                        <span className="badge" data-tone={probe.vision ? "good" : "warn"} title={probe.visionNote ?? ""}>
-                          {probe.vision ? "sees images" : "text only"}
-                        </span>
-                      )}
+                      <VisionBadge advertised={advertisedVision[m]}
+                        vision={probe?.vision} note={probe?.visionNote} />
                     </div>
                   );
                 })}
@@ -954,34 +1037,35 @@ function GatewayCard() {
               </div>
             </>
           )}
+          {available && available.length === 0 && (
+            <p className="hint">This key lists no models from the approved ten-model roster. Try another gateway or check this key&apos;s model access.</p>
+          )}
 
           {/* The free panes have fixed ids, so they get a result line rather
               than an editable field. */}
           {EXTRA_AGENTS.map((e) => {
-            const probe = probes[e.model];
+            const id = primaryModelId(e.model);
+            const routeModel = id ? preferredPrimaryRoute(id, gatewayId) : e.model;
+            const probe = probes[routeModel];
             return (
               <div className="row" key={e.id}>
                 <label>{e.label}</label>
+                <button type="button" className="switch" data-on={!!enabledAgents[e.id]}
+                  aria-label={`Enable ${e.label} for solver selection`}
+                  onClick={() => patch({ enabled: { ...enabledAgents, [e.id]: !enabledAgents[e.id] } })} />
                 <span className="field mono" style={{ opacity: 0.7 }}>
-                  {e.model}
+                  {routeModel}
                 </span>
-                {probe && <ProbeBadge probe={probe} modelId={e.model} />}
-                {probe?.vision != null && (
-                  <span
-                    className="badge"
-                    data-tone={probe.vision ? "good" : "warn"}
-                    title={probe.visionNote ?? ""}
-                  >
-                    {probe.vision ? "sees images" : "text only"}
-                  </span>
-                )}
+                {probe && <ProbeBadge probe={probe} modelId={routeModel} />}
+                <VisionBadge advertised={advertisedVision[routeModel]}
+                  vision={probe?.vision} note={probe?.visionNote} />
               </div>
             );
           })}
         </>
       )}
 
-      {active && (
+      {active && FREE_ROUTER_MODELS.length > 0 && (
         <p className="hint" style={{ marginTop: 2 }}>
           <b>Free on this router:</b>{" "}
           {FREE_ROUTER_MODELS.map((m) => m.id).join(", ")} — both text-only, so put
@@ -1011,6 +1095,14 @@ function GatewayCard() {
           For Wiro Signature-Based authentication, enter both values from the Wiro dashboard. The
           app stores them together as the credential required by Wiro&apos;s Direct LLM Gateway. For an
           API-Key-Only Wiro project, leave API Secret blank.
+        </p>
+      )}
+      {gatewayId === "cleanapis" && (
+        <p className="hint">
+          Paste your Clean APIs token above and save it. The token stays in your signed-in account&apos;s
+          server-side secrets; the app only receives whether it is present. Only the ten approved
+          models appear in this catalogue and can be selected for a run. Enable the token&apos;s
+          inference and models:read scopes.
         </p>
       )}
     </div>
@@ -1043,7 +1135,7 @@ function ProviderCard({ id }: { id: ProviderId }) {
       await bridge.setApiKey(id, draftKey.trim());
       setDraftKey("");
       await refreshKeys();
-      setNote("Saved to your Keychain.");
+      setNote("Saved to your account.");
     } catch (err) {
       setNote(String(err));
     } finally {
@@ -1122,19 +1214,16 @@ function ProviderCard({ id }: { id: ProviderId }) {
 
       <div className="row" data-dim={routed}>
         <label htmlFor={`model-${id}`}>Model</label>
-        <input
+        <select
           id={`model-${id}`}
           className="field mono"
-          list={`models-${id}`}
           value={model}
-          spellCheck={false}
           onChange={(e) => patch({ models: { ...models, [id]: e.target.value } })}
-        />
-        <datalist id={`models-${id}`}>
+        >
           {spec.knownModels.map((m) => (
-            <option key={m} value={m} />
+            <option key={m} value={m}>{m}</option>
           ))}
-        </datalist>
+        </select>
       </div>
 
       <div className="row" data-dim={routed}>
@@ -1159,7 +1248,7 @@ function ProviderCard({ id }: { id: ProviderId }) {
           </>
         ) : (
           <>
-            Keys are stored in the macOS Keychain and read only by the app.{" "}
+            Keys are stored in your account and loaded by the desktop app.{" "}
             <button
               className="link"
               onClick={() => {
@@ -1175,116 +1264,56 @@ function ProviderCard({ id }: { id: ProviderId }) {
   );
 }
 
-const CONTEXT_MODES = [
-  {
-    id: "auto" as const,
-    label: "Auto",
-    blurb:
-      "Each pane gets what it can use. Vision models see the screenshot; text-only models get a transcription only when needed. No extra setup or unnecessary reading pass.",
-  },
-  {
-    id: "images" as const,
-    label: "Images",
-    blurb:
-      "Every agent gets the screenshot and reads it itself. No shared transcription, so no shared misreading — this is the safest option and the default.",
-  },
-  {
-    id: "extract" as const,
-    label: "Reading",
-    blurb:
-      "Two vision models transcribe and compare the screenshot. Other agents use the agreed text, so text-only models can join. This adds two calls and can spread a transcription mistake.",
-  },
-  {
-    id: "both" as const,
-    label: "Both",
-    blurb:
-      "The screenshot and the reading. The most expensive and the most thorough: an agent that can see gets to catch the transcription being wrong.",
-  },
-];
-
-/** How the screenshot reaches the agents, and who reads it. */
+/** Read-only: Story Strip no longer has a separate extraction configuration. */
 function ReadingCard() {
-  const contextMode = useStore((s) => s.settings.contextMode);
-  const extractors = useStore((s) => s.settings.extractors);
-  const keys = useStore((s) => s.keys);
-  const patch = useStore((s) => s.patchSettings);
-
-  const mode = CONTEXT_MODES.find((m) => m.id === contextMode) ?? CONTEXT_MODES[0];
-
-  // Replacing one half of the pair. Picking the provider the other half already
-  // uses would collapse the cross-check into one model agreeing with itself, so
-  // the two swap places instead of colliding.
-  const setExtractor = (slot: 0 | 1, next: ProviderId) => {
-    const other = extractors[slot === 0 ? 1 : 0];
-    const pair: ProviderId[] = slot === 0 ? [next, other] : [other, next];
-    if (next === other) pair[slot === 0 ? 1 : 0] = extractors[slot];
-    patch({ extractors: pair });
+  const gatewayId = useStore(s => s.settings.gatewayId);
+  const gatewayKey = useStore(s => s.gatewayKey);
+  const probes = useStore(s => s.settings.probes);
+  const enabled = useStore(s => s.settings.enabled);
+  const availableVision = Object.values(probes).filter(p => p.ok && p.vision === true).length;
+  const [refreshingDocs, setRefreshingDocs] = useState(false);
+  const [docResults, setDocResults] = useState<LanguageRefreshResult[] | null>(null);
+  const refreshDocs = async () => {
+    setRefreshingDocs(true);
+    try { setDocResults(await refreshOfficialLanguageSources()); }
+    finally { setRefreshingDocs(false); }
   };
-
-  const missing = extractors.filter((p) => !keys[p]);
-
-  return (
-    <div className="provider-card">
-      <div className="top">
-        <span className="name">Reading the screenshot</span>
-        <span className="spacer" />
-        <span className="vendor">section 9</span>
-      </div>
-
-      <div className="segmented" style={{ marginBottom: 8 }}>
-        {CONTEXT_MODES.map((m) => (
-          <button
-            key={m.id}
-            data-on={contextMode === m.id}
-            style={{ flex: 1 }}
-            onClick={() => patch({ contextMode: m.id })}
-          >
-            {m.label}
-          </button>
-        ))}
-      </div>
-
-      <p className="hint" style={{ marginTop: 0, marginBottom: 8 }}>
-        {mode.blurb}
-      </p>
-
-      {contextMode !== "images" && (
-        <>
-          {([0, 1] as const).map((slot) => (
-            <div className="row" key={slot}>
-              <label htmlFor={`extractor-${slot}`}>{slot === 0 ? "Reader" : "Checked by"}</label>
-              <select
-                id={`extractor-${slot}`}
-                className="field"
-                value={extractors[slot]}
-                onChange={(e) => setExtractor(slot, e.target.value as ProviderId)}
-              >
-                {VISION_PROVIDERS.map((p) => (
-                  <option key={p} value={p}>
-                    {PROVIDERS[p].label} — {PROVIDERS[p].vendor}
-                  </option>
-                ))}
-              </select>
-            </div>
-          ))}
-          <p className="hint">
-            Two different vendors is the point: a blind spot one model has, the other
-            probably does not. When they disagree on the code or the error, the run says so
-            instead of quietly picking one.
-            {missing.length > 0 && (
-              <>
-                {" "}
-                <b>No key saved for {missing.map((p) => PROVIDERS[p].vendor).join(" or ")}</b>
-                {missing.length === extractors.length
-                  ? " — reading cannot run, so runs fall back to sending the images."
-                  : " — only one model will read, and nothing will check it."}
-              </>
-            )}
-          </p>
-        </>
-      )}
+  return <div className="provider-card">
+    <div className="top">
+      <span className="name">Independent screenshot vision</span>
+      <span className="spacer" />
+      <span className="vendor">Direct images</span>
     </div>
-  );
+    <p className="hint">
+      Council Editor uses a fixed roster of ten models, regardless of which API gateway
+      you select. Wiro, TokenRouter and Clean APIs only change the transport and
+      exact model-ID spelling. No gateway is allowed to introduce an eleventh model.
+    </p>
+    <div className="row" style={{ alignItems: "center", gap: 12 }}>
+      <span>Official language documentation</span>
+      <button className="btn ghost" disabled={refreshingDocs} onClick={() => void refreshDocs()}>
+        {refreshingDocs ? "Checking…" : "Refresh official docs"}
+      </button>
+    </div>
+    {docResults && <p className="hint" role="status">
+      {docResults.filter(result => result.ok).length}/{docResults.length} official sources reachable. The local Markdown packs remain the offline fallback.
+    </p>}
+    <p className="hint">
+      Every selected AI agent sees the original images and independently determines the
+      question and solution. There is no shared OCR or image extraction, no separate
+      reading agents, and no text-only substitute for a screenshot.
+    </p>
+    <div className="row"><span>Selected API</span><b>{gatewayPreset(gatewayId).label}</b></div>
+    <div className="row"><span>Gateway credential</span><b>{gatewayKey ? "Connected" : "Not connected"}</b></div>
+    <div className="row"><span>Eligible configured models</span><b>{Object.values(enabled).filter(Boolean).length} / 10</b></div>
+    <div className="row"><span>Models with observed vision support</span><b>{availableVision}</b></div>
+    <p className="hint">
+      Use the API tab to refresh this gateway&apos;s model catalogue and run a live
+      image-capability check. Only verified vision-capable models receive screenshot
+      bytes. The Big O knowledge library and Council test evidence guide solution
+      analysis; runtime measurements are never presented as theoretical Big O.
+    </p>
+  </div>;
 }
 
 const TABS = [
@@ -1292,7 +1321,7 @@ const TABS = [
   { id: "council" as const, label: "Council" },
   { id: "appearance" as const, label: "Appearance" },
   { id: "updates" as const, label: "Updates" },
-  { id: "reading" as const, label: "Reading" },
+  { id: "reading" as const, label: "Vision" },
   { id: "capture" as const, label: "Capture" },
   { id: "sessions" as const, label: "Sessions" },
   { id: "limits" as const, label: "Limits" },
@@ -1498,7 +1527,7 @@ function CouncilCard() {
     setListing(true);
     setListError(null);
     try {
-      setAvailable(await bridge.listGatewayModels(settings.gatewayBaseUrl, settings.gatewayId));
+      setAvailable(primaryCatalog(await bridge.listGatewayModels(settings.gatewayBaseUrl, settings.gatewayId)));
     } catch (err) {
       setAvailable(null);
       setListError(String(err).replace(/^Error:\s*/, ""));
@@ -1602,6 +1631,16 @@ function CouncilCard() {
       </p>
 
       <div className="row">
+        <label htmlFor="memory-target">Memory goal</label>
+        <input id="memory-target" className="field" type="number" min={1} max={1024}
+          value={Math.round(settings.memoryTargetKb / 1024)}
+          onChange={(event) => patch({ memoryTargetKb: Math.max(1, Number(event.target.value) || 1) * 1024 })}
+          style={{ flex: 1 }} />
+        <span className="vendor">MB (soft target)</span>
+      </div>
+      <p className="hint">Correctness and Big-O complexity come first. A 0 ms display is rounded timing, and interpreter or platform overhead may exceed this memory goal.</p>
+
+      <div className="row">
         <label htmlFor="council-include">Panel Answers Are Candidates</label>
         <div className="segmented" style={{ flex: 1 }}>
           {([true, false] as const).map((v) => (
@@ -1624,21 +1663,10 @@ function CouncilCard() {
 
       <div className="row">
         <label htmlFor="execution-provider">Program Tests</label>
-        <div className="segmented" style={{ flex: 1 }}>
-          {(["e2b", "local"] as const).map((v) => (
-            <button
-              key={String(v)}
-              data-on={settings.executionProvider === v}
-              style={{ flex: 1 }}
-              onClick={() => patch({ executionProvider: v })}
-            >
-              {v === "e2b" ? "E2B Sandbox" : "Local"}
-            </button>
-          ))}
-        </div>
+        <span className="chip">E2B Cloud only</span>
       </div>
 
-      {settings.executionProvider === "e2b" && (
+      {(
         <>
           <div className="row">
             <label htmlFor="e2b-timeout">E2B Timeout</label>
@@ -1662,87 +1690,6 @@ function CouncilCard() {
           </p>
         </>
       )}
-
-      <div className="row">
-        <label htmlFor="benchmark-backend">Remote Benchmark</label>
-        <div className="segmented" style={{ flex: 1 }}>
-          {(["actions", "off"] as const).map((v) => (
-            <button
-              key={String(v)}
-              data-on={settings.benchmarkBackend === v}
-              style={{ flex: 1 }}
-              onClick={() => patch({ benchmarkBackend: v })}
-            >
-              {v === "actions" ? "GitHub Actions" : "Off"}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {settings.benchmarkBackend === "actions" && (
-        <>
-          <div className="row">
-            <label htmlFor="github-repository">Repository</label>
-            <input
-              id="github-repository"
-              className="field mono"
-              type="text"
-              spellCheck={false}
-              value={settings.githubRepository}
-              onChange={(e) => patch({ githubRepository: e.target.value })}
-              placeholder="owner/repo"
-              style={{ flex: 1 }}
-            />
-          </div>
-          <div className="row">
-            <label htmlFor="github-workflow">Workflow</label>
-            <input
-              id="github-workflow"
-              className="field mono"
-              type="text"
-              spellCheck={false}
-              value={settings.githubWorkflow}
-              onChange={(e) => patch({ githubWorkflow: e.target.value })}
-              placeholder="cloud-benchmark.yml"
-              style={{ flex: 1 }}
-            />
-          </div>
-          <div className="row">
-            <label htmlFor="github-ref">Ref</label>
-            <input
-              id="github-ref"
-              className="field mono"
-              type="text"
-              spellCheck={false}
-              value={settings.githubRef}
-              onChange={(e) => patch({ githubRef: e.target.value })}
-              placeholder="main"
-              style={{ flex: 1 }}
-            />
-          </div>
-          <div className="row">
-            <label htmlFor="github-timeout">Remote Timeout</label>
-            <input
-              id="github-timeout"
-              className="field"
-              type="number"
-              min={30}
-              max={900}
-              step={30}
-              value={Math.round(settings.benchmarkTimeoutMs / 1000)}
-              onChange={(e) => patch({ benchmarkTimeoutMs: Number(e.target.value) * 1000 })}
-              style={{ flex: 1 }}
-            />
-            <span className="vendor">seconds</span>
-          </div>
-          <p className="hint">
-            Runs passing candidates on GitHub Actions and adds pass/fail, time, and memory results
-            to the Council report. Production workers should use a server-side GitHub App or
-            Actions token, not a local <span className="mono">gh</span> login.
-          </p>
-        </>
-      )}
-
       <div className="row" style={{ alignItems: "start" }}>
         <label htmlFor="council-solvers" style={{ paddingTop: 6 }}>
           Solvers
@@ -1764,7 +1711,7 @@ function CouncilCard() {
         />
       </div>
       <p className="hint">
-        Enter 2–10 gateway model IDs, one per line. Add <span className="mono">/responses</span>{" "}
+        Enter 2–4 approved gateway model IDs, one per line. Add <span className="mono">/responses</span>{" "}
         for Responses API models such as Codex. Panel models are not requested twice.
       </p>
 
@@ -1792,19 +1739,19 @@ function CouncilCard() {
 
       <div className="row">
         <label htmlFor="council-synth">Synthesizer</label>
-        <input
+        <select
           id="council-synth"
           className="field mono"
-          type="text"
-          spellCheck={false}
           value={settings.synthesisModel}
           onChange={(e) => patch({ synthesisModel: e.target.value })}
-          list="gateway-models"
           style={{ flex: 1 }}
-        />
+        >
+          {Array.from(new Set([settings.synthesisModel, ...PRIMARY_MODEL_IDS.map(id => preferredPrimaryRoute(id, settings.gatewayId))])).map(model =>
+            <option key={model} value={model}>{model}</option>)}
+        </select>
       </div>
       <p className="hint">
-        Also writes the test harness. Empty falls back to the first judge&rsquo;s model.
+        Also writes the test harness. Its exact route must be available on the selected gateway.
       </p>
 
       {reachable && (
@@ -1910,6 +1857,7 @@ function CaptureCard() {
   const mcqModel = useStore((s) => s.settings.mcqModel);
   const mcqEndpoint = useStore((s) => s.settings.mcqEndpoint);
   const availableModels = useStore((s) => s.settings.availableModels);
+  const gatewayId = useStore((s) => s.settings.gatewayId);
   const patch = useStore((s) => s.patchSettings);
   const [helper, setHelper] = useState<bridge.BackgroundHelperStatus | null>(null);
   const [helperBusy, setHelperBusy] = useState(false);
@@ -2037,18 +1985,16 @@ function CaptureCard() {
         </p>
         <div className="row">
           <label htmlFor="mcq-model">MCQ Model</label>
-          <input
+          <select
             id="mcq-model"
             className="field mono"
-            list="mcq-models"
             value={mcqModel}
             onChange={(e) => patch({ mcqModel: e.target.value })}
-          />
-          <datalist id="mcq-models">
-            {Array.from(new Set(["anthropic/claude-fable-5", ...availableModels])).map((model) => (
-              <option key={model} value={model} />
+          >
+            {Array.from(new Set([mcqModel, ...(availableModels.length ? availableModels : PRIMARY_MODEL_IDS.map(id => preferredPrimaryRoute(id, gatewayId)))])).map((model) => (
+              <option key={model} value={model}>{model}</option>
             ))}
-          </datalist>
+          </select>
         </div>
         <div className="row">
           <label htmlFor="mcq-endpoint">MCQ API</label>
@@ -2170,6 +2116,7 @@ export default function SettingsDialog() {
   };
 
   const perMinute = useStore((st) => st.settings.gatewayPerMinute);
+  const selectedGatewayId = useStore((st) => st.settings.gatewayId);
   const [rateDraft, setRateDraft] = useState<string | null>(null);
   const commitRate = () => {
     if (rateDraft !== null && rateDraft.trim()) patch({ gatewayPerMinute: Number(rateDraft) });
@@ -2278,7 +2225,7 @@ export default function SettingsDialog() {
             {/* The number that decides whether a run answers or 429s. It is a
                 property of the plan, not of the API, so it cannot be discovered
                 — only told to us, or learned the hard way from a refusal. */}
-            <div className="row" style={{ marginTop: 12 }}>
+            {selectedGatewayId !== "cleanapis" ? <><div className="row" style={{ marginTop: 12 }}>
               <label htmlFor="rate">Gateway Requests per Minute</label>
               <input
                 id="rate"
@@ -2296,10 +2243,13 @@ export default function SettingsDialog() {
               />
             </div>
             <p className="hint">
-              Pane, reader, and judge requests use this rate. Extra requests queue instead of
+              Solver and Council requests use this rate. Extra requests queue instead of
               failing with <span className="mono">429 Too Many Requests</span>, so runs may take
               longer. TokenRouter&rsquo;s free tier allows 5 requests per minute.
-            </p>
+            </p></> : <p className="hint">
+              Clean API runs the selected solvers in parallel and follows the quota and retry
+              delay returned by your Clean API plan.
+            </p>}
           </div>
           )}
         </div>

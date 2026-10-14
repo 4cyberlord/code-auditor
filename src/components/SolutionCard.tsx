@@ -19,15 +19,18 @@ import Markdown from "./Markdown";
  * fact only when something ran; everything else here is a model's read, however
  * confident it sounds, and the card never lets the two wear the same styling.
  */
-export default function SolutionCard() {
+export default function SolutionCard({ alwaysOpen = false }: { alwaysOpen?: boolean }) {
   const review = useStore((s) => s.review);
+  const agents = useStore((s) => s.agents);
+  const extraction = useStore((s) => s.extraction);
   const runs = useStore((s) => s.council.runs);
   const rerun = useStore((s) => s.runReview);
   const setLanguage = useStore((s) => s.setReviewLanguage);
   const running = useStore((s) => s.running);
   const open = useStore((s) => s.settings.railPanel === "solution");
+  const revealed = alwaysOpen || open || agents.some(a => a.enabled && a.final?.code?.trim());
   const toggleRail = useStore((s) => s.toggleRailPanel);
-  const toggle = () => toggleRail("solution");
+  const toggle = () => { if (!alwaysOpen) toggleRail("solution"); };
 
   /**
    * What was actually measured, if anything.
@@ -61,13 +64,20 @@ export default function SolutionCard() {
   }, [runs]);
 
   const data = review.data;
+  const solved = agents.filter(a => a.enabled && a.final?.code?.trim());
+  const best = solved.find(a => a.final?.wellFormed) ?? solved[0];
+  const code = best?.final?.code?.trim() ?? "";
+  const language = best?.final?.language || "text";
+  const complexity = best?.final?.complexity || "Not evaluated";
+  const functions = [...code.matchAll(/\bdef\s+(\w+)\s*\(([^)]*)\)|\bfunction\s+(\w+)\s*\(([^)]*)\)/g)]
+    .slice(0, 10).map(m => ({ name: m[1] || m[3], args: m[2] || m[4] || "" }));
 
   const optimal = data ? isAlreadyOptimal(data) : false;
   const ports = PORT_LANGUAGES.filter((l) => data?.ports[l]);
   const shown: PortLanguage = ports.includes(review.language) ? review.language : ports[0] ?? "cpp";
 
   return (
-    <section className="solution-card" data-open={open}>
+    <section className="solution-card" data-open={revealed}>
       {/* The whole header is the handle, the same as the other drawers — a
           chevron alone is a poor target and there is nothing else this row
           could mean. The status badge stays visible when collapsed, because
@@ -76,7 +86,7 @@ export default function SolutionCard() {
         className="side-head drawer-head solution-head"
         role="button"
         tabIndex={0}
-        aria-expanded={open}
+        aria-expanded={revealed}
         onClick={toggle}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -112,18 +122,44 @@ export default function SolutionCard() {
       {/* Nothing reviewed yet. The drawer is still here to be opened, the same
           as Cloud Jobs with no jobs — a control that appears only once it has
           something to show is a control nobody finds. */}
-      {open && review.status === "idle" && !data && (
+      {revealed && code && (
+        <div className="solution-primary" style={{ padding: "12px 16px" }}>
+          <h3>Solution <span className="hint">{best?.model}</span></h3>
+          <div style={{ maxHeight: 450, overflow: "auto" }}>
+            <Markdown text={"```" + language + "\n" + code + "\n```"} />
+          </div>
+          <h4>Complexity</h4>
+          <p className="mono">{complexity}</p>
+          {functions.length > 0 && <>
+            <h4>Functions used</h4>
+            <ul>{functions.map((fn, index) => <li key={`${fn.name}-${fn.args}-${index}`}>
+              <code>{fn.name}({fn.args})</code> — Defines the {fn.name} function.
+            </li>)}</ul>
+          </>}
+          <h4>Key Idea</h4>
+          <p>{data?.approach.keyIdea || best?.final?.answer || "See the solution approach above."}</p>
+          <h4>Benchmark results</h4>
+          <p>{measured ? measured.cases + " · " + measured.runtime + " · " + (measured.memory ?? "memory not recorded")
+            : "Not benchmarked yet; measured runtime and memory are unavailable."}</p>
+        </div>
+      )}
+      {revealed && !code && extraction.status === "done" && (
+        <p className="hint solution-empty">Screenshot reading finished. Waiting for an agent to produce solution code.
+          {agents.some(a => a.enabled && a.status === "error") && " A selected agent failed; inspect its panel."}
+        </p>
+      )}
+      {revealed && review.status === "idle" && !data && !code && (
         <p className="hint solution-empty">
           Nothing reviewed yet. A read-out is written automatically when a run finishes, or press
           Review to grade whatever is on the panes now.
         </p>
       )}
 
-      {open && review.error && <div className="pane-error">{review.error}</div>}
-      {open && data?.validNote && <p className="solution-why">{data.validNote}</p>}
+      {revealed && review.error && <div className="pane-error">{review.error}</div>}
+      {revealed && data?.validNote && <p className="solution-why">{data.validNote}</p>}
 
       {/* Measured, or plainly not. Never a blank that reads as a zero. */}
-      {open && (data || review.status !== "idle") && (
+      {revealed && (data || review.status !== "idle") && (
       <div className="solution-measured" data-measured={Boolean(measured)}>
         {measured ? (
           <>
@@ -141,7 +177,7 @@ export default function SolutionCard() {
       </div>
       )}
 
-      {open && data && (
+      {revealed && data && (
         <div className="solution-facets">
           <div className="facet">
             <h4>Approach</h4>
@@ -187,7 +223,7 @@ export default function SolutionCard() {
       {/* The same algorithm, three ways. The performance rule is deliberately
           not enforced across these — they are here to be compared, and which
           one to ship is the reader's call. */}
-      {open && ports.length > 0 && (
+      {revealed && ports.length > 0 && (
         <div className="solution-ports">
           <div className="segmented">
             {ports.map((lang) => (

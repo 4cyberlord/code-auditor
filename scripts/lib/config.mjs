@@ -21,7 +21,7 @@
  *
  * Anything already set in the real environment wins. The database fills gaps; it
  * does not overrule a value someone exported on purpose for one run. That is
- * what keeps `CODE_AUDITOR_BATCH_EXECUTION=local npm run …` working.
+ * Job-level secrets remain per account; generated code execution is E2B-only.
  */
 
 import { execFileSync } from "node:child_process";
@@ -103,6 +103,11 @@ export const BOOTSTRAP = new Set([
   "SUPABASE_PUBLISHABLE_KEY",
   "SUPABASE_SERVICE_ROLE_KEY",
   "SUPABASE_SERVICE_KEY",
+  // External language sources are bootstrap-only: never load their endpoints
+  // or credentials from the Supabase application configuration database.
+  "CODE_AUDITOR_LANGUAGE_REGISTRIES",
+  "CODE_AUDITOR_LANGUAGE_PUBLISH_TOKEN",
+  "NEON_LANGUAGE_DOCS_TOKEN",
 ]);
 
 /**

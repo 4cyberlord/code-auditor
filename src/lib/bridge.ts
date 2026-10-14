@@ -17,6 +17,8 @@ export interface ImageInput {
   mime: string;
   /** base64, no data: prefix */
   data: string;
+  /** Short-lived read-only Azure URL, when the run uses URL image delivery. */
+  url?: string;
 }
 
 export interface RunRequest {
@@ -114,6 +116,12 @@ export async function openScreenRecordingSettings(): Promise<void> {
 export async function restartForScreenRecordingPermission(): Promise<void> {
   if (!inTauri()) throw new Error(NOT_TAURI);
   await invoke("screen_recording_restart");
+}
+
+/** End the native desktop process, including any in-flight model work. */
+export async function quitApplication(): Promise<void> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  await invoke("app_quit");
 }
 
 export async function checkForUpdates(): Promise<UpdateCheckResult> {
@@ -622,31 +630,14 @@ export interface RunCodeResult {
   ok: boolean;
 }
 
-/**
- * Executes a block of model-written code in a bounded scratch directory.
- *
- * Only ever called from a button press. Nothing in the app runs an answer on its
- * own, however unanimous the panel was about it -- this is generated code on the
- * user's own machine, and the person deciding to run it has to be a person.
- */
-export async function runCode(args: {
-  language: string;
-  code: string;
-  stdin?: string;
-  timeoutMs?: number;
-}): Promise<RunCodeResult> {
-  if (!inTauri()) throw new Error(NOT_TAURI);
-  return invoke<RunCodeResult>("run_code", { req: args });
+/** Retired desktop runner. Generated code must be queued on E2B. */
+export async function runCode(): Promise<RunCodeResult> {
+  throw new Error("Local execution is disabled. Use the E2B cloud benchmark queue.");
 }
 
-/** Languages with an interpreter actually installed on this machine. */
+/** Local runtimes are deliberately unavailable to the application. */
 export async function runnableLanguages(): Promise<string[]> {
-  if (!inTauri()) return [];
-  try {
-    return await invoke<string[]>("runnable_languages");
-  } catch {
-    return [];
-  }
+  return [];
 }
 
 /**
@@ -656,12 +647,25 @@ export async function runnableLanguages(): Promise<string[]> {
  * account happens outside this app, so a hard-coded list can only ever be a
  * guess about somebody else's billing page.
  */
+export interface GatewayModelDetails {
+  id: string;
+  /** Null when the gateway did not include capability metadata. */
+  capabilities: string[] | null;
+}
+
+export async function listGatewayModelDetails(
+  baseUrl?: string | null,
+  gatewayId: Extract<TransportId, "tokenrouter" | "wiro" | "cleanapis"> = "tokenrouter"
+): Promise<GatewayModelDetails[]> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  return invoke<GatewayModelDetails[]>("list_gateway_models", { baseUrl: baseUrl ?? null, gatewayId });
+}
+
 export async function listGatewayModels(
   baseUrl?: string | null,
   gatewayId: Extract<TransportId, "tokenrouter" | "wiro" | "cleanapis"> = "tokenrouter"
 ): Promise<string[]> {
-  if (!inTauri()) throw new Error(NOT_TAURI);
-  return invoke<string[]>("list_gateway_models", { baseUrl: baseUrl ?? null, gatewayId });
+  return (await listGatewayModelDetails(baseUrl, gatewayId)).map(model => model.id);
 }
 
 export interface ProbeResult {
@@ -690,7 +694,9 @@ export async function probeModels(
   testVision = false,
   // Which wire each model speaks when it is not chat. Passed through to the
   // probe so it does not mark a Responses-API model broken for being one.
-  endpointByModel?: Record<string, "chat" | "responses">
+  endpointByModel?: Record<string, "chat" | "responses">,
+  notifyOnResult = true,
+  visionTransport: "azure" | "supabase" = "supabase"
 ): Promise<ProbeResult[]> {
   if (!inTauri()) throw new Error(NOT_TAURI);
   return invoke<ProbeResult[]>("probe_models", {
@@ -699,6 +705,8 @@ export async function probeModels(
     gatewayId,
     testVision,
     endpointByModel: endpointByModel ?? null,
+    notifyOnResult,
+    visionTransport,
   });
 }
 
@@ -832,6 +840,7 @@ export async function uploadScreenshot(args: {
   data: string;
   submissionId?: string;
   position?: number;
+  backend?: "azure" | "supabase";
 }): Promise<Uploaded> {
   if (!inTauri()) throw new Error(NOT_TAURI);
   // Spelled out rather than spread: tests/bridge.test.ts reads the argument
@@ -844,6 +853,7 @@ export async function uploadScreenshot(args: {
     data: args.data,
     submissionId: args.submissionId ?? null,
     position: args.position ?? null,
+    backend: args.backend ?? "supabase",
   });
 }
 
@@ -854,15 +864,25 @@ export async function uploadScreenshot(args: {
  * file is gone — and how an iPad app will fetch one without holding a key that
  * can write.
  */
-export async function signedUrl(path: string, seconds = 3600): Promise<string> {
+export async function signedUrl(path: string, seconds = 3600, bucket?: string): Promise<string> {
   if (!inTauri()) throw new Error(NOT_TAURI);
-  return invoke<string>("storage_signed_url", { path, seconds });
+  return invoke<string>("storage_signed_url", { path, seconds, bucket: bucket ?? null });
 }
 
 /** Deletes a stored screenshot, so "delete" in the app means deleted. */
-export async function removeStored(path: string): Promise<void> {
+export async function removeStored(path: string, bucket?: string): Promise<void> {
   if (!inTauri()) return;
-  await invoke("storage_remove", { path });
+  await invoke("storage_remove", { path, bucket: bucket ?? null });
+}
+
+export async function readAzureScreenshot(path: string): Promise<string> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  return invoke<string>("storage_read_azure", { path });
+}
+
+export async function testAzureStorage(): Promise<void> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  await invoke("storage_test_azure");
 }
 
 /**

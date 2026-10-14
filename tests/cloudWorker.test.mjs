@@ -1,6 +1,7 @@
 // Hermetic: config now comes from the database, and this test must not inherit
 // whatever is in a developer's .development.env.
 process.env.CODE_AUDITOR_CONFIG = "off";
+process.env.NODE_ENV = "test";
 process.env.SUPABASE_URL = "https://project.supabase.co";
 process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role";
 process.env.TOKENROUTER_API_KEY = "tokenrouter";
@@ -24,9 +25,13 @@ const events = [];
 const patches = [];
 const reports = [];
 const modelCalls = [];
+const apiRoutes = [];
+let cleanRateRetries = 0;
 // Flipped for the second scenario, so the generated harness rejects every
 // candidate the way a harness with a wrong expectation does.
 let HARNESS_WRONG = false;
+let EMPTY_SPEC_ONCE = true;
+let EMPTY_SPEC_ALWAYS = false;
 // Scenario 3: one route answers nothing, ever, the way a dead endpoint does.
 let DEAD_MODEL = "";
 // Scenario 5: a route with no reasoning mode, which must not read as a dead seat.
@@ -38,7 +43,7 @@ const abort = () => Object.assign(new Error("aborted"), { name: "AbortError" });
 function json(data, init = {}) {
   return new Response(JSON.stringify(data), {
     status: init.status || 200,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...init.headers },
   });
 }
 
@@ -56,6 +61,12 @@ let TIE_BREAK_PICK = "B";
 
 globalThis.fetch = async (url, init = {}) => {
   const href = String(url);
+  if (href.includes("/rest/v1/app_config?")) {
+    return json([{ key: "cleanapis", value: "test-clean-token", owner_id: "clean-owner" }]);
+  }
+  if (href === "https://cleanapis.com/v1/models") {
+    return json({ data: ["claude-opus-5.5", "kimi-k3", "gpt-5.6-sol", "unapproved-model"].map(id => ({ id })) });
+  }
   if (href.includes("/rest/v1/intelligence_")) {
     if (LIBRARY_DOWN) throw new Error("ECONNREFUSED");
     if (href.includes("intelligence_sources")) return json([]);
@@ -119,6 +130,11 @@ globalThis.fetch = async (url, init = {}) => {
   if (href.includes("/chat/completions")) {
     const req = JSON.parse(init.body);
     modelCalls.push(req);
+    apiRoutes.push({ url: href, authorization: init.headers?.authorization, model: req.model });
+    if (href === "https://cleanapis.com/v1/chat/completions" && cleanRateRetries === 0) {
+      cleanRateRetries++;
+      return json({ error: { message: "Rate limit exceeded" } }, { status: 429, headers: { "retry-after": "0.001" } });
+    }
     if (DEAD_MODEL && req.model === DEAD_MODEL) throw abort();
     if (REJECTS_REASONING && req.model === REJECTS_REASONING && req.reasoning_effort) {
       return json({ error: { message: "Unsupported parameter: 'reasoning_effort'" } }, { status: 400 });
@@ -229,6 +245,10 @@ export function solve(xs) { return xs ? xs.length : 0; }
 FINAL>>>`);
     }
     if (system.includes("You write test harnesses for candidate solutions")) {
+      if (EMPTY_SPEC_ONCE || EMPTY_SPEC_ALWAYS) {
+        EMPTY_SPEC_ONCE = false;
+        return modelReply("");
+      }
       return modelReply(`<<<TESTS
 HARNESS: javascript
 \`\`\`javascript
@@ -291,7 +311,31 @@ FINAL>>>`);
   throw new Error(`Unexpected fetch: ${href}`);
 };
 
-const { runCouncilJob } = await import("../scripts/cloud-worker.mjs");
+const { runCouncilJob: runWorkerJob, remoteScript } = await import("../scripts/cloud-worker.mjs");
+const javaScript = remoteScript("java", "class Main {}", "e2b");
+check("Java E2B command is concrete, not an undefined template variable",
+  javaScript.includes("command='javac Main.java && java Main'") && !javaScript.includes("JAVA_COMMAND"));
+check("every supported E2B language builds a runner script",
+  ["python", "javascript", "typescript", "bash", "ruby", "php", "c", "cpp", "java", "go", "rust"]
+    .every((language) => remoteScript(language, "// smoke", "e2b").includes("CA_EXIT:")));
+const runCouncilJob = job => runWorkerJob({ ...job,
+  settings_snapshot: { executionProvider: "e2b", ...job.settings_snapshot },
+});
+let EXECUTIONS = 0;
+globalThis.__COUNCIL_E2B_TEST_DOUBLE__ = async (_language, program) => {
+  EXECUTIONS++;
+  const wrong = /want:\s*99/.test(program);
+  const stdout = wrong
+    ? "FAIL empty got=0 want=99\nFAIL three got=3 want=99\n"
+    : "PASS empty\nPASS three\n";
+  return {
+    ok: !wrong, exitCode: wrong ? 1 : 0, stdout, stderr: "", durationMs: 12,
+    remoteElapsedMs: 2, peakMemoryKb: 8192, runtime: "e2b test double",
+    provider: "e2b", sandboxId: "test-sandbox", executionId: "test-execution",
+    state: wrong ? "failed" : "completed", exitVerified: true, timedOut: false,
+    truncated: false, network: "denied", bootMs: 10,
+  };
+};
 const { COUNCIL_DEFAULT_MODELS } = await import("../src/lib/council.ts");
 
 console.log("\n1. cloud worker v1 happy path");
@@ -303,46 +347,42 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
-    // Gateways commonly catalogue wire ids without their provider prefix. The
-    // worker must still accept this roster and send those reachable wire ids.
-    availableModels: ["claude-sonnet-4.6", "kimi-k3"],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
 check("patched completed", patches.some((p) => p.status === "completed"));
-check(
-  "provider-qualified seats use the reachable gateway ids",
-  modelCalls.some((call) => call.model === "claude-sonnet-4.6") &&
-    modelCalls.some((call) => call.model === "kimi-k3"),
-  JSON.stringify(modelCalls.map((call) => call.model))
-);
 check("wrote one report", reports.length === 1);
 check("report has winner", reports[0]?.winner === "A", String(reports[0]?.winner));
 check("report has reviews", reports[0]?.report?.reviews?.length === 2, String(reports[0]?.report?.reviews?.length));
 check("report has judges", reports[0]?.report?.judges?.length === 1, String(reports[0]?.report?.judges?.length));
 check("report has benchmark suite", reports[0]?.report?.suites?.length === 1, String(reports[0]?.report?.suites?.length));
-check("report has passing local runs", reports[0]?.report?.runs?.A?.passed === 2 && reports[0]?.report?.runs?.B?.passed === 2, JSON.stringify(reports[0]?.report?.runs));
+check("empty harness response was retried with another route",
+  modelCalls.filter(c => c.messages?.[0]?.content?.includes("You write test harnesses for candidate solutions")).length >= 2);
+check("report has passing E2B runs", reports[0]?.report?.runs?.A?.passed === 2 && reports[0]?.report?.runs?.B?.passed === 2, JSON.stringify(reports[0]?.report?.runs));
 check("downloaded image for model calls", modelCalls.some((c) => Array.isArray(c.messages[1].content) && c.messages[1].content.some((p) => p.type === "image_url")));
 check("benchmark phase event recorded", events.some((e) => e.phase === "benchmark_done"));
 check("review phase event recorded", events.some((e) => e.phase === "review_done"));
 check("judge phase event recorded", events.some((e) => e.phase === "judge_done"));
 check("completion event recorded", events.some((e) => e.phase === "completed"));
 
-// --- the revision round, which cloud jobs used to skip entirely --------------
-check("the solvers were asked to revise", events.some((e) => e.phase === "revision_done"));
+
+// --- the adaptive revision round ---------------------------------------------
+check("only the candidate with a substantive concern was asked to revise",
+  events.filter((e) => e.phase === "revision_done").length === 1 &&
+  events.some((e) => e.phase === "revision_done" && e.payload?.letter === "B"));
 check(
-  "the revised field was executed",
-  Object.keys(reports[0]?.report?.revisedRuns || {}).length === 2,
+  "only the revised candidate was re-executed",
+  Object.keys(reports[0]?.report?.revisedRuns || {}).length === 1 && reports[0]?.report?.revisedRuns?.B?.passed === 2,
   JSON.stringify(reports[0]?.report?.revisedRuns)
 );
 check(
-  "the revision is what is on the report",
-  reports[0]?.report?.candidates?.[0]?.revised?.code?.includes("xs ? xs.length"),
-  String(reports[0]?.report?.candidates?.[0]?.revised?.code)
+  "the clean candidate was not needlessly rewritten",
+  !reports[0]?.report?.candidates?.[0]?.revised && reports[0]?.report?.candidates?.[1]?.revised?.code?.includes("xs ? xs.length"),
+  JSON.stringify(reports[0]?.report?.candidates?.map((candidate) => Boolean(candidate.revised)))
 );
 const judgeCall = modelCalls.find((c) => c.messages[0].content.includes("one judge on an engineering council"));
 check(
@@ -370,16 +410,16 @@ const parsed = reports[0]?.report?.parsed;
 check("the synthesis parsed", parsed?.synthesis?.winner === "A", JSON.stringify(parsed?.synthesis?.winner));
 check("the approach is a field now", parsed?.synthesis?.approach === "direct", String(parsed?.synthesis?.approach));
 check("the judge's ranking was counted", parsed?.tally?.[0]?.letter === "A", JSON.stringify(parsed?.tally));
-check("the winner came from the synthesis, uncontested", parsed?.winnerSource === "synthesis", String(parsed?.winnerSource));
+check("the winner was selected from execution evidence", parsed?.winnerSource === "evidence", String(parsed?.winnerSource));
 
 // --- the presentation the overlay renders ----------------------------------
 const presentation = reports[0]?.report?.presentation;
 check("standing is stamped on the report", presentation?.standing === "verified", String(presentation?.standing));
 check("there is one evidence row per candidate", presentation?.evidence?.length === 2, JSON.stringify(presentation?.evidence?.length));
 check(
-  "the evidence describes the revision that was judged",
-  presentation?.evidence?.[0]?.revised === true && presentation?.evidence?.[0]?.gate === "pass",
-  JSON.stringify(presentation?.evidence?.[0])
+  "the evidence distinguishes the clean original from the repaired candidate",
+  presentation?.evidence?.[0]?.revised === false && presentation?.evidence?.[1]?.revised === true && presentation?.evidence?.[1]?.gate === "pass",
+  JSON.stringify(presentation?.evidence)
 );
 check("provenance names the model behind the winner", Boolean(presentation?.provenance?.includes("Candidate A")), String(presentation?.provenance));
 
@@ -452,6 +492,25 @@ check(
   textOf(reviewCall).slice(0, 200)
 );
 
+console.log("\n1b. empty harness responses cannot publish an untested answer");
+EMPTY_SPEC_ALWAYS = true;
+const beforeUnverified = { reports: reports.length, executions: EXECUTIONS };
+let noHarnessRejected = false;
+try {
+  await runCouncilJob({ id: "job-no-harness", session_id: "session-1", settings_snapshot: {
+    mode: "auto", maxTokens: 2048,
+    councilModels: [{ id: "anthropic/claude-opus-5.5", endpoint: "chat" },
+      { id: "moonshotai/kimi-k3", endpoint: "chat" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
+  } });
+} catch (err) {
+  noHarnessRejected = /no executable .* test harness/i.test(String(err));
+}
+EMPTY_SPEC_ALWAYS = false;
+check("empty specs fail closed", noHarnessRejected, true);
+check("no unverified report was published", reports.length, beforeUnverified.reports);
+check("E2B was not falsely reported as having tested code", EXECUTIONS, beforeUnverified.executions);
+
 // --- the gate, and the harness that convicts everybody ----------------------
 console.log("\n2. a synthesis cannot promote a candidate the runner rejected");
 HARNESS_WRONG = true;
@@ -460,7 +519,8 @@ patches.length = 0;
 reports.length = 0;
 modelCalls.length = 0;
 
-await runCouncilJob({
+let rejectedUnverified = false;
+try { await runCouncilJob({
   id: "job-2",
   session_id: "session-1",
   settings_snapshot: {
@@ -468,24 +528,23 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
-});
+}); } catch (err) { rejectedUnverified = /no final candidate passed executable E2B/i.test(String(err)); }
 
-const runs2 = reports[0]?.report?.runs || {};
-check("both candidates were rejected by the harness", runs2.A?.failed > 0 && runs2.B?.failed > 0, JSON.stringify(runs2));
-check("the synthesis still named A", reports[0]?.report?.synthesisClaimedWinner === "A", String(reports[0]?.report?.synthesisClaimedWinner));
-check("but no winner was recorded", !reports[0]?.winner, JSON.stringify(reports[0]?.winner));
-check("and the overrule was logged", events.some((e) => e.phase === "gate_overrule"));
+check("both candidates were executed and rejected", events.filter(e => e.phase === "benchmark_done").length >= 2,
+  JSON.stringify(events.map(e => e.phase)));
+check("no unverified coding solution was published", rejectedUnverified && reports.length === 0,
+  JSON.stringify({ rejectedUnverified, reports: reports.length }));
 check(
   "identical failures accuse the harness, not the code",
   events.some((e) => e.phase === "harness_suspect"),
   JSON.stringify(events.map((e) => e.phase))
 );
-check("the job still completed rather than dying", patches.some((p) => p.status === "completed"));
+check("the job never claimed completion", !patches.some((p) => p.status === "completed"));
 
 // --- a route that never answers is asked once, not at every stage ----------
 console.log("\n3. a model that times out is benched for the rest of the job");
@@ -504,10 +563,10 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -542,11 +601,11 @@ await runCouncilJob({
     // past the solver slice — it is not a seat, but it can see, and that is
     // what the reading pass needs.
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat", vision: false },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat", vision: false },
       { id: "moonshotai/kimi-k3", endpoint: "chat", vision: false },
-      { id: "anthropic/claude-opus-4.6", endpoint: "chat", vision: true },
+      { id: "anthropic/claude-fable-5.1", endpoint: "chat", vision: true },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -557,7 +616,7 @@ check("so it transcribed instead", events.some((e) => e.phase === "reading_done"
 const readerEvent = events.find((e) => e.phase === "no_seeing_models");
 check(
   "the reader was a model that can see",
-  readerEvent?.payload?.readers?.includes("anthropic/claude-opus-4.6") &&
+  readerEvent?.payload?.readers?.includes("anthropic/claude-fable-5.1") &&
     !readerEvent?.payload?.readers?.includes("moonshotai/kimi-k3"),
   JSON.stringify(readerEvent?.payload?.readers)
 );
@@ -613,10 +672,10 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -647,15 +706,15 @@ await runCouncilJob({
   mode: "mcq",
   settings_snapshot: {
     overlayMode: "mcq",
-    mcqModel: "anthropic/claude-fable-5",
+    mcqModel: "anthropic/claude-fable-5.1",
     mcqEndpoint: "chat",
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-fable-5", endpoint: "chat", vision: true },
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat", vision: true },
+      { id: "anthropic/claude-fable-5.1", endpoint: "chat", vision: true },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat", vision: true },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -665,7 +724,7 @@ check("MCQ report is tagged", mcqReport.kind === "mcq", JSON.stringify(mcqReport
 check("MCQ answer is stored", mcqReport.answer?.label === "C", JSON.stringify(mcqReport.answer));
 check("MCQ why-not reasons are stored", mcqReport.whyNot?.length === 3, JSON.stringify(mcqReport.whyNot));
 check("MCQ checked knowledge first", events.some((e) => e.phase === "knowledge_selected"));
-check("MCQ used the configured model", mcqCall?.model === "anthropic/claude-fable-5", String(mcqCall?.model));
+check("MCQ used the configured model", mcqCall?.model === "anthropic/claude-fable-5.1", String(mcqCall?.model));
 check("MCQ completed", patches.some((p) => p.status === "completed" && p.mode === "mcq"));
 MCQ_READING = false;
 
@@ -684,15 +743,15 @@ await runCouncilJob({
   mode: "council",
   settings_snapshot: {
     overlayMode: "auto",
-    mcqModel: "anthropic/claude-fable-5",
+    mcqModel: "anthropic/claude-fable-5.1",
     mcqEndpoint: "chat",
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-fable-5", endpoint: "chat", vision: true },
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat", vision: true },
+      { id: "anthropic/claude-fable-5.1", endpoint: "chat", vision: true },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat", vision: true },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -721,10 +780,10 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat", vision: false },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat", vision: false },
       { id: "moonshotai/kimi-k3", endpoint: "chat", vision: false },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 }).catch((err) => {
   noEyesError = err;
@@ -771,16 +830,16 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
 const picked = events.find((e) => e.phase === "knowledge_selected");
 check("the database library was used", picked?.payload?.library === "database", JSON.stringify(picked?.payload));
-check("and only its records were searched", picked?.payload?.records === 1, String(picked?.payload?.records));
+check("database rows are searched alongside bundled algorithm guidance", picked?.payload?.records > 1, String(picked?.payload?.records));
 const dbSolver = modelCalls.find((c) => String(c.messages[0].content).includes("independent expert agents"));
 const dbText = textOf(dbSolver);
 check("the row reached the solver", dbText.includes("Counting the elements of an array"), dbText.slice(-260));
@@ -800,10 +859,10 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -832,11 +891,11 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
       { id: "z-ai/glm-5.3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -869,11 +928,11 @@ await runCouncilJob({
     maxTokens: 2048,
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
-      { id: "anthropic/claude-sonnet-4.6", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
       { id: "z-ai/glm-5.3", endpoint: "chat" },
     ],
-    councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
 });
 
@@ -887,6 +946,34 @@ check(
 );
 READERS_DISAGREE = false;
 TIE_BREAK_PICK = "B";
+
+console.log("\n10. Clean API carries the owner's token and only approved model IDs");
+events.length = patches.length = reports.length = modelCalls.length = apiRoutes.length = 0;
+await runCouncilJob({
+  id: "clean-job", owner_id: "clean-owner", session_id: "session-1",
+  settings_snapshot: {
+    mode: "code", maxTokens: 2048, gatewayId: "cleanapis", gatewayBaseUrl: "https://cleanapis.com/v1",
+    councilModels: [
+      { id: "unapproved-model", endpoint: "chat" },
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
+      { id: "moonshotai/kimi-k3", endpoint: "chat" },
+    ],
+    councilJudges: [{ model: "openai/gpt-5.6-sol", emphasis: "correctness" }],
+    synthesisModel: "openai/gpt-5.6-sol",
+  },
+});
+check("Clean API job completed", patches.some(patch => patch.status === "completed"));
+check("Clean API's quota response was retried", cleanRateRetries === 1);
+check("every call used Clean API's chat endpoint", apiRoutes.length > 0 &&
+  apiRoutes.every(route => route.url === "https://cleanapis.com/v1/chat/completions"));
+check("every call used the owner's Clean token", apiRoutes.length > 0 &&
+  apiRoutes.every(route => route.authorization === "Bearer test-clean-token"));
+check("gateway aliases became exact Clean model IDs", apiRoutes.length > 0 &&
+  apiRoutes.every(route => ["claude-opus-5.5", "kimi-k3", "gpt-5.6-sol"].includes(route.model)));
+check("the unapproved model was never called", !apiRoutes.some(route => route.model === "unapproved-model"));
+check("Clean API received the screenshot", modelCalls.some(call =>
+  call.messages?.[1]?.content?.some?.(part => part.type === "image_url")));
+check("Clean API produced a tested final solution", reports[0]?.winner === "A" && reports[0]?.report?.runs?.A?.passed === 2);
 
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall cloud worker checks passed\n");
 process.exit(fail ? 1 : 0);

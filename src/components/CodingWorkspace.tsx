@@ -71,7 +71,7 @@ interface CodingModelChoice {
 }
 
 function supportsCodingTools(route: Route | null): boolean {
-  return !!route && ["openai", "moonshot", "tokenrouter"].includes(route.provider);
+  return !!route && ["openai", "moonshot", "tokenrouter", "wiro", "cleanapis"].includes(route.provider);
 }
 
 export default function CodingWorkspace() {
@@ -101,7 +101,8 @@ export default function CodingWorkspace() {
       ALL_AGENTS.filter((id) => settings.enabled[id]).map((id) => {
         const spec = agentSpec(id);
         const route = routeFor(id, settings, keys, gatewayKey);
-        const endpoint = route ? endpointForCouncilModel(settings.councilModels, route.model) : "chat";
+        const endpoint = route && settings.gatewayId === "tokenrouter"
+          ? endpointForCouncilModel(settings.councilModels, route.model) : "chat";
         const unsupportedEndpoint = endpoint !== "chat";
         const unsupportedProvider = !supportsCodingTools(route);
         const available = !!route && !unsupportedEndpoint && !unsupportedProvider;

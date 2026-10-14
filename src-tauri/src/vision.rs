@@ -551,6 +551,7 @@ mod tests {
         let img = ImageInput {
             mime: "image/png".into(),
             data: base64::engine::general_purpose::STANDARD.encode(b"x"),
+            url: None,
         };
         let out = recognize_one(&img).unwrap();
         assert_eq!(out.words, 0);

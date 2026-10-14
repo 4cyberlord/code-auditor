@@ -325,10 +325,8 @@ async function createSmokeJob() {
       settings_snapshot: {
         mode: "auto",
         maxTokens: 1200,
-        executionProvider:
-          mustEnv("CODE_AUDITOR_SMOKE_EXECUTION") ||
-          (mustEnv("E2B_API_KEY") ? "e2b" : "local"),
-        benchmarkBackend: "actions",
+        executionProvider: "e2b",
+        benchmarkBackend: "off",
         githubRepository: mustEnv("GITHUB_REPOSITORY") || mustEnv("CODE_AUDITOR_GITHUB_REPOSITORY"),
         githubWorkflow: mustEnv("CODE_AUDITOR_GITHUB_WORKFLOW") || "cloud-benchmark.yml",
         githubRef: mustEnv("CODE_AUDITOR_GITHUB_REF") || "main",
@@ -380,7 +378,7 @@ async function solveSmokeJob() {
   process.env.CODE_AUDITOR_WORKER_SOLVERS = "2";
   process.env.CODE_AUDITOR_WORKER_JUDGES = "1";
   process.env.CODE_AUDITOR_NOTIFY_COMPLETED ||= "true";
-  process.env.CODE_AUDITOR_EXECUTION_PROVIDER ||= "local";
+  process.env.CODE_AUDITOR_EXECUTION_PROVIDER = "e2b";
   process.env.CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS ||= "13000";
 
   const created = await timed("Queued smoke solve job", createSmokeJob);
@@ -414,7 +412,7 @@ ok(".development.env loaded", loaded);
 ok("SUPABASE_URL present", Boolean(mustEnv("SUPABASE_URL")));
 ok("Supabase service role present", Boolean(serviceKey()));
 ok("APNs path file present", !mustEnv("APNS_PRIVATE_KEY_PATH") || existsSync(path.resolve(ROOT, mustEnv("APNS_PRIVATE_KEY_PATH"))));
-if (!mustEnv("E2B_API_KEY")) warn("E2B key", "missing; smoke solve will fall back to local execution");
+if (!mustEnv("E2B_API_KEY")) warn("E2B key", "missing; code verification will stop without running locally");
 
 section("2. external services");
 if (mustEnv("SUPABASE_URL") && serviceKey()) {

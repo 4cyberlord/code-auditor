@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import Markdown from "./Markdown";
 import RunPanel from "./RunPanel";
-import { GATEWAY, agentSpec } from "@/lib/models";
+import { agentSpec, gatewayPreset } from "@/lib/models";
+import { primaryModelLabel } from "@/lib/primaryModels";
 import { routeFor, useStore, type AgentSlot } from "@/lib/store";
 
 const STATUS: Record<AgentSlot["status"], { label: string; tone: string }> = {
@@ -30,6 +31,7 @@ export default function AgentPane({ agent }: { agent: AgentSlot }) {
     (st) => routeFor(agent.provider, st.settings, st.keys, st.gatewayKey) !== null
   );
   const openSettings = useStore((s) => s.setSettingsOpen);
+  const gatewayLabel = useStore((s) => gatewayPreset(s.settings.gatewayId).label);
 
   const scroller = useRef<HTMLDivElement>(null);
   const [pinned, setPinned] = useState(true);
@@ -78,7 +80,7 @@ export default function AgentPane({ agent }: { agent: AgentSlot }) {
     <section className="pane" data-disabled={!agent.enabled}>
       <div className="pane-head">
         <span className="dot" style={{ background: spec.accent }} data-pulse={streaming} />
-        <span className="pane-title">{spec.label}</span>
+        <span className="pane-title">{primaryModelLabel(agent.model) ?? spec.label}</span>
         {/* The route belongs next to the model id, not buried in Settings: two
             answers reached over different wires are not quite the like-for-like
             comparison the panel implies they are. */}
@@ -86,7 +88,7 @@ export default function AgentPane({ agent }: { agent: AgentSlot }) {
           className="pane-model"
           title={
             agent.viaGateway
-              ? `${agent.model} — reached through ${GATEWAY.label}`
+              ? `${agent.model} — reached through ${gatewayLabel}`
               : agent.model
           }
         >
@@ -124,14 +126,14 @@ export default function AgentPane({ agent }: { agent: AgentSlot }) {
                 someone hunting for a setting that does not exist. */}
             {spec.routerOnly ? (
               <div className="hint" style={{ marginTop: 6 }}>
-                {spec.label} is only reachable through {GATEWAY.label}, so there is no
+                {spec.label} is only reachable through {gatewayLabel}, so there is no
                 direct key to fall back to. Add credit, or switch this pane off and use
                 one with its own key.
               </div>
             ) : (
               <div className="hint" style={{ marginTop: 6 }}>
                 {spec.vendor} can also be reached directly: add a {spec.vendor} key and
-                turn the {GATEWAY.label} switch off to bypass the router entirely.
+                turn the {gatewayLabel} switch off to bypass the router entirely.
               </div>
             )}
             <div style={{ marginTop: 8 }}>

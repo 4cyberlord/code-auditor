@@ -61,7 +61,22 @@ check("requires storage path", errors.includes("storagePath is required"));
 check("requires image mime", errors.some((x) => x.includes("is not an image")));
 check("requires bytes", errors.some((x) => x.includes("has no bytes")));
 
-console.log("\n3. settings snapshots do not carry secrets");
+console.log("\n3. prevent redundant cloud uploads and invalid sizes");
+const duplicateObject = validateCloudSolveJobDraft({
+  ...valid,
+  images: [image(0), { ...image(1), storagePath: image(0).storagePath }],
+});
+check("same stored screenshot cannot occupy two positions", duplicateObject.some((x) => x.includes("duplicate storage object")));
+check("fractional byte counts rejected", validateCloudSolveJobDraft({
+  ...valid,
+  images: [{ ...image(0), bytes: 12.5 }],
+}).some((x) => x.includes("has no bytes")));
+check("unsafe integer byte counts rejected", validateCloudSolveJobDraft({
+  ...valid,
+  images: [{ ...image(0), bytes: Number.MAX_SAFE_INTEGER + 1 }],
+}).some((x) => x.includes("has no bytes")));
+
+console.log("\n4. settings snapshots do not carry secrets");
 const snapshot = sanitizedSettingsSnapshot({
   gatewayKey: "secret",
   apiToken: "secret",
