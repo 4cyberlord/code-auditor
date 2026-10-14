@@ -124,10 +124,12 @@ export interface LoadOptions {
 }
 
 let cached: KnowledgeLibrary | null = null;
+let pending: Promise<KnowledgeLibrary> | null = null;
 
 /** Drop the cache. Tests use it; a long-lived worker gets it for free via TTL. */
 export function resetKnowledgeCache(): void {
   cached = null;
+  pending = null;
 }
 
 /**
@@ -147,6 +149,10 @@ export async function loadKnowledgeLibrary(opts: LoadOptions = {}): Promise<Know
   if (cached && now - cached.at < ttl) return cached;
   if (!opts.fetchRows) return bundledLibrary("no database transport is configured", now);
 
+  // Share an in-flight read across concurrent jobs; TTL alone does not prevent
+  // a burst of identical PostgREST requests on worker cold start.
+  if (pending) return pending;
+  const load = async (): Promise<KnowledgeLibrary> => {
   try {
     const [rows, sources] = await Promise.all([
       opts.fetchRows("intelligence_records"),
@@ -172,5 +178,12 @@ export async function loadKnowledgeLibrary(opts: LoadOptions = {}): Promise<Know
     // caching the failure would keep a healthy library out of reach until the
     // process restarts.
     return bundledLibrary(`the database could not be read (${message})`, now);
+  }
+  };
+  pending = load();
+  try {
+    return await pending;
+  } finally {
+    pending = null;
   }
 }
