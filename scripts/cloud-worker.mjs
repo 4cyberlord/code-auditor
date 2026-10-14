@@ -22,7 +22,7 @@ import { createSign } from "node:crypto";
 import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
-import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
+import { LANGUAGES, loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
 import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/externalLanguageSources.mjs";
 import { fetchLanguageViaGateway } from "./lib/supabaseLanguageGateway.mjs";
 import { fetchOfficialDocDigest } from "./lib/officialDocs.mjs";
@@ -1174,7 +1174,13 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   const specStartedAt = Date.now();
   const failures = new Map();
   // Database packs are checksum validated; verified bundled packs remain an offline fallback.
-  const languagePacks = await Promise.all(languages.map(language => loadLanguagePack(language, {
+  const documentedLanguages = languages.filter(language => LANGUAGES.includes(language));
+  const undocumentedLanguages = languages.filter(language => !LANGUAGES.includes(language));
+  if (undocumentedLanguages.length) {
+    await addEvent(job.id, "warn", "language_guidance_unavailable",
+      `No approved runtime documentation for: ${undocumentedLanguages.join(", ")}. Continuing benchmark verification without language-specific guidance.`);
+  }
+  const languagePacks = await Promise.all(documentedLanguages.map(language => loadLanguagePack(language, {
     // The Supabase RPC queries an external Neon foreign table; it never
     // stores Markdown in Supabase. Neon Data API currently requires JWT
     // even for anonymous readers, so prefer the authenticated FDW path.
@@ -1204,7 +1210,7 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
           settings, baseUrl, model, system: testSpecSystemPrompt(),
           user: testSpecUserPrompt({
             question, docket: candidateDocket(candidates), languages: [language],
-            knowledge: [knowledge || settings.knowledgeDigest || "", languagePrompt(pack),
+            knowledge: [knowledge || settings.knowledgeDigest || "", pack ? languagePrompt(pack) : "",
               lastError ? `THE PRIOR HARNESS WAS REJECTED: ${lastError.slice(0,650)}. Repair only the harness.` : ""]
               .filter(Boolean).join("\n\n"),
           }),
@@ -1218,7 +1224,7 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
         if (suite.referenceCode) {
           const referenceProgram=spliceSuite(suite,suite.referenceCode);
           if (!referenceProgram) throw new Error("Reference could not be inserted.");
-          const version = pack.version + ":" + (process.env.CODE_AUDITOR_E2B_TEMPLATE || "default");
+          const version = (pack?.version ?? "no-approved-language-pack") + ":" + (process.env.CODE_AUDITOR_E2B_TEMPLATE || "default");
           const key=referenceKey(language,suite.harness,suite.referenceCode,version);
           if (!isReferenceValidated(key)) {
             const outcome=await runVerification(settings,suite,referenceProgram);
