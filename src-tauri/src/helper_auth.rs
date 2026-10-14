@@ -41,11 +41,13 @@ struct Minted {
     expires_at: String,
 }
 
-#[tauri::command]
-pub async fn helper_authorize(db: tauri::State<'_, Db>) -> Result<HelperAuth, String> {
+/// Mint and save the helper's independent, revocable submission token for the
+/// signed-in desktop session. Keeping this outside the Tauri command lets the
+/// app renew the helper after sign-in or a helper replacement.
+pub async fn authorize_current_session(db: &Db) -> Result<HelperAuth, String> {
     crate::auth::require()?;
     let minted: Minted =
-        crate::server_api::call(db.inner(), "auth.helperToken", serde_json::json!({})).await?;
+        crate::server_api::call(db, "auth.helperToken", serde_json::json!({})).await?;
 
     store_token(&minted.token)
         .map_err(|e| format!("Could not save the helper's authorisation: {e}"))?;
@@ -53,6 +55,11 @@ pub async fn helper_authorize(db: tauri::State<'_, Db>) -> Result<HelperAuth, St
         authorised: true,
         expires_at: Some(minted.expires_at),
     })
+}
+
+#[tauri::command]
+pub async fn helper_authorize(db: tauri::State<'_, Db>) -> Result<HelperAuth, String> {
+    authorize_current_session(db.inner()).await
 }
 
 #[tauri::command]

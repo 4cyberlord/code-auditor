@@ -396,6 +396,13 @@ pub async fn auth_login(
         let _ = remember_me;
 
         let _ = crate::secrets::load(db.inner()).await;
+        // A just-reinstalled helper must inherit the signed-in desktop
+        // session without making the person authorise the same account twice.
+        // Do not turn a valid login into a failure if the helper-token service
+        // is momentarily unavailable; Settings can still retry explicitly.
+        if let Err(error) = crate::helper_auth::authorize_current_session(db.inner()).await {
+            eprintln!("Could not automatically authorise the background helper: {error}");
+        }
         return Ok(status_for(&db).await);
     }
 

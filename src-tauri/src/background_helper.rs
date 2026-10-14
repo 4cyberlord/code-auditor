@@ -577,7 +577,9 @@ fn read_signature_info() -> Result<(Option<String>, Option<String>), String> {
 }
 
 #[tauri::command]
-pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
+pub async fn background_helper_install(
+    db: tauri::State<'_, crate::db::Db>,
+) -> Result<GhostModeStatus, String> {
     crate::auth::require()?;
     let path = plist_path()?;
     let bundled = bundled_helper_path()?;
@@ -625,6 +627,14 @@ pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
         } else {
             format!("The launchd service accepted the helper, but it was not running yet: {detail}")
         });
+    }
+    // Replacing the helper executable must preserve the current desktop
+    // account's ability to submit work. Refresh its separate, revocable token
+    // now so a failure is reported at install time rather than during capture.
+    if let Err(error) = crate::helper_auth::authorize_current_session(db.inner()).await {
+        status.problem = Some(format!(
+            "The helper was installed, but its authorisation could not be refreshed: {error}"
+        ));
     }
     Ok(status)
 }

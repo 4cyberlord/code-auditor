@@ -10,8 +10,8 @@ import { reason } from "@/lib/auth";
  * The helper runs as a launch agent, so it works when the app is closed — which
  * is the whole point of it, and also why it cannot borrow the app's sign-in:
  * that lives in this process's memory and dies with it. It gets a session of its
- * own instead, thirty days long, revocable from the database, replaced rather
- * than added to each time this button is pressed.
+ * own instead, thirty days long and revocable from the database. It is renewed
+ * automatically after desktop sign-in and helper replacement.
  *
  * Saying all of that on the card matters. This is the only thing stored on the
  * machine now, and a credential nobody can see the terms of is one nobody
@@ -119,10 +119,10 @@ export default function HelperCard() {
       </div>
 
       <p className="hint" style={{ margin: "8px 0 0" }}>
-        The capture hotkeys work while Council Editor is closed, so the helper needs a sign-in of
-        its own. It is a thirty-day session stored in the macOS Keychain — the only thing this app
-        keeps on your Mac. Renewing replaces it; removing it here stops this machine, and revoking
-        the session in the database stops it everywhere.
+        The capture hotkeys work while Council Editor is closed, so the helper uses a separate,
+        thirty-day session stored in the macOS Keychain. It is renewed from your signed-in desktop
+        session after login or reinstall. Renewing replaces it; removing it here stops this machine,
+        and revoking the session in the database stops it everywhere.
       </p>
 
       {error && (
