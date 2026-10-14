@@ -124,5 +124,28 @@ console.log("\n4. loaded once per process, not once per lookup");
   check("a failure is never cached", failures === 2, `${failures} attempts`);
 }
 
+console.log("\\n5. concurrent refreshes use one database request");
+{
+  resetKnowledgeCache();
+  let recordsRequests = 0;
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const fetchRows = async (table: string) => {
+    if (table === "intelligence_records") {
+      recordsRequests++;
+      await gate;
+      return [row()];
+    }
+    return [];
+  };
+  const jobs = Array.from({ length: 20 }, () => loadKnowledgeLibrary({ fetchRows, now: 10_000 }));
+  check("20 simultaneous jobs initiate just one records request", recordsRequests === 1, String(recordsRequests));
+  release?.();
+  const results = await Promise.all(jobs);
+  check("all jobs receive the same loaded library", results.every((r) => r.source === "database" && r === results[0]));
+  await loadKnowledgeLibrary({ fetchRows, now: 10_100 });
+  check("the completed load remains cached", recordsRequests === 1, String(recordsRequests));
+}
+
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall knowledge library checks passed\n");
 process.exit(fail ? 1 : 0);
