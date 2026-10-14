@@ -6,8 +6,8 @@ Documentation lives either in the source-controlled `docs/language-runtime/*.md`
 fallback or in one or more independently provisioned external PostgreSQL
 databases exposing an authenticated PostgREST-compatible HTTPS endpoint
 (e.g. a Neon Data API). An external Neon database has been provisioned at project
-`rough-lake-58845101`, database `language_docs`, with eleven verified
-Markdown guides. Supabase holds only the non-secret directory entry.
+`rough-lake-58845101`, database `language_docs`, with three supported
+runtime Markdown guides. Supabase holds only the non-secret directory entry.
 
 ## Public documentation read path
 
@@ -18,7 +18,7 @@ Neon Data API for `language_docs` is active at:
 The `anonymous` PostgreSQL role can **only SELECT** approved, reviewed
 `language_runtime_packs` whose content hash matches their recorded SHA-256.
 It cannot insert/update packs or read proposals and peer registry records.
-All 11 stored language guides passed checksum verification and were readable
+The three supported language guides must pass checksum verification and be readable
 under the `anonymous` role in the database. Actual unauthenticated HTTPS
 requests to the Data API must be checked from the deployed worker environment.
 
