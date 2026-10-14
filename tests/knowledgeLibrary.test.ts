@@ -126,5 +126,30 @@ console.log("\n4. loaded once per process, not once per lookup");
   check("a failure is never cached", failures === 2, `${failures} attempts`);
 }
 
+console.log("\n5. concurrent jobs share a single in-flight read");
+{
+  resetKnowledgeCache();
+  let calls = 0;
+  let release: ((rows: unknown[]) => void) | undefined;
+  const gate = new Promise<unknown[]>(resolve => { release = resolve; });
+  const fetchRows = async (table: string): Promise<unknown[]> => {
+    if (table === "intelligence_records") {
+      calls++;
+      return gate;
+    }
+    return [];
+  };
+  const first = loadKnowledgeLibrary({ fetchRows, now: 200_000 });
+  const second = loadKnowledgeLibrary({ fetchRows, now: 200_000 });
+  const third = loadKnowledgeLibrary({ fetchRows, now: 200_000 });
+  check("only one cold-start records query", calls === 1, `${calls} queries`);
+  release?.([row()]);
+  const loaded = await Promise.all([first, second, third]);
+  check("all callers receive the same populated library", loaded.every(lib => lib.source === "database"));
+  const onceMore = await loadKnowledgeLibrary({ fetchRows, now: 201_000 });
+  check("cached result still avoids a new request", onceMore.source === "database" && calls === 1);
+  resetKnowledgeCache();
+}
+
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall knowledge library checks passed\n");
 process.exit(fail ? 1 : 0);
