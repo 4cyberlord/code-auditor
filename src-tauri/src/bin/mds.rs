@@ -1987,7 +1987,7 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
         .to_string();
     let agents: Vec<Value> = candidates
         .iter()
-        .take(5)
+        .take(4)
         .map(|candidate| {
             let letter = candidate
                 .get("letter")
@@ -2023,6 +2023,7 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
                 "model": model,
                 "status": status,
                 "error": error,
+                "detail": if has_code { "Answer ready" } else { "Awaiting candidate answer" },
             })
         })
         .collect();
@@ -2083,24 +2084,80 @@ fn job_progress_message(job: &SubmittedJob) -> String {
 }
 
 fn coding_agents_from_events(job: &SubmittedJob) -> Vec<Value> {
-    let label = if job.progress_phase.is_empty() {
-        "worker"
-    } else {
-        job.progress_phase.as_str()
-    };
     let status = match job.status.as_str() {
         "failed" | "needs_attention" | "cancelled" => "error",
         "completed" => "done",
         "queued" => "pending",
         _ => "running",
     };
-    vec![serde_json::json!({
-        "id": "worker",
-        "label": label,
-        "model": job.mode,
-        "status": status,
-        "error": job.error,
-    })]
+    let detail = job_progress_message(job);
+    configured_council_agents()
+        .into_iter()
+        .map(|mut agent| {
+            agent["status"] = Value::String(status.to_string());
+            agent["detail"] = Value::String(detail.clone());
+            if job.error.is_some() {
+                agent["error"] = serde_json::to_value(&job.error).unwrap_or(Value::Null);
+            }
+            agent
+        })
+        .collect()
+}
+
+/// The helper deliberately reads only the cached, non-secret settings snapshot.
+/// That lets its always-on overlay name the same Council seats as the main app,
+/// while leaving credentials and the actual job workflow solely in the app.
+fn configured_council_agents() -> Vec<Value> {
+    let settings = last_good_settings_path()
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|snapshot| snapshot.get("settings").cloned())
+        .unwrap_or(Value::Null);
+
+    let mut models: Vec<String> = settings
+        .pointer("/councilModels")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|model| model.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+
+    // The main app can include its own panel answers alongside the configured
+    // Council solvers. Surface that seat only when the setting says it is part
+    // of this run, and cap the compact overlay at the requested four cards.
+    if settings
+        .get("councilIncludePanel")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        models.push("Panel answer".to_string());
+    }
+
+    models.truncate(4);
+    models
+        .into_iter()
+        .enumerate()
+        .map(|(index, model)| {
+            let label = if model == "Panel answer" {
+                "Panel".to_string()
+            } else {
+                model
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&model)
+                    .replace('-', " ")
+            };
+            serde_json::json!({
+                "id": format!("seat-{}", index + 1),
+                "label": label,
+                "model": model,
+                "status": "pending",
+                "detail": "Waiting for Council to begin.",
+            })
+        })
+        .collect()
 }
 
 fn coding_solution_from_report(
@@ -2448,16 +2505,22 @@ fn overlay_html() -> &'static str {
             .picture-count{position:absolute;right:4px;bottom:4px;padding:2px 5px;border-radius:5px;background:rgba(0,0,0,.58);color:rgba(255,255,255,.95);font-size:10px;font-weight:700;line-height:1}
 	            img{display:block;width:44px;height:33px;object-fit:cover;border-radius:6px;border:1px solid rgba(255,255,255,.36)}
             .divider{width:100%;height:1px;margin:8px 0 2px;background:var(--pane-line)}
-            .solution-status{box-sizing:border-box;width:100%;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px}
-            .model-chip{display:grid;grid-template-columns:7px minmax(0,1fr);grid-template-rows:auto auto;align-items:center;column-gap:5px;row-gap:1px;min-width:0;padding:5px 6px;border:1px solid var(--panel-line);border-radius:7px;background:var(--chip-fill);font-size:9px;color:var(--muted)}
-            .model-chip b{min-width:0;font-size:10px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            .solution-status{box-sizing:border-box;width:100%;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+            .model-chip{display:grid;grid-template-columns:9px minmax(0,1fr);grid-template-rows:auto auto auto;align-items:center;column-gap:7px;row-gap:2px;min-width:0;padding:10px 11px;border:1px solid rgba(255,255,255,.18);border-radius:11px;background:linear-gradient(135deg,rgba(255,255,255,.13),rgba(255,255,255,.045));box-shadow:inset 0 1px 0 rgba(255,255,255,.14);font-size:10px;color:var(--muted)}
+            .model-chip b{min-width:0;font-size:11px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
             .model-chip span:last-child{grid-column:2;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-            .dot{width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.36);box-shadow:0 0 0 2px rgba(255,255,255,.08);flex:0 0 auto}
+            .model-chip .agent-model{grid-column:2;color:rgba(255,255,255,.54);font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+            .dot{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.36);box-shadow:0 0 0 3px rgba(255,255,255,.08);flex:0 0 auto}
             .model-chip[data-state="done"] .dot{background:#39d98a;box-shadow:0 0 0 3px rgba(57,217,138,.16)}
             .model-chip[data-state="working"] .dot{background:#ffd166;box-shadow:0 0 0 3px rgba(255,209,102,.16)}
             .model-chip[data-state="error"] .dot{background:#ff6b6b;box-shadow:0 0 0 3px rgba(255,107,107,.16)}
             .model-chip[data-state="cancelled"] .dot{background:rgba(255,255,255,.22);box-shadow:0 0 0 3px rgba(255,255,255,.08)}
             .model-chip[data-state="pending"] .dot{background:rgba(255,255,255,.38)}
+            .agent-header{box-sizing:border-box;width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:2px}
+            .agent-header .title{font-size:11px}.agent-summary{color:var(--muted);font-size:10px;white-space:nowrap}
+            .overlay-progress,.overlay-diagnostics{box-sizing:border-box;width:100%;padding:9px 10px;border:1px solid rgba(114,159,255,.34);border-radius:9px;background:rgba(67,112,199,.12);color:rgba(231,240,255,.86);font-size:10px;line-height:1.35}
+            .overlay-diagnostics{border-color:rgba(255,107,107,.48);background:rgba(255,107,107,.1);color:rgba(255,226,226,.94)}
+            .overlay-diagnostics b{display:block;margin-bottom:2px;color:#ffd7d7}
 	            .solution-editor{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:650px;display:flex;flex-direction:column;border:1px solid var(--panel-line);border-radius:9px;background:var(--editor-bg);overflow:hidden}
             .editor-head,.tests-head{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.76);font-size:11px}
             .editor-head b,.tests-head b{color:rgba(255,255,255,.95)}
@@ -2514,6 +2577,38 @@ fn overlay_html() -> &'static str {
                 function renderMcq(state){const savedPictures=document.getElementById('pictures');const left=document.querySelector('.pictures-pane');const right=document.querySelector('.thought-pane');const m=state.mcq||{};const picked=(m.answer&&m.answer.label)||'';const found=Array.isArray(m.options)?m.options:[];const position=found.findIndex((o)=>o.label===picked);const ordinal=(n)=>n%100>=11&&n%100<=13?'th':n%10===1?'st':n%10===2?'nd':n%10===3?'rd':'th';const formatted=m.answerVerified===true&&position>=0?'✅ '+picked+' ('+(position+1)+ordinal(position+1)+' Option) - '+String((m.answer&&m.answer.text)||found[position].text||''):'';const displayAnswer=formatted||String(m.displayAnswer||'');const selectedModel=(m.model&&String(m.model).trim())?String(m.model).trim():'none';const hasModel=selectedModel.toLowerCase()!=='none';left.innerHTML='<div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title-row"><div class="title">Question</div><div class="mcq-model-pill" data-enabled="'+(hasModel?'true':'false')+'">'+esc(hasModel?selectedModel:'No Model')+'</div></div><div class="mcq-box mcq-question"></div><div class="title">Answer</div><div class="mcq-box mcq-answer"></div>';if(savedPictures)document.getElementById('pictures').replaceWith(savedPictures);right.innerHTML='<div class="title">Question history</div><div class="mcq-history"></div>';document.querySelector('.mcq-question').textContent=m.question||state.progress||'Reading the captured question...';document.querySelector('.mcq-answer').innerHTML='<b>'+esc(displayAnswer||(picked||'Answer'))+'</b>'+(displayAnswer?'':(m.answer&&m.answer.text?' — '+esc(m.answer.text):''))+'<br><br>'+esc(m.reason||state.error||state.progress||'Waiting for the MCQ worker result...');const hist=document.querySelector('.mcq-history');const add=(title,body,level,meta)=>{const row=document.createElement('div');row.className='mcq-history-row';row.dataset.level=level||'info';const h=document.createElement('b');h.textContent=title;const p=document.createElement('div');p.textContent=body||'';row.appendChild(h);row.appendChild(p);if(meta&&meta.length){const mrow=document.createElement('div');mrow.className='mcq-history-meta';meta.forEach((x)=>{const s=document.createElement('span');s.textContent=x;mrow.appendChild(s);});row.appendChild(mrow);}hist.appendChild(row);};add('AI selected',selectedModel,'info',[state.status||'',state.phase||''].filter(Boolean));add('Captured question',m.question||'Waiting for the screenshot reading.',state.error?'error':'info',[state.status||'',state.phase||''].filter(Boolean));if(m.options&&m.options.length){add('Choices found',(m.options||[]).map((o)=>(o.label?o.label+'. ':'')+(o.text||'')).join('\\n'),'info',[]);}if(m.knowledgeUsed!==undefined){add('Local knowledge check',m.knowledgeUsed?'A local knowledge match or guidance was included before the model answer.':'The local knowledge pack was checked before the model answer, but no direct match was used.','info',[selectedModel]);}if(picked||m.reason){add('Selected answer',(picked?picked+': ':'')+(m.answer&&m.answer.text?m.answer.text:'')+'\\n'+(m.reason||''),'info',[selectedModel]);}(m.whyNot||[]).forEach((x)=>add('Rejected choice '+(x.label||''),x.reason||'Not selected.','info',[]));(state.history||[]).forEach((e)=>add(e.phase||'worker event',e.message||'',e.level||'info',[e.createdAt||''].filter(Boolean)));if(!hist.children.length)add('Waiting','The helper is waiting for the worker history.','info',[]);window.updatePreviews(window.__lastPreviews||[]);}
 			            function restoreCodingShell(){if(document.getElementById('agents'))return;document.getElementById('panel').innerHTML='<div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span id="solution-source">waiting</span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div>';window.updatePreviews(window.__lastPreviews||[]);}
 			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'reviewed':('candidate · '+(state.solution.source||''));renderCodeLines(code,state.solution.code,state.solution.language);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation);}};
+            // Keep the existing capture and result renderer intact, then give
+            // its agent output the same clear, glassy Council presentation as
+            // the Story workspace. This is intentionally display-only.
+            const baseUpdateOverlayState=window.updateOverlayState;
+            function agentStatusText(agent){
+              if(agent.error)return String(agent.error);
+              if(agent.detail)return String(agent.detail);
+              const labels={done:'Answer ready',running:'Generating answer',streaming:'Generating answer',reviewing:'Reviewing answer',pending:'Queued for Council',cancelled:'Cancelled'};
+              return labels[agent.status]||String(agent.status||'Waiting');
+            }
+            function renderStoryAgents(state){
+              const agents=document.getElementById('agents');if(!agents)return;
+              const pane=agents.closest('.pictures-pane');if(!pane)return;
+              const oldHeader=pane.querySelector('.agent-header');if(oldHeader)oldHeader.remove();
+              const oldProgress=pane.querySelector('.overlay-progress');if(oldProgress)oldProgress.remove();
+              const oldDiagnostics=pane.querySelector('.overlay-diagnostics');if(oldDiagnostics)oldDiagnostics.remove();
+              const header=document.createElement('div');header.className='agent-header';
+              const heading=document.createElement('div');heading.className='title';heading.textContent='Selected Council agents';
+              const summary=document.createElement('span');summary.className='agent-summary';
+              const selected=Array.isArray(state.agents)?state.agents.slice(0,4):[];
+              const ready=selected.filter((agent)=>agent.status==='done').length;
+              summary.textContent=selected.length?(ready+'/'+selected.length+' answers ready'):'Waiting for the Council roster';
+              header.appendChild(heading);header.appendChild(summary);
+              const oldTitle=agents.previousElementSibling;if(oldTitle&&oldTitle.classList.contains('title'))oldTitle.replaceWith(header);else pane.insertBefore(header,agents);
+              agents.innerHTML='';
+              if(!selected.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='The selected Council agents will appear here.';agents.appendChild(empty);}else{selected.forEach((agent)=>{const card=document.createElement('div');card.className='model-chip';card.dataset.state=stateTone(agent.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=agent.label||agent.id||'Council agent';const model=document.createElement('span');model.className='agent-model';model.textContent=agent.model||'Council';const detail=document.createElement('span');detail.textContent=agentStatusText(agent);card.title=[agent.model,agent.error].filter(Boolean).join(' — ');card.append(dot,name,model,detail);agents.appendChild(card);});}
+              const progress=document.createElement('div');progress.className='overlay-progress';progress.textContent=state.phase==='done'?'Council completed this run. Review the verified solution below.':(state.phase==='error'?'Council needs attention. See the diagnostic below.':(selected.find((agent)=>agent.detail)?.detail||'Council is preparing and reviewing candidate answers.'));
+              agents.after(progress);
+              const failures=selected.filter((agent)=>agent.error).map((agent)=>(agent.label||agent.id||'Council agent')+': '+agent.error);
+              if(failures.length||state.phase==='error'){const diagnostic=document.createElement('div');diagnostic.className='overlay-diagnostics';const label=document.createElement('b');label.textContent='Run diagnostics';const message=document.createElement('span');message.textContent=failures.join(' · ')||'The Council run reported an issue. The captured images and any available answer remain available.';diagnostic.append(label,message);progress.after(diagnostic);}
+            }
+            window.updateOverlayState=function(state){baseUpdateOverlayState(state);if(!state||state.kind!=='mcq')renderStoryAgents(state||{});};
     </script></body></html>"#
 }
 
