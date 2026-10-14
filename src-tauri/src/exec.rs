@@ -181,12 +181,6 @@ pub fn runtime_for(language: &str, code: &str) -> Option<Runtime> {
         },
         // Compiled languages. Two steps in one shell line, so a build failure
         // lands on stderr with a non-zero exit exactly like a runtime one.
-        "c" => Runtime {
-            program: "cc",
-            file: "main.c",
-            command: "cc -std=c17 -O1 main.c -o prog -lm && ./prog",
-            label: "cc",
-        },
         "cpp" | "c++" | "cc" | "cxx" => Runtime {
             program: "c++",
             file: "main.cpp",
@@ -328,7 +322,7 @@ impl std::fmt::Display for ExecError {
         match self {
             ExecError::UnknownLanguage(l) => write!(
                 f,
-                "There's no runner for {l} yet. Python, JavaScript, TypeScript, bash, Ruby, PHP, C, C++, Java, Go and Rust all work."
+                "There's no runner for {l} yet. Python, JavaScript, TypeScript, bash, Ruby, PHP, C++, Java, Go and Rust all work."
             ),
             ExecError::RuntimeMissing { program, label } => write!(
                 f,
@@ -992,20 +986,18 @@ mod sandbox_tests {
     fn compiled_languages_build_and_then_run() {
         for (lang, needle) in [
             ("cpp", "c++"),
-            ("c", "cc "),
             ("rust", "rustc"),
             ("go", "go run"),
         ] {
             let rt = runtime_for(lang, "").unwrap_or_else(|| panic!("{lang} should be runnable"));
             assert!(rt.command.contains(needle), "{lang}: {}", rt.command);
         }
-        // C, C++ and Rust compile to a binary and then execute it; that second
+        // C++ and Rust compile to a binary and then execute it; that second
         // step is the part it would be easy to forget.
         assert!(runtime_for("cpp", "")
             .unwrap()
             .command
             .contains("&& ./prog"));
-        assert!(runtime_for("c", "").unwrap().command.contains("&& ./prog"));
     }
 
     #[test]
