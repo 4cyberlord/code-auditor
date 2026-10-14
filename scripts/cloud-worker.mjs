@@ -811,7 +811,7 @@ function judgeDigest(judges) {
 }
 
 function isProviderQuotaError(message) {
-  return /insufficient_user_quota|credit limit is insufficient|account quota is running low|please recharge/i.test(
+  return /insufficient_user_quota|credit limit is insufficient|account quota is running low|please recharge|billing verification failed|payment method/i.test(
     String(message || "")
   );
 }
@@ -2418,8 +2418,8 @@ export async function runCouncilJob(job) {
     const rateLimit = errors.find(isProviderRateLimit);
     if (quota || rateLimit) {
       const reason = quota
-        ? "TokenRouter quota is exhausted; add credit or switch the worker to another reachable model/key."
-        : "TokenRouter rate limit blocked every solver; the worker should retry later.";
+        ? `${gatewayId(settings)} cannot execute the configured Council models because its account is unavailable for billing or quota. Verify that gateway's payment/credit status, or select another gateway key in Settings.`
+        : `${gatewayId(settings)} rate-limited every solver; the worker should retry later.`;
       await addEvent(job.id, "warn", "needs_attention", reason);
       await patchJob(job.id, {
         status: "needs_attention",
