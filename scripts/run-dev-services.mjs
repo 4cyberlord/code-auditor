@@ -5,7 +5,8 @@
  * The desktop UI queues E2B work in Supabase, so a dev app without a worker
  * looks healthy until verification begins. Keep the frontend and isolated
  * worker pool alive together, while reusing an already-running port 3000 when
- * a developer started Next separately.
+ * a developer started Next separately. Set CODE_AUDITOR_REMOTE_WORKER=1 when
+ * an online worker owns the queue, so a desktop test cannot claim jobs twice.
  */
 import net from "node:net";
 import { spawn } from "node:child_process";
@@ -25,10 +26,14 @@ if (!await isListening()) {
 } else {
   console.log(`Reusing frontend already listening on :${port}`);
 }
-children.push(spawn(process.execPath, ["scripts/run-worker-pool.mjs"], {
-  stdio: "inherit",
-  env: { ...process.env, CODE_AUDITOR_WORKER_COUNT: process.env.CODE_AUDITOR_WORKER_COUNT || "2" },
-}));
+if (process.env.CODE_AUDITOR_REMOTE_WORKER !== "1") {
+  children.push(spawn(process.execPath, ["scripts/run-worker-pool.mjs"], {
+    stdio: "inherit",
+    env: { ...process.env, CODE_AUDITOR_WORKER_COUNT: process.env.CODE_AUDITOR_WORKER_COUNT || "2" },
+  }));
+} else {
+  console.log("Using the configured online Council worker; local worker pool is disabled.");
+}
 
 let stopping = false;
 const stop = (signal) => {
