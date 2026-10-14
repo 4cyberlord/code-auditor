@@ -109,6 +109,7 @@ const [
   extraction,
   { knowledgePackFor },
   knowledgeLibrary,
+  runtimeGuidance,
   mcq,
 ] = await Promise.all([
   import("../src/lib/prompts.ts"),
@@ -119,11 +120,13 @@ const [
   import("../src/lib/extraction.ts"),
   import("../src/lib/knowledge.ts"),
   import("../src/lib/knowledgeLibrary.ts"),
+  import("../src/lib/languageRuntimeGuidance.ts"),
   import("../src/lib/mcq.ts"),
 ]);
 
 const { detectMcq, parseMcqAnswer, resolveMcqSelection, formatMcqSelection } = mcq;
 const { loadKnowledgeLibrary } = knowledgeLibrary;
+const { runtimeGuidanceFor } = runtimeGuidance;
 
 /**
  * The library this job reasons from.
@@ -1164,13 +1167,19 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   const suitesByLanguage = await parallelMap(languages,
     workerConcurrency(process.env.CODE_AUDITOR_HARNESS_CONCURRENCY, 2, 3),
     async (language) => {
+    // The model gets the contract for this language only. Giving it every
+    // language's syntax rules is noise and was one source of cross-language
+    // harness mistakes; runtime execution below remains the final check.
+    const languageKnowledge = [knowledge || settings.knowledgeDigest || "", runtimeGuidanceFor(language)]
+      .filter(Boolean)
+      .join("\n\n");
     for (const model of specModels.filter(candidate => !bench.has(candidate)).slice(0, 3)) {
       try {
         const specText = await tokenRouterGenerate({
           settings, baseUrl, model, system: testSpecSystemPrompt(),
           user: testSpecUserPrompt({
             question, docket: candidateDocket(candidates), languages: [language],
-            knowledge: knowledge || settings.knowledgeDigest || "",
+            knowledge: languageKnowledge,
           }),
           maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
         });
