@@ -168,7 +168,7 @@ export async function loadKnowledgeLibrary(opts: LoadOptions = {}): Promise<Know
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // Errors are not cached, so the next job can retry a recovered database.
-      return bundledLibrary(`the database could not be read (\${message})`, now);
+      return bundledLibrary(`the database could not be read (${message})`, now);
     }
   })();
   pending = load;
