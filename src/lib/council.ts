@@ -279,8 +279,6 @@ export function normalizeCodeLanguage(raw: string): string {
   // ```c++17, ```cpp20, ```cxx2x  ->  cpp   (checked before bare C, so the
   // "++" is never mistaken for a C standard suffix)
   if (/^(?:c\+\+|cpp|cxx)(?:\d{2}|\dx|2x)?$/.test(lang)) return "cpp";
-  // ```c99, ```c11, ```c17, ```c23  ->  c
-  if (/^c(?:\d{2})?$/.test(lang) && lang !== "cc") return "c";
   // ```python3.11, ```python3  ->  python
   if (/^python3(?:\.\d+)*$/.test(lang)) return "python";
   // ```node20, ```es2022  ->  javascript
