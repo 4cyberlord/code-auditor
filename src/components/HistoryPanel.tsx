@@ -2,7 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { modelPerformance, type CouncilReport, type ModelPerformance } from "@/lib/council";
-import { getCouncilReport, listSolveJobs } from "@/lib/sessions";
+import { getCouncilReport, listSolveJobImages, listSolveJobs, type CouncilReportSummary, type SolveJob } from "@/lib/sessions";
+import { signedUrl } from "@/lib/bridge";
+import Markdown from "@/components/Markdown";
 import { formatWhen } from "@/lib/when";
 import { useStore } from "@/lib/store";
 
@@ -28,6 +30,70 @@ export default function HistoryPanel() {
   const toggleRail = useStore((s) => s.toggleRailPanel);
   const [performance, setPerformance] = useState<ModelPerformance[]>([]);
   const [performanceLoading, setPerformanceLoading] = useState(false);
+  const [remoteJobs, setRemoteJobs] = useState<SolveJob[]>([]);
+  const [remoteSelectedId, setRemoteSelectedId] = useState<string | null>(null);
+  const [remoteReport, setRemoteReport] = useState<CouncilReportSummary | null>(null);
+  const [remotePreviews, setRemotePreviews] = useState<Array<{ id: string; url: string }>>([]);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+  const remoteSelected = remoteJobs.find((job) => job.id === remoteSelectedId) ?? null;
+
+  // Cloud Council results are stored as council_reports, not ordinary runs.
+  // Show only terminal-origin jobs in History, using the authenticated jobs API.
+  // The server currently returns the most recent 50 jobs, not an exhaustive archive.
+  useEffect(() => {
+    if (!current || !open) return;
+    let live = true;
+    const refresh = async () => {
+      try {
+        const jobs = await listSolveJobs("all");
+        if (live) {
+          setRemoteJobs(jobs.filter((job) =>
+            job.sessionId === current &&
+            (job.settingsSnapshot?.origin === "remote-terminal" ||
+             job.settingsSnapshot?.source === "council-remote-helper")
+          ));
+          setRemoteError(null);
+        }
+      } catch (err) {
+        if (live) setRemoteError(String(err));
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => { if (!document.hidden) void refresh(); }, 15_000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [current, open]);
+
+  useEffect(() => {
+    if (!remoteSelected) return;
+    let live = true;
+    const load = async () => {
+      setRemoteLoading(true);
+      setRemoteError(null);
+      try {
+        const [report, images] = await Promise.all([
+          getCouncilReport(remoteSelected.id),
+          listSolveJobImages(remoteSelected.id),
+        ]);
+        const previews = await Promise.all(images.map(async (image) => {
+          try {
+            const url = await signedUrl(image.storagePath, 900, image.storageBucket);
+            return { id: image.id, url };
+          } catch { return null; }
+        }));
+        if (live) {
+          setRemoteReport(report);
+          setRemotePreviews(previews.filter((p): p is { id: string; url: string } => p !== null));
+        }
+      } catch (err) {
+        if (live) setRemoteError(String(err));
+      } finally {
+        if (live) setRemoteLoading(false);
+      }
+    };
+    void load();
+    return () => { live = false; };
+  }, [remoteSelected?.id, remoteSelected?.updatedAt]);
 
   useEffect(() => {
     void loadHistory();
@@ -131,6 +197,64 @@ export default function HistoryPanel() {
           )}
 
           {historyError && <div className="pane-error">{historyError}</div>}
+          {remoteError && <div className="pane-error">{remoteError}</div>}
+
+          {remoteJobs.length > 0 && (
+            <section aria-label="Remote solution history">
+              <div className="history-inspecting-notice">
+                <span>(R) Remote solutions</span>
+                <span className="hint">Recent cloud jobs</span>
+              </div>
+              <div className="history-list">
+                {remoteJobs.map((job) => (
+                  <button
+                    key={job.id}
+                    className="history-row"
+                    data-current={remoteSelectedId === job.id}
+                    onClick={() => {
+                      setRemoteSelectedId(remoteSelectedId === job.id ? null : job.id);
+                      setRemoteReport(null);
+                      setRemotePreviews([]);
+                    }}
+                  >
+                    <div className="history-asked">(R) {job.resultSummary || "Captured question"}</div>
+                    <div className="history-meta">
+                      <span>{formatWhen(job.createdAt, zone, "relative")}</span>
+                      <span>·</span>
+                      <span>{job.status.replaceAll("_", " ")}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+              {remoteSelected && (
+                <div className="job-detail" aria-label="Remote solution detail">
+                  <div className="job-detail-head">
+                    <strong>(R) {remoteSelected.mode === "mcq" ? "MCQ" : "Council"} report</strong>
+                    <button className="btn tiny ghost" onClick={() => setRemoteSelectedId(null)}>Close</button>
+                  </div>
+                  {remoteLoading && <div className="hint">Loading remote report…</div>}
+                  {remotePreviews.length > 0 && (
+                    <div className="job-images">
+                      {remotePreviews.map((image, index) => (
+                        // Signed URLs are scoped to images owned by this session.
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img key={image.id} src={image.url} alt={`Remote screenshot ${index + 1}`} />
+                      ))}
+                    </div>
+                  )}
+                  {remoteReport?.markdown ? (
+                    <div className="job-report">
+                      <Markdown text={remoteReport.markdown} />
+                    </div>
+                  ) : !remoteLoading && (
+                    <p className="hint">
+                      {remoteSelected.error || "The complete report will appear once the cloud worker finishes."}
+                    </p>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
 
           {!current && (
             <div className="empty" style={{ padding: 20 }}>
@@ -138,7 +262,7 @@ export default function HistoryPanel() {
             </div>
           )}
 
-          {current && !historyLoading && !history.length && !historyError && (
+          {current && !historyLoading && !history.length && !remoteJobs.length && !historyError && (
             <div className="empty" style={{ padding: 20 }}>
               No finished runs in this session yet. Runs are saved automatically once completed.
             </div>
