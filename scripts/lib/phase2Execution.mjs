@@ -7,7 +7,7 @@ export function executionId() { return randomUUID(); }
 export function validateExecution(language, code, timeoutMs) {
   const name = String(language || "").trim().toLowerCase();
   const supported = ["python","python3","py","py3","javascript","js","node","nodejs","mjs","cjs",
-    "typescript","ts","rust","rs","go","golang","php","java","c","cpp","c++","cc","cxx",
+    "typescript","ts","rust","rs","go","golang","php","java","cpp","c++","cc","cxx",
     "bash","sh","shell","ruby","rb"];
   if (!supported.includes(name)) throw new Error("Unsupported execution language: " + (name || "unknown"));
   if (typeof code !== "string" || !code.trim()) throw new Error("No program to execute.");
