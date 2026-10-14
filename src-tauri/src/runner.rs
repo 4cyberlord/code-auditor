@@ -107,7 +107,6 @@ pub async fn runnable_languages() -> Result<Vec<String>, String> {
         "bash",
         "ruby",
         "php",
-        "c",
         "cpp",
         "java",
         "go",
