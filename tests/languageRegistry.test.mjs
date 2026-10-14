@@ -13,7 +13,10 @@ clearLanguagePackCache();
 const rejected=await loadLanguagePack("python",{fetchRows:async()=>[{language:"python",runtime_version:"3",content_md:base.markdown,checksum:"0".repeat(64),status:"validated",reviewed_at:new Date().toISOString()}]});
 assert.equal(rejected.source,"bundle");
 clearLanguagePackCache();
-assert.equal((await loadLanguagePack("java",{fetchRows:async()=>{throw Error("offline")}})).source,"bundle");
+assert.equal((await loadLanguagePack("rust",{fetchRows:async()=>{throw Error("offline")}})).source,"bundle");
+for (const unsupported of ["java","c","javascript","typescript","go","php","ruby","bash"]) {
+  assert.throws(() => bundledPack(unsupported), RangeError);
+}
 assert.throws(()=>bundledPack("../../secret"),RangeError);
 clearReferenceCache();const key=referenceKey("cpp","h","r","20");
 assert.equal(isReferenceValidated(key),false);markReferenceValidated(key);assert.equal(isReferenceValidated(key),true);
