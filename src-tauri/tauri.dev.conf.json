@@ -3,7 +3,11 @@
   "productName": "Council Editor Dev",
   "build": {
     "devUrl": "http://localhost:3000",
-    "beforeDevCommand": "true"
+    "beforeDevCommand": {
+      "script": "npm run dev:services",
+      "cwd": "..",
+      "wait": false
+    }
   },
   "app": {
     "windows": [

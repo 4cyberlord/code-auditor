@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "next dev -p 3001",
+    "dev:services": "node scripts/run-dev-services.mjs",
     "worker": "node scripts/cloud-worker.mjs",
     "worker:watch": "node --watch scripts/cloud-worker.mjs",
     "worker:pool": "node scripts/run-worker-pool.mjs",
