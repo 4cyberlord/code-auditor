@@ -2688,6 +2688,7 @@ fn overlay_html() -> &'static str {
 	
             window.showCodingHistory=function(rows,selected){
                 window.__codingHistoryLocked=true;window.__codingHistoryOpen=true;
+                window.__savedPreviews=(window.__lastPreviews||[]).slice();
                 const panel=document.getElementById('panel');let root=document.getElementById('coding-history');
                 if(!root){root=document.createElement('div');root.id='coding-history';root.className='coding-history';panel.appendChild(root);}
                 root.hidden=false;root.textContent='';
@@ -2704,11 +2705,13 @@ fn overlay_html() -> &'static str {
             window.closeCodingHistory=function(){
                 window.__codingHistoryOpen=false;window.__codingHistoryLocked=false;
                 const root=document.getElementById('coding-history');if(root)root.hidden=true;
+                if(window.__savedPreviews)window.updatePreviews(window.__savedPreviews);
                 if(window.__latestCodingState)window.updateOverlayState(window.__latestCodingState);
             };
             window.openCodingHistoryResult=function(state){
                 window.__codingHistoryOpen=false;
                 const root=document.getElementById('coding-history');if(root)root.hidden=true;
+                window.updatePreviews([]);
                 window.__renderHistoryNow=true;window.__codingHistoryLocked=false;
                 try{window.updateOverlayState(state);}finally{window.__renderHistoryNow=false;window.__codingHistoryLocked=true;}
             };
@@ -2743,6 +2746,12 @@ fn overlay_html() -> &'static str {
  set(6,[rows.map(e=>[e.letter,e.gate,e.passed!==undefined?'passed: '+e.passed:'',e.failed!==undefined?'failed: '+e.failed:'',Number.isFinite(e.elapsedMs)?'elapsed: '+e.elapsedMs+' ms':'',e.runtime||'',e.note||''].filter(Boolean).join(' · ')).join('\n'),bm.ran?'Process time: '+(bm.remoteElapsedMs!=null?bm.remoteElapsedMs+' ms':'not reported')+'; peak memory: '+(bm.peakMemoryKb!=null?bm.peakMemoryKb+' KB':'not reported'):''].filter(Boolean).join('\n'));
  // Rejection reasons and genuine reviewer disagreements belong together
  // in the existing Trade-offs area; neither is proof of tests passing.
+ if(rv.functions&&typeof rv.functions==='object'){
+   const notes=document.getElementById('function-notes');
+   if(notes){notes.textContent='';Object.entries(rv.functions).slice(0,12).forEach(([name,description])=>{
+     const row=document.createElement('div');row.textContent=name+': '+String(description||'');notes.appendChild(row);
+   });}
+ }
  set(7,[rv.style&&rv.style.readability?'Readability: '+rv.style.readability:'',rv.style&&rv.style.structure?'Structure: '+rv.style.structure:'',rv.style&&rv.style.note||'',lines(p.tradeOffs),lines(p.rejected),lines(p.dissent),p.harnessSuspect].filter(Boolean).join('\n'));
 }
                         window.updatePreviews=function(images){window.__lastPreviews=images||[];const pictures=document.getElementById('pictures');if(!pictures)return;if(pictures.__sources&&pictures.__sources.length===images.length&&images.every((src,i)=>src===pictures.__sources[i]))return;pictures.__sources=images.slice();pictures.innerHTML='';if(!images.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Captured images will appear here';pictures.appendChild(empty);return;}images.forEach((src,i)=>{const pill=document.createElement('div');pill.className='picture-pill';const img=document.createElement('img');img.src=src;img.alt='Capture '+(i+1);const count=document.createElement('span');count.className='picture-count';count.textContent=(i+1)+'/10';pill.appendChild(img);pill.appendChild(count);pictures.appendChild(pill);});};
@@ -2778,7 +2787,7 @@ mod tests {
     #[test]
     fn number_pairs_route_to_the_requested_workflow_and_capture_shape() {
         let expected = [
-            (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13),
+            (1, 0, 10), (1, 1, 11), (1, 2, 12),
             (2, 1, 21), (2, 2, 22), (2, 3, 23), (2, 4, 24),
             (3, 1, 31), (3, 2, 32), (3, 3, 33),
             (0, 0, 99), (1, 4, 14), (3, 5, 35),
@@ -2789,6 +2798,18 @@ mod tests {
         for invalid in [(1, 3), (1, 5), (2, 0), (2, 5), (3, 0), (3, 4), (4, 1)] {
             assert_eq!(number_pair_command(invalid.0, invalid.1), None);
         }
+    }
+
+    #[test]
+    fn no_region_capture_is_exposed_in_either_workflow() {
+        assert_eq!(helper_capture_mode(4).is_some(), false);
+        assert_eq!(number_pair_command(1, 3), None);
+        assert_eq!(number_pair_command(3, 4), None);
+        assert_eq!(number_pair_command(2, 4), Some(24));
+        assert_eq!(number_pair_command(2, 5), None);
+        assert!(overlay_html().contains("window.showCodingHistory"));
+        assert!(overlay_html().contains("window.openCodingHistoryResult"));
+        assert!(overlay_html().contains("Solution insights"));
     }
 
     #[test]
