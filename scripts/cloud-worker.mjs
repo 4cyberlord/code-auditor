@@ -1554,7 +1554,7 @@ async function selectKnowledge(job, settings, { candidates = [], reading = null,
   if (officialDocs) await addEvent(job.id, "info", "official_docs_selected",
     "Added a bounded Neon documentation reference to the solving context.",
     { language: documentLanguage, bytes: Buffer.byteLength(officialDocs, "utf8") });
-  return [pack, officialDocs].filter(Boolean).join("\\n\\n");
+  return [pack, officialDocs].filter(Boolean).join("\n\n");
 }
 
 /**
