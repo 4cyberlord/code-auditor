@@ -603,7 +603,11 @@ pub fn run() {
         // app back, which is what a macOS user expects from a background app.
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen { .. } = event {
-            reveal(app);
+            // Numeric 14 submits work silently, without stealing focus from
+            // the application the user is currently working in.
+            if !background_helper::recent_headless_process() {
+                reveal(app);
+            }
         }
         #[cfg(not(target_os = "macos"))]
         {
