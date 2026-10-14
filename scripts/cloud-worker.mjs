@@ -110,6 +110,7 @@ const [
   { knowledgePackFor },
   knowledgeLibrary,
   runtimeGuidance,
+  revisionPolicy,
   mcq,
 ] = await Promise.all([
   import("../src/lib/prompts.ts"),
@@ -121,12 +122,14 @@ const [
   import("../src/lib/knowledge.ts"),
   import("../src/lib/knowledgeLibrary.ts"),
   import("../src/lib/languageRuntimeGuidance.ts"),
+  import("../src/lib/revisionPolicy.ts"),
   import("../src/lib/mcq.ts"),
 ]);
 
 const { detectMcq, parseMcqAnswer, resolveMcqSelection, formatMcqSelection } = mcq;
 const { loadKnowledgeLibrary } = knowledgeLibrary;
 const { runtimeGuidanceFor } = runtimeGuidance;
+const { needsCandidateRevision } = revisionPolicy;
 
 /**
  * The library this job reasons from.
@@ -1165,7 +1168,7 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   let lastFailure = "No model produced an executable test harness.";
   // Languages are independent. Retries within one language stay sequential.
   const suitesByLanguage = await parallelMap(languages,
-    workerConcurrency(process.env.CODE_AUDITOR_HARNESS_CONCURRENCY, 2, 3),
+    workerConcurrency(process.env.CODE_AUDITOR_HARNESS_CONCURRENCY, 3, 4),
     async (language) => {
     // The model gets the contract for this language only. Giving it every
     // language's syntax rules is noise and was one source of cross-language
@@ -2423,18 +2426,22 @@ export async function runCouncilJob(job) {
   // re-answering a question already answered.
   let field3 = field;
   let revisedRuns = {};
-  const hasReviews = reviewSets.some((set) => set.reviews.length > 0);
-  // Failed executions trigger one bounded repair round even with no peer
-  // critique. The corrected program is retested by the same E2B gate.
-  const failedCandidates = field.filter((c) => requiresRepair(benchmark.runs[c.letter]));
-  if (hasReviews || failedCandidates.length > 0) {
+  const revisionCandidates = field.filter((candidate) =>
+    needsCandidateRevision(benchmark.runs[candidate.letter], reviewsOf(reviewSets, candidate.letter))
+  );
+  // Reviews still reach every judge and the final synthesis. Only candidates
+  // with execution failure or a substantive correctness concern incur a second
+  // generation and sandbox pass.
+  if (revisionCandidates.length > 0) {
     await patchJob(job.id, { progress_phase: "revising" });
     const revising = bench.keep(
-      field.filter((c) => (c.final || c.text) && (hasReviews || requiresRepair(benchmark.runs[c.letter]))),
+      revisionCandidates.filter((candidate) => candidate.final || candidate.text),
       (c) => c.model
     );
     await bench.announce("revising", field.filter((c) => bench.has(c.model)).map((c) => c.model));
-    await addEvent(job.id, "info", "revising", `Asking ${revising.length} solver(s) to revise after review.`);
+    await addEvent(job.id, "info", "revising", `Asking ${revising.length} solver(s) to repair execution failures or substantive review concerns.`, {
+      letters: revising.map(candidate => candidate.letter),
+    });
     const revisions = new Map();
     await Promise.all(
       revising.map(async (candidate) => {

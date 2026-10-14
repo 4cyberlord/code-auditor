@@ -1,6 +1,10 @@
 {
   "identifier": "com.charles.councileditor.dev",
   "productName": "Council Editor Dev",
+  "build": {
+    "devUrl": "http://localhost:3000",
+    "beforeDevCommand": "true"
+  },
   "app": {
     "windows": [
       {

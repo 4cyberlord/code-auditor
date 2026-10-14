@@ -370,17 +370,19 @@ check("judge phase event recorded", events.some((e) => e.phase === "judge_done")
 check("completion event recorded", events.some((e) => e.phase === "completed"));
 
 
-// --- the revision round, which cloud jobs used to skip entirely --------------
-check("the solvers were asked to revise", events.some((e) => e.phase === "revision_done"));
+// --- the adaptive revision round ---------------------------------------------
+check("only the candidate with a substantive concern was asked to revise",
+  events.filter((e) => e.phase === "revision_done").length === 1 &&
+  events.some((e) => e.phase === "revision_done" && e.payload?.letter === "B"));
 check(
-  "the revised field was executed",
-  Object.keys(reports[0]?.report?.revisedRuns || {}).length === 2,
+  "only the revised candidate was re-executed",
+  Object.keys(reports[0]?.report?.revisedRuns || {}).length === 1 && reports[0]?.report?.revisedRuns?.B?.passed === 2,
   JSON.stringify(reports[0]?.report?.revisedRuns)
 );
 check(
-  "the revision is what is on the report",
-  reports[0]?.report?.candidates?.[0]?.revised?.code?.includes("xs ? xs.length"),
-  String(reports[0]?.report?.candidates?.[0]?.revised?.code)
+  "the clean candidate was not needlessly rewritten",
+  !reports[0]?.report?.candidates?.[0]?.revised && reports[0]?.report?.candidates?.[1]?.revised?.code?.includes("xs ? xs.length"),
+  JSON.stringify(reports[0]?.report?.candidates?.map((candidate) => Boolean(candidate.revised)))
 );
 const judgeCall = modelCalls.find((c) => c.messages[0].content.includes("one judge on an engineering council"));
 check(
@@ -415,9 +417,9 @@ const presentation = reports[0]?.report?.presentation;
 check("standing is stamped on the report", presentation?.standing === "verified", String(presentation?.standing));
 check("there is one evidence row per candidate", presentation?.evidence?.length === 2, JSON.stringify(presentation?.evidence?.length));
 check(
-  "the evidence describes the revision that was judged",
-  presentation?.evidence?.[0]?.revised === true && presentation?.evidence?.[0]?.gate === "pass",
-  JSON.stringify(presentation?.evidence?.[0])
+  "the evidence distinguishes the clean original from the repaired candidate",
+  presentation?.evidence?.[0]?.revised === false && presentation?.evidence?.[1]?.revised === true && presentation?.evidence?.[1]?.gate === "pass",
+  JSON.stringify(presentation?.evidence)
 );
 check("provenance names the model behind the winner", Boolean(presentation?.provenance?.includes("Candidate A")), String(presentation?.provenance));
 
