@@ -25,5 +25,5 @@ const invalid=await fetchLanguageViaGateway("python",{
 });
 assert.equal(invalid.length,1);assert.equal(fallbackCalls,2);
 assert.equal((await fetchLanguageViaGateway("java",{queryGateway:async()=>null})).length,0);
-assert.throws(()=>fetchLanguageViaGateway("../secrets",{}),/Unsupported language/);
+await assert.rejects(fetchLanguageViaGateway("../secrets",{}),/Unsupported language/);
 console.log("PASS: Supabase-to-Neon FDW reads, checksum validation and safe fallback");
