@@ -25,6 +25,7 @@ import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
 import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/externalLanguageSources.mjs";
 import { fetchLanguageViaGateway } from "./lib/supabaseLanguageGateway.mjs";
+import { fetchOfficialDocDigest } from "./lib/officialDocs.mjs";
 import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
 import { phaseTimer } from "./lib/phaseTimings.mjs";
 import { readFileSync } from "node:fs";
@@ -1521,6 +1522,14 @@ async function selectKnowledge(job, settings, { candidates = [], reading = null,
   const limit = Math.max(1, Number(settings.knowledgeLimit || 5));
   const library = await libraryFor(settings);
   const pack = knowledgePackFor(query, limit, library.records, true);
+  // Only retrieve relevant remote documentation once per job, after reading
+  // established the problem and language. Cached Neon queries are bounded,
+  // deduplicated and fail open to bundled guidance.
+  const documentLanguage = contract?.language || reading?.extraction?.language ||
+    (Array.isArray(settings.solutionLanguages) ? settings.solutionLanguages[0] : "");
+  const officialDocs = await fetchOfficialDocDigest(documentLanguage, query, {
+    registryDirectory: languageDirectory,
+  });
   await addEvent(
     job.id,
     pack.trim() ? "info" : "warn",
@@ -1542,7 +1551,10 @@ async function selectKnowledge(job, settings, { candidates = [], reading = null,
       queryBytes: Buffer.byteLength(query, "utf8"),
     }
   );
-  return pack;
+  if (officialDocs) await addEvent(job.id, "info", "official_docs_selected",
+    "Added a bounded Neon documentation reference to the solving context.",
+    { language: documentLanguage, bytes: Buffer.byteLength(officialDocs, "utf8") });
+  return [pack, officialDocs].filter(Boolean).join("\\n\\n");
 }
 
 /**
