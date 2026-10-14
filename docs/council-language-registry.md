@@ -9,45 +9,30 @@ databases exposing an authenticated PostgREST-compatible HTTPS endpoint
 `rough-lake-58845101`, database `language_docs`, with eleven verified
 Markdown guides. Supabase holds only the non-secret directory entry.
 
-## Configuration (cloud worker only)
+## Public documentation read path
 
-Set `CODE_AUDITOR_LANGUAGE_REGISTRIES` in your server's secure deployment
-environment (not in public Next.js variables or a solve job). Example:
+Neon Data API for `language_docs` is active at:
 
-```json
-[
-  {
-    "id": "neon-docs",
-    "url": "https://YOUR-PRIVATE-DATA-API.neon.tech/",
-    "tokenEnv": "NEON_LANGUAGE_DOCS_TOKEN"
-  }
-]
-```
+`https://ep-flat-forest-akcqqd8f.apirest.c-3.us-west-2.aws.neon.tech/language_docs/rest/v1`
 
-Set `NEON_LANGUAGE_DOCS_TOKEN` as a separate server-only secret. Supabase
-service credentials cannot be reused as external language-registry tokens. The endpoint
-must be the **data endpoint**, not Neon's management API. The worker never
-copies the external token or any Markdown to the client or Supabase.
-Only HTTPS, external, non-Supabase endpoints are accepted. Registries are
-checked in listed priority order with a 2.5-second timeout each. Each result
-requires an approved status, review timestamp, size bound and SHA256 checksum.
-A secure worker may discover the Neon endpoint from the service-role-only
-`public.external_service_registry` table in Supabase when explicit registry
-configuration is absent. This directory is metadata only and is cached for
-five minutes. The Neon Data API now allows anonymous `SELECT` on
-`public.language_runtime_packs` only, with a row-level-security policy that
-admits validated, reviewed documents whose SHA-256 content checksums match.
-Anonymous access to proposals and registry peers, and all anonymous writes
-to language documents, remain denied. This public documentation path
-requires **no Neon Auth token**.
+The `anonymous` PostgreSQL role can **only SELECT** approved, reviewed
+`language_runtime_packs` whose content hash matches their recorded SHA-256.
+It cannot insert/update packs or read proposals and peer registry records.
+All 11 stored language guides passed checksum verification and were readable
+under the `anonymous` role in the database. Actual unauthenticated HTTPS
+requests to the Data API must be checked from the deployed worker environment.
 
-Council Editor workers can discover this endpoint using the private Supabase
-service registry, then read the publicly approved Neon guide directly. The
-application database does not store a copy of the guide. The previous
-`credential_state` field refers to an abandoned service-JWT integration and
-is no longer needed for the public-documentation path. No production
-worker deployment or live end-to-end HTTP validation is implied by the
-GitHub branch commit. On API errors, the bundled Markdown is used.
+The cloud worker uses its existing Supabase service-role connection to read
+the **metadata only** in `public.external_service_registry` (cached five
+minutes). It discovers the expected Neon project and HTTPS Data API endpoint,
+then fetches one approved language pack at a time without sending a Neon
+bearer token. Any failed request uses the bundled Markdown fallback. The
+worker does not duplicate language documents in Supabase.
+
+`CODE_AUDITOR_LANGUAGE_REGISTRIES` remains an optional server-only override
+for other separately authenticated, PostgREST-compatible language databases.
+Private endpoints require a separate `tokenEnv` credential. This is **not
+needed** for the public Neon language-docs endpoint.
 
 ## External database deployment and publishing
 
