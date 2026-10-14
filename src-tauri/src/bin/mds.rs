@@ -176,8 +176,9 @@ mod mac_shortcuts {
     pub static MOVE_DOWN: AtomicBool = AtomicBool::new(false);
     pub static SCROLL_UP: AtomicBool = AtomicBool::new(false);
     pub static SCROLL_DOWN: AtomicBool = AtomicBool::new(false);
-    // Encoded capture/process pairs: 10-14 main app, 21-25 coding helper,
-    // 31-35 MCQ helper. Zero means no queued request.
+    // Encoded pairs: 00 starts a fresh coding-overlay batch, 10-14 route to
+    // the main app, and 31-35 are reserved for the MCQ overlay. Zero means no
+    // queued request, so 00 is represented internally as command 6.
     static NUMBER_COMMAND: AtomicU8 = AtomicU8::new(0);
 
     static CONTROL_DOWN: AtomicBool = AtomicBool::new(false);
@@ -623,8 +624,19 @@ fn run() -> Result<(), String> {
                 12 => send_capture_to_council("right"),
                 13 => send_capture_to_council("region"),
                 14 => send_process_to_council(),
-                21..=24 | 31..=34 => {
-                    let target_view = if command < 30 { "coding" } else { "mcq" };
+                6 => {
+                    active_view = "coding".to_string();
+                    if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                        eprintln!("new session unavailable during screenshot selection");
+                    } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                        eprintln!("new session unavailable during cloud submission");
+                    } else if let Err(error) = reset_pending_batch("coding").and_then(|_| start_batch("coding")) {
+                        eprintln!("new coding session failed: {error}");
+                    }
+                    let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                }
+                31..=34 => {
+                    let target_view = "mcq";
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("screenshot capture already in progress");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -643,8 +655,8 @@ fn run() -> Result<(), String> {
                         capture_task = Some(rt.spawn_blocking(move || capture_screen(mode, &view)));
                     }
                 }
-                25 | 35 => {
-                    let target_view = if command == 25 { "coding" } else { "mcq" };
+                35 => {
+                    let target_view = "mcq";
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("finish the screenshot selection before submitting");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -1143,6 +1155,27 @@ fn start_batch(view: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Remove only the active, unsubmitted capture batch for one overlay view.
+/// History and submitted job records deliberately remain available.
+fn reset_pending_batch(view: &str) -> Result<(), String> {
+    if let Some(batch) = read_pending_for(view)? {
+        let captures_root = cache_dir()?.join("captures");
+        let capture_dir = captures_dir(&batch.id)?;
+        if capture_dir.parent() != Some(captures_root.as_path()) {
+            return Err("Refusing to clear an unexpected capture location.".into());
+        }
+        if capture_dir.exists() {
+            fs::remove_dir_all(&capture_dir)
+                .map_err(|e| format!("Could not clear staged screenshots: {e}"))?;
+        }
+    }
+    let pending = pending_path_for(view)?;
+    if pending.exists() {
+        fs::remove_file(&pending).map_err(|e| format!("Could not clear the staged batch: {e}"))?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum CaptureMode { Full, Region, Left, Right }
 
@@ -1158,8 +1191,9 @@ fn helper_capture_mode(digit: u8) -> Option<CaptureMode> {
 
 fn number_pair_command(first: u8, second: u8) -> Option<u8> {
     match first {
+        0 if second == 0 => Some(6),
         1 if second <= 4 => Some(10 + second),
-        2 | 3 if (1..=5).contains(&second) => Some(first * 10 + second),
+        3 if (1..=5).contains(&second) => Some(30 + second),
         _ => None,
     }
 }
@@ -2619,15 +2653,14 @@ mod tests {
     #[test]
     fn number_pairs_route_to_the_requested_workflow_and_capture_shape() {
         let expected = [
-            (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13),
-            (2, 1, 21), (2, 2, 22), (2, 3, 23), (2, 4, 24),
-            (3, 1, 31), (3, 2, 32), (3, 3, 33), (3, 4, 34),
-            (1, 4, 14), (2, 5, 25), (3, 5, 35),
+            (0, 0, 6),
+            (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13), (1, 4, 14),
+            (3, 1, 31), (3, 2, 32), (3, 3, 33), (3, 4, 34), (3, 5, 35),
         ];
         for (prefix, shape, command) in expected {
             assert_eq!(number_pair_command(prefix, shape), Some(command));
         }
-        for invalid in [(1, 5), (2, 0), (3, 0), (4, 1)] {
+        for invalid in [(1, 5), (2, 0), (2, 1), (2, 5), (3, 0), (4, 1)] {
             assert_eq!(number_pair_command(invalid.0, invalid.1), None);
         }
     }
