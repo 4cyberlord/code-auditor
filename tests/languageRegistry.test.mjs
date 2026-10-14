@@ -14,8 +14,8 @@ const rejected=await loadLanguagePack("python",{fetchRows:async()=>[{language:"p
 assert.equal(rejected.source,"bundle");
 clearLanguagePackCache();
 assert.equal((await loadLanguagePack("rust",{fetchRows:async()=>{throw Error("offline")}})).source,"bundle");
-assert.deepEqual(LANGUAGES,["python","cpp","rust"]);
-for (const removed of ["javascript","typescript","java","c","go","php","ruby","bash"]) assert.throws(()=>bundledPack(removed),RangeError);
+assert.deepEqual(LANGUAGES,["python","c","cpp","rust"]);
+for (const removed of ["javascript","typescript","java","go","php","ruby","bash"]) assert.throws(()=>bundledPack(removed),RangeError);
 assert.throws(()=>bundledPack("../../secret"),RangeError);
 clearReferenceCache();const key=referenceKey("cpp","h","r","20");
 assert.equal(isReferenceValidated(key),false);markReferenceValidated(key);assert.equal(isReferenceValidated(key),true);
