@@ -206,7 +206,7 @@ pub struct LocalQwenResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodingModelStepRequest {
-    /// "openai" | "moonshot" | "tokenrouter" | "wiro"; direct Anthropic/Gemini tools are
+    /// "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis"; direct Anthropic/Gemini tools are
     /// intentionally not claimed here until their native tool wires are mapped.
     pub provider: String,
     pub model: String,
@@ -242,7 +242,7 @@ pub async fn run_coding_model_step(
 ) -> Result<LocalQwenResponse, String> {
     crate::auth::require()?;
     let provider = req.provider.trim();
-    if !matches!(provider, "openai" | "moonshot" | "tokenrouter" | "wiro") {
+    if !matches!(provider, "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis") {
         return Err(format!(
             "{provider} is not available for Coding yet. Choose a TokenRouter, OpenAI, or Moonshot chat model."
         ));
@@ -264,6 +264,7 @@ pub async fn run_coding_model_step(
             "openai" => "https://api.openai.com/v1".into(),
             "tokenrouter" => "https://api.tokenrouter.com/v1".into(),
             "wiro" => "https://llm.wiro.ai/v1".into(),
+            "cleanapis" => "https://cleanapis.com/v1".into(),
             _ => "https://api.moonshot.ai/v1".into(),
         });
     let mut body = json!({
@@ -1081,6 +1082,7 @@ pub async fn probe_models(
         .filter(|b| !b.trim().is_empty())
         .unwrap_or_else(|| match gateway_id.as_str() {
             "wiro" => "https://llm.wiro.ai/v1".into(),
+            "cleanapis" => "https://cleanapis.com/v1".into(),
             _ => "https://api.tokenrouter.com/v1".into(),
         });
     let url = format!("{}/chat/completions", base.trim_end_matches('/'));
@@ -1379,6 +1381,7 @@ pub async fn list_gateway_models(
         .filter(|b| !b.trim().is_empty())
         .unwrap_or_else(|| match gateway_id.as_str() {
             "wiro" => "https://llm.wiro.ai/v1".into(),
+            "cleanapis" => "https://cleanapis.com/v1".into(),
             _ => "https://api.tokenrouter.com/v1".into(),
         });
     let url = format!("{}/models", base.trim_end_matches('/'));
@@ -1516,7 +1519,7 @@ const RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 /// The transport whose budget this is. Direct vendor calls have their own,
 /// far larger, limits and must not be made to wait behind the gateway's.
 fn is_gateway(provider: &str) -> bool {
-    matches!(provider, "tokenrouter" | "wiro")
+    matches!(provider, "tokenrouter" | "wiro" | "cleanapis")
 }
 
 struct Gate {
@@ -1701,7 +1704,7 @@ fn build_request(
 ) -> Result<(String, Vec<(String, String)>, Value), String> {
     let key = secrets::read_api_key(&req.provider)?;
     match req.provider.as_str() {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" => {
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => {
             let base = req
                 .base_url
                 .clone()
@@ -1709,6 +1712,7 @@ fn build_request(
                     "openai" => "https://api.openai.com/v1".into(),
                     "tokenrouter" => "https://api.tokenrouter.com/v1".into(),
                     "wiro" => "https://llm.wiro.ai/v1".into(),
+                    "cleanapis" => "https://cleanapis.com/v1".into(),
                     _ => "https://api.moonshot.ai/v1".into(),
                 });
             let mut content = vec![json!({ "type": "text", "text": req.user_text })];
@@ -1841,7 +1845,7 @@ fn gemini_text(v: &Value) -> String {
 
 fn extract_delta(provider: &str, v: &Value) -> String {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" => v["choices"][0]["delta"]["content"]
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => v["choices"][0]["delta"]["content"]
             .as_str()
             .unwrap_or_default()
             .to_string(),
@@ -1861,7 +1865,7 @@ fn extract_delta(provider: &str, v: &Value) -> String {
 
 fn extract_whole(provider: &str, v: &Value) -> String {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" => v["choices"][0]["message"]["content"]
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => v["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or_default()
             .to_string(),
@@ -1882,7 +1886,7 @@ fn extract_whole(provider: &str, v: &Value) -> String {
 
 fn extract_usage(provider: &str, v: &Value) -> Option<Usage> {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" => {
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => {
             let u = &v["usage"];
             u.is_object()
                 .then(|| (u["prompt_tokens"].as_u64(), u["completion_tokens"].as_u64()))

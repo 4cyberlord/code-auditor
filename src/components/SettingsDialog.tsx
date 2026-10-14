@@ -1505,7 +1505,7 @@ function CouncilCard() {
     } finally {
       setListing(false);
     }
-  }, [settings.gatewayBaseUrl]);
+  }, [settings.gatewayBaseUrl, settings.gatewayId]);
 
   const commitSolvers = () => {
     if (solversDraft === null) return;

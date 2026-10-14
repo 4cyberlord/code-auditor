@@ -93,7 +93,6 @@ export default function ImagePreview({
               {"‹"}
             </button>
           )}
-          {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={image.dataUrl} alt={image.name} />
           {images.length > 1 && (
             <button

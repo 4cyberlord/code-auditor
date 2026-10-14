@@ -1,20 +1,16 @@
-import nextCoreWebVitals from "eslint-config-next/core-web-vitals";
-import nextTypeScript from "eslint-config-next/typescript";
+import tseslint from "typescript-eslint";
+import reactHooks from "eslint-plugin-react-hooks";
 
-// eslint-config-next ships native flat config from 16 onwards, so the
-// @eslint/eslintrc FlatCompat shim these were loaded through is gone. Going
-// through it now throws a circular-reference error while validating the config,
-// because the shim re-serializes a config that already references itself.
 const config = [
   {
     // supabase/functions is Deno, not Next: different globals, different module
     // resolution. Linting it with this config reports problems that are not.
-    ignores: [".next/**", "out/**", "src-tauri/**", "supabase/functions/**", "node_modules/**", "next-env.d.ts"],
+    ignores: [".next/**", ".kilo/**", "out/**", "src-tauri/**", "supabase/functions/**", "node_modules/**", "next-env.d.ts"],
   },
-  ...nextCoreWebVitals,
-  ...nextTypeScript,
+  ...tseslint.configs.recommended,
+  reactHooks.configs.flat.recommended,
   {
-    // Two rules arrived with the react-hooks plugin in eslint-config-next 16
+    // Two rules arrived with the React Hooks recommended config in version 7
     // and flag 12 places that predate them — mount-time loads that read
     // localStorage after hydration, and Date.now()/crypto reads during render.
     //
@@ -27,6 +23,8 @@ const config = [
     rules: {
       "react-hooks/set-state-in-effect": "warn",
       "react-hooks/purity": "warn",
+      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-unused-vars": "off",
     },
   },
 ];

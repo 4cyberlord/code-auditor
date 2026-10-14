@@ -52,6 +52,7 @@ const SUPABASE_SERVICE_ROLE_KEY = mustEnv("SUPABASE_SERVICE_ROLE_KEY");
  * worker's own environment for settings that are genuinely worker-wide.
  */
 let jobSecrets = null;
+let jobGatewayApiKey = "";
 
 /** Platform rows are owned by the nil UUID. */
 const PLATFORM_OWNER = "00000000-0000-0000-0000-000000000000";
@@ -75,6 +76,7 @@ function secret(name) {
 }
 
 async function loadOwnerSecrets(ownerId) {
+  jobGatewayApiKey = "";
   if (!ownerId) {
     jobSecrets = null;
     return null;
@@ -91,6 +93,32 @@ async function loadOwnerSecrets(ownerId) {
     if (row.value) jobSecrets.set(row.key, row.value);
   }
   return jobSecrets;
+}
+
+/**
+ * Gateway credentials are stored under the selected gateway's id. In
+ * particular, a Clean API job must never be sent with the historical
+ * TokenRouter credential merely because both speak an OpenAI-compatible wire.
+ */
+function gatewayCredential(settings) {
+  const baseUrl = String(settings?.gatewayBaseUrl || "");
+  const gatewayId = settings?.gatewayId === "cleanapis" || baseUrl.includes("cleanapis.com")
+    ? "cleanapis"
+    : settings?.gatewayId === "wiro" || baseUrl.includes("llm.wiro.ai")
+      ? "wiro"
+      : "tokenrouter";
+  const legacyName = gatewayId === "tokenrouter" ? "TOKENROUTER_API_KEY" : `${gatewayId.toUpperCase()}_API_KEY`;
+  return { gatewayId, value: secret(gatewayId) || secret(legacyName) };
+}
+
+function selectGatewayCredential(settings) {
+  const credential = gatewayCredential(settings);
+  jobGatewayApiKey = credential.value;
+  return credential;
+}
+
+function activeGatewayApiKey() {
+  return jobGatewayApiKey || secret("TOKENROUTER_API_KEY");
 }
 const WORKER_ID = process.env.CODE_AUDITOR_WORKER_ID || `worker-${process.pid}`;
 const POLL_MS = Number(process.env.CODE_AUDITOR_WORKER_POLL_MS || 5000);
@@ -178,7 +206,6 @@ const {
   partitionByVision,
   answerStanding,
   gateFor,
-  reachableSeats,
   reasoningFields,
   reasoningForModel,
   rejectedImages,
@@ -367,7 +394,7 @@ function chatModels(settings) {
   const configured = Array.isArray(settings?.councilModels)
     ? settings.councilModels
     : COUNCIL_DEFAULT_MODELS;
-  return reachableSeats(configured, (m) => m?.id, settings?.availableModels).reachable
+  return canonicalCouncilSeats(configured, (m) => m?.id, "id", settings?.availableModels)
     // The Responses filter that used to live here dated from a worker that only
     // spoke chat-completions. It now speaks both, so dropping a seat the user
     // deliberately configured would be silently discarding their roster.
@@ -379,9 +406,39 @@ function chatJudges(settings) {
   const configured = Array.isArray(settings?.councilJudges)
     ? settings.councilJudges
     : COUNCIL_DEFAULT_JUDGES;
-  return reachableSeats(configured, (j) => j?.model, settings?.availableModels).reachable
+  return canonicalCouncilSeats(configured, (j) => j?.model, "model", settings?.availableModels)
     .filter((judge) => judge?.model)
     .slice(0, Number(process.env.CODE_AUDITOR_WORKER_JUDGES || 3));
+}
+
+/**
+ * Settings retain provider-qualified ids so the desktop can route them (for
+ * example `openai/gpt-5.6-sol`), while gateway catalogues return the wire id
+ * (`gpt-5.6-sol`). Match either representation and send the catalogue's exact
+ * value to the gateway. Without this, a healthy key can make every Council
+ * seat look unreachable before a single model request is made.
+ */
+function canonicalCouncilSeats(seats, idOf, key, catalogue) {
+  if (!Array.isArray(catalogue) || !catalogue.length) return seats;
+  const available = new Set(catalogue);
+  return seats.flatMap((seat) => {
+    const configured = String(idOf(seat) || "").trim();
+    const wireId = configured.includes("/") ? configured.slice(configured.lastIndexOf("/") + 1) : configured;
+    const resolved = available.has(configured) ? configured : available.has(wireId) ? wireId : "";
+    return resolved ? [{ ...seat, [key]: resolved }] : [];
+  });
+}
+
+function unreachableCouncilSeatIds(seats, idOf, catalogue) {
+  if (!Array.isArray(catalogue) || !catalogue.length) return [];
+  const available = new Set(catalogue);
+  return seats
+    .map(idOf)
+    .map((id) => String(id || "").trim())
+    .filter((id) => {
+      const wireId = id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : id;
+      return !available.has(id) && !available.has(wireId);
+    });
 }
 
 function gatewayBaseUrl(settings) {
@@ -433,7 +490,7 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
         method: "POST",
         signal: controller.signal,
         headers: {
-          authorization: `Bearer ${secret("TOKENROUTER_API_KEY")}`,
+          authorization: `Bearer ${activeGatewayApiKey()}`,
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -531,7 +588,7 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
         method: "POST",
         signal: controller.signal,
         headers: {
-          authorization: `Bearer ${secret("TOKENROUTER_API_KEY")}`,
+          authorization: `Bearer ${activeGatewayApiKey()}`,
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -1707,8 +1764,8 @@ async function mcqGenerate({ settings, baseUrl, model, system, user, images = []
 
 function mcqModel(settings, models) {
   const preferred = String(settings?.mcqModel || "anthropic/claude-fable-5").trim();
-  const available = reachableSeats([{ id: preferred }], (m) => m?.id, settings?.availableModels).reachable;
-  if (available.length) return preferred;
+  const available = canonicalCouncilSeats([{ id: preferred }], (m) => m?.id, "id", settings?.availableModels);
+  if (available.length) return available[0].id;
   return models[0]?.id || preferred;
 }
 
@@ -1717,19 +1774,21 @@ async function runMcqJob(job, { images = null, reading = null, bench = null } = 
   await notify(job.id, APP_DISPLAY_NAME, "MCQ job started.");
   await addEvent(job.id, "info", "mcq", "MCQ overlay workflow selected.");
   await loadOwnerSecrets(job.owner_id);
-  if (!secret("TOKENROUTER_API_KEY")) {
-    const message = "No TokenRouter key is saved for the account that owns this job.";
+  const settings = job.settings_snapshot || {};
+  const credential = selectGatewayCredential(settings);
+  if (!credential.value) {
+    const label = credential.gatewayId === "cleanapis" ? "Clean API" : credential.gatewayId === "wiro" ? "Wiro" : "TokenRouter";
+    const message = `No ${label} key is saved for the account that owns this job.`;
     await addEvent(job.id, "error", "needs_attention", message);
     await patchJob(job.id, { status: "needs_attention", progress_phase: "needs_attention", error: message, finished_at: new Date().toISOString() });
     return;
   }
 
-  const settings = job.settings_snapshot || {};
   const baseUrl = gatewayBaseUrl(settings);
   const roster = Array.isArray(settings.councilModels) && settings.councilModels.length
     ? settings.councilModels
     : COUNCIL_DEFAULT_MODELS;
-  const models = reachableSeats(roster, (m) => m?.id, settings.availableModels).reachable;
+  const models = canonicalCouncilSeats(roster, (m) => m?.id, "id", settings.availableModels);
   const model = mcqModel(settings, models);
   const localBench = bench || createBench(job);
 
@@ -1927,32 +1986,34 @@ export async function runCouncilJob(job) {
 
   // Whose job is this, and therefore whose keys pay for it.
   await loadOwnerSecrets(job.owner_id);
+  const settings = job.settings_snapshot || {};
+  const credential = selectGatewayCredential(settings);
+  const gatewayLabel = credential.gatewayId === "cleanapis" ? "Clean API" : credential.gatewayId === "wiro" ? "Wiro" : "TokenRouter";
 
-  if (!secret("TOKENROUTER_API_KEY")) {
+  if (!credential.value) {
     await addEvent(
       job.id,
       "error",
       "needs_attention",
-      "No TokenRouter key is saved for the account that owns this job."
+      `No ${gatewayLabel} key is saved for the account that owns this job.`
     );
     await patchJob(job.id, {
       status: "needs_attention",
       progress_phase: "needs_attention",
-      error: "No TokenRouter key is saved for the account that owns this job.",
+      error: `No ${gatewayLabel} key is saved for the account that owns this job.`,
       finished_at: new Date().toISOString(),
     });
-    await notify(job.id, APP_DISPLAY_NAME, "Council job needs TokenRouter configuration.");
+    await notify(job.id, APP_DISPLAY_NAME, `Council job needs ${gatewayLabel} configuration.`);
     await notifyOps({
       level: "warn",
       title: "Council job needs attention",
-      body: "No TokenRouter key is saved for the account that owns this job.",
+      body: `No ${gatewayLabel} key is saved for the account that owns this job.`,
       jobId: job.id,
       phase: "needs_attention",
     }).catch(() => {});
     return;
   }
 
-  const settings = job.settings_snapshot || {};
   const baseUrl = gatewayBaseUrl(settings);
   const models = chatModels(settings);
   const judges = chatJudges(settings);
@@ -1963,16 +2024,16 @@ export async function runCouncilJob(job) {
   // shrinks is how a four-solver Council becomes a two-solver Council without
   // anyone noticing.
   const missing = [
-    ...reachableSeats(
+    ...unreachableCouncilSeatIds(
       Array.isArray(settings.councilModels) ? settings.councilModels : COUNCIL_DEFAULT_MODELS,
       (m) => m?.id,
       settings.availableModels
-    ).unreachable.map((m) => m.id),
-    ...reachableSeats(
+    ),
+    ...unreachableCouncilSeatIds(
       Array.isArray(settings.councilJudges) ? settings.councilJudges : COUNCIL_DEFAULT_JUDGES,
       (j) => j?.model,
       settings.availableModels
-    ).unreachable.map((j) => j.model),
+    ),
   ];
   if (missing.length) {
     await addEvent(
@@ -2078,7 +2139,7 @@ export async function runCouncilJob(job) {
     ? settings.councilModels
     : COUNCIL_DEFAULT_MODELS;
   const readerPool = partitionByVision(
-    bench.keep(reachableSeats(roster, (m) => m?.id, settings.availableModels).reachable, (m) => m.id),
+    bench.keep(canonicalCouncilSeats(roster, (m) => m?.id, "id", settings.availableModels), (m) => m.id),
     (m) => m.id,
     settings.probes,
     settings.councilModels
@@ -2108,7 +2169,11 @@ export async function runCouncilJob(job) {
     : { extraction: null, context: "", markdown: "", readers: [], agreement: null };
 
   const overlayReadingText = [reading.context, reading.markdown].filter(Boolean).join("\n\n");
-  if (settings.overlayMode === "auto" && overlayReadingText && detectMcq(overlayReadingText).isMcq) {
+  // A multi-capture coding batch often contains numbered lines and snippets
+  // that resemble answer choices. Auto-routing is deliberately conservative:
+  // a real multi-page MCQ can still use explicit MCQ mode, while a coding run
+  // with several screenshots remains a Council job.
+  if (settings.overlayMode === "auto" && images.length === 1 && overlayReadingText && detectMcq(overlayReadingText).isMcq) {
     await addEvent(job.id, "info", "mcq_detected", "Auto overlay mode detected multiple-choice answer options.");
     await runMcqJob({ ...job, settings_snapshot: settings, mode: "mcq" }, { images, reading, bench });
     return;
@@ -2815,9 +2880,21 @@ if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
   console.log(`${APP_DISPLAY_NAME} cloud worker ${WORKER_ID} polling ${SUPABASE_URL}`);
   try {
     do {
-      const worked = await tick();
-      if (ONCE) break;
-      if (!worked) await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      try {
+        const worked = await tick();
+        if (ONCE) break;
+        if (!worked) await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      } catch (err) {
+        // A transient network failure while polling must not strand every later
+        // job. Individual job failures are recorded in tick(); this is only
+        // the worker's transport to Supabase, so wait and resume polling.
+        console.error(`${APP_DISPLAY_NAME} worker poll failed:`, err);
+        if (ONCE) {
+          process.exitCode = 1;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      }
     } while (true);
   } finally {
     await closeObservability();

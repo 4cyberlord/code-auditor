@@ -864,6 +864,164 @@ textarea.field {
   text-align: center;
 }
 
+/* --------------------------------------------------------- capture review */
+
+/* The pause between capture and model work is a full surface, not a larger
+   thumbnail strip. A person can inspect or remove a capture before anything
+   starts reading it. */
+.capture-review {
+  position: fixed;
+  inset: 38px 0 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px);
+}
+
+.capture-review-window {
+  width: min(840px, 100%);
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--bg-raised);
+  box-shadow: var(--shadow);
+}
+
+.capture-review-head,
+.capture-review-foot,
+.capture-review-add,
+.capture-review-buttons {
+  display: flex;
+  align-items: center;
+}
+
+.capture-review-head {
+  justify-content: space-between;
+  margin-bottom: 22px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.capture-review-brand {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.capture-story {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr 1fr;
+  grid-template-rows: 152px 152px;
+  gap: 12px;
+}
+
+.capture-story-image {
+  position: relative;
+  overflow: hidden;
+  border-radius: 17px;
+  background: var(--bg-sunken);
+}
+
+.capture-story-image-1 { grid-row: span 2; }
+.capture-story-image-4 { grid-column: span 2; }
+
+.capture-story-open,
+.capture-story-open img {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.capture-story-open {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.capture-story-open img { object-fit: cover; }
+
+.capture-story-image::after {
+  content: "";
+  position: absolute;
+  inset: 50% 0 0;
+  pointer-events: none;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.55));
+}
+
+.capture-story-image > span {
+  position: absolute;
+  z-index: 1;
+  bottom: 12px;
+  left: 13px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.capture-story-remove {
+  position: absolute;
+  z-index: 2;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.64);
+  color: #fff;
+  font-size: 17px;
+  line-height: 1;
+}
+
+.capture-review-foot {
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 21px;
+}
+
+.capture-review-add {
+  gap: 13px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.capture-review-buttons { gap: 7px; }
+
+.capture-review-buttons button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.capture-review-buttons button:hover { color: var(--text); }
+
+.capture-review-continue {
+  flex: none;
+  padding: 10px 15px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+@media (max-width: 680px) {
+  .capture-review { padding: 16px; }
+  .capture-review-window { padding: 17px; }
+  .capture-story { grid-template-rows: 120px 120px; gap: 8px; }
+  .capture-story-image { border-radius: 12px; }
+  .capture-review-foot { align-items: flex-end; }
+  .capture-review-add { align-items: flex-start; flex-direction: column; gap: 4px; }
+}
+
 .note-wrap {
   flex: 1 1 auto;
   display: flex;
@@ -912,6 +1070,30 @@ textarea.field {
      here, so resizing never touches React. */
   grid-template-columns: minmax(0, 1fr) 5px var(--rail-w, 344px);
   min-height: 0;
+}
+
+/* The agents are a response to a reviewed capture, not the home screen. Until
+   there is evidence to reason from, leave this space calm and let the capture
+   controls at the bottom be the only invitation. */
+.capture-first-screen {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+}
+
+.capture-first-copy {
+  display: grid;
+  gap: 5px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.capture-first-copy strong {
+  color: var(--text-dim);
+  font-weight: 500;
 }
 
 .rail {

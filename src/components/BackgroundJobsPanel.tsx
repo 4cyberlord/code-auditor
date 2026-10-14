@@ -373,7 +373,6 @@ export default function BackgroundJobsPanel() {
                 <div className="job-images">
                   {images.map((image) =>
                     image.url ? (
-                      // eslint-disable-next-line @next/next/no-img-element
                       <img key={image.id} src={image.url} alt={image.fileName} />
                     ) : (
                       <div key={image.id} className="job-image-missing">

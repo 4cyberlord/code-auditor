@@ -162,7 +162,6 @@ export default function LoginScreen({
 
         <div className="auth-brand-body">
           <div className="auth-icon">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/app-icon.png" alt="" width={76} height={76} />
           </div>
 

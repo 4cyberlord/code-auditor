@@ -217,6 +217,24 @@ export const WIRO_GATEWAY = {
   } as Record<ProviderId, string>,
 } as const;
 
+/** Clean API uses the unprefixed ids returned by its OpenAI-compatible catalogue. */
+export const CLEANAPIS_GATEWAY = {
+  id: "cleanapis",
+  label: "Clean API",
+  vendor: "Clean APIs",
+  keyUrl: "https://cleanapis.com/dashboard/api-keys",
+  keyHint: "cc_…",
+  defaultBaseUrl: "https://cleanapis.com/v1",
+  modelsUrl: "https://cleanapis.com/models",
+  accent: "#28a888",
+  defaultRouterModels: {
+    openai: "gpt-5.6-sol",
+    moonshot: "kimi-k3",
+    anthropic: "claude-opus-5.5",
+    gemini: "gemini-3.1-pro",
+  } as Record<ProviderId, string>,
+} as const;
+
 /**
  * Every gateway the app knows about, in display order.
  *
@@ -265,6 +283,17 @@ export const KNOWN_GATEWAYS: GatewayPreset[] = [
     modelsUrl: WIRO_GATEWAY.modelsUrl,
     accent: WIRO_GATEWAY.accent,
     defaultRouterModels: WIRO_GATEWAY.defaultRouterModels,
+  },
+  {
+    id: CLEANAPIS_GATEWAY.id,
+    label: CLEANAPIS_GATEWAY.label,
+    vendor: CLEANAPIS_GATEWAY.vendor,
+    keyUrl: CLEANAPIS_GATEWAY.keyUrl,
+    keyHint: CLEANAPIS_GATEWAY.keyHint,
+    defaultBaseUrl: CLEANAPIS_GATEWAY.defaultBaseUrl,
+    modelsUrl: CLEANAPIS_GATEWAY.modelsUrl,
+    accent: CLEANAPIS_GATEWAY.accent,
+    defaultRouterModels: CLEANAPIS_GATEWAY.defaultRouterModels,
   },
 ];
 
@@ -399,7 +428,7 @@ export function agentSpec(id: AgentId): AgentSpec {
  * travels over is either that vendor or the gateway. It doubles as the Keychain
  * entry id, because a credential belongs to whoever you are actually talking to.
  */
-export type GatewayId = typeof GATEWAY.id | typeof WIRO_GATEWAY.id;
+export type GatewayId = typeof GATEWAY.id | typeof WIRO_GATEWAY.id | typeof CLEANAPIS_GATEWAY.id;
 
 /** Finds the saved gateway preset, retaining TokenRouter for older settings. */
 export const gatewayPreset = (id: string | null | undefined): GatewayPreset =>

@@ -727,6 +727,8 @@ interface Settings {
 interface State {
   agents: AgentSlot[];
   images: ImageAsset[];
+  /** A fresh capture stays here until the person has reviewed it. */
+  captureReviewOpen: boolean;
   note: string;
   runId: string | null;
   running: boolean;
@@ -802,6 +804,7 @@ interface State {
   addImages: (imgs: ImageAsset[]) => number;
   removeImage: (index: number) => void;
   clearImages: () => void;
+  approveCaptureReview: () => void;
   setNote: (note: string) => void;
   patchSettings: (patch: Partial<Settings>) => void;
   /** Ingest a result ONLY from an independently vetted fixture runner. */
@@ -937,10 +940,10 @@ const DB_SETTINGS_KEY = "app.v1";
  * Images per run.
  *
  * Every one of these is sent to every enabled agent, so the payload is this
- * number times the number of panes -- ten images across four agents is forty
+ * number times the number of panes -- four images across four agents is sixteen
  * image uploads in one press. Worth knowing when a run costs more than expected.
  */
-export const MAX_IMAGES = 10;
+export const MAX_IMAGES = 4;
 
 function publishOverlayState(s: State): void {
   const consensus = computeConsensus(
@@ -1161,10 +1164,14 @@ function normalizeSettings(s: Settings): Settings {
         : base.mcqModel,
     mcqEndpoint: normalizeMcqEndpoint(s.mcqEndpoint),
     useGateway: typeof s.useGateway === "boolean" ? s.useGateway : base.useGateway,
-    // Older settings predate distinct gateway credentials. Infer Wiro from its
-    // endpoint so an existing Wiro setup comes back as Wiro after upgrading.
+    // Older settings predate distinct gateway credentials. Infer the known
+    // gateway from its endpoint so a saved credential is not silently hidden
+    // behind the TokenRouter default after an upgrade.
     gatewayId:
-      s.gatewayId === "wiro" ||
+      s.gatewayId === "cleanapis" ||
+      (typeof s.gatewayBaseUrl === "string" && s.gatewayBaseUrl.includes("cleanapis.com"))
+        ? "cleanapis"
+        : s.gatewayId === "wiro" ||
       (typeof s.gatewayBaseUrl === "string" && s.gatewayBaseUrl.includes("llm.wiro.ai"))
         ? "wiro"
         : GATEWAY.id,
@@ -1607,6 +1614,7 @@ let lateStarterWaits = 0;
 export const useStore = create<State>((set, get) => ({
   agents: buildAgents(defaultSettings()),
   images: [],
+  captureReviewOpen: false,
   note: "",
   runId: null,
   running: false,
@@ -1689,8 +1697,8 @@ export const useStore = create<State>((set, get) => ({
     // Counted in screenshots, not in images.
     //
     // A whole-screen capture becomes several tiles, and charging those against
-    // the limit meant "10 images" silently became five screenshots -- and then
-    // dropped half of the sixth, which is worse than refusing it.
+    // the limit would silently make a four-image review hold fewer than four
+    // captures, which is worse than refusing the extra capture as a whole.
     const current = get().images;
     const seen = new Set(current.map((i) => i.group ?? i.name));
     const room = Math.max(0, get().settings.maxImages - seen.size);
@@ -1719,26 +1727,14 @@ export const useStore = create<State>((set, get) => ({
     if (taken.length) {
       set((s) => ({
         images: [...s.images, ...taken],
+        captureReviewOpen: true,
         shortcutError: null,
         extraction: IDLE_EXTRACTION,
       }));
 
-      // The countermeasure, and the reason this fires here rather than at Run.
-      //
-      // A screenshot is a capability, not a message: it only reaches a model
-      // whose route actually carries an image, and two of this app's routes
-      // demonstrably do not. Text is not a capability. So the moment a picture
-      // arrives it is converted into a document, and from then on the panel
-      // depends on nothing but words.
-      //
-      // Starting now rather than at Run also buys the reading for free: it
-      // happens while the user is still typing their note, so pressing Run does
-      // not sit waiting on two vision calls that could have been made already.
-      if (get().settings.contextMode !== "images") void get().runExtraction();
-
       // And the bytes go where they are meant to live. Not awaited: an upload
-      // that takes a second must not hold up the reading or the panel, and the
-      // only thing depending on it finishing is history.
+      // that takes a second must not hold up the review. Uploading is storage,
+      // not analysis; the first model request still waits for Continue.
       void get().stashImages(taken);
     }
     // Reported in screenshots too, so the message matches what was pressed.
@@ -1747,11 +1743,16 @@ export const useStore = create<State>((set, get) => ({
     return wanted - got;
   },
   removeImage: (index) =>
-    set((s) => ({
-      images: s.images.filter((_, i) => i !== index),
-      extraction: IDLE_EXTRACTION,
-    })),
-  clearImages: () => set({ images: [], extraction: IDLE_EXTRACTION }),
+    set((s) => {
+      const images = s.images.filter((_, i) => i !== index);
+      return {
+        images,
+        captureReviewOpen: images.length ? s.captureReviewOpen : false,
+        extraction: IDLE_EXTRACTION,
+      };
+    }),
+  clearImages: () => set({ images: [], captureReviewOpen: false, extraction: IDLE_EXTRACTION }),
+  approveCaptureReview: () => set({ captureReviewOpen: false }),
   setNote: (note) => set({ note }),
 
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
@@ -2495,6 +2496,8 @@ export const useStore = create<State>((set, get) => ({
   },
 
   start: async () => {
+    // Global shortcuts honour the same boundary as the visible control.
+    if (get().captureReviewOpen) return;
     const { settings, images, note, keys, gatewayKey } = get();
 
     // One route per pane, decided once. A pane with no route is not an error

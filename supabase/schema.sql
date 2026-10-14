@@ -160,10 +160,11 @@ create table if not exists solve_jobs (
   -- tenancy-constrain.sql, once the backfill is verified.
   owner_id     uuid,
   session_id        uuid        not null references sessions (id) on delete cascade,
-  -- council is the only v1 cloud mode. Keeping it as a column lets later builds
-  -- add cheaper panel-only jobs without changing the queue shape.
+  -- Council and multiple-choice jobs share the durable queue. Keeping the mode
+  -- explicit lets auto overlay routing select the cheaper MCQ workflow without
+  -- changing the job shape.
   mode              text        not null default 'council'
-                      check (mode in ('council')),
+                      check (mode in ('council', 'mcq')),
   status            text        not null default 'queued'
                       check (status in ('queued', 'running', 'needs_attention',
                                         'failed', 'completed', 'cancelled')),

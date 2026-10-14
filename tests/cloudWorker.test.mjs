@@ -307,10 +307,19 @@ await runCouncilJob({
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
     councilJudges: [{ model: "anthropic/claude-sonnet-4.6", emphasis: "correctness" }],
+    // Gateways commonly catalogue wire ids without their provider prefix. The
+    // worker must still accept this roster and send those reachable wire ids.
+    availableModels: ["claude-sonnet-4.6", "kimi-k3"],
   },
 });
 
 check("patched completed", patches.some((p) => p.status === "completed"));
+check(
+  "provider-qualified seats use the reachable gateway ids",
+  modelCalls.some((call) => call.model === "claude-sonnet-4.6") &&
+    modelCalls.some((call) => call.model === "kimi-k3"),
+  JSON.stringify(modelCalls.map((call) => call.model))
+);
 check("wrote one report", reports.length === 1);
 check("report has winner", reports[0]?.winner === "A", String(reports[0]?.winner));
 check("report has reviews", reports[0]?.report?.reviews?.length === 2, String(reports[0]?.report?.reviews?.length));

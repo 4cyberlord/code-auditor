@@ -6,6 +6,7 @@ import { ALL_AGENTS, GATEWAY, agentSpec, type AgentId } from "@/lib/models";
 import { preflight, pace, gatewayRequests } from "@/lib/preflight";
 import { captureIntoApp, SHORTCUT_LABELS } from "@/lib/shortcuts";
 import ImagePreview from "./ImagePreview";
+import CaptureReview from "./CaptureReview";
 import { assetsFromBlob, assetsFromClipboard, assetsFromDataTransfer, humanBytes } from "@/lib/image";
 import type { ImageAsset } from "@/lib/store";
 import type { Mode } from "@/lib/prompts";
@@ -18,6 +19,7 @@ const MODES: { id: Mode; label: string; hint: string }[] = [
 
 export default function InputBar() {
   const images = useStore((s) => s.images);
+  const captureReviewOpen = useStore((s) => s.captureReviewOpen);
   const note = useStore((s) => s.note);
   const mode = useStore((s) => s.settings.mode);
   const running = useStore((s) => s.running);
@@ -36,6 +38,7 @@ export default function InputBar() {
   const start = useStore((s) => s.start);
   const cancel = useStore((s) => s.cancel);
   const reset = useStore((s) => s.reset);
+  const approveCaptureReview = useStore((s) => s.approveCaptureReview);
 
   const shortcutError = useStore((s) => s.shortcutError);
 
@@ -163,6 +166,7 @@ export default function InputBar() {
 
   const canRun =
     !running &&
+    !captureReviewOpen &&
     activeCount > 0 &&
     !check.blocking &&
     (images.length > 0 || note.trim().length > 0);
@@ -235,7 +239,6 @@ export default function InputBar() {
                 title={`${img.name} — click to view full size`}
                 aria-label={`View ${img.name} full size`}
               >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={img.dataUrl} alt={img.name} />
               </button>
               <button className="thumb-remove" onClick={() => removeImage(i)} title="Remove">
@@ -396,6 +399,17 @@ export default function InputBar() {
           onClose={() => setPreview(null)}
           onNavigate={setPreview}
           onRemove={removeImage}
+        />
+      )}
+
+      {captureReviewOpen && images.length > 0 && (
+        <CaptureReview
+          images={images}
+          maxImages={limit}
+          onContinue={approveCaptureReview}
+          onRemove={removeImage}
+          onOpen={setPreview}
+          onCapture={(kind) => void captureIntoApp(kind)}
         />
       )}
     </div>

@@ -212,7 +212,7 @@ These are **proposed remote protocol commands**; some target existing desktop fe
 ### Requirements
 
 - macOS
-- Node.js 22.6 or newer
+- Node.js 24 or newer
 - Rust toolchain
 - Xcode Command Line Tools
 

@@ -12,6 +12,7 @@ import CodingWorkspace from "@/components/CodingWorkspace";
 import BootScreen from "@/components/BootScreen";
 import HistoryPanel from "@/components/HistoryPanel";
 import InputBar from "@/components/InputBar";
+import StoryStripIntake from "@/components/StoryStripIntake";
 import ReadingPanel from "@/components/ReadingPanel";
 import SettingsDialog from "@/components/SettingsDialog";
 import SessionSidebar from "@/components/SessionSidebar";
@@ -88,11 +89,14 @@ export default function Page() {
 function Workbench() {
   type Workspace = "council" | "coding" | "knowledge";
   const [workspace, setWorkspace] = useState<Workspace>("council");
+  const [storyIntakeOpen, setStoryIntakeOpen] = useState(true);
   const agents = useStore((s) => s.agents);
   const hydrated = useStore((s) => s.hydrated);
   const hydrate = useStore((s) => s.hydrate);
   const setSettingsOpen = useStore((s) => s.setSettingsOpen);
   const running = useStore((s) => s.running);
+  const start = useStore((s) => s.start);
+  const approveCaptureReview = useStore((s) => s.approveCaptureReview);
   const signOut = useAuth((s) => s.signOut);
   const sessionsOpen = useStore((s) => s.settings.railPanel === "sessions");
   const historyOpen = useStore((s) => s.settings.railPanel === "history");
@@ -240,7 +244,22 @@ function Workbench() {
           the Knowledge tab it was describing a run nobody had started. */}
       {workspace === "council" && <ReadingPanel />}
 
-      <div className="workspace-stage" data-workspace={workspace}>
+      {workspace === "council" && storyIntakeOpen && (
+        <StoryStripIntake
+          running={running}
+          onStartAnalysis={() => {
+            approveCaptureReview();
+            setStoryIntakeOpen(false);
+            void start();
+          }}
+        />
+      )}
+
+      <div
+        className="workspace-stage"
+        data-workspace={workspace}
+        style={{ display: workspace === "council" && storyIntakeOpen ? "none" : undefined }}
+      >
         <div
           className="workspace-panel"
           data-active={workspace === "council"}
@@ -316,11 +335,11 @@ function Workbench() {
 
       <div
         className="workspace-input"
-        data-active={workspace === "council"}
-        aria-hidden={workspace !== "council"}
-        inert={workspace !== "council"}
+        data-active={workspace === "council" && !storyIntakeOpen}
+        aria-hidden={workspace !== "council" || storyIntakeOpen}
+        inert={workspace !== "council" || storyIntakeOpen}
       >
-        <InputBar />
+        {!storyIntakeOpen && <InputBar />}
       </div>
 
       <SettingsDialog />

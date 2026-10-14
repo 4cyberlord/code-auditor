@@ -11,7 +11,7 @@ runner="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/run-benchmark.mjs"
 output="$(cd "$2" && pwd -P)"
 [ -f "$workspace/manifest.json" ] || { echo "Missing reviewed manifest.json" >&2; exit 2; }
 [ "$workspace" != "$output" ] || { echo "Output must be separate from input workspace" >&2; exit 2; }
-image="public.ecr.aws/docker/library/node:22-alpine"
+image="public.ecr.aws/docker/library/node:24-alpine"
 docker run --rm --pull never \
   --network none --read-only --ipc none \
   --cap-drop ALL --security-opt no-new-privileges \
