@@ -39,7 +39,8 @@ assert.equal(selected.databaseId,"neon");
 const none=await fetchExternalLanguageRows("python",{environment:{},fetchImpl});
 assert.deepEqual(none,[]);
 clearLanguagePackCache();
-assert.equal((await loadLanguagePack("java",{fetchRows:id=>fetchExternalLanguageRows(id,{environment:{},fetchImpl})})).source,"bundle");
+assert.equal((await loadLanguagePack("rust",{fetchRows:id=>fetchExternalLanguageRows(id,{environment:{},fetchImpl})})).source,"bundle");
+await assert.rejects(fetchExternalLanguageRows("java",{environment:{},fetchImpl}),RangeError);
 const knownNeon="https://ep-flat-forest-akcqqd8f.apirest.c-3.us-west-2.aws.neon.tech/language_docs/rest/v1";
 const directory=[{service_key:"council_language_docs",provider:"neon",project_ref:"rough-lake-58845101",
   content_category:"language_documentation",stores_language_markdown:true,is_external:true,
