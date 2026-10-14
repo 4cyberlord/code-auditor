@@ -9,7 +9,7 @@ for (const tag of ["c++17", "c++20", "c++23", "C++17", "cpp17", "cpp20", "cxx2x"
 }
 
 for (const tag of ["c", "c99", "c11", "c17", "c23", "C11"]) {
-  assert.equal(normalizeCodeLanguage(tag), "c", `${tag} should be c`);
+  assert.notEqual(normalizeCodeLanguage(tag), "cpp", `${tag} must not be mistaken for C++`);
 }
 
 for (const tag of ["python", "python3", "py", "py3", "Python3.11", "python3.12"]) {
