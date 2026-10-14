@@ -161,6 +161,11 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_4: u32 = 0x21;
     const HID_USAGE_KEYBOARD_5: u32 = 0x22;
     const HID_USAGE_KEYBOARD_0: u32 = 0x27;
+    const HID_USAGE_KEYBOARD_MINUS: u32 = 0x2D;
+    const HID_USAGE_KEYBOARD_EQUAL: u32 = 0x2E;
+    const HID_USAGE_KEYBOARD_LEFT_BRACKET: u32 = 0x2F;
+    const HID_USAGE_KEYBOARD_RIGHT_BRACKET: u32 = 0x30;
+    const HID_USAGE_KEYBOARD_BACKSLASH: u32 = 0x31;
 
     pub static START_BATCH: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE: AtomicBool = AtomicBool::new(false);
@@ -176,9 +181,15 @@ mod mac_shortcuts {
     pub static MOVE_DOWN: AtomicBool = AtomicBool::new(false);
     pub static SCROLL_UP: AtomicBool = AtomicBool::new(false);
     pub static SCROLL_DOWN: AtomicBool = AtomicBool::new(false);
-    // Encoded pairs: 00 starts a fresh coding-overlay batch, 10-14 route to
-    // the main app, and 31-35 are reserved for the MCQ overlay. Zero means no
-    // queued request, so 00 is represented internally as command 6.
+    static FADE_DOWN: AtomicBool = AtomicBool::new(false);
+    static FADE_UP: AtomicBool = AtomicBool::new(false);
+    static HISTORY_TOGGLE: AtomicBool = AtomicBool::new(false);
+    static HISTORY_PREVIOUS: AtomicBool = AtomicBool::new(false);
+    static HISTORY_NEXT: AtomicBool = AtomicBool::new(false);
+    static HISTORY_OPEN_RESULT: AtomicBool = AtomicBool::new(false);
+    static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
+    // Encoded pairs: 00 and 10-14 route to the main app, 21-24 are coding
+    // overlay controls, and 31-35 are MCQ overlay controls.
     static NUMBER_COMMAND: AtomicU8 = AtomicU8::new(0);
 
     static CONTROL_DOWN: AtomicBool = AtomicBool::new(false);
@@ -262,6 +273,23 @@ mod mac_shortcuts {
                 }
             } else if usage < HID_USAGE_KEYBOARD_LEFT_CONTROL {
                 if let Ok(mut previous) = LAST_DIGIT.lock() { *previous = None; }
+            }
+        }
+
+        // These controls are deliberately active only while the coding overlay
+        // is visible, so ordinary typing elsewhere is unaffected.
+        if pressed && CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst)
+            && !CONTROL_DOWN.load(Ordering::SeqCst)
+            && !OPTION_DOWN.load(Ordering::SeqCst)
+        {
+            match (usage, SHIFT_DOWN.load(Ordering::SeqCst)) {
+                (HID_USAGE_KEYBOARD_LEFT_BRACKET, true) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_RIGHT_BRACKET, true) => HISTORY_NEXT.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_MINUS, true) => HISTORY_TOGGLE.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_BACKSLASH, true) => HISTORY_OPEN_RESULT.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_MINUS, false) => FADE_DOWN.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_EQUAL, false) => FADE_UP.store(true, Ordering::SeqCst),
+                _ => {}
             }
         }
 
@@ -397,6 +425,13 @@ mod mac_shortcuts {
         SCROLL_DOWN.swap(false, Ordering::SeqCst)
     }
     pub fn take_number_command() -> u8 { NUMBER_COMMAND.swap(0, Ordering::SeqCst) }
+    pub fn set_coding_overlay_visible(value: bool) { CODING_OVERLAY_VISIBLE.store(value, Ordering::SeqCst); }
+    pub fn take_fade_down() -> bool { FADE_DOWN.swap(false, Ordering::SeqCst) }
+    pub fn take_fade_up() -> bool { FADE_UP.swap(false, Ordering::SeqCst) }
+    pub fn take_history_toggle() -> bool { HISTORY_TOGGLE.swap(false, Ordering::SeqCst) }
+    pub fn take_history_previous() -> bool { HISTORY_PREVIOUS.swap(false, Ordering::SeqCst) }
+    pub fn take_history_next() -> bool { HISTORY_NEXT.swap(false, Ordering::SeqCst) }
+    pub fn take_history_open_result() -> bool { HISTORY_OPEN_RESULT.swap(false, Ordering::SeqCst) }
 }
 
 async fn space_api_calls() {
@@ -589,6 +624,10 @@ fn run() -> Result<(), String> {
     let mut overlay_refresh = OverlayRefresh::default();
     update_overlay(&webview, &active_view, &mut overlay_refresh)?;
     let mut overlay_visible = false;
+    let mut overlay_alpha = 0.46_f64;
+    let mut coding_history_open = false;
+    let mut coding_history_rows: Vec<SubmittedJob> = Vec::new();
+    let mut coding_history_index = 0_usize;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
     let mut last_heartbeat = Instant::now();
@@ -625,6 +664,11 @@ fn run() -> Result<(), String> {
                 13 => send_capture_to_council("region"),
                 14 => send_process_to_council(),
                 6 => {
+                    // 00 belongs to the main-app session rather than the
+                    // overlay, so it does not touch staged overlay captures.
+                    send_capture_to_council("new-session");
+                }
+                21 => {
                     active_view = "coding".to_string();
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("new session unavailable during screenshot selection");
@@ -633,15 +677,17 @@ fn run() -> Result<(), String> {
                     } else if let Err(error) = reset_pending_batch("coding").and_then(|_| start_batch("coding")) {
                         eprintln!("new coding session failed: {error}");
                     }
+                    overlay_visible = true;
+                    let _ = show_overlay(&overlay, true);
                     let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                 }
-                31..=34 => {
-                    let target_view = "mcq";
+                22 | 23 | 31..=34 => {
+                    let target_view = if command < 30 { "coding" } else { "mcq" };
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("screenshot capture already in progress");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("screenshot capture unavailable during cloud submission");
-                    } else if let Some(mode) = helper_capture_mode(command % 10) {
+                    } else if let Some(mode) = helper_capture_mode(if command < 30 { command - 20 } else { command % 10 }) {
                         active_view = target_view.to_string();
                         capture_active_view = Some(active_view.clone());
                         // Background-route captures open their own coding/MCQ
@@ -655,8 +701,8 @@ fn run() -> Result<(), String> {
                         capture_task = Some(rt.spawn_blocking(move || capture_screen(mode, &view)));
                     }
                 }
-                35 => {
-                    let target_view = "mcq";
+                24 | 35 => {
+                    let target_view = if command == 24 { "coding" } else { "mcq" };
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("finish the screenshot selection before submitting");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -737,6 +783,7 @@ fn run() -> Result<(), String> {
 
         #[cfg(target_os = "macos")]
         {
+            mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
             if mac_shortcuts::take_toggle_overlay()
                 && capture_task.as_ref().is_none_or(|task| task.is_finished())
             {
@@ -845,6 +892,52 @@ fn run() -> Result<(), String> {
             if overlay_visible && mac_shortcuts::take_scroll_down() {
                 let _ = webview.evaluate_script("window.scrollSolutionBy(260)");
             }
+            if overlay_visible && active_view == "coding" && mac_shortcuts::take_fade_down() {
+                overlay_alpha = (overlay_alpha - 0.07).max(0.18);
+                let _ = set_ghost_opacity(&overlay, overlay_alpha);
+            }
+            if overlay_visible && active_view == "coding" && mac_shortcuts::take_fade_up() {
+                overlay_alpha = (overlay_alpha + 0.07).min(0.95);
+                let _ = set_ghost_opacity(&overlay, overlay_alpha);
+            }
+            if overlay_visible && active_view == "coding" {
+                if mac_shortcuts::take_history_toggle() {
+                    if coding_history_open {
+                        coding_history_open = false;
+                        let _ = webview.evaluate_script("window.closeCodingHistory()");
+                    } else {
+                        coding_history_rows = load_coding_history().unwrap_or_default();
+                        coding_history_index = 0;
+                        let headers: Vec<Value> = coding_history_rows.iter().map(|job| serde_json::json!({
+                            "id": job.id, "submittedAt": job.submitted_at, "status": job.status,
+                        })).collect();
+                        let rows = serde_json::to_string(&headers).unwrap_or_else(|_| "[]".into());
+                        let _ = webview.evaluate_script(&format!("window.showCodingHistory({rows},0)"));
+                        coding_history_open = true;
+                    }
+                }
+                if mac_shortcuts::take_history_previous() {
+                    if coding_history_open {
+                        coding_history_index = coding_history_index.saturating_sub(1);
+                        let _ = webview.evaluate_script(&format!("window.selectCodingHistoryRow({coding_history_index})"));
+                    } else { let _ = webview.evaluate_script("window.scrollSolutionBy(-260)"); }
+                }
+                if mac_shortcuts::take_history_next() {
+                    if coding_history_open {
+                        coding_history_index = (coding_history_index + 1).min(coding_history_rows.len().saturating_sub(1));
+                        let _ = webview.evaluate_script(&format!("window.selectCodingHistoryRow({coding_history_index})"));
+                    } else { let _ = webview.evaluate_script("window.scrollSolutionBy(260)"); }
+                }
+                if mac_shortcuts::take_history_open_result() && coding_history_open {
+                    if let Some(job) = coding_history_rows.get(coding_history_index) {
+                        if let Ok(state) = serde_json::to_string(&coding_overlay_state(job)) {
+                            let _ = webview.evaluate_script(&format!("window.openCodingHistoryResult({state})"));
+                        }
+                        coding_history_open = false;
+                    }
+                }
+            }
+            mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
         }
     });
     Ok(())
@@ -942,6 +1035,19 @@ fn tune_ghost_overlay(_window: &Window) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn set_ghost_opacity(window: &Window, alpha: f64) -> Result<(), String> {
+    use objc2_app_kit::NSWindow;
+    unsafe {
+        let ns_window = window.ns_window();
+        if ns_window.is_null() {
+            return Err("Overlay NSWindow unavailable".into());
+        }
+        (&*ns_window.cast::<NSWindow>()).setAlphaValue(alpha.clamp(0.18, 0.95));
+    }
+    Ok(())
+}
+
 fn show_overlay(window: &Window, visible: bool) -> Result<(), String> {
     window.set_always_on_top(true);
     window
@@ -982,6 +1088,26 @@ fn archive_job(job: &SubmittedJob) -> Result<(), String> {
 }
 fn last_good_settings_path() -> Result<PathBuf, String> {
     Ok(cache_dir()?.join("last-good-settings.json"))
+}
+
+fn load_coding_history() -> Result<Vec<SubmittedJob>, String> {
+    let mut rows = Vec::new();
+    if let Some(current) = read_submitted_job_for("coding")? {
+        if current.mode == "council" { rows.push(current); }
+    }
+    let dir = cache_dir()?.join("job-history");
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten().take(500) {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") { continue; }
+            let Ok(raw) = fs::read_to_string(path) else { continue; };
+            let Ok(job) = serde_json::from_str::<SubmittedJob>(&raw) else { continue; };
+            if job.mode == "council" && !rows.iter().any(|known| known.id == job.id) { rows.push(job); }
+        }
+    }
+    rows.sort_by(|a, b| b.submitted_at.cmp(&a.submitted_at));
+    rows.truncate(100);
+    Ok(rows)
 }
 
 fn clean_expired_capture_dirs() -> Result<(), String> {
@@ -1193,6 +1319,7 @@ fn number_pair_command(first: u8, second: u8) -> Option<u8> {
     match first {
         0 if second == 0 => Some(6),
         1 if second <= 4 => Some(10 + second),
+        2 if (1..=4).contains(&second) => Some(20 + second),
         3 if (1..=5).contains(&second) => Some(30 + second),
         _ => None,
     }
@@ -2614,6 +2741,10 @@ fn overlay_html() -> &'static str {
             // Keep the existing capture and result renderer intact, then give
             // its agent output the same clear, glassy Council presentation as
             // the Story workspace. This is intentionally display-only.
+            window.showCodingHistory=function(rows,selected){const panel=document.getElementById('panel');let root=document.getElementById('coding-history');if(!root){root=document.createElement('div');root.id='coding-history';root.style.cssText='position:absolute;inset:16px;z-index:20;display:flex;flex-direction:column;gap:14px;padding:20px;border:1px solid rgba(255,255,255,.22);border-radius:14px;background:rgba(19,23,32,.96);color:white;overflow:hidden';panel.appendChild(root);}root.hidden=false;root.innerHTML='';const title=document.createElement('h3');title.textContent='Coding history · { / } navigate · | open · _ close';root.appendChild(title);const list=document.createElement('div');list.style.cssText='flex:1;overflow:auto;display:flex;flex-direction:column;gap:7px';(rows||[]).forEach((item,index)=>{const row=document.createElement('div');row.className='coding-history-row';row.dataset.index=String(index);row.style.cssText='padding:11px 13px;border:1px solid rgba(255,255,255,.18);border-radius:9px;color:rgba(255,255,255,.78);font-size:12px';row.textContent=(index+1)+'. '+(item.submittedAt||'')+' · '+(item.status||'')+' · '+String(item.id||'').slice(0,12);list.appendChild(row);});if(!list.children.length){const empty=document.createElement('div');empty.textContent='No coding history yet.';list.appendChild(empty);}root.appendChild(list);window.selectCodingHistoryRow(selected||0);};
+            window.selectCodingHistoryRow=function(selected){const root=document.getElementById('coding-history');if(!root)return;root.querySelectorAll('.coding-history-row').forEach((row,index)=>{const active=index===selected;row.style.background=active?'rgba(245,216,59,.17)':'transparent';row.style.borderColor=active?'rgba(245,216,59,.84)':'rgba(255,255,255,.18)';if(active)row.scrollIntoView({block:'nearest'});});};
+            window.closeCodingHistory=function(){const root=document.getElementById('coding-history');if(root)root.hidden=true;};
+            window.openCodingHistoryResult=function(state){window.closeCodingHistory();window.updateOverlayState(state);};
             const baseUpdateOverlayState=window.updateOverlayState;
             function agentStatusText(agent){
               if(agent.error)return String(agent.error);
@@ -2655,12 +2786,13 @@ mod tests {
         let expected = [
             (0, 0, 6),
             (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13), (1, 4, 14),
+            (2, 1, 21), (2, 2, 22), (2, 3, 23), (2, 4, 24),
             (3, 1, 31), (3, 2, 32), (3, 3, 33), (3, 4, 34), (3, 5, 35),
         ];
         for (prefix, shape, command) in expected {
             assert_eq!(number_pair_command(prefix, shape), Some(command));
         }
-        for invalid in [(1, 5), (2, 0), (2, 1), (2, 5), (3, 0), (4, 1)] {
+        for invalid in [(1, 5), (2, 0), (2, 5), (3, 0), (4, 1)] {
             assert_eq!(number_pair_command(invalid.0, invalid.1), None);
         }
     }
