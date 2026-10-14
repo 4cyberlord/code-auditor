@@ -22,7 +22,7 @@ import { createSign } from "node:crypto";
 import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
-import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
+import { LANGUAGES, loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
 import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/externalLanguageSources.mjs";
 import { fetchLanguageViaGateway } from "./lib/supabaseLanguageGateway.mjs";
 import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
@@ -1167,6 +1167,10 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   await patchJob(job.id, { progress_phase: "speccing" });
   await addEvent(job.id, "info", "speccing", "Generating language-specific benchmark harnesses.");
   const languages = Array.from(new Set(codeCandidates.map((c) => candidateLanguage(c.final)).filter(Boolean)));
+  const unsupported = languages.filter(language => !LANGUAGES.includes(language));
+  if (unsupported.length) {
+    throw new Error(`Unsupported coding language: ${unsupported.join(", ")}. Council Editor supports Python, C++, and Rust.`);
+  }
   const specModels = [...new Set([
     settings.synthesisModel, ...judges.map(judge => judge.model), ...models.map(model => model.id),
   ].filter(Boolean))];
