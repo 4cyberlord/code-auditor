@@ -22,6 +22,11 @@ import { createSign } from "node:crypto";
 import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
+import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
+import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/externalLanguageSources.mjs";
+import { fetchLanguageViaGateway } from "./lib/supabaseLanguageGateway.mjs";
+import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
+import { phaseTimer } from "./lib/phaseTimings.mjs";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -274,6 +279,12 @@ function mustEnv(name) {
   }
   return v;
 }
+
+// Fetch directory records once per TTL, shared by all languages/jobs. This
+// directory is service-role-only and contains no actual programming guides.
+const languageDirectory=createRegistryDirectoryLoader(()=>
+  rest("external_service_registry?select=service_key,provider,project_ref,content_category,stores_language_markdown,is_external,metadata&service_key=eq.council_language_docs&limit=1")
+);
 
 async function rest(path, init = {}) {
   const res = await fetch(`${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/${path}`, {
@@ -1041,10 +1052,8 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
       // A program that never started did not fail its tests — the harness did.
       // Naming it distinctly keeps a build problem out of the evidence the
       // judges weigh, where it would read as "this candidate is wrong".
-      const brokenHarness =
-        /could not find or load main class|error: cannot find symbol|no such file or directory|command not found|compilation failed|error: expected|traceback \(most recent call last\)|nameerror:|syntaxerror:|typeerror:/i.test(
-          diagnostic
-        ) || harnessPreflightDiagnostics(suite.language, suite.harness).length > 0;
+      const brokenHarness = harnessPreflightDiagnostics(suite.language,suite.harness).length>0;
+      const compileIssue = /could not find or load main class|cannot find symbol|no such file or directory|command not found|compilation failed|error: expected|traceback \(most recent call last\)|nameerror:|syntaxerror:|typeerror:/i.test(diagnostic);
       runs[candidate.letter] = {
         letter: candidate.letter,
         ran: true,
@@ -1055,7 +1064,8 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
         note: local.timedOut
           ? "timed out"
           : brokenHarness
-            ? "the generated harness did not build or start"
+            ? "generated harness failed static preflight"
+            : compileIssue ? "candidate/harness integration or compilation failed; inspect stderr"
             : local.exitCode !== 0
               ? `exit ${local.exitCode}`
               : "",
@@ -1165,35 +1175,88 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
     settings.synthesisModel, ...judges.map(judge => judge.model), ...models.map(model => model.id),
   ].filter(Boolean))];
   const specStartedAt = Date.now();
-  let lastFailure = "No model produced an executable test harness.";
-  // Languages are independent. Retries within one language stay sequential.
+  const failures = new Map();
+  // Database packs are checksum validated; verified bundled packs remain an offline fallback.
+  const languagePacks = await Promise.all(languages.map(language => loadLanguagePack(language, {
+    // The Supabase RPC queries an external Neon foreign table; it never
+    // stores Markdown in Supabase. Neon Data API currently requires JWT
+    // even for anonymous readers, so prefer the authenticated FDW path.
+    // If the user mapping is not configured, keep the trusted bundled fallback.
+    fetchRows: id => fetchLanguageViaGateway(id,{
+      queryGateway: language => rest("rpc/fetch_council_language_pack",{
+        method:"POST",body:JSON.stringify({p_language:language}),
+      }),
+      fallback: language => fetchExternalLanguageRows(language,{
+        registryDirectory:languageDirectory,
+      }),
+    }),
+  })));
+  const packsByLanguage = new Map(languagePacks.map(pack => [pack.language,pack]));
+  await addEvent(job.id,"info","language_packs_ready",
+    `Loaded ${languagePacks.length} language-specific guides.`,
+    {languages:languagePacks.map(pack=>({language:pack.language,source:pack.source,database:pack.databaseId??null,checksum:pack.checksum.slice(0,12)}))});
+  // Independent languages run concurrently; within-language retry remains bounded and serial.
   const suitesByLanguage = await parallelMap(languages,
     workerConcurrency(process.env.CODE_AUDITOR_HARNESS_CONCURRENCY, 3, 4),
     async (language) => {
+    const pack = packsByLanguage.get(language);
+    let lastError = "";
     // The model gets the contract for this language only. Giving it every
     // language's syntax rules is noise and was one source of cross-language
     // harness mistakes; runtime execution below remains the final check.
-    const languageKnowledge = [knowledge || settings.knowledgeDigest || "", runtimeGuidanceFor(language)]
-      .filter(Boolean)
-      .join("\n\n");
+    const languageKnowledge = [
+      knowledge || settings.knowledgeDigest || "",
+      runtimeGuidanceFor(language),
+      languagePrompt(pack),
+    ].filter(Boolean).join("\n\n");
     for (const model of specModels.filter(candidate => !bench.has(candidate)).slice(0, 3)) {
       try {
         const specText = await tokenRouterGenerate({
           settings, baseUrl, model, system: testSpecSystemPrompt(),
           user: testSpecUserPrompt({
             question, docket: candidateDocket(candidates), languages: [language],
-            knowledge: languageKnowledge,
+            knowledge: [
+              languageKnowledge,
+              lastError ? `THE PRIOR HARNESS WAS REJECTED: ${lastError.slice(0, 650)}. Repair only the harness.` : "",
+            ].filter(Boolean).join("\n\n"),
           }),
           maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
         });
         const suite = parseTestSuites(specText).find(item => item.language === language);
-        if (suite) return suite;
-        lastFailure = `${model} returned no usable ${language} test harness.`;
-        await addEvent(job.id, "warn", "spec_retry", lastFailure);
+        if (!suite) throw new Error("No valid executable harness block parsed.");
+        // One independent reference run catches malformed harnesses *before*
+        // all candidates are tested. Successful evidence can be reused only for
+        // identical code, harness and execution environment.
+        if (suite.referenceCode) {
+          const referenceProgram=spliceSuite(suite,suite.referenceCode);
+          if (!referenceProgram) throw new Error("Reference could not be inserted.");
+          const version = pack.version + ":" + (process.env.CODE_AUDITOR_E2B_TEMPLATE || "default");
+          const key=referenceKey(language,suite.harness,suite.referenceCode,version);
+          if (!isReferenceValidated(key)) {
+            const outcome=await runVerification(settings,suite,referenceProgram);
+            const cases=countCases(outcome.stdout);
+            if (!outcome.ok || cases.failed!==0 || cases.passed<2)
+              throw new Error(`Reference self-test failed: ${cases.passed} passed and ${cases.failed} failed; ${String(outcome.stderr||outcome.stdout||"no diagnostics").slice(0,600)}`);
+            markReferenceValidated(key);
+          }
+          await addEvent(job.id,"info","harness_preflight_pass",
+            `${language}: independent reference passed E2B.`,
+            {language,checksum:key.slice(0,12)});
+        } else {
+          await addEvent(job.id,"warn","harness_reference_missing",
+            `${language} harness has no independent reference; candidate tests and mutation oracle remain required.`,{language});
+        }
+        return suite;
       } catch (err) {
-        lastFailure = `${model}: ${err instanceof Error ? err.message : String(err)}`;
-        await bench.note(model, err, "speccing");
-        await addEvent(job.id, "warn", "spec_retry", lastFailure);
+        lastError=err instanceof Error?err.message:String(err);
+        // A failed E2B account, network or sandbox is not an invalid harness.
+        // Do not spend two more provider generations on an infrastructure fault.
+        if (/No E2B key|E2B_API_KEY|quota|rate limit|sandbox unavailable|ECONNREFUSED|ETIMEDOUT|deadline_exceeded/i.test(lastError))
+          throw err;
+        failures.set(language,`${model}: ${lastError}`);
+        await bench.note(model,err,"speccing");
+        await addEvent(job.id,"warn","spec_retry",
+          `${model} generated an invalid ${language} harness: ${lastError}`);
       }
     }
     return null;
@@ -1204,7 +1267,7 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
     { elapsedMs: Date.now() - specStartedAt, languages: languages.length, generated: suites.length });
   const missing = missingSuiteLanguages(languages, suites);
   if (missing.length) {
-    throw new Error(`Cannot verify coding solution in E2B: no executable ${missing.join(", ")} test harness was produced. ${lastFailure}`);
+    throw new Error(`Cannot verify coding solution in E2B: no executable ${missing.join(", ")} test harness was produced. ${missing.map(language=>failures.get(language)).filter(Boolean).join(" | ")}`);
   }
 
   await patchJob(job.id, { progress_phase: "verifying" });
@@ -2148,6 +2211,8 @@ export async function runCouncilJob(job) {
   // Everything the desktop path sends, which until now none of was sent: the
   // reading of the picture, the knowledge selected for this question, a real
   // manifest, and the house preference for what to write it in.
+  const timer = phaseTimer();
+  timer.enter("contract");
   const policy = solutionPolicy(
     Array.isArray(settings.solutionLanguages) && settings.solutionLanguages.length
       ? settings.solutionLanguages
@@ -2229,6 +2294,7 @@ export async function runCouncilJob(job) {
   const solverSystem = systemPrompt(settings.mode || "auto", answerLanguage);
   const candidates = [];
 
+  timer.enter("solving");
   await bench.announce("solving", models.filter((m) => bench.has(m.id)).map((m) => m.id));
   await addEvent(
     job.id,
@@ -2332,6 +2398,7 @@ export async function runCouncilJob(job) {
     knowledge = await selectKnowledge(job, settings, { candidates: field, reading });
   }
 
+  timer.enter("benchmark");
   const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field, knowledge, bench);
   const docket = candidateDocket(field);
   // An execution backend that is down makes every candidate "untested", which
@@ -2378,6 +2445,7 @@ export async function runCouncilJob(job) {
     await addEvent(job.id, "warn", "benchmark_pending", execution);
   }
 
+  timer.enter("reviewing");
   await patchJob(job.id, { progress_phase: "reviewing" });
 
   const reviewSets = [];
@@ -2433,6 +2501,7 @@ export async function runCouncilJob(job) {
   // with execution failure or a substantive correctness concern incur a second
   // generation and sandbox pass.
   if (revisionCandidates.length > 0) {
+    timer.enter("revising");
     await patchJob(job.id, { progress_phase: "revising" });
     const revising = bench.keep(
       revisionCandidates.filter((candidate) => candidate.final || candidate.text),
@@ -2503,6 +2572,7 @@ export async function runCouncilJob(job) {
     });
 
     if (benchmark.suites.length && field3.some((c) => c.revised)) {
+  timer.enter("reverifying");
       await patchJob(job.id, { progress_phase: "reverifying" });
       await addEvent(job.id, "info", "reverifying", "Re-running the revised field against the same harnesses.");
       revisedRuns = await executeField(job, settings, benchmark.suites, field3, { revised: true });
@@ -2538,6 +2608,7 @@ export async function runCouncilJob(job) {
     .filter(Boolean)
     .join("\n\n");
 
+  timer.enter("judging");
   await patchJob(job.id, { progress_phase: "judging" });
 
   const judgeReports = [];
@@ -2579,6 +2650,7 @@ export async function runCouncilJob(job) {
     })
   );
 
+  timer.enter("synthesizing");
   await patchJob(job.id, { progress_phase: "synthesizing" });
   await addEvent(job.id, "info", "synthesizing", "Synthesizing the cloud Council result.");
 
@@ -2651,6 +2723,7 @@ export async function runCouncilJob(job) {
   // panel, the helper overlay, the dossier below — reads these instead of
   // scraping markdown, so a model drifting from the report format degrades one
   // parser rather than every surface at once.
+  timer.enter("final_gate");
   const parsedSynthesis = parseCouncilSynthesis(synthesis);
   const judgeReadings = judgeReports.map((j) => ({
     model: j.model,
@@ -2706,7 +2779,10 @@ export async function runCouncilJob(job) {
     });
   }
 
+  const phaseTimings=timer.snapshot();
+  await addEvent(job.id,"info","council_phase_timings","Council stage timing (milliseconds).",phaseTimings);
   const report = {
+    phaseTimings,
     candidates: field3,
     suites: benchmark.suites,
     runs: benchmark.runs,

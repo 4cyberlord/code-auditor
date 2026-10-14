@@ -1,11 +1,25 @@
-# Language runtime knowledge packs
+# Language runtime Markdown registry
 
-These Markdown packs are a maintained local summary of official language and runtime rules used when generating E2B harnesses. They are deliberately summaries, not mirrors of vendor manuals. The source links are authoritative and the review date identifies when the pack should be refreshed.
+The Council worker reads a language-specific guide before generating harnesses.
+Source-controlled, checksum-verified guides are the reliable offline fallback;
+optionally it reads approved Markdown from external PostgREST-compatible
+PostgreSQL services configured through `CODE_AUDITOR_LANGUAGE_REGISTRIES`.
 
-The Council should retrieve the pack matching the candidate language before writing a harness. A pack provides guidance; the executable preflight and E2B known-good/mutation checks remain the final authority.
+**Do not store language documentation in the Supabase application database.**
+The external database schema is `deploy/external-language-registry.sql`.
+See `docs/council-language-registry.md` for secure configuration and publishing.
 
-Packs:
+- [python](python.md)
+- [javascript](javascript.md)
+- [typescript](typescript.md)
+- [java](java.md)
+- [c](c.md)
+- [cpp](cpp.md)
+- [rust](rust.md)
+- [go](go.md)
+- [php](php.md)
+- [ruby](ruby.md)
+- [bash](bash.md)
 
-- [Python](python.md)
-- [JavaScript and TypeScript](javascript-typescript.md)
-- [Java, C/C++, Rust, and Go](java-cpp-rust-go.md)
+Documentation guides generation, but executable E2B validation, independent
+reference checking and mutation testing remain the correctness authority.
