@@ -16,7 +16,9 @@ const MAX_CONTEXT = 6500;
 const STOP = new Set(["that","this","with","from","into","have","when","then","where","what","your","does","will","using","which","their","about","there","return","solve","write","code","problem","given","should","must","function","class"]);
 
 export function searchTerms(input) {
-  return [...new Set(String(input || "").toLowerCase().match(/[a-z][a-z0-9_]{3,23}/g) || [])]
+  return [...new Set((String(input || "").toLowerCase().match(/[a-z][a-z0-9_]{3,23}/g) || [])
+    .map(term => term.replace(/_+$/g, ""))
+    .filter(term => term.length >= 4))]
     .filter(t => !STOP.has(t)).slice(0, 5);
 }
 function trimContext(rows, language) {
