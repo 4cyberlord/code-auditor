@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf, thread, time::Duration};
-use tauri::{AppHandle, Emitter, Manager};
+use std::{fs, path::PathBuf, sync::{Mutex, OnceLock}, thread, time::{Duration, Instant}};
+use tauri::{AppHandle, Emitter};
 
 const GHOST_LABEL: &str = "com.apple.mds.useragent";
 const GHOST_BUNDLE_ID: &str = "com.apple.mds";
@@ -96,6 +96,22 @@ fn helper_status_path() -> Result<PathBuf, String> {
     Ok(support_dir()?.join("cache/helper-status.json"))
 }
 
+// A numeric 14 request is background-only. If macOS sends a Reopen event
+// during its delivery, do not activate the main window as a side effect.
+static HEADLESS_PROCESS_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+fn mark_headless_process() {
+    let guard = HEADLESS_PROCESS_AT.get_or_init(|| Mutex::new(None));
+    if let Ok(mut at) = guard.lock() { *at = Some(Instant::now()); }
+}
+
+pub(crate) fn recent_headless_process() -> bool {
+    HEADLESS_PROCESS_AT.get()
+        .and_then(|guard| guard.lock().ok())
+        .and_then(|at| *at)
+        .is_some_and(|at| at.elapsed() < Duration::from_secs(2))
+}
+
 /// Relay system-wide numeric capture requests from the Input Monitoring helper
 /// into the main app's normal capture pipeline (and therefore its preview tray).
 pub(crate) fn watch_app_capture_requests(app: AppHandle) {
@@ -127,13 +143,7 @@ pub(crate) fn watch_app_capture_requests(app: AppHandle) {
                     _ => None,
                 };
                 if let Some(event) = event {
-                    if event == "shortcut://solve" {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
-                        }
-                    }
+                    if mode.as_deref() == Some("process") { mark_headless_process(); }
                     let _ = app.emit(event, ());
                 }
             }
