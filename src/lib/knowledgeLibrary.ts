@@ -124,10 +124,12 @@ export interface LoadOptions {
 }
 
 let cached: KnowledgeLibrary | null = null;
+let pending: Promise<KnowledgeLibrary> | null = null;
 
 /** Drop the cache. Tests use it; a long-lived worker gets it for free via TTL. */
 export function resetKnowledgeCache(): void {
   cached = null;
+  pending = null;
 }
 
 /**
@@ -147,25 +149,32 @@ export async function loadKnowledgeLibrary(opts: LoadOptions = {}): Promise<Know
   if (cached && now - cached.at < ttl) return cached;
   if (!opts.fetchRows) return bundledLibrary("no database transport is configured", now);
 
-  try {
-    const [rows, sources] = await Promise.all([
-      opts.fetchRows("intelligence_records"),
-      opts.fetchRows("intelligence_sources").catch(() => [] as unknown[]),
-    ]);
-    const records = recordsFromRows((rows ?? []) as RecordRow[], (sources ?? []) as SourceRow[]);
-    if (!records.length) {
-      // An empty table is the normal state before the seeder has been run, and
-      // it must not read as a library of nothing.
-      cached = bundledLibrary("the database holds no usable records yet", now);
+  // Concurrent jobs share a single fetch on a cold or expired cache. A query
+  // per job here creates a thundering herd under parallel Council workloads.
+  if (pending) return pending;
+  const load = (async (): Promise<KnowledgeLibrary> => {
+    try {
+      const [rows, sources] = await Promise.all([
+        opts.fetchRows!("intelligence_records"),
+        opts.fetchRows!("intelligence_sources").catch(() => [] as unknown[]),
+      ]);
+      const records = recordsFromRows((rows ?? []) as RecordRow[], (sources ?? []) as SourceRow[]);
+      if (!records.length) {
+        cached = bundledLibrary("the database holds no usable records yet", now);
+        return cached;
+      }
+      cached = { records, source: "database", note: "", at: now };
       return cached;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Errors are not cached, so the next job can retry a recovered database.
+      return bundledLibrary(`the database could not be read (\${message})`, now);
     }
-    cached = { records, source: "database", note: "", at: now };
-    return cached;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    // Not cached: a database that was down a minute ago may be up now, and
-    // caching the failure would keep a healthy library out of reach until the
-    // process restarts.
-    return bundledLibrary(`the database could not be read (${message})`, now);
+  })();
+  pending = load;
+  try {
+    return await load;
+  } finally {
+    if (pending === load) pending = null;
   }
 }
