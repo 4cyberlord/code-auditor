@@ -1054,6 +1054,24 @@ fn show_overlay(window: &Window, visible: bool) -> Result<(), String> {
         .set_ignore_cursor_events(true)
         .map_err(|e| format!("Could not set ghost click-through: {e}"))?;
     window.set_visible(visible);
+
+    // `set_visible` alone does not bring an inactive application's window
+    // above the foreground application. Keep this overlay click-through and
+    // non-key, but explicitly order it to the front so its global shortcut
+    // works from any app, Space, or full-screen desktop.
+    #[cfg(target_os = "macos")]
+    if visible {
+        use objc2_app_kit::NSWindow;
+
+        unsafe {
+            let ns_window = window.ns_window();
+            if ns_window.is_null() {
+                return Err("Overlay NSWindow unavailable".into());
+            }
+            (&*ns_window.cast::<NSWindow>()).orderFrontRegardless();
+        }
+    }
+
     Ok(())
 }
 
