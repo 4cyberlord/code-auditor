@@ -684,7 +684,6 @@ function runtimeFor(language, code) {
   if (["bash", "sh", "shell", "zsh", "console"].includes(lang)) return { file: "main.sh", command: "bash main.sh", runtime: "bash" };
   if (["ruby", "rb"].includes(lang)) return { file: "main.rb", command: "ruby main.rb", runtime: "ruby" };
   if (lang === "php") return { file: "main.php", command: "php main.php", runtime: "php" };
-  if (lang === "c") return { file: "main.c", command: "cc -std=c17 -O1 main.c -o prog -lm && ./prog", runtime: "cc" };
   if (["cpp", "c++", "cc", "cxx"].includes(lang)) return { file: "main.cpp", command: "c++ -std=c++20 -O1 main.cpp -o prog && ./prog", runtime: "c++" };
   if (lang === "java") {
     // `java Main.java` is single-file source mode: it runs the FIRST class in
@@ -789,7 +788,6 @@ lang="$(printf '%s' "$lang" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')"
 # so a c++17 fence compiles here too instead of exiting 97 unrun.
 case "$lang" in
   c++*|cpp*|cxx*) lang=cpp ;;
-  c[0-9][0-9]) lang=c ;;
   python3.*) lang=python3 ;;
   node[0-9]*|es[0-9][0-9][0-9][0-9]) lang=javascript ;;
 esac
@@ -801,7 +799,6 @@ case "$lang" in
   bash|sh|shell) file=main.sh; cp code.txt "$file"; command='bash main.sh'; runtime='${providerLabel} bash' ;;
   ruby|rb) file=main.rb; cp code.txt "$file"; command='ruby main.rb'; runtime='${providerLabel} ruby' ;;
   php) file=main.php; cp code.txt "$file"; command='php main.php'; runtime='${providerLabel} php' ;;
-  c) file=main.c; cp code.txt "$file"; command='cc -std=c17 -O2 main.c -o prog -lm && ./prog'; runtime='${providerLabel} cc -O2' ;;
   cpp|c++|cc|cxx) file=main.cpp; cp code.txt "$file"; command='c++ -std=c++20 -O2 main.cpp -o prog && ./prog'; runtime='${providerLabel} c++ -O2' ;;
   java) file=Main.java; cp code.txt "$file"; command="${JAVA_COMMAND}"; runtime='${providerLabel} javac + java' ;;
   go|golang) file=main.go; cp code.txt "$file"; command='go run main.go'; runtime='${providerLabel} go' ;;
