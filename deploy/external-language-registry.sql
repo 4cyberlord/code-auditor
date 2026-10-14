@@ -2,7 +2,7 @@
 -- Never apply to the Council Editor Supabase application database.
 create table if not exists public.language_runtime_packs (
   language text primary key check (language in
-    ('python','javascript','typescript','java','c','cpp','rust','go','php','ruby','bash')),
+    ('python','cpp','rust')),
   runtime_version text not null check (length(runtime_version) between 1 and 64),
   content_md text not null check (octet_length(content_md) between 1 and 32768),
   checksum text not null check (checksum ~ '^[a-f0-9]{64}$'),
