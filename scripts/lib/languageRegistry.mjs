@@ -1,12 +1,12 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-export const LANGUAGES=Object.freeze(["python","javascript","typescript","java","c","cpp","rust","go","php","ruby","bash"]);
+export const LANGUAGES=Object.freeze(["python","cpp","rust"]);
 const allowed=new Set(LANGUAGES),cache=new Map(),pending=new Map();
 export const sha256=s=>createHash("sha256").update(s,"utf8").digest("hex");
 export function canonicalLanguage(raw){
  const s=String(raw||"").trim().toLowerCase();
- const aliases={js:"javascript",node:"javascript",nodejs:"javascript",mjs:"javascript",ts:"typescript",py:"python",python3:"python","c++":"cpp",cc:"cpp",cxx:"cpp",rs:"rust",golang:"go",rb:"ruby",sh:"bash",shell:"bash"};
+ const aliases={py:"python",py3:"python",python3:"python","c++":"cpp",cc:"cpp",cxx:"cpp",cplusplus:"cpp",rs:"rust"};
  const name=aliases[s]||s;
  if(!allowed.has(name))throw new RangeError("Unsupported language: "+s);
  return name;
