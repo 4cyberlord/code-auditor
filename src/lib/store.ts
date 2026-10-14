@@ -4305,7 +4305,14 @@ async function executeField(
 
 async function runE2BBenchmark(sessionId: string, language: string, program: string, timeoutMs: number) {
   const id = await db.createBenchmark(sessionId, language, program, timeoutMs);
-  const deadline = Date.now() + timeoutMs + 60_000;
+  // The execution limit starts only after a cloud worker has claimed the job.
+  // A cold worker or another candidate ahead of this one can legitimately use
+  // more than a minute, so do not falsely mark a still-queued benchmark as an
+  // E2B execution failure. Five minutes is also a bounded, visible wait rather
+  // than an indefinite spinner when the worker is unavailable.
+  const queueGraceMs = 3 * 60_000;
+  const deadline = Date.now() + timeoutMs + queueGraceMs;
+  let lastStatus: "queued" | "running" = "queued";
   while (Date.now() < deadline) {
     const request = await db.getBenchmark(id);
     if (request.status === "failed") throw new Error(request.error || "E2B benchmark failed.");
@@ -4313,9 +4320,10 @@ async function runE2BBenchmark(sessionId: string, language: string, program: str
       if (!request.result) throw new Error("E2B completed without execution evidence.");
       return { ...request.result, timedOut: false };
     }
+    lastStatus = request.status;
     await new Promise<void>((resolve) => setTimeout(resolve, 2000));
   }
-  throw new Error("E2B benchmark did not finish before the waiting limit; no result was assumed.");
+  throw new Error(`E2B benchmark remained ${lastStatus} before the waiting limit; no result was assumed. Retry when the cloud worker is available.`);
 }
 
 /**

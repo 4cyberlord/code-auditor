@@ -224,7 +224,7 @@ export default function StoryResultWorkspace() {
         </section>
         <section className="story-report-card">
           <div className="story-report-heading">Functions used <span>{functions.length} found</span></div>
-          {functions.length ? functions.map(fn => <div className="story-function" key={fn.signature}><code>{fn.signature}</code><p>{reviewData?.functions?.[fn.name] || "Function-specific explanation pending review."}</p></div>)
+          {functions.length ? functions.map((fn, index) => <div className="story-function" key={`${fn.signature}-${index}`}><code>{fn.signature}</code><p>{reviewData?.functions?.[fn.name] || "Function-specific explanation pending review."}</p></div>)
             : <p className="story-muted">Function details appear when the generated code is available.</p>}
         </section>
         <section className="story-report-card">

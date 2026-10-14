@@ -140,6 +140,13 @@ fn center_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// Close the desktop application from its in-app Quit control. Tauri tears
+/// down active webviews and native tasks as the process exits.
+#[tauri::command]
+fn app_quit(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[cfg(desktop)]
 fn install_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
     let handle = app.handle();
@@ -330,6 +337,7 @@ pub fn run() {
         .manage(RunRegistry::default())
         .manage(Db::default())
         .invoke_handler(tauri::generate_handler![
+            app_quit,
             auth::require,
             auth::set_pin,
             auth::auth_status,

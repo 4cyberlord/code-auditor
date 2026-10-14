@@ -118,6 +118,12 @@ export async function restartForScreenRecordingPermission(): Promise<void> {
   await invoke("screen_recording_restart");
 }
 
+/** End the native desktop process, including any in-flight model work. */
+export async function quitApplication(): Promise<void> {
+  if (!inTauri()) throw new Error(NOT_TAURI);
+  await invoke("app_quit");
+}
+
 export async function checkForUpdates(): Promise<UpdateCheckResult> {
   if (!inTauri()) throw new Error("Update checks only work inside the desktop app.");
   return invoke<UpdateCheckResult>("update_check");

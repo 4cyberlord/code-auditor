@@ -132,7 +132,7 @@ export default function SolutionCard({ alwaysOpen = false }: { alwaysOpen?: bool
           <p className="mono">{complexity}</p>
           {functions.length > 0 && <>
             <h4>Functions used</h4>
-            <ul>{functions.map(fn => <li key={fn.name}>
+            <ul>{functions.map((fn, index) => <li key={`${fn.name}-${fn.args}-${index}`}>
               <code>{fn.name}({fn.args})</code> — Defines the {fn.name} function.
             </li>)}</ul>
           </>}

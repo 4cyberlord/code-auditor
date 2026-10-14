@@ -26,7 +26,7 @@ import { useWindowChrome } from "@/lib/windowChrome";
 import { useStore } from "@/lib/store";
 import Toasts from "@/components/Toasts";
 import LoginScreen from "@/components/LoginScreen";
-import { inTauri } from "@/lib/bridge";
+import { inTauri, quitApplication } from "@/lib/bridge";
 import { gateFor, useAuth } from "@/lib/auth";
 import { devLog } from "@/lib/devLog";
 import { PRIMARY_MODEL_IDS } from "@/lib/primaryModels";
@@ -287,6 +287,13 @@ function Workbench() {
         >
           Settings
         </button>
+        {inTauri() && <button
+          className="btn tiny ghost"
+          onClick={() => void quitApplication()}
+          title="Quit Council Editor and stop in-flight work"
+        >
+          Quit app
+        </button>}
       </div>
 
       {/* The panes are showing a past run. Said plainly, because every control
