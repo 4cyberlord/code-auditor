@@ -7,12 +7,9 @@ export interface OfficialLanguageSource {
 
 export const OFFICIAL_LANGUAGE_SOURCES: OfficialLanguageSource[] = [
   { id: "python", language: "Python", title: "Python Language Reference", url: "https://docs.python.org/3/reference/" },
-  { id: "javascript", language: "JavaScript", title: "ECMAScript Language Specification", url: "https://tc39.es/ecma262/" },
-  { id: "typescript", language: "TypeScript", title: "TypeScript Handbook", url: "https://www.typescriptlang.org/docs/handbook/" },
-  { id: "java", language: "Java", title: "Java Language Specifications", url: "https://docs.oracle.com/javase/specs/" },
-  { id: "cpp", language: "C++", title: "cppreference", url: "https://en.cppreference.com/w/" },
+  { id: "c", language: "C", title: "WG14 C standards documents", url: "https://www.open-std.org/jtc1/sc22/wg14/www/docs/" },
+  { id: "cpp", language: "C++", title: "WG21 C++ draft", url: "https://github.com/cplusplus/draft" },
   { id: "rust", language: "Rust", title: "Rust Reference", url: "https://doc.rust-lang.org/reference/" },
-  { id: "go", language: "Go", title: "Go Language Specification", url: "https://go.dev/ref/spec" },
 ];
 
 export interface LanguageRefreshResult { source: OfficialLanguageSource; ok: boolean; detail: string; checkedAt: number; }
