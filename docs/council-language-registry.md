@@ -34,6 +34,26 @@ for other separately authenticated, PostgREST-compatible language databases.
 Private endpoints require a separate `tokenEnv` credential. This is **not
 needed** for the public Neon language-docs endpoint.
 
+## Supabase PostgreSQL FDW gateway
+
+The production Supabase application database has installed `postgres_fdw`,
+a private `language_gateway.language_runtime_packs` foreign table and
+the service-role-only `public.fetch_council_language_pack(text)` RPC.
+This SQL queries Neon directly over PostgreSQL; no Markdown is stored in
+Supabase. The cloud worker prefers this RPC and verifies each returned
+document's SHA-256 checksum independently.
+
+**Connection credential still required:** The remote Neon role
+`council_language_ro` currently has `NOLOGIN`; Supabase's
+`service_role` has no Postgres FDW user mapping. Configure a unique,
+strong read-only password for that role and store it *only* in the
+Supabase PostgreSQL foreign-server user mapping under `service_role`.
+No Supabase service-role or Neon owner credentials should be reused.
+Test the RPC with a service-role JWT and verify no non-service role can
+execute it. Until that succeeds, the worker will use bundled guides.
+Neon's HTTPS Data API currently rejects requests without a JWT even
+though its PostgreSQL `anonymous` RLS policy permits reading guides.
+
 ## External database deployment and publishing
 
 1. Provision a separate Postgres database in Neon or another trusted provider.

@@ -24,6 +24,7 @@ import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
 import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/externalLanguageSources.mjs";
+import { fetchLanguageViaGateway } from "./lib/supabaseLanguageGateway.mjs";
 import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
 import { phaseTimer } from "./lib/phaseTimings.mjs";
 import { readFileSync } from "node:fs";
@@ -1173,10 +1174,18 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   const failures = new Map();
   // Database packs are checksum validated; verified bundled packs remain an offline fallback.
   const languagePacks = await Promise.all(languages.map(language => loadLanguagePack(language, {
-    // Supabase supplies only external-service *metadata*, never language
-    // documents. Approved Neon guides are publicly readable through
-    // an RLS-guarded SELECT-only Data API; no Neon token is needed.
-    fetchRows: id => fetchExternalLanguageRows(id,{registryDirectory:languageDirectory}),
+    // The Supabase RPC queries an external Neon foreign table; it never
+    // stores Markdown in Supabase. Neon Data API currently requires JWT
+    // even for anonymous readers, so prefer the authenticated FDW path.
+    // If the user mapping is not configured, keep the trusted bundled fallback.
+    fetchRows: id => fetchLanguageViaGateway(id,{
+      queryGateway: language => rest("rpc/fetch_council_language_pack",{
+        method:"POST",body:JSON.stringify({p_language:language}),
+      }),
+      fallback: language => fetchExternalLanguageRows(language,{
+        registryDirectory:languageDirectory,
+      }),
+    }),
   })));
   const packsByLanguage = new Map(languagePacks.map(pack => [pack.language,pack]));
   await addEvent(job.id,"info","language_packs_ready",
