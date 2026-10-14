@@ -39,7 +39,7 @@ export async function loadLanguagePack(raw,options={}){
     if(found)pack=found;
    }catch{}
   }
-  cache.set(name,{pack,until:now+Math.max(1,ttl)});
+  // A transient registry outage must not lock the entire process into a bundled\n  // fallback for the normal five-minute success TTL. Retry after 30 seconds.\n  const effectiveTtl=pack.source==="bundle"&&options.fetchRows ? Math.min(ttl,30000) : ttl;\n  cache.set(name,{pack,until:now+Math.max(1,effectiveTtl)});
   return pack;
  })();
  pending.set(name,work);
