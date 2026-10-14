@@ -49,7 +49,6 @@ const ALIASES: Record<string, string> = {
 /** How a language is spelled when we say it back to a person or a model. */
 const DISPLAY: Record<string, string> = {
   cpp: "C++",
-  c: "C",
   csharp: "C#",
   javascript: "JavaScript",
   typescript: "TypeScript",
