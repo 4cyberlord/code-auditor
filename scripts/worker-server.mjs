@@ -95,6 +95,31 @@ async function workerTick(req, res) {
   });
 }
 
+// A hosted container must acknowledge its scheduler quickly.  The actual
+// Council run can take minutes (four solvers, E2B, judges and revision), so
+// keeping the scheduler HTTP request open makes the scheduler—not the job—the
+// weakest timeout in the system.  One process-wide promise also keeps repeated
+// schedule kicks from executing the same queue twice.
+let inFlightTick = null;
+async function workerKick(req, res) {
+  if (!allowed(req, "CODE_AUDITOR_WORKER_TICK_SECRET")) {
+    json(res, 401, { ok: false, error: "unauthorized" });
+    return;
+  }
+  if (inFlightTick) {
+    json(res, 202, { ok: true, accepted: false, reason: "already_running" });
+    return;
+  }
+  inFlightTick = tick()
+    .catch(async (err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      captureWorkerException(err, { phase: "worker_kick" });
+      await notifyOps({ level: "error", title: "Council worker tick failed", body: message, phase: "worker_kick" }).catch(() => {});
+    })
+    .finally(() => { inFlightTick = null; });
+  json(res, 202, { ok: true, accepted: true });
+}
+
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -104,6 +129,10 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/api/worker-tick") {
       await workerTick(req, res);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/worker-kick") {
+      await workerKick(req, res);
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/register-device") {

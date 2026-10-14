@@ -1,0 +1,9 @@
+{
+  "name": "council-editor-cloud-worker",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@cloudflare/containers": "^0.3.7",
+    "wrangler": "^4.51.0"
+  }
+}

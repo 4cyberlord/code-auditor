@@ -18,7 +18,7 @@
 // so app_config is merged into process.env before anything below reads it.
 import "./lib/config.mjs";
 
-import { createSign } from "node:crypto";
+import { createHmac, createSign } from "node:crypto";
 import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
@@ -395,11 +395,59 @@ async function signedStorageUrl(path, seconds = 900) {
     : `${SUPABASE_URL.replace(/\/$/, "")}/storage/v1${value}`;
 }
 
+const AZURE_SCREENSHOT_BUCKET = "azure:council-images";
+const AZURE_CONTAINER = "council-images";
+const AZURE_SAS_VERSION = "2023-11-03";
+
+function azureCredentials() {
+  const connectionString = secret("azure_storage_connection_string");
+  if (!connectionString) throw new Error("No Azure Storage connection string is saved for this account.");
+  const fields = new Map(connectionString.split(";").flatMap((part) => {
+    const index = part.indexOf("=");
+    return index > 0 ? [[part.slice(0, index).trim().toLowerCase(), part.slice(index + 1).trim()]] : [];
+  }));
+  const account = fields.get("accountname");
+  const key = fields.get("accountkey");
+  if (account !== "councilimages") throw new Error("Azure Storage must use the councilimages account.");
+  if (!key) throw new Error("Azure Storage connection string has no AccountKey.");
+  const decodedKey = Buffer.from(key, "base64");
+  if (!decodedKey.length) throw new Error("Azure Storage connection string has an invalid AccountKey.");
+  return { account, key: decodedKey };
+}
+
+function azureBlobPath(path) {
+  if (!path || path.split("/").some((part) => !part || part === "." || part === "..")) {
+    throw new Error("Invalid Azure screenshot path.");
+  }
+  return path.split("/").map(encodeURIComponent).join("/");
+}
+
+function azureSignedReadUrl(path, seconds = 900) {
+  const { account, key } = azureCredentials();
+  const safePath = azureBlobPath(path);
+  const expiresAt = new Date(Date.now() + Math.min(7200, Math.max(60, seconds)) * 1000)
+    .toISOString().replace(/\.\d{3}Z$/, "Z");
+  const resource = `/blob/${account}/${AZURE_CONTAINER}/${path}`;
+  const stringToSign = ["r", "", expiresAt, resource, "", "", "https", AZURE_SAS_VERSION,
+    "b", "", "", "", "", "", "", ""].join("\n");
+  const signature = createHmac("sha256", key).update(stringToSign, "utf8").digest("base64");
+  const url = new URL(`https://${account}.blob.core.windows.net/${AZURE_CONTAINER}/${safePath}`);
+  url.searchParams.set("sp", "r");
+  url.searchParams.set("se", expiresAt);
+  url.searchParams.set("spr", "https");
+  url.searchParams.set("sv", AZURE_SAS_VERSION);
+  url.searchParams.set("sr", "b");
+  url.searchParams.set("sig", signature);
+  return url.toString();
+}
+
 async function downloadJobImages(jobId) {
   const rows = await listJobImages(jobId);
   const out = [];
   for (const row of rows || []) {
-    const url = await signedStorageUrl(row.storage_path);
+    const url = row.storage_bucket === AZURE_SCREENSHOT_BUCKET
+      ? azureSignedReadUrl(row.storage_path)
+      : await signedStorageUrl(row.storage_path);
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Could not download ${row.file_name}: ${res.status} ${res.statusText}`);
     const bytes = Buffer.from(await res.arrayBuffer());
@@ -2099,7 +2147,7 @@ export async function runCouncilJob(job) {
   }
 
   await patchJob(job.id, { progress_phase: "downloading_images" });
-  await addEvent(job.id, "info", "downloading_images", "Downloading ordered screenshots from Supabase Storage.");
+  await addEvent(job.id, "info", "downloading_images", "Downloading ordered screenshots from configured private storage.");
   const images = await downloadJobImages(job.id);
   if (!images.length) throw new Error("The job has no downloadable screenshots.");
 

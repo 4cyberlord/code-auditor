@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "council-editor-worker",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-14",
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["*/1 * * * *"] },
+  "containers": [
+    {
+      "class_name": "CouncilWorkerContainer",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "council": {
+          "dockerfile": "./container/Dockerfile",
+          "build_context": ".."
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "COUNCIL_WORKER", "class_name": "CouncilWorkerContainer" }
+    ]
+  },
+  "exports": {
+    "CouncilWorkerContainer": { "type": "durable-object", "storage": "sqlite" }
+  }
+}
