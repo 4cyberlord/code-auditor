@@ -1,7 +1,7 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-export const LANGUAGES=Object.freeze(["python","cpp","rust"]);
+export const LANGUAGES=Object.freeze(["python","c","cpp","rust"]);
 const allowed=new Set(LANGUAGES),cache=new Map(),pending=new Map();
 export const sha256=s=>createHash("sha256").update(s,"utf8").digest("hex");
 export function canonicalLanguage(raw){
