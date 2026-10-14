@@ -111,7 +111,7 @@ async function decodeImage(file: Blob): Promise<DecodedImage> {
  * first and scaling each piece keeps the text at a size a model can actually
  * make out, at the cost of sending more images.
  *
- * One tile is always preferred when one tile is enough -- a region capture, a
+ * One tile is always preferred when one tile is enough -- a half-screen capture, a
  * phone photo, anything already small comes through untouched.
  */
 export function planTiles(width: number, height: number): TilePlan {

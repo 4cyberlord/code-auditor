@@ -136,10 +136,10 @@ pub(crate) fn watch_app_capture_requests(app: AppHandle) {
                 if !recent { continue; }
                 let event = match mode.as_deref() {
                     Some("screen") => Some("shortcut://capture-screen"),
-                    Some("region") => Some("shortcut://capture"),
                     Some("left") => Some("shortcut://capture-left"),
                     Some("right") => Some("shortcut://capture-right"),
                     Some("process") => Some("shortcut://solve"),
+                    Some("new-session") => Some("shortcut://new-session"),
                     _ => None,
                 };
                 if let Some(event) = event {
@@ -669,7 +669,7 @@ pub(crate) fn capture_owner_pid() -> Option<u32> {
 }
 pub(crate) fn forward_capture(mode: &str) -> bool {
     let Some(pid) = capture_owner_pid() else { return false; };
-    if !matches!(mode, "region" | "screen" | "left" | "right") { return false; }
+    if !matches!(mode, "screen" | "left" | "right") { return false; }
     let Ok(dir) = support_dir().map(|p| p.join("cache/capture-commands")) else { return false; };
     if std::fs::create_dir_all(&dir).is_err() { return false; }
     let id = uuid::Uuid::new_v4().to_string();

@@ -397,18 +397,6 @@ export interface Capture {
 }
 
 /**
- * Interactive region capture.
- *
- * Resolves to null when the user presses Escape during selection -- an ordinary
- * outcome, not a failure, so callers should treat it as "nothing to do". A real
- * problem (a refused Screen Recording permission, say) rejects instead.
- */
-export async function captureSelection(): Promise<Capture[] | null> {
-  if (!inTauri()) throw new Error(NOT_TAURI);
-  return invoke<Capture[] | null>("capture_selection");
-}
-
-/**
  * Reads a previously saved capture back off disk.
  *
  * Resolves to null when the file is gone — purged on purpose, or moved. A session

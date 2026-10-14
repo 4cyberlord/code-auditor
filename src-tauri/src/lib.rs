@@ -33,7 +33,6 @@ use tauri::{
 
 /// Emitted when a global shortcut or the tray menu asks for a capture or a run.
 /// Both entry points land on the same events, so the frontend has one path.
-pub const EV_CAPTURE: &str = "shortcut://capture";
 pub const EV_CAPTURE_SCREEN: &str = "shortcut://capture-screen";
 pub const EV_CAPTURE_LEFT: &str = "shortcut://capture-left";
 pub const EV_CAPTURE_RIGHT: &str = "shortcut://capture-right";
@@ -58,11 +57,9 @@ pub const EV_WORKSPACE: &str = "workspace://select";
 /// reaches us. And the letters say what they do:
 ///
 ///   S = Screen   grab the whole display
-///   R = Region   drag a box
 ///   A = Audit    hand it to the agents
 ///   O = Overlay  toggle the capture-exempt glass panel
 pub const ACCEL_CAPTURE_SCREEN: &str = "Control+Alt+S";
-pub const ACCEL_CAPTURE: &str = "Control+Alt+R";
 pub const ACCEL_CAPTURE_LEFT: &str = "Control+Alt+Shift+L";
 pub const ACCEL_CAPTURE_RIGHT: &str = "Control+Alt+Shift+R";
 pub const ACCEL_SOLVE: &str = "Control+Alt+A";
@@ -258,7 +255,6 @@ fn install_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
 pub fn run() {
     // Resolved before the plugin is constructed, because the handler has to be
     // attached at construction time -- see the comment on the plugin below.
-    let cap_accel = accel("CODE_AUDITOR_CAPTURE_KEY", ACCEL_CAPTURE);
     let screen_accel = accel("CODE_AUDITOR_SCREEN_KEY", ACCEL_CAPTURE_SCREEN);
     let left_accel = accel("CODE_AUDITOR_CAPTURE_LEFT_KEY", ACCEL_CAPTURE_LEFT);
     let right_accel = accel("CODE_AUDITOR_CAPTURE_RIGHT_KEY", ACCEL_CAPTURE_RIGHT);
@@ -280,7 +276,6 @@ pub fn run() {
     let builder = {
         use tauri_plugin_global_shortcut::{Builder as ShortcutBuilder, ShortcutState};
 
-        let cap_key = parse_accel(&cap_accel, ACCEL_CAPTURE);
         let screen_key = parse_accel(&screen_accel, ACCEL_CAPTURE_SCREEN);
         let left_key = parse_accel(&left_accel, ACCEL_CAPTURE_LEFT);
         let right_key = parse_accel(&right_accel, ACCEL_CAPTURE_RIGHT);
@@ -299,9 +294,7 @@ pub fn run() {
                     // and does not recognise would silently fire a four-model run
                     // -- which today is unreachable, and the moment a fourth
                     // shortcut is added becomes an expensive surprise.
-                    let ev = if *shortcut == cap_key {
-                        EV_CAPTURE
-                    } else if *shortcut == screen_key {
+                    let ev = if *shortcut == screen_key {
                         EV_CAPTURE_SCREEN
                     } else if *shortcut == left_key {
                         EV_CAPTURE_LEFT
@@ -321,7 +314,7 @@ pub fn run() {
                         trace("hotkey fired for an accelerator we do not own; ignored");
                         return;
                     };
-                    if matches!(ev, EV_CAPTURE | EV_CAPTURE_SCREEN | EV_CAPTURE_LEFT | EV_CAPTURE_RIGHT)
+                    if matches!(ev, EV_CAPTURE_SCREEN | EV_CAPTURE_LEFT | EV_CAPTURE_RIGHT)
                         && background_helper::capture_owner_pid().is_some() {
                         return; // Helper's IOHID callback already handled the physical press.
                     }
@@ -364,7 +357,6 @@ pub fn run() {
             knowledge::knowledge_delete,
             knowledge::knowledge_folder,
             knowledge::knowledge_publish,
-            capture::capture_selection,
             capture::capture_screen,
             capture::capture_left_half,
             capture::capture_right_half,
@@ -453,8 +445,6 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 let show = MenuItem::with_id(app, "show", "Open Council Editor", true, None::<&str>)?;
-                let capture =
-                    MenuItem::with_id(app, "capture", "Capture Region", true, Some("Ctrl+Alt+R"))?;
                 let capture_screen = MenuItem::with_id(
                     app,
                     "capture-screen",
@@ -483,7 +473,7 @@ pub fn run() {
                 let quit = MenuItem::with_id(app, "quit", "Quit Council Editor", true, None::<&str>)?;
                 let menu = Menu::with_items(
                     app,
-                    &[&show, &capture, &capture_screen, &capture_left, &capture_right, &solve, &overlay, &sep, &quit],
+                    &[&show, &capture_screen, &capture_left, &capture_right, &solve, &overlay, &sep, &quit],
                 )?;
 
                 // A template image: black-on-transparent, recoloured by macOS for
@@ -493,15 +483,10 @@ pub fn run() {
                 TrayIconBuilder::with_id("main-tray")
                     .icon(icon)
                     .icon_as_template(true)
-                    .tooltip("Council Editor — ⌃⌥S screen, ⌃⌥R region, ⌃⌥⇧L left, ⌃⌥⇧R right")
+                    .tooltip("Council Editor — ⌃⌥S screen, ⌃⌥⇧L left, ⌃⌥⇧R right")
                     .menu(&menu)
                     .on_menu_event(|app, event| match event.id.as_ref() {
                         "show" => reveal(app),
-                        "capture" => {
-                            if !background_helper::forward_capture("region") {
-                                let _ = app.emit(EV_CAPTURE, ());
-                            }
-                        }
                         "capture-screen" => {
                             if !background_helper::forward_capture("screen") {
                                 let _ = app.emit(EV_CAPTURE_SCREEN, ());
@@ -535,7 +520,6 @@ pub fn run() {
 
                 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
-                let cap_key = parse_accel(&cap_accel, ACCEL_CAPTURE);
                 let screen_key = parse_accel(&screen_accel, ACCEL_CAPTURE_SCREEN);
                 let left_key = parse_accel(&left_accel, ACCEL_CAPTURE_LEFT);
                 let right_key = parse_accel(&right_accel, ACCEL_CAPTURE_RIGHT);
@@ -550,7 +534,6 @@ pub fn run() {
                 // one collision disable every capture shortcut, including the
                 // left/right actions that did not conflict.
                 for (label, key, spec) in [
-                    ("region", cap_key, cap_accel.as_str()),
                     ("screen", screen_key, screen_accel.as_str()),
                     ("left half", left_key, left_accel.as_str()),
                     ("right half", right_key, right_accel.as_str()),

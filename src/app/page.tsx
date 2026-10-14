@@ -183,6 +183,7 @@ function Workbench() {
     let unlistenSettings: (() => void) | undefined;
     let unlistenWorkspace: (() => void) | undefined;
     let unlistenSolve: (() => void) | undefined;
+    let unlistenNewSession: (() => void) | undefined;
     let disposed = false;
     if (inTauri()) {
       void listen("settings://open", () => setSettingsOpen(true)).then((off) => {
@@ -195,6 +196,13 @@ function Workbench() {
         }
       }).then((off) => {
         unlistenWorkspace = off;
+      });
+      void listen("shortcut://new-session", () => {
+        const state = useStore.getState();
+        if (!state.running && !state.preparing) void state.newSession();
+      }).then((off) => {
+        if (disposed) off();
+        else unlistenNewSession = off;
       });
       void listen("shortcut://solve", () => {
         const s = useStore.getState();
@@ -231,6 +239,7 @@ function Workbench() {
       unlistenSettings?.();
       unlistenWorkspace?.();
       unlistenSolve?.();
+      unlistenNewSession?.();
     };
   }, [setSettingsOpen]);
 
@@ -456,9 +465,6 @@ function CaptureExemptOverlay() {
         <span className="capture-brand" aria-hidden="true">CA</span>
         <span className="capture-pause" aria-hidden="true">||</span>
         <span className="capture-meter" aria-hidden="true"><i /><i /><i /></span>
-        <span className="capture-action">Capture Region</span>
-        <span className="capture-key">⌃⌥</span>
-        <span className="capture-key">R</span>
         <span className="capture-action">Capture Screen</span>
         <span className="capture-key">⌃⌥</span>
         <span className="capture-key">S</span>

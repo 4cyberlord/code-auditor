@@ -577,17 +577,16 @@ export default function CodingWorkspace() {
     await execute(active);
   };
 
-  const captureForCoding = async (mode: "screen" | "left" | "right" | "region") => {
+  const captureForCoding = async (mode: "screen" | "left" | "right") => {
     setCapturing(true);
     setError(null);
     try {
       const result = mode === "screen" ? await bridge.captureScreen()
         : mode === "left" ? await bridge.captureLeftHalf()
-        : mode === "right" ? await bridge.captureRightHalf()
-        : await bridge.captureSelection();
+        : await bridge.captureRightHalf();
       if (!result?.length) return;
       const valid = result.filter((shot) => shot.dataUrl.startsWith("data:image/png;base64,") && shot.dataUrl.length < 12_000_000).slice(0, 3);
-      if (!valid.length) throw new Error("Capture is too large to send. Select a smaller region.");
+      if (!valid.length) throw new Error("Capture is too large to send. Use a half-screen capture to reduce image size.");
       setScreenshots(valid);
       setTask((current) => current.trim() ? current : "Solve the coding question in the attached screenshot. Give the best solution, time and space complexity, optimization and code-style review, and explain the key functions and syntax.");
     } catch (err) {
@@ -878,12 +877,12 @@ export default function CodingWorkspace() {
               autoCapitalize="off"
             />
             <div className="coding-capture-actions" style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "8px 12px" }}>
-              {(["screen", "left", "right", "region"] as const).map((mode) => (
+              {(["screen", "left", "right"] as const).map((mode) => (
                 <button key={mode} type="button" className="btn tiny ghost"
                   disabled={capturing || busy || !bridge.inTauri()}
                   onClick={() => void captureForCoding(mode)}
                   title={"Capture " + mode + " and attach it to your coding question"}>
-                  {capturing ? "Capturing..." : mode === "screen" ? "Full screen" : mode === "region" ? "Select area" : mode === "left" ? "Left half" : "Right half"}
+                  {capturing ? "Capturing..." : mode === "screen" ? "Full screen" : mode === "left" ? "Left half" : "Right half"}
                 </button>
               ))}
               {!!screenshots.length && (

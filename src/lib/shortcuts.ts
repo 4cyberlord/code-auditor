@@ -12,7 +12,7 @@ import { useStore } from "./store.ts";
  * agents working on it" without the app needing focus first.
  *
  * Capture and solve are two keys rather than one on purpose: it leaves room to
- * grab a second region or type a note before spending four API calls.
+ * grab a second screenshot or type a note before spending four API calls.
  *
  * The accelerators are claimed in Rust (`src-tauri/src/lib.rs`), not here. This
  * side only listens for the resulting event. Registering from the webview meant
@@ -25,8 +25,6 @@ import { useStore } from "./store.ts";
 export const SHORTCUTS = {
   /** S for Screen: grab the whole display, no aiming. */
   captureScreen: "Control+Alt+S",
-  /** R for Region: drag a box. */
-  capture: "Control+Alt+R",
   /** L / R for the automatic halves of the display containing the app. */
   captureLeft: "Control+Alt+Shift+L",
   captureRight: "Control+Alt+Shift+R",
@@ -37,13 +35,12 @@ export const SHORTCUTS = {
 /** How those read on a Mac keyboard. */
 export const SHORTCUT_LABELS = {
   captureScreen: "⌃⌥S",
-  capture: "⌃⌥R",
   captureLeft: "⌃⌥⇧L",
   captureRight: "⌃⌥⇧R",
   solve: "⌃⌥A",
 } as const;
 
-type CaptureKind = "region" | "screen" | "left" | "right";
+type CaptureKind = "screen" | "left" | "right";
 
 /**
  * Turn the Rust-side data URL into a Blob without asking WKWebView to fetch a
@@ -81,10 +78,8 @@ export async function captureIntoApp(kind: CaptureKind) {
         ? await bridge.captureScreen()
         : kind === "left"
           ? await bridge.captureLeftHalf()
-          : kind === "right"
-            ? await bridge.captureRightHalf()
-            : await bridge.captureSelection();
-    // Null means Escape during selection. Nothing to report.
+          : await bridge.captureRightHalf();
+    // No capture means there was no valid image to stage.
     if (!captures || captures.length === 0) return;
 
     // Each display, through the same path a drop or a paste takes. One keypress
@@ -129,7 +124,6 @@ export function useGlobalShortcuts() {
     // Both the hotkeys and the tray menu items emit these, so there is one code
     // path whichever way the user asked.
     void Promise.all([
-      listen("shortcut://capture", () => void captureIntoApp("region")),
       listen("shortcut://capture-screen", () => void captureIntoApp("screen")),
       listen("shortcut://capture-left", () => void captureIntoApp("left")),
       listen("shortcut://capture-right", () => void captureIntoApp("right")),

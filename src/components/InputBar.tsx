@@ -186,7 +186,7 @@ export default function InputBar() {
         tabIndex={0}
       >
         <strong style={{ fontSize: 12, color: "var(--text-dim)" }}>
-          {SHORTCUT_LABELS.captureScreen} screen {"·"} {SHORTCUT_LABELS.capture} region {"·"} {SHORTCUT_LABELS.captureLeft}/{SHORTCUT_LABELS.captureRight} halves
+          {SHORTCUT_LABELS.captureScreen} screen {"·"} {SHORTCUT_LABELS.captureLeft}/{SHORTCUT_LABELS.captureRight} halves
         </strong>
         <span>
           {SHORTCUT_LABELS.solve} to audit {"·"} or drop, paste, click
@@ -211,9 +211,6 @@ export default function InputBar() {
       <div className="capture-controls" aria-label="Capture controls">
         <button className="btn tiny" type="button" onClick={() => void captureIntoApp("screen")}>
           Screen
-        </button>
-        <button className="btn tiny ghost" type="button" onClick={() => void captureIntoApp("region")}>
-          Region
         </button>
         <button className="btn tiny ghost" type="button" onClick={() => void captureIntoApp("left")}>
           Left

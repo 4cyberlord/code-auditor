@@ -1843,7 +1843,6 @@ function CouncilCard() {
  */
 const SHORTCUTS = [
   { keys: "\u2303\u2325S", what: "Capture the whole screen", env: "CODE_AUDITOR_SCREEN_KEY" },
-  { keys: "\u2303\u2325R", what: "Capture a region", env: "CODE_AUDITOR_CAPTURE_KEY" },
   { keys: "\u2303\u2325\u21e7L", what: "Capture the left half of this app's display", env: "CODE_AUDITOR_CAPTURE_LEFT_KEY" },
   { keys: "\u2303\u2325\u21e7R", what: "Capture the right half of this app's display", env: "CODE_AUDITOR_CAPTURE_RIGHT_KEY" },
   { keys: "\u2303\u2325A", what: "Solve what is loaded", env: "CODE_AUDITOR_SOLVE_KEY" },
@@ -2069,12 +2068,13 @@ function CaptureCard() {
           </div>
         ))}
         {[
-          { keys: "10 · 11 · 12 · 13", route: "Main app: full screen · left · right · region" },
-          { keys: "21 · 22 · 23 · 24", route: "Background coding: full screen · left · right · region" },
-          { keys: "31 · 32 · 33 · 34", route: "Background MCQ: full screen · left · right · region" },
+          { keys: "10 · 11 · 12", route: "Main app: full screen · left · right" },
+          { keys: "00 · 21 · 22 · 23 · 24", route: "Coding overlay: new session · full screen · left · right · submit" },
+          { keys: "31 · 32 · 33", route: "Background MCQ: full screen · left · right" },
           { keys: "14", route: "Main app: process captured image(s) with enabled models" },
-          { keys: "25", route: "Background coding: submit captured images for processing" },
           { keys: "35", route: "Background MCQ: submit captured images for processing" },
+          { keys: "_ · { · } · |", route: "Coding overlay: history · navigate/scroll · open selected history" },
+          { keys: "- · =", route: "Visible coding overlay: reduce opacity · increase opacity" },
         ].map((route) => (
           <div className="row" key={route.keys}>
             <label><span style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>{route.keys}</span></label>
@@ -2082,7 +2082,7 @@ function CaptureCard() {
           </div>
         ))}
         <p className="hint">
-          Enter each two-digit code quickly. Capture codes stage an image in that workflow; 14, 25,
+          Enter each two-digit code quickly. Capture codes stage an image in that workflow; 14, 24,
           and 35 send that workflow’s staged images for processing. These work when the window is closed
           because the Rust helper owns them. To change a regular shortcut,
           set its environment variable before launch, for example{" "}

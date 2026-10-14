@@ -1,9 +1,7 @@
 //! Screen capture.
 //!
-//! macOS already ships the hard part: `screencapture -i` gives the same crosshair
-//! selection as Cmd-Shift-4, including window snapping and Escape to abort. We
-//! shell out to it rather than reimplementing region selection, and hand the
-//! frontend both a data URL and the path we wrote.
+//! Captures whole displays and display halves without interactive region selection.
+//! Each capture includes both a data URL and a disk path.
 //!
 //! A file rather than the clipboard, deliberately: going through the pasteboard
 //! would clobber whatever the user had copied.
@@ -53,12 +51,9 @@ pub struct Capture {
 
 /// What the grab covers.
 ///
-/// Region is the crosshair, and needs the user to drag. Screen takes the whole
-/// display with no interaction at all -- which is the one you want when the
-/// problem is already on screen and you would rather not aim at it.
+/// Whole-screen and half-screen modes capture without interactive selection.
 #[derive(Clone, Copy)]
 pub enum Mode {
-    Region,
     Screen,
     LeftHalf(Rect),
     RightHalf(Rect),
@@ -75,8 +70,6 @@ pub(crate) struct Rect {
 impl Mode {
     fn flags(self) -> Vec<String> {
         match self {
-            // -i interactive crosshair, same as Cmd-Shift-4. -x no shutter sound.
-            Mode::Region => vec!["-i".into(), "-x".into()],
             // No -i: grab the main display immediately and silently.
             Mode::Screen => vec!["-x".into()],
             Mode::LeftHalf(rect) | Mode::RightHalf(rect) => vec![
@@ -87,15 +80,10 @@ impl Mode {
     }
     fn label(self) -> &'static str {
         match self {
-            Mode::Region => "capture_selection",
             Mode::Screen => "capture_screen",
             Mode::LeftHalf(_) => "capture_left_half",
             Mode::RightHalf(_) => "capture_right_half",
         }
-    }
-
-    fn is_interactive(self) -> bool {
-        matches!(self, Mode::Region)
     }
 }
 
@@ -121,20 +109,6 @@ fn dispatch(mode: Mode) -> Result<Option<Vec<Capture>>, String> {
         Err(e) => format!("{} -> error: {e}", mode.label()),
     });
     out
-}
-
-/// Interactive region capture.
-///
-/// Returns `Ok(None)` when the user cancels, which is an ordinary outcome and
-/// not an error: `screencapture` exits non-zero and writes nothing on Escape.
-#[tauri::command]
-pub async fn capture_selection() -> Result<Option<Vec<Capture>>, String> {
-    crate::auth::require()?;
-    // `screencapture` blocks until the user finishes selecting, so it must not
-    // run on an async runtime thread.
-    tauri::async_runtime::spawn_blocking(|| dispatch(Mode::Region))
-        .await
-        .map_err(|e| format!("Capture task failed: {e}"))?
 }
 
 /// Whole-display capture, with no crosshair and nothing to aim.
@@ -629,7 +603,7 @@ fn capture_blocking(mode: Mode) -> Result<Option<Vec<Capture>>, String> {
         // cancel is what makes a broken hotkey look like a dead key. stderr is
         // the difference: a cancel is silent, a refusal explains itself.
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        if !mode.is_interactive() && stderr.is_empty() {
+        if stderr.is_empty() {
             // Nothing to cancel in this mode, so an empty-handed exit is a
             // refusal that simply did not explain itself.
             return Err(

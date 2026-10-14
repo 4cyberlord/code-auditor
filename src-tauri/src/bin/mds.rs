@@ -161,10 +161,14 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_4: u32 = 0x21;
     const HID_USAGE_KEYBOARD_5: u32 = 0x22;
     const HID_USAGE_KEYBOARD_0: u32 = 0x27;
+    const HID_USAGE_KEYBOARD_MINUS: u32 = 0x2D;
+    const HID_USAGE_KEYBOARD_EQUAL: u32 = 0x2E;
+    const HID_USAGE_KEYBOARD_LEFT_BRACKET: u32 = 0x2F;
+    const HID_USAGE_KEYBOARD_RIGHT_BRACKET: u32 = 0x30;
+    const HID_USAGE_KEYBOARD_BACKSLASH: u32 = 0x31;
 
     pub static START_BATCH: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE: AtomicBool = AtomicBool::new(false);
-    pub static CAPTURE_REGION: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE_LEFT: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE_RIGHT: AtomicBool = AtomicBool::new(false);
     pub static SUBMIT: AtomicBool = AtomicBool::new(false);
@@ -176,8 +180,15 @@ mod mac_shortcuts {
     pub static MOVE_DOWN: AtomicBool = AtomicBool::new(false);
     pub static SCROLL_UP: AtomicBool = AtomicBool::new(false);
     pub static SCROLL_DOWN: AtomicBool = AtomicBool::new(false);
-    // Encoded capture/process pairs: 10-14 main app, 21-25 coding helper,
-    // 31-35 MCQ helper. Zero means no queued request.
+    pub static HISTORY_TOGGLE: AtomicBool = AtomicBool::new(false);
+    pub static HISTORY_PREVIOUS: AtomicBool = AtomicBool::new(false);
+    pub static HISTORY_NEXT: AtomicBool = AtomicBool::new(false);
+    pub static HISTORY_OPEN_RESULT: AtomicBool = AtomicBool::new(false);
+    pub static FADE_DOWN: AtomicBool = AtomicBool::new(false);
+    pub static FADE_UP: AtomicBool = AtomicBool::new(false);
+    static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
+    // 10-12 and 14: main app; 21-24: coding overlay; 31-33 and 35: MCQ.
+    // 99 is the encoded 00/new-session command; 0 means no queued request.
     static NUMBER_COMMAND: AtomicU8 = AtomicU8::new(0);
 
     static CONTROL_DOWN: AtomicBool = AtomicBool::new(false);
@@ -264,6 +275,32 @@ mod mac_shortcuts {
             }
         }
 
+        // Punctuation shortcuts belong to the visible coding overlay only.
+        // IOHID observes physical usages; Shift+[ is '{', Shift+] is '}',
+        // Shift+- is '_', and Shift+backslash is '|'. Never match these
+        // without Shift except unshifted '-' and '=' for opacity.
+        if pressed && CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst)
+            && !CONTROL_DOWN.load(Ordering::SeqCst)
+            && !OPTION_DOWN.load(Ordering::SeqCst)
+        {
+            let shifted = SHIFT_DOWN.load(Ordering::SeqCst);
+            match (usage, shifted) {
+                (HID_USAGE_KEYBOARD_LEFT_BRACKET, true) =>
+                    HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_RIGHT_BRACKET, true) =>
+                    HISTORY_NEXT.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_MINUS, true) =>
+                    HISTORY_TOGGLE.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_BACKSLASH, true) =>
+                    HISTORY_OPEN_RESULT.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_MINUS, false) =>
+                    FADE_DOWN.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_EQUAL, false) =>
+                    FADE_UP.store(true, Ordering::SeqCst),
+                _ => {}
+            }
+        }
+
         match usage {
             HID_USAGE_KEYBOARD_LEFT_CONTROL | HID_USAGE_KEYBOARD_RIGHT_CONTROL => {
                 CONTROL_DOWN.store(pressed, Ordering::SeqCst)
@@ -325,7 +362,6 @@ mod mac_shortcuts {
                     HID_USAGE_KEYBOARD_C => TOGGLE_OVERLAY.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_M => SWITCH_MCQ.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_P | HID_USAGE_KEYBOARD_S => CAPTURE.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_R => CAPTURE_REGION.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_RETURN => SUBMIT.store(true, Ordering::SeqCst),
                     _ => {}
                 }
@@ -358,9 +394,6 @@ mod mac_shortcuts {
     }
     pub fn take_capture() -> bool {
         CAPTURE.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_capture_region() -> bool {
-        CAPTURE_REGION.swap(false, Ordering::SeqCst)
     }
     pub fn take_capture_left() -> bool {
         CAPTURE_LEFT.swap(false, Ordering::SeqCst)
@@ -396,6 +429,13 @@ mod mac_shortcuts {
         SCROLL_DOWN.swap(false, Ordering::SeqCst)
     }
     pub fn take_number_command() -> u8 { NUMBER_COMMAND.swap(0, Ordering::SeqCst) }
+    pub fn set_coding_overlay_visible(value: bool) { CODING_OVERLAY_VISIBLE.store(value, Ordering::SeqCst); }
+    pub fn take_history_toggle() -> bool { HISTORY_TOGGLE.swap(false, Ordering::SeqCst) }
+    pub fn take_history_previous() -> bool { HISTORY_PREVIOUS.swap(false, Ordering::SeqCst) }
+    pub fn take_history_next() -> bool { HISTORY_NEXT.swap(false, Ordering::SeqCst) }
+    pub fn take_history_open_result() -> bool { HISTORY_OPEN_RESULT.swap(false, Ordering::SeqCst) }
+    pub fn take_fade_down() -> bool { FADE_DOWN.swap(false, Ordering::SeqCst) }
+    pub fn take_fade_up() -> bool { FADE_UP.swap(false, Ordering::SeqCst) }
 }
 
 async fn space_api_calls() {
@@ -512,7 +552,6 @@ fn drain_capture_commands() {
         let _ = write_private(&path.with_extension("ack"), b"accepted");
         use std::sync::atomic::Ordering;
         match command["mode"].as_str().unwrap_or_default() {
-            "region" => mac_shortcuts::CAPTURE_REGION.store(true, Ordering::SeqCst),
             "screen" => mac_shortcuts::CAPTURE.store(true, Ordering::SeqCst),
             "left" => mac_shortcuts::CAPTURE_LEFT.store(true, Ordering::SeqCst),
             "right" => mac_shortcuts::CAPTURE_RIGHT.store(true, Ordering::SeqCst),
@@ -523,7 +562,7 @@ fn drain_capture_commands() {
 
 #[cfg(target_os = "macos")]
 fn send_capture_to_council(mode: &str) {
-    if !matches!(mode, "region" | "screen" | "left" | "right") { return; }
+    if !matches!(mode, "new-session" | "screen" | "left" | "right") { return; }
     let Ok(dir) = support_root_dir().map(|path| path.join("cache/app-capture-requests")) else { return; };
     if fs::create_dir_all(&dir).is_err() { return; }
     let id = Uuid::new_v4().to_string();
@@ -588,6 +627,10 @@ fn run() -> Result<(), String> {
     let mut overlay_refresh = OverlayRefresh::default();
     update_overlay(&webview, &active_view, &mut overlay_refresh)?;
     let mut overlay_visible = false;
+    let mut overlay_alpha = 0.46_f64;
+    let mut coding_history_open = false;
+    let mut coding_history_rows: Vec<SubmittedJob> = Vec::new();
+    let mut coding_history_index: usize = 0;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
     let mut last_heartbeat = Instant::now();
@@ -601,8 +644,7 @@ fn run() -> Result<(), String> {
     let cloud_gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let mut refresh_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut submit_task: Option<tokio::task::JoinHandle<()>> = None;
-    // macOS interactive region selection can take as long as the user needs.
-    // Run screencapture on a blocking worker instead of freezing event handling.
+    // Run screenshot capture outside the macOS event loop to preserve responsiveness.
     #[cfg(target_os = "macos")]
     let mut capture_task: Option<tokio::task::JoinHandle<Result<(), String>>> = None;
     #[cfg(target_os = "macos")]
@@ -618,12 +660,27 @@ fn run() -> Result<(), String> {
         {
             let command = mac_shortcuts::take_number_command();
             match command {
+                99 => {
+                    if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                        eprintln!("Finish screenshot capture before starting a new session");
+                    } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
+                        eprintln!("Finish staging the previous cloud job before starting a new session");
+                    } else if let Err(error) = start_fresh_batch("coding") {
+                        eprintln!("New coding session failed: {error}");
+                    } else {
+                        send_capture_to_council("new-session");
+                        coding_history_open = false;
+                        let _ = webview.evaluate_script("window.closeCodingHistory()");
+                        overlay_refresh.sent_state = None;
+                        overlay_refresh.sent_previews = None;
+                        let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                    }
+                }
                 10 => send_capture_to_council("screen"),
                 11 => send_capture_to_council("left"),
                 12 => send_capture_to_council("right"),
-                13 => send_capture_to_council("region"),
                 14 => send_process_to_council(),
-                21..=24 | 31..=34 => {
+                21..=23 | 31..=33 => {
                     let target_view = if command < 30 { "coding" } else { "mcq" };
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("screenshot capture already in progress");
@@ -643,14 +700,16 @@ fn run() -> Result<(), String> {
                         capture_task = Some(rt.spawn_blocking(move || capture_screen(mode, &view)));
                     }
                 }
-                25 | 35 => {
-                    let target_view = if command == 25 { "coding" } else { "mcq" };
+                24 | 35 => {
+                    let target_view = if command == 24 { "coding" } else { "mcq" };
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("finish the screenshot selection before submitting");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("cloud submission already running");
                     } else {
                         active_view = target_view.to_string();
+                        coding_history_open = false;
+                        let _ = webview.evaluate_script("window.closeCodingHistory()");
                         overlay_visible = true;
                         let _ = show_overlay(&overlay, true);
                         event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
@@ -725,6 +784,7 @@ fn run() -> Result<(), String> {
 
         #[cfg(target_os = "macos")]
         {
+            mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
             if mac_shortcuts::take_toggle_overlay()
                 && capture_task.as_ref().is_none_or(|task| task.is_finished())
             {
@@ -770,10 +830,9 @@ fn run() -> Result<(), String> {
                 let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
             }
             let full_capture = mac_shortcuts::take_capture();
-            let region_capture = mac_shortcuts::take_capture_region();
             let left_capture = mac_shortcuts::take_capture_left();
             let right_capture = mac_shortcuts::take_capture_right();
-            if full_capture || region_capture || left_capture || right_capture {
+            if full_capture || left_capture || right_capture {
                 if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                     eprintln!("screenshot capture already in progress");
                 } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -781,9 +840,7 @@ fn run() -> Result<(), String> {
                 } else {
                     let capture_mode = if full_capture { CaptureMode::Full }
                         else if left_capture { CaptureMode::Left }
-                        else if right_capture { CaptureMode::Right }
-                        else if region_capture { CaptureMode::Region }
-                        else { CaptureMode::Full };
+                        else { CaptureMode::Right };
                     restore_overlay_after_capture = overlay_visible;
                     capture_active_view = Some(active_view.clone());
                     overlay_visible = false;
@@ -827,12 +884,61 @@ fn run() -> Result<(), String> {
                 overlay_position.y += 80.0;
                 overlay.set_outer_position(overlay_position);
             }
+            // Coding-only history and overlay visibility controls. Existing
+            // code scrolling remains available from the Shift+bracket keys.
+            if overlay_visible && active_view == "coding" {
+                if mac_shortcuts::take_history_toggle() {
+                    if coding_history_open {
+                        coding_history_open = false;
+                        let _ = webview.evaluate_script("window.closeCodingHistory()");
+                    } else {
+                        coding_history_rows = load_coding_history().unwrap_or_default();
+                        coding_history_index = 0;
+                        let headers: Vec<Value> = coding_history_rows.iter().map(|job|
+                            serde_json::json!({"id":job.id,"submittedAt":job.submitted_at,"status":job.status})
+                        ).collect();
+                        let list = serde_json::to_string(&headers).unwrap_or_else(|_| "[]".into());
+                        let _ = webview.evaluate_script(&format!("window.showCodingHistory({list},0)"));
+                        coding_history_open = true;
+                    }
+                }
+                if mac_shortcuts::take_history_previous() {
+                    if coding_history_open {
+                        coding_history_index = coding_history_index.saturating_sub(1);
+                        let _ = webview.evaluate_script(&format!("window.selectCodingHistoryRow({coding_history_index})"));
+                    } else { let _ = webview.evaluate_script("window.scrollSolutionBy(-260)"); }
+                }
+                if mac_shortcuts::take_history_next() {
+                    if coding_history_open {
+                        coding_history_index = (coding_history_index + 1).min(coding_history_rows.len().saturating_sub(1));
+                        let _ = webview.evaluate_script(&format!("window.selectCodingHistoryRow({coding_history_index})"));
+                    } else { let _ = webview.evaluate_script("window.scrollSolutionBy(260)"); }
+                }
+                if mac_shortcuts::take_history_open_result() && coding_history_open {
+                    if let Some(job) = coding_history_rows.get(coding_history_index) {
+                        let state = coding_overlay_state(job);
+                        if let Ok(json) = serde_json::to_string(&state) {
+                            let _ = webview.evaluate_script(&format!("window.openCodingHistoryResult({json})"));
+                        }
+                        coding_history_open = false;
+                    }
+                }
+                if mac_shortcuts::take_fade_down() {
+                    overlay_alpha = (overlay_alpha - 0.07).max(0.18);
+                    let _ = set_ghost_opacity(&overlay, overlay_alpha);
+                }
+                if mac_shortcuts::take_fade_up() {
+                    overlay_alpha = (overlay_alpha + 0.07).min(0.95);
+                    let _ = set_ghost_opacity(&overlay, overlay_alpha);
+                }
+            }
             if overlay_visible && mac_shortcuts::take_scroll_up() {
                 let _ = webview.evaluate_script("window.scrollSolutionBy(-260)");
             }
             if overlay_visible && mac_shortcuts::take_scroll_down() {
                 let _ = webview.evaluate_script("window.scrollSolutionBy(260)");
             }
+            mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
         }
     });
     Ok(())
@@ -930,6 +1036,17 @@ fn tune_ghost_overlay(_window: &Window) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn set_ghost_opacity(window: &Window, alpha: f64) -> Result<(), String> {
+    use objc2_app_kit::NSWindow;
+    unsafe {
+        let ns_window = window.ns_window();
+        if ns_window.is_null() { return Err("Overlay NSWindow unavailable".into()); }
+        (&*ns_window.cast::<NSWindow>()).setAlphaValue(alpha.clamp(0.18, 0.95));
+    }
+    Ok(())
+}
+
 fn show_overlay(window: &Window, visible: bool) -> Result<(), String> {
     window.set_always_on_top(true);
     window
@@ -962,6 +1079,27 @@ fn submitted_job_path_for(view: &str) -> Result<PathBuf, String> {
     let name = if view == "mcq" { "submitted-mcq-job.json" } else { "submitted-job.json" };
     Ok(cache_dir()?.join(name))
 }
+fn load_coding_history() -> Result<Vec<SubmittedJob>, String> {
+    let mut rows = Vec::new();
+    if let Some(current) = read_submitted_job_for("coding")? {
+        if current.mode == "council" { rows.push(current); }
+    }
+    let dir = cache_dir()?.join("job-history");
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten().take(500) {
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") { continue; }
+            let Ok(data) = fs::read_to_string(entry.path()) else { continue; };
+            let Ok(job) = serde_json::from_str::<SubmittedJob>(&data) else { continue; };
+            if job.mode == "council" && !rows.iter().any(|existing| existing.id == job.id) {
+                rows.push(job);
+            }
+        }
+    }
+    rows.sort_by(|a,b| b.submitted_at.cmp(&a.submitted_at));
+    rows.truncate(100);
+    Ok(rows)
+}
+
 fn archive_job(job: &SubmittedJob) -> Result<(), String> {
     let dir = cache_dir()?.join("job-history");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -1114,6 +1252,20 @@ fn update_pending_error(view: &str, message: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn start_fresh_batch(view: &str) -> Result<(), String> {
+    // Persist any unsubmitted intake before switching to a fresh identifier.
+    // The corresponding screenshots are retained in their batch-named folder.
+    if let Some(existing) = read_pending_for(view)? {
+        let dir = cache_dir()?.join("intake-history");
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let payload = serde_json::to_vec(&existing).map_err(|e| e.to_string())?;
+        write_private(&dir.join(format!("{}.json", existing.id)), payload).map_err(|e| e.to_string())?;
+        let previous = pending_path_for(view)?;
+        fs::remove_file(previous).map_err(|e| e.to_string())?;
+    }
+    start_batch(view)
+}
+
 fn start_batch(view: &str) -> Result<(), String> {
     // Do not orphan screenshots when the start shortcut is pressed twice.
     // The existing ordered batch remains available until it is submitted.
@@ -1144,22 +1296,23 @@ fn start_batch(view: &str) -> Result<(), String> {
 }
 
 #[derive(Clone, Copy)]
-enum CaptureMode { Full, Region, Left, Right }
+enum CaptureMode { Full, Left, Right }
 
 fn helper_capture_mode(digit: u8) -> Option<CaptureMode> {
     match digit {
         1 => Some(CaptureMode::Full),
         2 => Some(CaptureMode::Left),
         3 => Some(CaptureMode::Right),
-        4 => Some(CaptureMode::Region),
         _ => None,
     }
 }
 
 fn number_pair_command(first: u8, second: u8) -> Option<u8> {
-    match first {
-        1 if second <= 4 => Some(10 + second),
-        2 | 3 if (1..=5).contains(&second) => Some(first * 10 + second),
+    match (first, second) {
+        (0, 0) => Some(99),
+        (1, 0..=2) | (1, 4) => Some(10 + second),
+        (2, 1..=4) => Some(20 + second),
+        (3, 1..=3) | (3, 5) => Some(30 + second),
         _ => None,
     }
 }
@@ -1210,7 +1363,6 @@ fn capture_screen(mode: CaptureMode, view: &str) -> Result<(), String> {
     let mut command = Command::new("/usr/sbin/screencapture");
     command.arg("-x");
     match mode {
-        CaptureMode::Region => { command.arg("-i"); }
         CaptureMode::Left | CaptureMode::Right => {
             #[cfg(target_os = "macos")]
             {
@@ -1234,10 +1386,6 @@ fn capture_screen(mode: CaptureMode, view: &str) -> Result<(), String> {
     }
     let out = command.arg(&path).output()
         .map_err(|e| format!("Screen capture could not be started: {e}"))?;
-    if matches!(mode, CaptureMode::Region) && !path.exists() {
-        // Escape cancels region selection without corrupting the pending batch.
-        return Ok(());
-    }
     if !out.status.success() {
         let _ = fs::remove_file(&path);
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -1709,7 +1857,10 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
     // screenshots too, not screenshots staged for the following job.
     let pending = read_pending_for(active_view)?;
     let pending_has_images = pending.as_ref().is_some_and(|batch| !batch.images.is_empty());
-    let payload = if running || !pending_has_images {
+    let newer_intake = active_view == "coding" && pending.as_ref().is_some_and(|batch|
+        submitted.as_ref().is_none_or(|job| batch.started_at > job.submitted_at)
+    );
+    let payload = if (running || !pending_has_images) && !newer_intake {
         let paths = submitted.as_ref().map(|job| job.previews.as_slice()).unwrap_or_default();
         let sources = if paths.iter().all(|path| path.starts_with("data:")) {
             paths.to_vec() // legacy job preview format
@@ -1741,7 +1892,10 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
     // Keep the displayed state paired with the displayed screenshots.
     // A completed job remains available in the job cache while a subsequent
     // batch is being collected. Show pending state with pending thumbnails.
-    let state = if !running {
+    let state = if newer_intake {
+        serde_json::to_string(&coding_pending_state(pending.as_ref().unwrap()))
+            .unwrap_or_else(|_| "{}".to_string())
+    } else if !running {
         if let Some(batch) = pending.as_ref() {
             if pending_has_images {
                 let pending_state = if active_view == "mcq" {
@@ -1782,6 +1936,13 @@ fn read_overlay_state_snapshot(active_view: &str, submitted: Option<&SubmittedJo
     let fallback =
         r#"{"runId":null,"updatedAt":"","phase":"idle","agents":[],"solution":null,"tests":[]}"#;
 
+    if active_view == "coding" {
+        if let Some(batch) = pending {
+            if submitted.is_none_or(|job| batch.started_at > job.submitted_at) {
+                return serde_json::to_string(&coding_pending_state(batch)).unwrap_or_else(|_| fallback.into());
+            }
+        }
+    }
     if let Some(job) = submitted {
         let is_mcq = job.mode == "mcq" || mcq_from_submitted(&job).is_some();
         if active_view == "mcq" && is_mcq {
@@ -2060,6 +2221,8 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
         // already computed on the report. The thought-process panes had nothing
         // to render because nothing was sending them anything.
         "presentation": body.get("presentation").cloned().unwrap_or(Value::Null),
+        "review": body.get("review").or_else(|| body.get("solutionReview")).cloned().unwrap_or(Value::Null),
+        "benchmark": body.get("benchmark").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -2458,7 +2621,11 @@ fn overlay_html() -> &'static str {
 		      .hud-key,.hud-pause{display:grid;place-items:center;min-width:32px;height:28px;padding:0 10px;border-radius:8px;background:rgba(255,255,255,.13);box-shadow:inset 0 1px 0 rgba(255,255,255,.08);color:rgba(255,255,255,.9);flex:0 0 auto}
 		      .hud-action{color:rgba(255,255,255,.68);margin-left:4px}
 	      .hud-meter{display:inline-flex;align-items:end;gap:2px;height:18px;padding:0 2px}.hud-meter i{display:block;width:3px;border-radius:3px;background:#f5d83b;box-shadow:0 0 9px rgba(245,216,59,.34)}.hud-meter i:nth-child(1){height:7px}.hud-meter i:nth-child(2){height:12px}.hud-meter i:nth-child(3){height:9px}
-	      #panel{box-sizing:border-box;width:100%;flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;border:2px solid rgba(245,216,59,.72);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(245,216,59,.16),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(245,216,59,.18),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
+	      #panel{position:relative;box-sizing:border-box;width:100%;flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;border:2px solid rgba(245,216,59,.72);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(245,216,59,.16),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(245,216,59,.18),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
+            .coding-history{position:absolute;inset:16px;z-index:10;display:flex;flex-direction:column;gap:14px;padding:20px;border:1px solid var(--panel-line);border-radius:14px;background:rgba(19,23,32,.96);color:white;overflow:hidden}
+            .coding-history[hidden]{display:none}.coding-history h3{font-size:16px;margin:0}.coding-history-list{flex:1;overflow:auto;display:flex;flex-direction:column;gap:7px}
+            .coding-history-row{padding:11px 13px;border:1px solid var(--panel-line);border-radius:9px;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+            .coding-history-row[data-selected="true"]{background:rgba(245,216,59,.17);border-color:rgba(245,216,59,.84);color:white}
             .pane{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:10px;padding:18px;overflow:hidden}.pane+ .pane{border-left:1px solid var(--pane-line)}
             .pictures-pane{align-items:flex-start}
             .title{font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.95;text-shadow:0 1px 2px var(--title-shadow)}
@@ -2517,8 +2684,36 @@ fn overlay_html() -> &'static str {
 	              .mcq-model-pill[data-enabled="false"]{border-color:rgba(255,107,107,.48);background:rgba(255,107,107,.1)}
 	              .mcq-model-pill[data-enabled="false"]::before{background:#ff6b6b;box-shadow:0 0 10px rgba(255,107,107,.82),0 0 0 3px rgba(255,107,107,.16)}
 		      .empty{opacity:.72;font-size:12px;font-weight:600;padding:4px;white-space:nowrap;text-shadow:0 1px 2px var(--title-shadow)}
-	        </style></head><body><div class="hudbar"><span class="hud-logo">CA</span><span class="hud-pause">||</span><span class="hud-meter"><i></i><i></i><i></i></span><span class="hud-action">Start</span><span class="hud-key">⌃⌥ B</span><span class="hud-action">Capture</span><span class="hud-key">⌃⌥ P</span><span class="hud-action">Submit</span><span class="hud-key">⌃⌥ ↵</span><span class="hud-action">Coding</span><span class="hud-key">⌃⌥ C</span><span class="hud-action">MCQ</span><span class="hud-key">⌃⌥ M</span></div><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span id="solution-source">waiting</span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><script>
-	            const esc=(s)=>String(s||'').replace(/[&<>]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+	        </style></head><body><div class="hudbar"><span class="hud-logo">CA</span><span class="hud-pause">||</span><span class="hud-meter"><i></i><i></i><i></i></span><span class="hud-action">Start</span><span class="hud-key">⌃⌥ B</span><span class="hud-action">Capture</span><span class="hud-key">⌃⌥ P</span><span class="hud-action">Submit</span><span class="hud-key">⌃⌥ ↵</span><span class="hud-action">Coding</span><span class="hud-key">⌃⌥ C</span><span class="hud-action">MCQ</span><span class="hud-key">⌃⌥ M</span></div><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span id="solution-source">waiting</span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Solution insights</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Benchmarks and tests</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Code style and trade-offs</div><div class="thought-space"></div></div></div></div></div><script>
+	
+            window.showCodingHistory=function(rows,selected){
+                window.__codingHistoryLocked=true;window.__codingHistoryOpen=true;
+                const panel=document.getElementById('panel');let root=document.getElementById('coding-history');
+                if(!root){root=document.createElement('div');root.id='coding-history';root.className='coding-history';panel.appendChild(root);}
+                root.hidden=false;root.textContent='';
+                const header=document.createElement('h3');header.textContent='Coding history · { / } navigate · | open · _ close';root.appendChild(header);
+                const list=document.createElement('div');list.className='coding-history-list';root.appendChild(list);
+                if(!rows||!rows.length){const empty=document.createElement('p');empty.textContent='No saved coding runs yet.';list.appendChild(empty);}
+                (rows||[]).forEach((item,i)=>{const el=document.createElement('div');el.className='coding-history-row';el.dataset.index=String(i);el.textContent=(i+1)+'. '+(item.submittedAt||'')+' · '+(item.status||'')+' · '+String(item.id||'').slice(0,12);list.appendChild(el);});
+                window.selectCodingHistoryRow(selected||0);
+            };
+            window.selectCodingHistoryRow=function(selected){
+                const root=document.getElementById('coding-history');if(!root)return;
+                root.querySelectorAll('.coding-history-row').forEach((el,i)=>{el.dataset.selected=i===selected?'true':'false';if(i===selected)el.scrollIntoView({block:'nearest'});});
+            };
+            window.closeCodingHistory=function(){
+                window.__codingHistoryOpen=false;window.__codingHistoryLocked=false;
+                const root=document.getElementById('coding-history');if(root)root.hidden=true;
+                if(window.__latestCodingState)window.updateOverlayState(window.__latestCodingState);
+            };
+            window.openCodingHistoryResult=function(state){
+                window.__codingHistoryOpen=false;
+                const root=document.getElementById('coding-history');if(root)root.hidden=true;
+                window.__renderHistoryNow=true;window.__codingHistoryLocked=false;
+                try{window.updateOverlayState(state);}finally{window.__renderHistoryNow=false;window.__codingHistoryLocked=true;}
+            };
+
+            const esc=(s)=>String(s||'').replace(/[&<>]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 	            window.scrollSolutionBy=function(delta){const el=document.getElementById('solution-code');if(el)el.scrollTop+=delta;};
             function highlight(code,lang){let h=esc(code);if(/py|python/i.test(lang||'')){h=h.replace(/([=+\-*\/])/g,'<span class="op">$1</span>').replace(/\b(\d+)\b/g,'<span class="num">$1</span>').replace(/\b(def|for|in|if|return|class|else|elif|while|try|except|with|as|from|import)\b/g,'<span class="kw">$1</span>').replace(/\b(enumerate|range|len|print|set|dict|list)\b/g,'<span class="built">$1</span>');}return h;}
 		            function stateTone(status){if(status==='done')return'done';if(status==='streaming'||status==='reviewing'||status==='running')return'working';if(status==='error')return'error';if(status==='cancelled')return'cancelled';return'pending';}
@@ -2528,8 +2723,8 @@ fn overlay_html() -> &'static str {
 		            function renderFunctionNotes(code){const target=document.getElementById('function-notes');if(!target)return;const meanings={set:'stores unique values for quick membership checks',sum:'adds numeric values together',max:'returns the largest value',min:'returns the smallest value',len:'counts items',range:'creates a numeric loop sequence',enumerate:'loops with index and value',append:'adds an item to a list',sort:'orders a list in place',sorted:'returns ordered values',print:'writes debug output',useState:'stores React component state',useEffect:'runs React side effects',fetch:'requests network data',map:'transforms each item',filter:'keeps matching items',reduce:'combines items into one result'};const found=detectedFunctionNames(code);target.innerHTML='';found.slice(0,5).forEach((name)=>{const row=document.createElement('div');row.textContent=name+': '+(meanings[name]||'function call used by the solution');target.appendChild(row);});if(!target.children.length){const row=document.createElement('div');row.textContent='No function calls detected yet.';target.appendChild(row);}}
 		            function functionExample(name){const examples={sum:'sum([18, 9]) -> 27',set:'set([18, 9, 18]) -> {18, 9}',max:'max([18, 9]) -> 18',min:'min([18, 9]) -> 9',len:'len([18, 9]) -> 2',range:'range(0, 5) -> 0..4',enumerate:'enumerate(items) -> index + value',append:'outliers.append(18) -> adds 18',sort:'values.sort() -> in-place order',sorted:'sorted(values) -> ordered copy',print:'print(result) -> console output',useState:'useState(false) -> state + setter',useEffect:'useEffect(fn, []) -> run side effect',fetch:'fetch(url) -> request data',map:'items.map(fn) -> transformed items',filter:'items.filter(fn) -> matching items',reduce:'items.reduce(fn, seed) -> one value'};return examples[name]||name+'(exampleInput) -> expected output';}
 		            function renderSmartTests(target,count,code,stateTests){target.innerHTML='';const cases=Array.isArray(stateTests)?stateTests:[];count.textContent=cases.length?cases.length+' evidence row'+(cases.length===1?'':'s'):'no execution evidence';if(!cases.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No verified execution evidence available yet.';target.appendChild(empty);return;}cases.slice(0,8).forEach((item)=>{const card=document.createElement('div');card.className='case';const name=document.createElement('b');name.textContent=item.name||'Execution result';const detail=document.createElement('code');detail.textContent=[item.status,item.expected!==undefined?'expected: '+String(item.expected):'',item.actual!==undefined?'actual: '+String(item.actual):'',item.input!==undefined?'input: '+String(item.input):''].filter(Boolean).join(' · ');card.appendChild(name);card.appendChild(detail);target.appendChild(card);});}
-            function renderCouncilInsights(presentation){
- const p=presentation||{};
+            function renderCouncilInsights(presentation,review,benchmark){
+ const p=presentation||{};const rv=(review&&review.data)||review||{};const bm=benchmark||{};
  const root=document.querySelector('.thought-list');if(!root)return;
  const items=root.querySelectorAll('.thought-item');
  const set=(index,value)=>{const el=items[index]&&items[index].querySelector('.thought-space');if(el)el.textContent=value||'Not reported by Council.';};
@@ -2537,23 +2732,23 @@ fn overlay_html() -> &'static str {
  const complexity=String(p.complexity||'');
  const time=complexity.match(/(?:time|runtime)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);
  const space=complexity.match(/(?:space|memory)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);
- set(0,p.approach);
+ set(0,[p.approach,rv.approach&&rv.approach.current?'Reviewed: '+rv.approach.current:'',rv.approach&&rv.approach.keyIdea?'Key idea: '+rv.approach.keyIdea:'',rv.approach&&rv.approach.suggested?'Suggested: '+rv.approach.suggested:''].filter(Boolean).join('\n'));
  set(2,p.dataStructures);
- set(3,p.timeComplexity||(time&&time[1])||complexity);
- set(4,p.spaceComplexity||(space&&space[1]));
+ set(3,p.timeComplexity||(time&&time[1])||(rv.efficiency&&rv.efficiency.currentTime)||complexity);
+ set(4,p.spaceComplexity||(space&&space[1])||(rv.efficiency&&rv.efficiency.currentSpace));
  // Dissent describes disagreements, not edge-case coverage. Never turn
  // unrelated judge evidence into fabricated algorithmic edge cases.
  set(5,lines(p.edgeCases));
  const rows=Array.isArray(p.evidence)?p.evidence:[];
- set(6,rows.map(e=>[e.letter,e.gate,e.passed!==undefined?'passed: '+e.passed:'',e.failed!==undefined?'failed: '+e.failed:'',Number.isFinite(e.elapsedMs)?'elapsed: '+e.elapsedMs+' ms':'',e.runtime||'',e.note||''].filter(Boolean).join(' · ')).join('\n'));
+ set(6,[rows.map(e=>[e.letter,e.gate,e.passed!==undefined?'passed: '+e.passed:'',e.failed!==undefined?'failed: '+e.failed:'',Number.isFinite(e.elapsedMs)?'elapsed: '+e.elapsedMs+' ms':'',e.runtime||'',e.note||''].filter(Boolean).join(' · ')).join('\n'),bm.ran?'Process time: '+(bm.remoteElapsedMs!=null?bm.remoteElapsedMs+' ms':'not reported')+'; peak memory: '+(bm.peakMemoryKb!=null?bm.peakMemoryKb+' KB':'not reported'):''].filter(Boolean).join('\n'));
  // Rejection reasons and genuine reviewer disagreements belong together
  // in the existing Trade-offs area; neither is proof of tests passing.
- set(7,[lines(p.tradeOffs),lines(p.rejected),lines(p.dissent),p.harnessSuspect].filter(Boolean).join('\n'));
+ set(7,[rv.style&&rv.style.readability?'Readability: '+rv.style.readability:'',rv.style&&rv.style.structure?'Structure: '+rv.style.structure:'',rv.style&&rv.style.note||'',lines(p.tradeOffs),lines(p.rejected),lines(p.dissent),p.harnessSuspect].filter(Boolean).join('\n'));
 }
                         window.updatePreviews=function(images){window.__lastPreviews=images||[];const pictures=document.getElementById('pictures');if(!pictures)return;if(pictures.__sources&&pictures.__sources.length===images.length&&images.every((src,i)=>src===pictures.__sources[i]))return;pictures.__sources=images.slice();pictures.innerHTML='';if(!images.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Captured images will appear here';pictures.appendChild(empty);return;}images.forEach((src,i)=>{const pill=document.createElement('div');pill.className='picture-pill';const img=document.createElement('img');img.src=src;img.alt='Capture '+(i+1);const count=document.createElement('span');count.className='picture-count';count.textContent=(i+1)+'/10';pill.appendChild(img);pill.appendChild(count);pictures.appendChild(pill);});};
                 function renderMcq(state){const savedPictures=document.getElementById('pictures');const left=document.querySelector('.pictures-pane');const right=document.querySelector('.thought-pane');const m=state.mcq||{};const picked=(m.answer&&m.answer.label)||'';const found=Array.isArray(m.options)?m.options:[];const position=found.findIndex((o)=>o.label===picked);const ordinal=(n)=>n%100>=11&&n%100<=13?'th':n%10===1?'st':n%10===2?'nd':n%10===3?'rd':'th';const formatted=m.answerVerified===true&&position>=0?'✅ '+picked+' ('+(position+1)+ordinal(position+1)+' Option) - '+String((m.answer&&m.answer.text)||found[position].text||''):'';const displayAnswer=formatted||String(m.displayAnswer||'');const selectedModel=(m.model&&String(m.model).trim())?String(m.model).trim():'none';const hasModel=selectedModel.toLowerCase()!=='none';left.innerHTML='<div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title-row"><div class="title">Question</div><div class="mcq-model-pill" data-enabled="'+(hasModel?'true':'false')+'">'+esc(hasModel?selectedModel:'No Model')+'</div></div><div class="mcq-box mcq-question"></div><div class="title">Answer</div><div class="mcq-box mcq-answer"></div>';if(savedPictures)document.getElementById('pictures').replaceWith(savedPictures);right.innerHTML='<div class="title">Question history</div><div class="mcq-history"></div>';document.querySelector('.mcq-question').textContent=m.question||state.progress||'Reading the captured question...';document.querySelector('.mcq-answer').innerHTML='<b>'+esc(displayAnswer||(picked||'Answer'))+'</b>'+(displayAnswer?'':(m.answer&&m.answer.text?' — '+esc(m.answer.text):''))+'<br><br>'+esc(m.reason||state.error||state.progress||'Waiting for the MCQ worker result...');const hist=document.querySelector('.mcq-history');const add=(title,body,level,meta)=>{const row=document.createElement('div');row.className='mcq-history-row';row.dataset.level=level||'info';const h=document.createElement('b');h.textContent=title;const p=document.createElement('div');p.textContent=body||'';row.appendChild(h);row.appendChild(p);if(meta&&meta.length){const mrow=document.createElement('div');mrow.className='mcq-history-meta';meta.forEach((x)=>{const s=document.createElement('span');s.textContent=x;mrow.appendChild(s);});row.appendChild(mrow);}hist.appendChild(row);};add('AI selected',selectedModel,'info',[state.status||'',state.phase||''].filter(Boolean));add('Captured question',m.question||'Waiting for the screenshot reading.',state.error?'error':'info',[state.status||'',state.phase||''].filter(Boolean));if(m.options&&m.options.length){add('Choices found',(m.options||[]).map((o)=>(o.label?o.label+'. ':'')+(o.text||'')).join('\\n'),'info',[]);}if(m.knowledgeUsed!==undefined){add('Local knowledge check',m.knowledgeUsed?'A local knowledge match or guidance was included before the model answer.':'The local knowledge pack was checked before the model answer, but no direct match was used.','info',[selectedModel]);}if(picked||m.reason){add('Selected answer',(picked?picked+': ':'')+(m.answer&&m.answer.text?m.answer.text:'')+'\\n'+(m.reason||''),'info',[selectedModel]);}(m.whyNot||[]).forEach((x)=>add('Rejected choice '+(x.label||''),x.reason||'Not selected.','info',[]));(state.history||[]).forEach((e)=>add(e.phase||'worker event',e.message||'',e.level||'info',[e.createdAt||''].filter(Boolean)));if(!hist.children.length)add('Waiting','The helper is waiting for the worker history.','info',[]);window.updatePreviews(window.__lastPreviews||[]);}
-			            function restoreCodingShell(){if(document.getElementById('agents'))return;document.getElementById('panel').innerHTML='<div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span id="solution-source">waiting</span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div>';window.updatePreviews(window.__lastPreviews||[]);}
-			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'reviewed':('candidate · '+(state.solution.source||''));renderCodeLines(code,state.solution.code,state.solution.language);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation);}};
+			            function restoreCodingShell(){if(document.getElementById('agents'))return;document.getElementById('panel').innerHTML='<div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span id="solution-source">waiting</span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Solution insights</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Benchmarks and tests</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Code style and trade-offs</div><div class="thought-space"></div></div></div></div>';window.updatePreviews(window.__lastPreviews||[]);}
+			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};if(state.kind!=='mcq'&&!state.mcq){if(!window.__renderHistoryNow)window.__latestCodingState=state;if(window.__codingHistoryLocked&&!window.__renderHistoryNow)return;}if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'reviewed':('candidate · '+(state.solution.source||''));renderCodeLines(code,state.solution.code,state.solution.language);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation,state.review,state.benchmark);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation,state.review,state.benchmark);}};
     </script></body></html>"#
 }
 
@@ -2585,13 +2780,13 @@ mod tests {
         let expected = [
             (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13),
             (2, 1, 21), (2, 2, 22), (2, 3, 23), (2, 4, 24),
-            (3, 1, 31), (3, 2, 32), (3, 3, 33), (3, 4, 34),
-            (1, 4, 14), (2, 5, 25), (3, 5, 35),
+            (3, 1, 31), (3, 2, 32), (3, 3, 33),
+            (0, 0, 99), (1, 4, 14), (3, 5, 35),
         ];
         for (prefix, shape, command) in expected {
             assert_eq!(number_pair_command(prefix, shape), Some(command));
         }
-        for invalid in [(1, 5), (2, 0), (3, 0), (4, 1)] {
+        for invalid in [(1, 3), (1, 5), (2, 0), (2, 5), (3, 0), (3, 4), (4, 1)] {
             assert_eq!(number_pair_command(invalid.0, invalid.1), None);
         }
     }
