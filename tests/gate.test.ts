@@ -123,6 +123,11 @@ assert.equal(harnessIsSuspect({}), "");
     "the roster can say a known-Responses model speaks chat"
   );
   assert.equal(
+    endpointForCouncilModel([{ id: "openai/gpt-5.6-sol", endpoint: "responses" }], "gpt-5.6-sol"),
+    "responses",
+    "a bare gateway id keeps the endpoint selected for its qualified roster id"
+  );
+  assert.equal(
     endpointForCouncilModel([{ id: "some/new-model", endpoint: "responses" }], "some/new-model"),
     "responses",
     "and can classify a model the fallback list has never heard of"

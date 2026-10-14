@@ -31,7 +31,7 @@
 
 import type { AgentFinal } from "./parse.ts";
 import { canonicalComplexityBound, compareComplexityBounds } from "./theoryBounds.ts";
-import { isPrimaryModel, listedPrimaryRoute } from "./primaryModels.ts";
+import { isPrimaryModel, listedPrimaryRoute, primaryModelId } from "./primaryModels.ts";
 
 // ------------------------------------------------------------------ candidates
 
@@ -693,7 +693,7 @@ export const COUNCIL_SIZE = { solversMin: 2, solversMax: 4, judgesMin: 1, judges
  * wrong wire by the other, and that failure looks like a model refusing rather
  * than a router misdialling. One copy, in the file both sides already import.
  */
-export const RESPONSES_MODELS = new Set(["openai/gpt-5.6-sol"]);
+export const RESPONSES_MODELS = new Set(["openai/gpt-5.6-sol", "openai/gpt-5.3-codex"]);
 
 /**
  * Which wire a model answers on.
@@ -709,8 +709,17 @@ export function endpointForCouncilModel(
 ): "chat" | "responses" {
   const id = (model || "").trim();
   if (!id) return "chat";
-  const spec = (roster?.length ? roster : COUNCIL_DEFAULT_MODELS).find((m) => m.id === id);
-  return spec?.endpoint ?? (RESPONSES_MODELS.has(id) ? "responses" : "chat");
+  const canonical = primaryModelId(id);
+  // A gateway may publish a bare wire id while the persisted roster records
+  // the provider-qualified spelling. They are the same approved model, so its
+  // endpoint setting must travel with it rather than falling back to a wrong
+  // API wire.
+  const spec = (roster?.length ? roster : COUNCIL_DEFAULT_MODELS).find((m) =>
+    m.id === id || (canonical !== null && primaryModelId(m.id) === canonical)
+  );
+  return spec?.endpoint ?? (
+    RESPONSES_MODELS.has(id) || canonical === "gpt-5.6-sol" ? "responses" : "chat"
+  );
 }
 
 /**

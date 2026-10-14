@@ -510,22 +510,22 @@ function gatewayCredential(settings) {
  */
 function canonicalCouncilSeats(seats, idOf, key, catalogue) {
   if (!Array.isArray(catalogue) || !catalogue.length) return seats;
-  const available = new Set(catalogue);
   return seats.flatMap((seat) => {
     const configured = String(idOf(seat) || "").trim();
-    const wireId = configured.includes("/") ? configured.slice(configured.lastIndexOf("/") + 1) : configured;
-    const resolved = available.has(configured) ? configured : available.has(wireId) ? wireId : "";
+    // Resolve aliases by approved model identity and return the gateway's
+    // exact current spelling. This handles bare Clean APIs ids, qualified
+    // TokenRouter ids, and documented aliases without manual migrations.
+    const resolved = listedPrimaryRoute(configured, catalogue) || "";
     return resolved ? [{ ...seat, [key]: resolved }] : [];
   });
 }
 
 function unreachableCouncilSeatIds(seats, idOf, catalogue) {
   if (!Array.isArray(catalogue) || !catalogue.length) return [];
-  const available = new Set(catalogue);
-  return seats.map(idOf).map((id) => String(id || "").trim()).filter((id) => {
-    const wireId = id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : id;
-    return !available.has(id) && !available.has(wireId);
-  });
+  return seats
+    .map(idOf)
+    .map((id) => String(id || "").trim())
+    .filter((id) => !listedPrimaryRoute(id, catalogue));
 }
 
 function gatewayModel(model, settings) {
