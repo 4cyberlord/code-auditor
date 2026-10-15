@@ -9,6 +9,13 @@
   "placement": {
     "mode": "smart"
   },
+  "vpc_services": [
+    {
+      "binding": "NIMO_WAKE",
+      "service_id": "01a14123-6d7c-76a1-a1a8-72a13f028342",
+      "remote": true
+    }
+  ],
   "queues": {
     "producers": [
       {

@@ -259,11 +259,11 @@ redelivery and a temporary dispatch outage cannot run a job twice or lose it.
 
 `COUNCIL_DISPATCH_URL` and `COUNCIL_DISPATCH_SECRET` belong exclusively in
 Supabase Edge Function secrets. The matching `DISPATCH_SECRET` belongs
-exclusively in the Cloudflare Worker. The normal VPS polling loop remains the
-recovery route and should not be removed. A private Nimo wake endpoint can be
-set later through Cloudflare Tunnel/VPC using `NIMO_WAKE_URL` and
-`NIMO_WAKE_SECRET`; do not expose that endpoint directly on the public
-internet.
+exclusively in the Cloudflare Worker. Queue delivery wakes Nimo through a
+Cloudflare Tunnel and Workers VPC Service binding (`NIMO_WAKE`), with a second
+secret dedicated to that private wake request. The Nimo listener binds only to
+loopback; it must never be exposed on the public internet. The normal 2-second
+VPS polling loop remains the recovery route and should not be removed.
 
 On macOS the helper is signed with `APPLE_SIGNING_IDENTITY` or
 `CODESIGN_IDENTITY` when set, otherwise the scripts pick Developer ID

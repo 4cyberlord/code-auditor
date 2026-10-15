@@ -30,8 +30,10 @@ async function wake(message, env) {
   // A wake is only an acceleration hint. The VPS worker still polls Supabase,
   // and its conditional claim is what prevents duplicate Queue delivery from
   // executing a job twice.
-  if (!env.NIMO_WAKE_URL || !env.NIMO_WAKE_SECRET) return;
-  const response = await fetch(env.NIMO_WAKE_URL, {
+  if (!env.NIMO_WAKE || !env.NIMO_WAKE_SECRET) {
+    throw new Error("NIMO_WAKE VPC service binding is not configured");
+  }
+  const response = await env.NIMO_WAKE.fetch("http://council-nimo-worker/api/worker-kick", {
     method: "POST",
     headers: {
       authorization: `Bearer ${env.NIMO_WAKE_SECRET}`,

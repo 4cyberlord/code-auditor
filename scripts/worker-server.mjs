@@ -9,6 +9,7 @@ import { tick } from "./cloud-worker.mjs";
 import { captureWorkerException, closeObservability, notifyOps } from "./observability.mjs";
 
 const PORT = Number(process.env.PORT || process.env.CODE_AUDITOR_WORKER_PORT || 8787);
+const POLL_MS = Number(process.env.CODE_AUDITOR_WORKER_POLL_MS || 2_000);
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -26,9 +27,9 @@ function bearer(req) {
   return auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
 }
 
-function allowed(req, envName) {
+function allowed(req, envName, { required = false } = {}) {
   const expected = process.env[envName];
-  return !expected || bearer(req) === expected;
+  return expected ? bearer(req) === expected : !required;
 }
 
 async function readJson(req) {
@@ -82,12 +83,17 @@ async function registerDevice(req, res) {
 }
 
 async function workerTick(req, res) {
-  if (!allowed(req, "CODE_AUDITOR_WORKER_TICK_SECRET")) {
+  if (!allowed(req, "CODE_AUDITOR_WORKER_TICK_SECRET", { required: true })) {
     json(res, 401, { ok: false, error: "unauthorized" });
     return;
   }
+  const run = startTick("http_tick");
+  if (!run) {
+    json(res, 202, { ok: true, accepted: false, reason: "already_running" });
+    return;
+  }
   const started = Date.now();
-  const worked = await tick();
+  const worked = await run;
   json(res, 200, {
     ok: true,
     worked,
@@ -101,23 +107,27 @@ async function workerTick(req, res) {
 // weakest timeout in the system.  One process-wide promise also keeps repeated
 // schedule kicks from executing the same queue twice.
 let inFlightTick = null;
-async function workerKick(req, res) {
-  if (!allowed(req, "CODE_AUDITOR_WORKER_TICK_SECRET")) {
-    json(res, 401, { ok: false, error: "unauthorized" });
-    return;
-  }
-  if (inFlightTick) {
-    json(res, 202, { ok: true, accepted: false, reason: "already_running" });
-    return;
-  }
+function startTick(source) {
+  if (inFlightTick) return null;
   inFlightTick = tick()
     .catch(async (err) => {
       const message = err instanceof Error ? err.message : String(err);
-      captureWorkerException(err, { phase: "worker_kick" });
-      await notifyOps({ level: "error", title: "Council worker tick failed", body: message, phase: "worker_kick" }).catch(() => {});
+      captureWorkerException(err, { phase: "worker_tick", source });
+      await notifyOps({ level: "error", title: "Council worker tick failed", body: message, phase: "worker_tick" }).catch(() => {});
     })
     .finally(() => { inFlightTick = null; });
-  json(res, 202, { ok: true, accepted: true });
+  return inFlightTick;
+}
+
+async function workerKick(req, res) {
+  if (!allowed(req, "CODE_AUDITOR_WORKER_TICK_SECRET", { required: true })) {
+    json(res, 401, { ok: false, error: "unauthorized" });
+    return;
+  }
+  const run = startTick("cloudflare_queue");
+  json(res, 202, run
+    ? { ok: true, accepted: true }
+    : { ok: true, accepted: false, reason: "already_running" });
 }
 
 const server = createServer(async (req, res) => {
@@ -153,11 +163,18 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`Council Editor worker server listening on :${PORT}`);
+const fallbackTimer = setInterval(() => {
+  startTick("fallback_poll");
+}, POLL_MS);
+fallbackTimer.unref();
+startTick("startup");
+
+server.listen(PORT, "127.0.0.1", () => {
+  console.log(`Council Editor worker server listening privately on 127.0.0.1:${PORT}; fallback poll ${POLL_MS}ms`);
 });
 
 process.on("SIGTERM", async () => {
+  clearInterval(fallbackTimer);
   server.close();
   await closeObservability();
   process.exit(0);
