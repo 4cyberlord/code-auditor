@@ -75,16 +75,6 @@ jobs:
           if not any(f['path'].endswith('.html') for f in files):
               raise ValueError('No HTML pages extracted')
           PY
-      - name: Publish extraction as private CI artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: council-language-html-staging
-          path: |
-            extracted/
-            extracted-manifest.json
-          retention-days: 7
-          if-no-files-found: error
-
       - name: Upload extracted files to Cloudflare R2 with GitHub OIDC
         env:
           UPLOAD_ENDPOINT: https://council-language-docs-upload.council-docs-r2-2f1fd544.workers.dev/upload
