@@ -1,0 +1,31 @@
+name: Verify direct language docs integration
+on:
+  push:
+    branches: [feat/direct-offline-docs-lookup]
+    paths:
+      - scripts/cloud-worker.mjs
+      - scripts/lib/authoritativeLanguageDocs.mjs
+      - tests/authoritativeLanguageDocs.test.mjs
+      - .github/workflows/council-direct-docs-test.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  docs-unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Check JavaScript syntax without installing dependencies
+        run: |
+          node --check scripts/lib/authoritativeLanguageDocs.mjs
+          node --check scripts/cloud-worker.mjs
+          node --check tests/authoritativeLanguageDocs.test.mjs
+      - name: Run targeted language-documentation and registry tests
+        run: |
+          node tests/authoritativeLanguageDocs.test.mjs
+          node tests/externalLanguageSources.test.mjs
+          node tests/languageRegistry.test.mjs
