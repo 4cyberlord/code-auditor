@@ -483,17 +483,29 @@ function chatJudges(settings) {
 }
 
 function gatewayBaseUrl(settings) {
+  // Remote Helper has no local desktop preferences. Route it to an actual
+  // account-configured gateway; never infer a different credential from the Mac.
   return settings?.gatewayBaseUrl || ({
     cleanapis: "https://cleanapis.com/v1",
     wiro: "https://llm.wiro.ai/v1",
     tokenrouter: "https://api.tokenrouter.com/v1",
-  })[settings?.gatewayId || "tokenrouter"] || "https://api.tokenrouter.com/v1";
+  })[gatewayId(settings)] || "https://api.tokenrouter.com/v1";
 }
 
 function gatewayId(settings) {
   const baseUrl = String(settings?.gatewayBaseUrl || "");
   if (settings?.gatewayId === "cleanapis" || baseUrl.includes("cleanapis.com")) return "cleanapis";
   if (settings?.gatewayId === "wiro" || baseUrl.includes("llm.wiro.ai")) return "wiro";
+  if (settings?.gatewayId === "tokenrouter" || baseUrl.includes("tokenrouter.com")) return "tokenrouter";
+  if ((settings?.origin === "remote-terminal" || settings?.source === "council-remote-helper") &&
+      !settings?.gatewayId && !baseUrl) {
+    // Owner/platform secrets have already been loaded before a job is run.
+    // An explicitly selected gateway is NEVER overridden. With no selection,
+    // prefer the historical TokenRouter default if it is configured.
+    for (const candidate of ["tokenrouter", "cleanapis", "wiro"]) {
+      if (secret(candidate) || secret(candidate.toUpperCase() + "_API_KEY")) return candidate;
+    }
+  }
   return "tokenrouter";
 }
 
