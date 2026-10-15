@@ -14,8 +14,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - name: Install extraction dependencies
-        run: sudo apt-get update && sudo apt-get install -y awscli unzip xz-utils
       - name: Download and inspect archive entries
         shell: bash
         run: |
