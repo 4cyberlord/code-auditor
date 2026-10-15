@@ -1275,20 +1275,29 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   const specStartedAt = Date.now();
   const failures = new Map();
   // Database packs are checksum validated; verified bundled packs remain an offline fallback.
-  const languagePacks = await Promise.all(languages.map(language => loadLanguagePack(language, {
-    // The Supabase RPC queries an external Neon foreign table; it never
-    // stores Markdown in Supabase. Neon Data API currently requires JWT
-    // even for anonymous readers, so prefer the authenticated FDW path.
-    // If the user mapping is not configured, keep the trusted bundled fallback.
-    fetchRows: id => fetchLanguageViaGateway(id,{
-      queryGateway: language => rest("rpc/fetch_council_language_pack",{
-        method:"POST",body:JSON.stringify({p_language:language}),
+  // Previously all database language packs finished before any HTML lookups
+  // could start, even though both sources are independent read-only inputs.
+  // Fetch both groups concurrently, preserving their original language order.
+  const [languagePacks, languageDocs] = await Promise.all([
+    Promise.all(languages.map(language => loadLanguagePack(language, {
+      // The Supabase RPC queries an external Neon foreign table; it never
+      // stores Markdown in Supabase. Neon Data API currently requires JWT
+      // even for anonymous readers, so prefer the authenticated FDW path.
+      // If the user mapping is not configured, keep the trusted bundled fallback.
+      fetchRows: id => fetchLanguageViaGateway(id,{
+        queryGateway: language => rest("rpc/fetch_council_language_pack",{
+          method:"POST",body:JSON.stringify({p_language:language}),
+        }),
+        fallback: language => fetchExternalLanguageRows(language,{
+          registryDirectory:languageDirectory,
+        }),
       }),
-      fallback: language => fetchExternalLanguageRows(language,{
-        registryDirectory:languageDirectory,
-      }),
-    }),
-  })));
+    }))),
+    Promise.all(languages.map(language => fetchAuthoritativeLanguageContext(
+      [question, candidateDocket(candidates).slice(0,3000)].join("\n"),
+      {language}
+    ))),
+  ]);
   const packsByLanguage = new Map(languagePacks.map(pack => [pack.language,pack]));
   await addEvent(job.id,"info","language_packs_ready",
     `Loaded ${languagePacks.length} language-specific guides.`,
@@ -1301,10 +1310,7 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
     // The owner's HTML documentation is consulted FIRST for each target
     // language, including reference-harness generation. The verified rules
     // pack still supplies runtime contracts and fallback guidance.
-    const docs = await fetchAuthoritativeLanguageContext(
-      [question, candidateDocket(candidates).slice(0,3000)].join("\n"),
-      {language}
-    );
+    const docs = languageDocs[languages.indexOf(language)];
     if(docs.prompt)await addEvent(job.id,"info","language_reference_harness",
       "Consulted the personal documentation server for "+language+" harness generation.",
       {language,source:docs.source,pages:docs.pages.map(page=>page.url)});
@@ -2385,18 +2391,23 @@ export async function runCouncilJob(job) {
     reading.extraction?.language || settings.outputLanguage || "");
   // Proactive reference lookup before the first solver: bounded, cached,
   // server-side and topic-specific, never a full-site download.
-  const initialReference = inferredKind === "code" || detectedDocsLanguage
-    ? await fetchAuthoritativeLanguageContext(documentationQuery, {
-      language:detectedDocsLanguage || "python"
-    })
-    : {language:"",source:"not-applicable",prompt:"",pages:[]};
+  // Both reads depend on the completed problem contract, but NOT on each other.
+  // Overlap the personal-server HTML fetch with library/database retrieval.
+  const [initialReference, initialKnowledge] = await Promise.all([
+    inferredKind === "code" || detectedDocsLanguage
+      ? fetchAuthoritativeLanguageContext(documentationQuery, {
+          language:detectedDocsLanguage || "python"
+        })
+      : Promise.resolve({language:"",source:"not-applicable",prompt:"",pages:[]}),
+    inferredKind === "code"
+      ? selectKnowledge(job, settings, {contract: contracting.contract, reading})
+      : Promise.resolve(""),
+  ]);
   if(initialReference.prompt)await addEvent(job.id,"info","language_reference_primary",
     "Loaded focused documentation from the personal server before solving.",
     {language:initialReference.language,source:initialReference.source,
      pages:initialReference.pages.map(page=>page.url)});
-  let knowledge = inferredKind === "code"
-    ? await selectKnowledge(job, settings, { contract: contracting.contract, reading })
-    : "";
+  let knowledge = initialKnowledge;
   const solverPrompt = [
     userPrompt("", solveImages.length > 0, reading.context, imageRefs,
       [initialReference.prompt,knowledge].filter(Boolean).join("\n\n"), policy),
@@ -2516,7 +2527,10 @@ export async function runCouncilJob(job) {
   // classifier run over the pixels beforehand could have.
   // Named here rather than at the end: the answers are in hand, and a run that
   // fails later should still have left a session you can recognise.
-  await nameSessionFromWork(job, reading, field);
+  // Naming is user-facing metadata, not a prerequisite for harness generation.
+  // Start it now and join before the report is saved; a slow DB title lookup
+  // must not hold up E2B preflight or model reviews.
+  const sessionNaming = nameSessionFromWork(job, reading, field);
 
   const isCoding = looksLikeCodingProblem(field);
   await addEvent(
@@ -2982,6 +2996,7 @@ export async function runCouncilJob(job) {
   // Built from the finished report rather than assembled alongside it, so the
   // helper overlay and the app render the same fields from the same source.
   report.presentation = buildPresentation(report);
+  await sessionNaming;
   const markdown = await saveCouncilReport(job, report);
 
   await patchJob(job.id, {
