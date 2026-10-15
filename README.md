@@ -247,6 +247,24 @@ The development app also starts the port-3000 frontend and a two-worker E2B
 queue pool. It is intentionally development-only: production needs its own
 always-on worker deployment rather than a desktop process to consume benchmark
 requests.
+
+### Fast online-job dispatch
+
+Supabase is the durable source of truth for `solve_jobs`. The optional
+Cloudflare Queue at `cloudflare/dispatch` is only a fast wake-up lane: after a
+job transaction commits, the API sends its opaque job ID to the Queue. It
+never carries screenshots, provider credentials, generated code, or E2B
+payloads. The Nimo worker still atomically claims the job in Supabase, so Queue
+redelivery and a temporary dispatch outage cannot run a job twice or lose it.
+
+`COUNCIL_DISPATCH_URL` and `COUNCIL_DISPATCH_SECRET` belong exclusively in
+Supabase Edge Function secrets. The matching `DISPATCH_SECRET` belongs
+exclusively in the Cloudflare Worker. The normal VPS polling loop remains the
+recovery route and should not be removed. A private Nimo wake endpoint can be
+set later through Cloudflare Tunnel/VPC using `NIMO_WAKE_URL` and
+`NIMO_WAKE_SECRET`; do not expose that endpoint directly on the public
+internet.
+
 On macOS the helper is signed with `APPLE_SIGNING_IDENTITY` or
 `CODESIGN_IDENTITY` when set, otherwise the scripts pick Developer ID
 Application and then Apple Development. Set `CODE_AUDITOR_ALLOW_ADHOC=1` only

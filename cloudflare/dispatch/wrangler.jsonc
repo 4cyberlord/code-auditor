@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "council-solve-dispatch",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-15",
+  "observability": {
+    "enabled": true
+  },
+  "placement": {
+    "mode": "smart"
+  },
+  "queues": {
+    "producers": [
+      {
+        "queue": "council-solve-dispatch",
+        "binding": "SOLVE_DISPATCH"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "council-solve-dispatch",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 3,
+        "retry_delay": 5
+      }
+    ]
+  }
+}

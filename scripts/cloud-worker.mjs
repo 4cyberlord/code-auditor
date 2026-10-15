@@ -97,7 +97,10 @@ async function loadOwnerSecrets(ownerId) {
   return jobSecrets;
 }
 const WORKER_ID = process.env.CODE_AUDITOR_WORKER_ID || `worker-${process.pid}`;
-const POLL_MS = Number(process.env.CODE_AUDITOR_WORKER_POLL_MS || 5000);
+// The database is the recovery queue, not the fast path. Keep the recovery
+// interval short enough that a missed external dispatch does not make a newly
+// submitted job appear stalled, while avoiding an aggressive busy loop.
+const POLL_MS = Number(process.env.CODE_AUDITOR_WORKER_POLL_MS || 2000);
 const ONCE = process.argv.includes("--once");
 const STORAGE_BUCKET = "screenshots";
 const APP_DISPLAY_NAME = "Council Editor";

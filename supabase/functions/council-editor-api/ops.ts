@@ -13,6 +13,7 @@
  */
 
 import { fingerprint, HttpError, signIn, verifyPin, type Principal } from "./auth.ts";
+import { dispatchSolveJob } from "./dispatch.ts";
 import { SCREENSHOT_BUCKET, validateScreenshotUploadKey } from "./storagePolicy.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -843,6 +844,10 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
       console.error("solve_job_create:", error.message ?? error);
       throw new HttpError(500, "Could not queue the job.");
     }
+    // The row is already durable. Notify the separate queue only after the
+    // transaction succeeds, and never turn a notification outage into a lost
+    // user submission.
+    void dispatchSolveJob(data);
     return { id: data };
   },
 
