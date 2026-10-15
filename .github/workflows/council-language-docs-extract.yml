@@ -7,21 +7,7 @@ jobs:
   extract:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.COUNCIL_DOCS_R2_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.COUNCIL_DOCS_R2_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: auto
-      CF_ACCOUNT_ID: ${{ secrets.COUNCIL_DOCS_R2_ACCOUNT_ID }}
-      BUCKET: ${{ vars.COUNCIL_DOCS_R2_BUCKET }}
     steps:
-      - name: Confirm isolated configuration
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "$AWS_ACCESS_KEY_ID"
-          test -n "$AWS_SECRET_ACCESS_KEY"
-          test -n "$CF_ACCOUNT_ID"
-          test "$BUCKET" = "council-language-knowledge"
       - name: Install extraction dependencies
         run: sudo apt-get update && sudo apt-get install -y awscli unzip xz-utils
       - name: Download and inspect archive entries
@@ -69,29 +55,28 @@ jobs:
                           import shutil
                           shutil.copyfileobj(src,out)
           PY
-      - name: Upload extracted pages and manifest to R2
+      - name: Create checksum manifest without credentials
         shell: bash
         run: |
           set -euo pipefail
-          ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          aws --endpoint-url "$ENDPOINT" s3 sync extracted/ "s3://$BUCKET/extracted/" --no-progress --only-show-errors
           python3 - <<'PY'
-          import datetime,hashlib,json,pathlib
-          files=[]
+          import datetime, hashlib, json, pathlib
+          files = []
           for p in sorted(pathlib.Path('extracted').rglob('*')):
               if p.is_file():
                   files.append({'path':p.relative_to('extracted').as_posix(),'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
-          out={'schema_version':1,'generated_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'file_count':len(files),'files':files}
-          pathlib.Path('extracted-manifest.json').write_text(json.dumps(out,separators=(',',':')))
-          print('Uploaded files:',len(files))
+          manifest = {'schema_version':1,'generated_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'file_count':len(files),'files':files}
+          pathlib.Path('extracted-manifest.json').write_text(json.dumps(manifest,separators=(',',':')))
+          print('Validated files:',len(files))
+          if not any(f['path'].endswith('.html') for f in files):
+              raise ValueError('No HTML pages extracted')
           PY
-          aws --endpoint-url "$ENDPOINT" s3 cp extracted-manifest.json "s3://$BUCKET/manifests/extracted-files.json" --content-type application/json --no-progress
-      - name: Verify uploaded HTML is accessible
-        shell: bash
-        run: |
-          set -euo pipefail
-          ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/extracted/" --recursive | grep -m 1 -E '\.html
-          aws --endpoint-url "$ENDPOINT" s3api head-object --bucket "$BUCKET" --key manifests/extracted-files.json >/dev/null
-
-          aws --endpoint-url "$ENDPOINT" s3api head-object --bucket "$BUCKET" --key manifests/extracted-files.json >/dev/null
+      - name: Publish extraction as private CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: council-language-html-staging
+          path: |
+            extracted/
+            extracted-manifest.json
+          retention-days: 7
+          if-no-files-found: error
