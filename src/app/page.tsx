@@ -185,9 +185,20 @@ function Workbench() {
     let unlistenWorkspace: (() => void) | undefined;
     let unlistenSolve: (() => void) | undefined;
     let disposed = false;
+    // Fast Refresh and a window closing can finish an asynchronous Tauri
+    // subscription after React has already cleaned up this effect. Tauri may
+    // have disposed that listener internally too, so an idempotent cleanup is
+    // required rather than letting a late unlisten crash the whole workbench.
+    const safeUnlisten = (off: () => void) => {
+      try { off(); } catch { /* listener was already removed by Tauri */ }
+    };
+    const retainListener = (off: () => void, assign: (listener: () => void) => void) => {
+      if (disposed) safeUnlisten(off);
+      else assign(off);
+    };
     if (inTauri()) {
       void listen("settings://open", () => setSettingsOpen(true)).then((off) => {
-        unlistenSettings = off;
+        retainListener(off, (listener) => { unlistenSettings = listener; });
       });
       void listen<string>("workspace://select", (event) => {
         const next = event.payload;
@@ -195,7 +206,7 @@ function Workbench() {
           setWorkspace(next);
         }
       }).then((off) => {
-        unlistenWorkspace = off;
+        retainListener(off, (listener) => { unlistenWorkspace = listener; });
       });
       void listen("shortcut://solve", () => {
         const s = useStore.getState();
@@ -209,8 +220,7 @@ function Workbench() {
         // unchanged; they can switch to Council when they want to watch it.
         void useStore.getState().start();
       }).then((off) => {
-        if (disposed) off();
-        else unlistenSolve = off;
+        retainListener(off, (listener) => { unlistenSolve = listener; });
       });
     }
 
@@ -229,9 +239,9 @@ function Workbench() {
     return () => {
       disposed = true;
       window.removeEventListener("keydown", onKey);
-      unlistenSettings?.();
-      unlistenWorkspace?.();
-      unlistenSolve?.();
+      if (unlistenSettings) safeUnlisten(unlistenSettings);
+      if (unlistenWorkspace) safeUnlisten(unlistenWorkspace);
+      if (unlistenSolve) safeUnlisten(unlistenSolve);
     };
   }, [setSettingsOpen]);
 
