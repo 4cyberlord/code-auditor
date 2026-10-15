@@ -5,6 +5,7 @@ on:
     paths: [.github/workflows/council-source-reachability.yml]
 permissions:
   contents: read
+  id-token: write
 jobs:
   source-check:
     runs-on: ubuntu-24.04
@@ -29,3 +30,25 @@ jobs:
             echo "Checking Cloudflare Worker using $agent"
             curl -L --max-time 20 -sS -A "$agent" -w '\nHTTP %{http_code}\n' 'https://council-language-source-probe.council-docs-r2-2f1fd544.workers.dev/probe' | head -c 1500 || true
           done
+      - name: Smoke test signed R2 batch upload
+        env:
+          UPLOAD_ENDPOINT: https://council-offline-html-upload.council-docs-r2-2f1fd544.workers.dev/upload-batch
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --max-time 20 'http://144.24.31.129/offline-docs/python-3.15.0/python-3.15-docs-html/index.html' -o /tmp/source-index.html
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,subprocess,urllib.parse
+          path='offline-docs/python-3.15.0/python-3.15-docs-html/index.html'
+          content=pathlib.Path('/tmp/source-index.html').read_bytes()
+          manifest=json.dumps({'files':[{'path':path,'size':len(content),'sha256':hashlib.sha256(content).hexdigest()}]},separators=(',',':')).encode()
+          payload=len(manifest).to_bytes(4,'big')+manifest+content
+          pathlib.Path('/tmp/r2-batch.bin').write_bytes(payload)
+          url=os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']
+          url+=('&' if '?' in url else '?')+'audience='+urllib.parse.quote('council-language-docs-r2-upload-v1')
+          token=json.loads(subprocess.check_output(['curl','-fsSL','-H','Authorization: Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN'],url]))['value']
+          output=subprocess.check_output(['curl','--fail-with-body','-sSL','--max-time','30','-X','POST','-H','Authorization: Bearer '+token,'-H','Content-Type: application/octet-stream','--data-binary','@/tmp/r2-batch.bin',os.environ['UPLOAD_ENDPOINT']])
+          result=json.loads(output)
+          print(result)
+          assert result.get('ok') and result.get('count')==1
+          PY
