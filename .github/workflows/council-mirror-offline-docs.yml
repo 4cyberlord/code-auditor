@@ -1,0 +1,117 @@
+name: Mirror Python Rust C++ HTML to R2
+on:
+  push:
+    branches: [feat/r2-language-retrieval-20261015]
+    paths: [.github/workflows/council-mirror-offline-docs.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    steps:
+      - name: Crawl only the three user-provided offline HTML sites
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p mirror
+          SOURCE='http://144.24.31.129/offline-docs'
+          wget --mirror --no-parent --no-host-directories --page-requisites --execute robots=off --tries=2 --timeout=20 --waitretry=2 --reject='*.zip,*.tar,*.tar.gz,*.tar.xz' --directory-prefix=mirror "$SOURCE/python-3.15.0/python-3.15-docs-html/index.html" >python-crawl.log 2>&1 &
+          python_pid=$!
+          wget --mirror --no-parent --no-host-directories --page-requisites --execute robots=off --tries=2 --timeout=20 --waitretry=2 --reject='*.zip,*.tar,*.tar.gz,*.tar.xz' --directory-prefix=mirror "$SOURCE/rust-1.99.0/index.html" >rust-crawl.log 2>&1 &
+          rust_pid=$!
+          wget --mirror --no-parent --no-host-directories --page-requisites --execute robots=off --tries=2 --timeout=20 --waitretry=2 --reject='*.zip,*.tar,*.tar.gz,*.tar.xz' --directory-prefix=mirror "$SOURCE/cpp-26-wg21-n5050/html/index.html" >cpp-crawl.log 2>&1 &
+          cpp_pid=$!
+          wait "$python_pid" || { echo 'Python crawl had warnings'; tail -n 15 python-crawl.log; }
+          wait "$rust_pid" || { echo 'Rust crawl had warnings'; tail -n 15 rust-crawl.log; }
+          wait "$cpp_pid" || { echo 'C++ crawl had warnings'; tail -n 15 cpp-crawl.log; }
+          for site in python-3.15.0/python-3.15-docs-html rust-1.99.0 cpp-26-wg21-n5050/html; do
+            count=$(find "mirror/offline-docs/$site" -type f | wc -l)
+            echo "$site: $count files"
+            test "$count" -ge 1
+            test -s "mirror/offline-docs/$site/index.html"
+          done
+      - name: Upload mirrored HTML and supporting assets to Cloudflare with signed GitHub identity
+        shell: bash
+        env:
+          UPLOAD_ENDPOINT: https://council-offline-html-upload.council-docs-r2-2f1fd544.workers.dev/upload-batch
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import concurrent.futures,hashlib,json,os,pathlib,subprocess,tempfile,threading,time,urllib.parse
+          ROOT=pathlib.Path('mirror/offline-docs')
+          PREFIXES=('python-3.15.0/python-3.15-docs-html/','rust-1.99.0/','cpp-26-wg21-n5050/html/')
+          lock=threading.Lock()
+          cache=['',0.0]
+          def token():
+              with lock:
+                  if time.monotonic()<cache[1]:return cache[0]
+                  endpoint=os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']
+                  endpoint+=('&' if '?' in endpoint else '?')+'audience='+urllib.parse.quote('council-language-docs-r2-upload-v1')
+                  raw=subprocess.check_output(['curl','-fsSL','--max-time','25','-H','Authorization: Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN'],endpoint])
+                  cache[0]=json.loads(raw)['value']
+                  cache[1]=time.monotonic()+120
+                  return cache[0]
+          def groups(paths):
+              items=[];total=0
+              for p in paths:
+                  name=p.relative_to(ROOT).as_posix()
+                  if not name.startswith(PREFIXES):continue
+                  size=p.stat().st_size
+                  if size>20*1024*1024:raise RuntimeError('Asset exceeds supported upload limit: '+name)
+                  if items and (len(items)>=40 or total+size>10*1024*1024):
+                      yield items
+                      items=[];total=0
+                  items.append(p);total+=size
+              if items:yield items
+          def upload(index, paths):
+              meta=[];chunks=[]
+              for p in paths:
+                  value=p.read_bytes()
+                  meta.append({'path':'offline-docs/'+p.relative_to(ROOT).as_posix(),'size':len(value),'sha256':hashlib.sha256(value).hexdigest()})
+                  chunks.append(value)
+              manifest=json.dumps({'files':meta},separators=(',',':')).encode()
+              content=len(manifest).to_bytes(4,'big')+manifest+b''.join(chunks)
+              for attempt in range(3):
+                  try:
+                      with tempfile.NamedTemporaryFile(mode='wb',suffix='.bin') as tmp:
+                          tmp.write(content);tmp.flush()
+                          response=subprocess.check_output(['curl','--fail-with-body','-sSL','--max-time','180','--retry','1','-A','Mozilla/5.0','-X','POST','-H','Authorization: Bearer '+token(),'-H','Content-Type: application/octet-stream','--data-binary','@'+tmp.name,os.environ['UPLOAD_ENDPOINT']],stderr=subprocess.STDOUT)
+                      result=json.loads(response)
+                      if not result.get('ok') or result.get('count')!=len(paths):raise RuntimeError('Unexpected server response '+str(result)[:180])
+                      return len(paths)
+                  except Exception as error:
+                      if attempt==2:raise RuntimeError('Batch '+str(index)+' failed: '+str(error)[:250]) from error
+                      time.sleep(3*(attempt+1))
+          paths=sorted(p for p in ROOT.rglob('*') if p.is_file())
+          counts={prefix:sum(p.relative_to(ROOT).as_posix().startswith(prefix) for p in paths) for prefix in PREFIXES}
+          print('Mirrored site file counts:',counts,flush=True)
+          if any(v<1 for v in counts.values()):raise RuntimeError('Missing one or more documentation sites')
+          tasks=list(groups(paths))
+          print('R2 upload batches:',len(tasks),flush=True)
+          if not tasks:raise RuntimeError('No files to upload')
+          print('Uploading first batch as authenticated connectivity check',flush=True)
+          total=upload(0,tasks[0])
+          print('First batch accepted:',total,'files',flush=True)
+          with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+              futures=[pool.submit(upload,i,task) for i,task in enumerate(tasks[1:],start=1)]
+              for future in concurrent.futures.as_completed(futures):
+                  total+=future.result()
+                  if total%1000<50:print('Uploaded',total,'of',len(paths),flush=True)
+          print('TRANSFER COMPLETE',total,flush=True)
+          PY
+      - name: Verify R2 public read URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://pub-22a2b42534bc48d98fe9b3415a93963d.r2.dev/offline-docs'
+          for page in \
+            'python-3.15.0/python-3.15-docs-html/index.html' \
+            'rust-1.99.0/index.html' \
+            'cpp-26-wg21-n5050/html/index.html'
+          do
+            echo "Verifying R2 page: $page"
+            curl -fsSL --max-time 20 -o /dev/null "$BASE/$page"
+          done
