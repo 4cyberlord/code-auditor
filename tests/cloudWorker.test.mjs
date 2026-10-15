@@ -100,6 +100,15 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (href.includes("/rest/v1/council_reports")) {
     const row = JSON.parse(init.body);
+    // A progressive report is inserted once and then PATCHed in place as
+    // independent language ports finish. Mimic PostgREST's update semantics
+    // rather than counting each PATCH as a new database row.
+    if (String(init.method || "GET").toUpperCase() === "PATCH") {
+      const id = new URL(href).searchParams.get("job_id")?.replace(/^eq\./, "");
+      const stored = reports.find(report => report.job_id === id);
+      if (stored) Object.assign(stored, row);
+      return json(stored ? [stored] : []);
+    }
     reports.push(row);
     return json([row]);
   }

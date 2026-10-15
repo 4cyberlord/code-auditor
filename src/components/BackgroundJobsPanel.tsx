@@ -16,6 +16,7 @@ import {
 } from "@/lib/sessions";
 import { useStore } from "@/lib/store";
 import { formatWhen } from "@/lib/when";
+import { ProgressiveCouncilResult } from "./ProgressiveCouncilResult";
 import { devLog } from "@/lib/devLog";
 
 const statusTone: Record<SolveJob["status"], "good" | "bad" | "warn" | "live"> = {
@@ -309,6 +310,49 @@ export default function BackgroundJobsPanel() {
   // re-signing every image URL and reloading the report every 15 seconds.
   }, [open, selectedDetailId, selectedDetailStatus, selectedDetailVersion, urlRefresh]);
 
+  // The Council writes its verified preferred-language answer before
+  // optional porting completes. Refresh just the small report JSON while the
+  // cloud job continues; no screenshot re-fetch or re-signing on these ticks.
+  useEffect(()=>{
+    if(!open||!selectedDetailId||selectedDetailStatus!=="running")return;
+    let live=true;let busy=false;
+    const poll=async()=>{
+      if(!live||busy||document.hidden)return;
+      busy=true;
+      try{
+        const latest=await getCouncilReport(selectedDetailId);
+        if(live&&latest)setReport(latest);
+      }catch{/* jobs/events refresh reports connection errors */}
+      finally{busy=false}
+    };
+    void poll();
+    const id=window.setInterval(()=>{void poll()},5000);
+    return ()=>{live=false;window.clearInterval(id)};
+  },[open,selectedDetailId,selectedDetailStatus]);
+
+  // Report rows can be updated after each language translation finishes while
+  // solve_jobs remains in the same 'porting' phase. Refresh only the JSON
+  // report while running; never re-sign or re-read screenshot assets here.
+  useEffect(() => {
+    if (!open || !selectedDetailId || selectedDetailStatus !== "running") return;
+    let live = true;
+    let busy = false;
+    const refreshVerifiedResult = async () => {
+      if (busy || document.hidden) return;
+      busy = true;
+      try {
+        const updated = await getCouncilReport(selectedDetailId);
+        if (live && updated) setReport(updated);
+      } catch (error) {
+        devLog("cloud-jobs", "verified result refresh failed", { error: String(error) });
+      } finally {
+        busy = false;
+      }
+    };
+    const refreshTimer = window.setInterval(() => void refreshVerifiedResult(), 6000);
+    return () => { live = false; window.clearInterval(refreshTimer); };
+  }, [open, selectedDetailId, selectedDetailStatus]);
+
   return (
     <section className="background-jobs" data-open={open}>
       <div
@@ -453,6 +497,7 @@ export default function BackgroundJobsPanel() {
                 <div className="job-report">
                   <div className="job-title">{report.winner || "Council report"}</div>
                   <p>{excerpt(report.synthesis || report.markdown)}</p>
+                  <ProgressiveCouncilResult report={report} processing={selectedJob.status==="running"} />
                 </div>
               ) : selectedJob.error ? (
                 <div className="pane-error">{selectedJob.error}</div>
