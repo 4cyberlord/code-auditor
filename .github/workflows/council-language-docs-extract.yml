@@ -1,8 +1,14 @@
 name: Council language docs extraction
 on:
+  push:
+    branches:
+      - feat/r2-language-retrieval-20261015
+    paths:
+      - .github/workflows/council-language-docs-extract.yml
   workflow_dispatch:
 permissions:
   contents: read
+  id-token: write
 jobs:
   extract:
     runs-on: ubuntu-24.04
@@ -80,3 +86,59 @@ jobs:
             extracted-manifest.json
           retention-days: 7
           if-no-files-found: error
+
+      - name: Upload extracted files to Cloudflare R2 with GitHub OIDC
+        env:
+          UPLOAD_ENDPOINT: https://council-language-docs-upload.council-docs-r2-2f1fd544.workers.dev/upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import concurrent.futures, hashlib, json, os, pathlib, threading, time, urllib.parse, urllib.request
+          base=pathlib.Path('extracted')
+          files=[p for p in base.rglob('*') if p.is_file()]
+          token=''
+          expiry=0
+          lock=threading.Lock()
+          def auth():
+              global token,expiry
+              with lock:
+                  if time.time()<expiry:return token
+                  url=os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']
+                  sep='&' if '?' in url else '?'
+                  url+=sep+'audience='+urllib.parse.quote('council-language-docs-r2-upload-v1')
+                  req=urllib.request.Request(url,headers={'Authorization':'Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
+                  with urllib.request.urlopen(req,timeout=30) as res:
+                      token=json.load(res)['value']
+                  expiry=time.time()+120
+                  return token
+          def upload(p):
+              rel=p.relative_to(base).as_posix()
+              data=p.read_bytes()
+              digest=hashlib.sha256(data).hexdigest()
+              for attempt in range(4):
+                  try:
+                      req=urllib.request.Request(os.environ['UPLOAD_ENDPOINT'],data=data,method='PUT',headers={
+                          'Authorization':'Bearer '+auth(),
+                          'X-Docs-Path':rel,
+                          'X-Docs-Sha256':digest,
+                          'Content-Type':'application/octet-stream'
+                      })
+                      with urllib.request.urlopen(req,timeout=90) as res:
+                          result=json.load(res)
+                      if result.get('sha256')!=digest: raise ValueError('Uploaded checksum differs')
+                      return rel
+                  except Exception:
+                      if attempt==3:raise
+                      time.sleep(2*(attempt+1))
+          failures=[]
+          with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+              future_map={pool.submit(upload,p):p for p in files}
+              for completed in concurrent.futures.as_completed(future_map):
+                  try:completed.result()
+                  except Exception as e:failures.append((str(future_map[completed]),str(e)))
+          print('Total:',len(files),'Failed:',len(failures))
+          if failures:
+              for path,error in failures[:20]:print('FAILED',path,error)
+              raise RuntimeError('R2 upload incomplete')
+          PY
