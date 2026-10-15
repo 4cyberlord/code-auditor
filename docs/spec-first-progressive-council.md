@@ -11,6 +11,49 @@
 7. After primary publication, use that **exact verified source implementation** to produce the requested Rust/C++/Python ports. Each port independently uses the owner's pinned documentation server, language pack, a language-native test harness with independent reference validation, E2B execution, and harness mutation quality check. Ports that do not pass are marked failed, never presented as verified.
 8. Update the same saved report as ports complete, serialized to avoid lost updates. The app polls this report without re-fetching screenshots or interrupting the primary result. Mark the job `completed` only when optional port attempts have finished.
 
+## Provisional result while the judges are still working
+
+After the first candidate finishes E2B with at least one passing case, zero failed
+cases, and a successful run, it may appear as a **provisional** answer instead of
+waiting for every other model, reviewer, and judge. This is restricted to the
+problem's primary language. The cloud worker evaluates the solver's stated
+Big-O bound against the contracted target when both can be conservatively
+normalized to a common single-variable complexity family (for example
+`O(n)` or `O(n log n)`). A missing/unparseable claim, an obviously worse
+claim, an unsuccessful E2B run or a different language stays hidden until the
+Council has completed its decision. This **is not** an independent complexity
+proof; the UI explicitly labels it as an unreviewed claim.
+
+A provisional candidate is **not a Council winner**, nor proof against all
+hidden cases. It is surfaced with that warning so a user with an urgent
+problem may inspect working code while the stronger ranking proceeds. There
+is no immediate oscillation between candidates as faster/slower solvers
+finish: the first passing, screened candidate is retained until the
+independent Council makes its final decision.
+
+The provisional code is inserted into the existing `council_reports` row
+(while the job is still `running`). The final report PATCHes that same row,
+not a second duplicate insert. Both the provisional source and the final
+source appear in `solutionHistory`; a later language-port update also
+preserves them. A failed provisional report write is nonfatal: Council
+continues, and the normal final report insert remains available.
+
+When judges select a different verified candidate or Council improves a
+candidate and successfully reruns the new source, the panel automatically
+switches to the **final selected version** and shows a GitHub-style unified
+line diff. Removed provisional lines are shaded red and new final-winner lines
+green; unchanged lines remain neutral. The old source remains available
+under "View previous provisional version" for comparison or copying. A
+bounded in-app diff algorithm avoids quadratic-memory work on very large
+source files. No second model request, Git commit, or destructive source
+replacement is needed.
+
+**Status hierarchy:** `provisional` = passed generated E2B tests and a
+preliminary claim screen; `final` = Council-reviewed, chosen via its
+deterministic tested-code winner gate; `port verified` = separately
+translated code that passed its language-native E2B suite. Complexity and
+runtime claims are always qualified independently of these test statuses.
+
 ## Complexity and timing decisions
 
 - `O(n)` is a goal **only where the problem admits linear complexity**. A problem requiring `O(n log n)`, `O(V+E)`, `O(log n)`, or otherwise must not be falsely labeled linear.
