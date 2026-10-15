@@ -2403,6 +2403,73 @@ textarea.field {
   max-height: 320px;
   overflow-y: auto;
 }
+.progressive-result-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.council-upgrade-diff {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.council-upgrade-diff > summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 9px;
+}
+.council-diff-header {
+  display: flex;
+  gap: 16px;
+  padding: 6px 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.council-diff-removed-label { color: #dc7272; }
+.council-diff-added-label { color: #4eb982; }
+.council-diff-lines {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-x: auto;
+  max-height: 400px;
+  padding: 3px 0;
+  background: var(--code-bg);
+}
+.council-diff-line {
+  display: grid;
+  grid-template-columns: 36px 36px 16px minmax(max-content, 1fr);
+  min-height: 18px;
+  white-space: pre;
+  align-items: baseline;
+}
+.council-diff-line[data-kind="removed"] {
+  background: color-mix(in srgb, #df5555 18%, var(--code-bg));
+  color: #f1a5a5;
+}
+.council-diff-line[data-kind="added"] {
+  background: color-mix(in srgb, #23a066 18%, var(--code-bg));
+  color: #a2e5bc;
+}
+.council-diff-number {
+  color: var(--text-faint);
+  text-align: right;
+  padding: 0 5px 0 0;
+  user-select: none;
+}
+.council-diff-marker {
+  text-align: center;
+  user-select: none;
+}
+.council-diff-line code {
+  font: inherit;
+  white-space: pre;
+  padding-right: 12px;
+}
 .progressive-result-ports {
   display: grid;
   gap: 8px;
