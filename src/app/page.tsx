@@ -11,6 +11,7 @@ import KnowledgeWorkspace from "@/components/KnowledgeWorkspace";
 import CodingWorkspace from "@/components/CodingWorkspace";
 import BootScreen from "@/components/BootScreen";
 import HistoryPanel from "@/components/HistoryPanel";
+import RemoteHistory from "@/components/RemoteHistory";
 import InputBar from "@/components/InputBar";
 import StoryStripIntake from "@/components/StoryStripIntake";
 import StoryResultWorkspace from "@/components/StoryResultWorkspace";
@@ -271,13 +272,15 @@ function Workbench() {
         </div>}
         <div style={{ position: "relative" }}>
           <button className="btn tiny ghost" onClick={() => { setTopMenu(topMenu === "history" ? null : "history"); void loadHistory(); }}>History</button>
-          {topMenu === "history" && <div style={{ position: "absolute", zIndex: 50, right: 0, top: 34, width: 350, maxHeight: 430, overflowY: "auto", background: "var(--panel)", border: "1px solid var(--line-strong)", borderRadius: 12, padding: 14, boxShadow: "var(--shadow)" }}>
+          {topMenu === "history" && <div style={{ position: "absolute", zIndex: 50, right: 0, top: 34, width: "min(460px, calc(100vw - 20px))", maxHeight: 560, overflowY: "auto", background: "var(--panel)", border: "1px solid var(--line-strong)", borderRadius: 12, padding: 14, boxShadow: "var(--shadow)" }}>
             <strong style={{ fontSize: 13 }}>Saved solutions</strong>
+            <p className="hint">Completed and in-progress work from all your Macs.</p>
             {historyError && <p className="hint" role="alert">{historyError}</p>}
             {history.length ? history.map(item => <button key={item.id} className="btn tiny ghost" style={{ display: "block", width: "100%", textAlign: "left", height: "auto", padding: "12px 8px", marginTop: 5 }} disabled={running} onClick={() => { setIntakeOpen(false); setStoryMode(true); void openRun(item.id); setTopMenu(null); }}>
               <span style={{ display: "block" }}>{item.title || "Captured question"}</span>
               <small className="hint">{new Date(item.startedAt).toLocaleString()} · {item.answered} answers · {item.verdict || "No verdict"}</small>
-            </button>) : !historyError && <p className="hint">No saved analyses yet.</p>}
+            </button>) : !historyError && <p className="hint">No ordinary desktop runs yet.</p>}
+            <RemoteHistory />
           </div>}
         </div>
         <button
