@@ -41,12 +41,16 @@ export function extractVerifiedCodeStructure(source,language="python"){
   const assigned=python
     ? allMatches(code,/^\s*([A-Za-z_]\w*)\s*(?::\s*[^=\n]+)?=(?!=)/gm,40).map(m=>m[1])
     : allMatches(code,/\b(?:let|const|var)\s+(?:mut\s+)?([A-Za-z_]\w*)/g,40).map(m=>m[1]);
-  const loopVars=python?allMatches(code,/^\s*for\s+([A-Za-z_]\w*)\s+in\s+/gm,20).map(m=>m[1]):[];
+  const loopVars=python
+    ? allMatches(code,/^\s*for\s+([^\n:]{1,90}?)\s+in\s+/gm,20).flatMap(m=>
+        m[1].replace(/[()]/g,"").split(",").map(p=>p.trim())
+          .filter(p=>/^[A-Za-z_]\w*$/.test(p)))
+    : [];
   const imports=python
     ? allMatches(code,/^\s*(?:from\s+[^\n]+\s+import\s+[^\n]+|import\s+[^\n]+)/gm,15).map(m=>trimText(m[0],110))
     : allMatches(code,/^\s*(?:#include\s*[<"][^>"]+[>"]|use\s+[A-Za-z0-9_:{}*,\s]+;)/gm,15).map(m=>trimText(m[0],110));
   const dataStructures=uniq([
-    detection(code,/\b(?:dict|defaultdict|Counter)\s*\(|\{[^}\n]*:/)?"dictionaries / hash maps":"",
+    detection(code,/\b(?:dict|defaultdict|Counter|HashMap)\s*\(|=\s*\{|\{[^}\n]*:/)?"dictionaries / hash maps":"",
     detection(code,/\bset\s*\(|\bHashSet\b/)?"sets":"",
     detection(code,/\b(?:list|deque|Vec)\b|\[[^\]\n]*(?:,|\bfor\b)[^\]\n]*\]|\.append\s*\(|\.push\s*\(/)?"lists / dynamic arrays":"",
     detection(code,/\bheapq\b|\bBinaryHeap\b/)?"heaps / priority queues":"",
