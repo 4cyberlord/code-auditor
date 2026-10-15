@@ -71,7 +71,7 @@ export function extractVerifiedCodeStructure(source,language="python"){
     detection(code,/\.append\s*\(|\.extend\s*\(|\.push\s*\(/)?"appending to a collection":"",
     detection(code,/\.pop\s*\(|\.remove\s*\(|\.discard\s*\(/)?"removing collection elements":"",
     detection(code,/\.sort\s*\(|\.reverse\s*\(/)?"sorting or reversing an existing collection":"",
-    detection(code,/\[[^\]\n]+\]\s*(?:=|\+=|-=)/)?"assignment to an indexed element":"",
+    detection(code,/\b[A-Za-z_]\w*\s*\[[^\]\r\n]+\]\s*(?:=(?!=)|\+=|-=)/m)?"assignment to an indexed element":"",
   ],10);
   return {
     language:lang,
