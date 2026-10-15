@@ -17,12 +17,12 @@ export function preferredLanguages(configured, fallback=["python","rust","cpp"])
  */
 export function requiredProblemLanguage(question){
  const text=String(question||"").slice(0,18000);
- const direct=/(?:required|target|programming|implementation|output)\\s*language\\s*[:=]\\s*(python|rust|c\\+\\+|cpp)\\b/i.exec(text)
-   ||/\\b(?:implement|write|solve|code)\\s+(?:this|it|the\\s+solution|the\\s+program)?\\s*in\\s+(python|rust|c\\+\\+|cpp)\\b/i.exec(text);
+ const direct=/(?:required|target|programming|implementation|output)\s*language\s*[:=]\s*(python|rust|c\+\+|cpp)\b/i.exec(text)
+   ||/\b(?:implement|write|solve|code)\s+(?:this|it|the\s+solution|the\s+program)?\s*in\s+(python|rust|c\+\+|cpp)\b/i.exec(text);
  if(direct)return canonicalPortLanguage(direct[1]);
- if(/#include\\s*[<"]|\\bstd::|\\bclass\\s+Solution\\s*\\{/.test(text))return "cpp";
- if(/\\bfn\\s+main\\s*\\(|\\bimpl\\s+Solution\\b/.test(text))return "rust";
- if(/\\bdef\\s+[a-z_]\\w*\\s*\\(|\\bclass\\s+Solution\\s*:\\s*/.test(text))return "python";
+ if(/#include\s*[<"]|\bstd::|\bclass\s+Solution\s*\{/.test(text))return "cpp";
+ if(/\bfn\s+main\s*\(|\bimpl\s+Solution\b/.test(text))return "rust";
+ if(/\bdef\s+[a-z_]\w*\s*\(|\bclass\s+Solution\s*:\s*/.test(text))return "python";
  return "";
 }
 export function contractSupportsEarlyHarness(question,kind){
