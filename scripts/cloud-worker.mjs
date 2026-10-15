@@ -28,7 +28,7 @@ import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/
 import { fetchLanguageViaGateway } from "./lib/supabaseLanguageGateway.mjs";
 import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
 import { phaseTimer } from "./lib/phaseTimings.mjs";
-import { preferredLanguages, contractSupportsEarlyHarness, isVerified, evidenceStatus, createBoundedExecutor } from "./lib/specFirstDelivery.mjs";
+import { preferredLanguages, requiredProblemLanguage, contractSupportsEarlyHarness, isVerified, evidenceStatus, createBoundedExecutor } from "./lib/specFirstDelivery.mjs";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -2431,7 +2431,7 @@ export async function runCouncilJob(job) {
   const policy = solutionPolicy(
     Array.isArray(settings.solutionLanguages) && settings.solutionLanguages.length
       ? settings.solutionLanguages
-      : undefined,
+      : ["Python","Rust","C++"],
     Number(settings.memoryTargetKb || 20 * 1024)
   );
   // No knowledge argument here on purpose. `knowledgePackFor` retrieves against
@@ -2484,10 +2484,12 @@ export async function runCouncilJob(job) {
   // called code: retrieving cp-algorithms and perf counters for a
   // multiple-choice question is noise charged four times over.
   const inferredKind = contracting.contract?.kind || reading.extraction?.kind || "";
+  const orderedLanguages=preferredLanguages(settings.solutionLanguages);
+  const primaryLanguage=requiredProblemLanguage(question)||orderedLanguages[0]||"python";
   const documentationQuery = [question, reading.extraction?.problemSummary,
     reading.extraction?.code].filter(Boolean).join("\n");
   const detectedDocsLanguage = inferDocumentationLanguage(documentationQuery,
-    reading.extraction?.language || settings.outputLanguage || "");
+    reading.extraction?.language || settings.outputLanguage || primaryLanguage);
   // Proactive reference lookup before the first solver: bounded, cached,
   // server-side and topic-specific, never a full-site download.
   // Both reads depend on the completed problem contract, but NOT on each other.
@@ -2513,7 +2515,12 @@ export async function runCouncilJob(job) {
     contractText,
   ]
     .filter(Boolean)
-    .join("\n\n---\n\n");
+    .join("\n\n---\n\n")+
+    (inferredKind==="code"
+      ? "\n\nThe FIRST solving stage must output only "+primaryLanguage+
+        " code unless the original problem explicitly demands another language."+
+        " Rust and C++ translations will be generated later from the E2B-verified winning solution."
+      : "");
 
   // The contract pass is the cheapest call of the run, which makes it the right
   // place to find out a route is dead. A model that timed out reading the
@@ -2546,8 +2553,6 @@ export async function runCouncilJob(job) {
   });
   const solverSystem = systemPrompt(settings.mode || "auto", answerLanguage);
   const candidates = [];
-  const orderedLanguages=preferredLanguages(settings.solutionLanguages);
-  const primaryLanguage=orderedLanguages[0]||"python";
   const earlyLanguages=contractSupportsEarlyHarness(
     [reading.context,contractText,question].filter(Boolean).join("\n"),inferredKind
   )?[primaryLanguage]:[];
@@ -3148,11 +3153,12 @@ export async function runCouncilJob(job) {
   const markdown = await saveCouncilReport(job, report);
   // This saved report is already visible to the Mac UI while job.status is
   // still running. Translation is optional work, not an answer-delivery gate.
-  await addEvent(job.id,"info","primary_solution_ready",
-    "Verified "+candidateLanguage(verifiedSource||{})+
-    " solution available now; additional language ports will follow.",
-    {winner:decision.winner,language:candidateLanguage(verifiedSource||{}),
-     code:verifiedSource?.code||"",ports:targets});
+  if(isCoding&&verifiedSource?.code&&isVerified(gateRuns[decision.winner])){
+    await addEvent(job.id,"info","primary_solution_ready",
+      "Verified "+candidateLanguage(verifiedSource)+
+      " solution available now; independent language ports will follow.",
+      {winner:decision.winner,language:candidateLanguage(verifiedSource),ports:targets});
+  }
   if(targets.length){
     await patchJob(job.id,{progress_phase:"porting"});
     let reportWrite=Promise.resolve();
