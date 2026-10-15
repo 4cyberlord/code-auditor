@@ -29,3 +29,21 @@ jobs:
           node tests/authoritativeLanguageDocs.test.mjs
           node tests/externalLanguageSources.test.mjs
           node tests/languageRegistry.test.mjs
+
+      - name: Smoke-test live personal-server documentation pages
+        run: |
+          node --input-type=module <<'NODE'
+          import {fetchAuthoritativeLanguageContext} from './scripts/lib/authoritativeLanguageDocs.mjs';
+          const cases=[
+            ['python','Need a Python heap and priority queue'],
+            ['rust','Need Rust ownership and borrowing references'],
+            ['cpp','Need C++23 templates and overload resolution']
+          ];
+          for (const [language,question] of cases) {
+            const result=await fetchAuthoritativeLanguageContext(question,{language,timeoutMs:5000});
+            console.log(language,result.source,result.pages.map(p=>p.path));
+            if(result.source!=='personal-server'||!result.pages.length){
+              throw new Error('No usable personal-server HTML reference for '+language);
+            }
+          }
+          NODE
