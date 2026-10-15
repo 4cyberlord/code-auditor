@@ -91,5 +91,7 @@ jobs:
         run: |
           set -euo pipefail
           ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/extracted/" --recursive | grep -E '\.html$' | head -n 1
+          aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/extracted/" --recursive | grep -m 1 -E '\.html
+          aws --endpoint-url "$ENDPOINT" s3api head-object --bucket "$BUCKET" --key manifests/extracted-files.json >/dev/null
+
           aws --endpoint-url "$ENDPOINT" s3api head-object --bucket "$BUCKET" --key manifests/extracted-files.json >/dev/null
