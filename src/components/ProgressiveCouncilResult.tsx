@@ -57,8 +57,9 @@ export function ProgressiveCouncilResult({
       {early?.complexity&&<p>Preliminary Big-O claim: {early.complexity} (not independently audited yet)</p>}
       <p className="progressive-result-note">
         This version passed the generated E2B test cases and initial complexity screening.
-        The other solvers, independent complexity judges, and final decision are still running.
-        The displayed code may be replaced if a better verified candidate wins.
+        {processing
+          ? "Other solvers and independent complexity judges are still working. The Council may replace this code with a stronger verified solution."
+          : "The Council did not finish its final decision. This provisional code is not an authoritative final answer."}
       </p>
       <details open>
         <summary>Show provisional {early?.language||"source"} code</summary>
