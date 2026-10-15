@@ -28,6 +28,7 @@ import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/
 import { fetchLanguageViaGateway } from "./lib/supabaseLanguageGateway.mjs";
 import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
 import { phaseTimer } from "./lib/phaseTimings.mjs";
+import { preferredLanguages, contractSupportsEarlyHarness, isVerified, evidenceStatus, createBoundedExecutor } from "./lib/specFirstDelivery.mjs";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1254,21 +1255,9 @@ async function runMutationOracle(job, settings, suites, candidates, runs) {
   }
 }
 
-async function benchmarkCandidates(job, settings, baseUrl, models, judges, question, candidates, knowledge = "", bench) {
-  const codeCandidates = candidates.filter((c) => c.final?.kind === "code" && c.final.code?.trim());
-  if (!codeCandidates.length) {
-    await addEvent(
-      job.id,
-      "info",
-      "benchmark_skipped",
-      "No runnable code candidate; MCQ, math, research and plain-answer jobs use Council reasoning validation instead of code execution."
-    );
-    return { suites: [], runs: {}, oracles: [] };
-  }
-
-  await patchJob(job.id, { progress_phase: "speccing" });
-  await addEvent(job.id, "info", "speccing", "Generating language-specific benchmark harnesses.");
-  const languages = Array.from(new Set(codeCandidates.map((c) => candidateLanguage(c.final)).filter(Boolean)));
+async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, question, candidates, languages, knowledge, bench) {
+  if(!languages.length)return [];
+  await addEvent(job.id,"info","harness_preparing","Preparing specification-derived E2B tests for "+languages.join(", "),{languages});
   const specModels = [...new Set([
     settings.synthesisModel, ...judges.map(judge => judge.model), ...models.map(model => model.id),
   ].filter(Boolean))];
@@ -1329,7 +1318,7 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
         const specText = await tokenRouterGenerate({
           settings, baseUrl, model, system: testSpecSystemPrompt(),
           user: testSpecUserPrompt({
-            question, docket: candidateDocket(candidates), languages: [language],
+            question, docket: candidateDocket(candidates) || "No candidate code exists yet. Derive the test cases, outputs and API signature only from the problem specification.", languages: [language],
             knowledge: [
               languageKnowledge,
               lastError ? `THE PRIOR HARNESS WAS REJECTED: ${lastError.slice(0, 650)}. Repair only the harness.` : "",
@@ -1385,10 +1374,34 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
     throw new Error(`Cannot verify coding solution in E2B: no executable ${missing.join(", ")} test harness was produced. ${missing.map(language=>failures.get(language)).filter(Boolean).join(" | ")}`);
   }
 
+
+  return suites;
+}
+
+async function benchmarkCandidates(job, settings, baseUrl, models, judges, question, candidates, knowledge = "", bench, options = {}) {
+  const codeCandidates=candidates.filter(c=>c.final?.kind==="code"&&c.final.code?.trim());
+  if(!codeCandidates.length){
+    await addEvent(job.id,"info","benchmark_skipped","No runnable code candidate.");
+    return {suites:[],runs:{},oracles:[]};
+  }
+  const languages=[...new Set(codeCandidates.map(c=>candidateLanguage(c.final)).filter(Boolean))];
+  const early=options.preparedSuites?await options.preparedSuites:[];
+  const suitesEarly=early.filter(suite=>languages.includes(suite.language));
+  const needed=missingSuiteLanguages(languages,suitesEarly);
+  const later=needed.length?await prepareProblemHarnesses(job,settings,baseUrl,models,judges,question,candidates,needed,knowledge,bench):[];
+  const suites=[...suitesEarly,...later];
+  const missing=missingSuiteLanguages(languages,suites);
+  if(missing.length)throw new Error("No executable E2B harness for "+missing.join(", "));
   await patchJob(job.id, { progress_phase: "verifying" });
   await addEvent(job.id, "info", "verifying", `Running ${codeCandidates.length} candidates through generated benchmarks.`);
-  const runs = await executeField(job, settings, suites, candidates);
-  const oracles = await runMutationOracle(job, settings, suites, candidates, runs);
+  const eagerEntries=await Promise.all([...(options.eagerRuns||new Map())].map(async ([letter,promise])=>{
+    try{return [letter,await promise]}catch{return [letter,null]}
+  }));
+  const completed=Object.fromEntries(eagerEntries.filter(([,run])=>run));
+  const stillPending=candidates.filter(candidate=>!completed[candidate.letter]);
+  const remaining=stillPending.length?await executeField(job,settings,suites,stillPending):{};
+  const runs={...completed,...remaining};
+  const oracles=await runMutationOracle(job, settings, suites, candidates, runs);
   return { suites, runs, oracles };
 }
 
@@ -2447,6 +2460,20 @@ export async function runCouncilJob(job) {
   });
   const solverSystem = systemPrompt(settings.mode || "auto", answerLanguage);
   const candidates = [];
+  const orderedLanguages=preferredLanguages(settings.solutionLanguages);
+  const primaryLanguage=orderedLanguages[0]||"python";
+  const earlyLanguages=contractSupportsEarlyHarness(
+    [reading.context,contractText,question].filter(Boolean).join("\n"),inferredKind
+  )?[primaryLanguage]:[];
+  const preparedSuites=earlyLanguages.length
+    ? prepareProblemHarnesses(job,settings,baseUrl,models,judges,question,[],earlyLanguages,knowledge,bench)
+      .catch(async err=>{
+        await addEvent(job.id,"warn","early_harness_fallback","Early E2B harness unavailable; candidate-aware fallback remains enabled.",
+          {detail:String(err).slice(0,180)}).catch(()=>{});
+        return [];
+      }):Promise.resolve([]);
+  const scheduleE2B=createBoundedExecutor(workerConcurrency(process.env.CODE_AUDITOR_E2B_CONCURRENCY,4,9));
+  const eagerRuns=new Map();
 
   timer.enter("solving");
   await bench.announce("solving", models.filter((m) => bench.has(m.id)).map((m) => m.id));
@@ -2474,6 +2501,19 @@ export async function runCouncilJob(job) {
         });
         const final = parseFinal(text);
         candidates[index] = { letter, model: spec.id, final, text, error: null };
+        if(final?.kind==="code"&&final.code?.trim()&&earlyLanguages.includes(candidateLanguage(final))){
+          eagerRuns.set(letter,scheduleE2B(async()=>{
+            const ready=await preparedSuites;
+            const suite=ready.find(item=>item.language===candidateLanguage(final));
+            if(!suite)return null;
+            const output=await executeField(job,settings,[suite],[candidates[index]]);
+            return output[letter]||null;
+          }).catch(async err=>{
+            await addEvent(job.id,"warn","eager_e2b_fallback","Early Candidate "+letter+" execution failed to start; normal E2B remains available.",
+              {letter,detail:String(err).slice(0,180)}).catch(()=>{});
+            return null;
+          }));
+        }
         await addEvent(job.id, "info", "solver_done", `${spec.id} answered as Candidate ${letter}.`, {
           model: spec.id,
           letter,
@@ -2559,7 +2599,7 @@ export async function runCouncilJob(job) {
   const councilKnowledge = [initialReference.prompt,knowledge].filter(Boolean).join("\n\n");
 
   timer.enter("benchmark");
-  const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field, knowledge, bench);
+  const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field, knowledge, bench, {preparedSuites,eagerRuns});
   const docket = candidateDocket(field);
   // An execution backend that is down makes every candidate "untested", which
   // reads exactly like every candidate being useless. It is not the same thing
@@ -2610,7 +2650,11 @@ export async function runCouncilJob(job) {
 
   const reviewSets = [];
 
-  const reviewing = bench.keep(models, (m) => m.id);
+  const verifiedCandidates=field.filter(c=>isVerified(benchmark.runs[c.letter]));
+  await addEvent(job.id,"info","candidate_evidence",
+    "E2B verified "+verifiedCandidates.length+" of "+field.length+" candidates.",
+    {candidates:field.map(c=>({letter:c.letter,status:evidenceStatus(benchmark.runs[c.letter])}))});
+  const reviewing=verifiedCandidates.length?bench.keep(models,(m)=>m.id):[];
   await bench.announce("reviewing", models.filter((m) => bench.has(m.id)).map((m) => m.id));
   await addEvent(job.id, "info", "reviewing", `Collecting ${reviewing.length} Council review passes.`);
   await Promise.all(
@@ -2621,7 +2665,7 @@ export async function runCouncilJob(job) {
           baseUrl,
           model: spec.id,
           system: reviewSystemPrompt(),
-          user: reviewUserPrompt({ question, docket, execution, knowledge: councilKnowledge }),
+          user: reviewUserPrompt({ question, docket: candidateDocket(verifiedCandidates), execution, knowledge: councilKnowledge }),
           maxTokens: Number(settings.maxTokens || 4096),
         });
         const parsed = parseReviewSet(text, spec.id);
@@ -2654,8 +2698,13 @@ export async function runCouncilJob(job) {
   // re-answering a question already answered.
   let field3 = field;
   let revisedRuns = {};
-  const revisionCandidates = field.filter((candidate) =>
-    needsCandidateRevision(benchmark.runs[candidate.letter], reviewsOf(reviewSets, candidate.letter))
+  // Never spend a repair round on failed candidates. Improve only correct
+  // candidates when a reviewer identifies a substantive concern.
+  const revisionCandidates=verifiedCandidates.filter(candidate=>
+    reviewsOf(reviewSets,candidate.letter).some(review=>
+      review.correct==="no" || (review.correct==="unsure" &&
+        !/^(none|no issue|n\/a|not applicable)$/i.test(String(review.problems||"").trim()))
+    )
   );
   // Reviews still reach every judge and the final synthesis. Only candidates
   // with execution failure or a substantive correctness concern incur a second
