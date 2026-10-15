@@ -51,10 +51,19 @@ jobs:
         env:
           CODE_AUDITOR_ALLOW_ADHOC: '1'
         run: npm run helper:sidecar
-      - name: Build desktop application (unsigned CI build)
+      - name: Build desktop application (ad-hoc CI validation only)
         env:
           CODE_AUDITOR_ALLOW_ADHOC: '1'
-        run: npm run app:build
+        run: |
+          # The checked-in Tauri config deliberately requires a real
+          # Developer ID for distributable releases. GitHub PR runners do
+          # not have that certificate. Override only this CI build.
+          APPLE_SIGNING_IDENTITY=- npx tauri build --bundles app
+          # Clear signing identity before the local-use DMG helper; a
+          # distributable signed/notarized release remains a separate gate.
+          node scripts/package-dmg.mjs
+          test -d "src-tauri/target/release/bundle/macos/Council Editor.app"
+          find src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -type f -size +1M | grep -q .
 
   docker-runtime-containment:
     runs-on: ubuntu-26.04
