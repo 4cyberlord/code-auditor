@@ -2389,6 +2389,20 @@ textarea.field {
   font-family: var(--font-mono);
   font-size: 11px;
 }
+.progressive-result-brief {
+  white-space: pre-wrap;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  border: 1px solid var(--line);
+  background: var(--bg-sunken);
+  border-radius: 6px;
+  padding: 9px;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow-y: auto;
+}
 .progressive-result-ports {
   display: grid;
   gap: 8px;
