@@ -38,10 +38,11 @@ fn client() -> Result<reqwest::Client, String> {
 
 /// Uploads one screenshot and returns where it landed.
 ///
-/// The path is `<session>/<position>-<name>`, so an object's address says which
-/// problem it belongs to and where in the sequence it sat. Ordering matters here
-/// -- the panel is told which screenshot is first and which is last -- and an
-/// address that carries it means the order survives even if a row is lost.
+/// Every Azure object lives beneath `<owner>/azure/<session>/<submission>/`.
+/// A submission is one immutable ordered batch, so images from another attempt
+/// or a refreshed application can never be selected by a model URL for this
+/// work. Ordering matters here -- the panel is told which screenshot is first
+/// and which is last -- and the index survives even if a database row is lost.
 #[tauri::command]
 pub async fn storage_upload(
     db: tauri::State<'_, crate::db::Db>,
@@ -61,7 +62,7 @@ pub async fn storage_upload(
     // Ownership lives in the path, because at upload time there is no row to
     // check it against — the screenshot record is written afterwards.
     let owner = crate::auth::current().ok_or(crate::auth::LOCKED)?.user_id;
-    let (path, idempotent) = if let Some(submission) = submission_id {
+    let (path, idempotent) = if let Some(ref submission) = submission_id {
         let parsed = uuid::Uuid::parse_str(&submission)
             .map_err(|_| "Invalid submission identity.")?;
         let index = position.ok_or("Screenshot position required for a durable submission.")?;
@@ -72,9 +73,16 @@ pub async fn storage_upload(
     };
 
     if backend.as_deref() == Some("azure") {
-        // Keep the destination recoverable even against an older server API
-        // that does not yet include storageBucket in screenshot-list responses.
-        let path = format!("{owner}/azure/{session_id}/{}", safe_name(&file_name));
+        // Azure is the model-facing source of truth. Do not permit a legacy,
+        // session-wide path here: it could mingle captures from separate
+        // submissions and make an image set ambiguous after an app refresh.
+        let submission = submission_id.as_deref()
+            .ok_or("Azure screenshot uploads require a submission identity.")?;
+        let parsed = uuid::Uuid::parse_str(submission)
+            .map_err(|_| "Invalid submission identity.")?;
+        let index = position.ok_or("Screenshot position required for an Azure submission.")?;
+        if index >= 10 { return Err("Screenshot position is out of range.".into()); }
+        let path = format!("{owner}/azure/{session_id}/{parsed}/{index}-{}", safe_name(&file_name));
         let uploaded_bytes = bytes.len();
         crate::azure_storage::upload(&path, if mime.is_empty() { "image/png" } else { &mime }, bytes).await?;
         return Ok(Uploaded {

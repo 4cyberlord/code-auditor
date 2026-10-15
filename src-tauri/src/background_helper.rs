@@ -96,7 +96,7 @@ fn helper_status_path() -> Result<PathBuf, String> {
     Ok(support_dir()?.join("cache/helper-status.json"))
 }
 
-// A numeric 14 request is background-only. If macOS sends a Reopen event
+// A numeric 13 request is background-only. If macOS sends a Reopen event
 // during its delivery, do not activate the main window as a side effect.
 static HEADLESS_PROCESS_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 

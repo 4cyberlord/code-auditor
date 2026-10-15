@@ -361,6 +361,18 @@ export interface CandidateRun {
   };
 }
 
+/** An equivalent implementation derived from the verified winning candidate. */
+export interface VerifiedPort {
+  language: string;
+  /** The winning candidate this implementation must preserve semantically. */
+  sourceLetter: string;
+  model: string;
+  code: string;
+  status: "verified" | "failed";
+  run?: CandidateRun;
+  error?: string;
+}
+
 /**
  * Reads one program's stdout for the harness convention: one line per case,
  * `PASS name` or `FAIL name`. A crash mid-run shows up as a short count, which
@@ -374,6 +386,27 @@ export function countCases(stdout: string): { passed: number; failed: number } {
     else if (/^\s*FAIL\b/.test(line)) failed += 1;
   }
   return { passed, failed };
+}
+
+/**
+ * A shared, named assertion failure across every independently generated
+ * candidate is evidence about the *test suite*, not yet evidence that every
+ * implementation is wrong. It is deliberately strict: crashes, timeouts,
+ * and merely similar errors do not qualify. This lets the coordinator ask
+ * for one independent replacement harness without weakening the verification
+ * gate for ordinary candidate failures.
+ */
+export function sharedHarnessFailure(runs: readonly CandidateRun[]): string | null {
+  if (runs.length < 2 || runs.some((run) => gateFor(run) !== "fail")) return null;
+  const signatures = runs.map((run) =>
+    (run.stdout ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /^FAIL\b/.test(line))
+      .join("\n")
+  );
+  if (signatures.some((signature) => !signature)) return null;
+  return signatures.every((signature) => signature === signatures[0]) ? signatures[0] : null;
 }
 
 /**
@@ -895,6 +928,7 @@ export type CouncilPhase =
   | "reverifying"
   | "judging"
   | "synthesizing"
+  | "porting"
   | "done"
   | "error"
   | "cancelled";
@@ -935,6 +969,8 @@ export interface CouncilReport {
   presentation?: Presentation | null;
   /** Orthogonal checks on the harness itself, when any were run. */
   oracles?: OracleSignal[];
+  /** Optional language-native equivalents of the verified winner. */
+  ports?: VerifiedPort[];
 }
 
 // --------------------------------------------------------------------- prompts
@@ -1450,7 +1486,12 @@ export function testSpecSystemPrompt(): string {
     "   break a plausible-but-wrong approach. Do not assume every listed edge case is",
     "   valid: respect the input constraints and the required function signature.",
     "   Compute expected outputs from the stated rules or a simple independent reference",
-    "   implementation, never by running a candidate or copying its answer.",
+    "   implementation, never by running a candidate or copying its answer. For every",
+    "   synthetic, adversarial, randomized, or boundary case, calculate the expected",
+    "   value by calling that independent oracle inside the harness. Hard-code expected",
+    "   values only for exact examples printed in the problem statement. Never hand-derive",
+    "   a custom expected value when the harness already contains an oracle; that creates",
+    "   false failures when a path or boundary condition was overlooked.",
     "   Include at least one performance-shaped case when constraints are available, so",
     "   quadratic/brute-force candidates are exposed by size or structure.",
     "3. One output line per case: `PASS <name>` on success, `FAIL <name> got=<x> want=<y>` on",
@@ -1461,13 +1502,16 @@ export function testSpecSystemPrompt(): string {
     "harness as one Main.java, and a second public class in one file will not compile.",
     "",
     "Output one block, exactly once:\n\n<<<TESTS\nHARNESS: <language>\n```<language>",
-    "<complete program with the <<<SOLUTION>>> marker>\n```\nHARNESS: <next language>\n```...```",
-    "\nTESTS>>>",
+    "<complete program with the <<<SOLUTION>>> marker>\n```\nREFERENCE: <language>\n```<language>",
+    "<complete independent reference implementation>\n```\nHARNESS: <next language>\n```...```\nTESTS>>>",
     "",
-    "When the question permits an independent known-correct implementation, append",
-    "REFERENCE: <language> and a fenced complete implementation using the same",
-    "signature as the harness marker. Do not copy a candidate or its proposed",
-    "expected values. Omit the reference if it cannot be independently established.",
+    "Append REFERENCE: <language> and a fenced complete, independent reference",
+    "implementation using the same signature as the harness marker. This is mandatory",
+    "for every runnable harness: E2B will run it through the harness before candidates",
+    "are tested. Do not copy a candidate or its proposed expected values. The reference",
+    "and every in-harness oracle must agree with all hard-coded statement examples before",
+    "you emit the suite. If an independent reference cannot be established, output no",
+    "harness rather than an unvalidated one.",
     "Every runnable case must assert its expected result, not merely call the code.",
     "Before emitting the harness, perform a language-level self-review: every variable in a",
     "comprehension, loop, closure, and expected-value expression must be defined in scope;",

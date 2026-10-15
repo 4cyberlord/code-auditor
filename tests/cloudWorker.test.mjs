@@ -391,17 +391,17 @@ check(
   textOf(judgeCall).slice(0, 200)
 );
 
-// --- the problem contract, read before anybody answered ---------------------
-check("the readers agreed on the problem", events.some((e) => e.phase === "problem_contract_done"));
+// --- trusted screenshot readings avoid a duplicate contract gate ------------
+check("an agreed reading starts the solvers without a second contract pass", events.some((e) => e.phase === "problem_contract_reused"));
 const firstSolverText = textOf(modelCalls.find((c) => String(c.messages[0].content).includes("independent expert agents")));
 check(
-  "the contract reached the solvers",
-  firstSolverText.includes("PROBLEM CONTRACT") && firstSolverText.includes("function solve(xs)"),
+  "the verified reading reached the solvers",
+  firstSolverText.includes("READING OF THE SCREENSHOT") && firstSolverText.includes("function solve(xs)"),
   firstSolverText.slice(-400)
 );
 check(
-  "and the same contract reached the judges",
-  textOf(judgeCall).includes("PROBLEM CONTRACT"),
+  "and the same reading reached the judges",
+  textOf(judgeCall).includes("READING OF THE SCREENSHOT"),
   textOf(judgeCall).slice(0, 200)
 );
 
@@ -423,11 +423,11 @@ check(
 );
 check("provenance names the model behind the winner", Boolean(presentation?.provenance?.includes("Candidate A")), String(presentation?.provenance));
 
-// --- reconstruction, then solving -------------------------------------------
+// --- reconstruction plus independent visual solving --------------------------
 //
-// Reading a screenshot and solving what is in it are different skills, so two
-// ranked readers reconstruct the problem first and the solvers work from that.
-// The picture only travels on to the solvers when the readers disputed it.
+// Reading a screenshot and solving what is in it are different skills. Readers
+// provide shared context, but every solver must independently inspect the
+// original image even when those readers agree.
 // A solver is the seat told it is one of several working the same problem.
 // Identifying it by that rather than by "not one of the other phases" means a
 // new phase cannot silently become "the solver" in this test.
@@ -442,20 +442,22 @@ const solverText = contentOf(solverCall);
 check("the screenshot was reconstructed first", events.some((e) => e.phase === "reading_done"));
 check("two readers looked at it", (events.find((e) => e.phase === "reading_done")?.payload?.readers || []).length === 2, JSON.stringify(events.find((e) => e.phase === "reading_done")?.payload));
 check("the readers were the ones shown the picture", modelCalls.some((c) => c.messages[0].content.includes("You are reading a screenshot") && c.messages[1].content.some?.((p) => p.type === "image_url")));
-check("the solvers work from the reconstruction", events.some((e) => e.phase === "solving_from_reading"));
+check("the solvers are never downgraded to transcript-only", !events.some((e) => e.phase === "solving_from_reading"));
 check("so the reading reached the solver", solverText.includes("READING OF THE SCREENSHOT"), solverText.slice(0, 160));
 check(
-  "and no picture went with it",
-  !(Array.isArray(solverCall?.messages?.[1]?.content) && solverCall.messages[1].content.some((p) => p.type === "image_url")),
+  "and the official image went with it",
+  Array.isArray(solverCall?.messages?.[1]?.content) && solverCall.messages[1].content.some((p) => p.type === "image_url"),
   JSON.stringify(solverCall?.messages?.[1]?.content?.map?.((p) => p.type))
 );
 check("the house rules reached the solver", solverText.includes("HOUSE RULES") && solverText.includes("C++"));
 check("the memory target is readable", solverText.includes("20 MB"), solverText.slice(0, 400));
 
-// Every seat is asked to think before it answers, without any phase having to
-// remember to ask.
+// Solving and review retain the user's reasoning budget; bounded extraction
+// work is intentionally concise so it cannot delay solver assignment.
 check("the solver was asked to reason", solverCall?.reasoning_effort === "high", String(solverCall?.reasoning_effort));
-check("so was the reviewer", modelCalls.every((c) => c.reasoning_effort === "high"), JSON.stringify(modelCalls.map((c) => c.reasoning_effort)));
+check("the readers skip solve-time reasoning", modelCalls
+  .filter((c) => c.messages?.[0]?.content?.includes("You are reading a screenshot"))
+  .every((c) => !c.reasoning_effort), JSON.stringify(modelCalls.map((c) => c.reasoning_effort)));
 
 // The library now arrives before the first attempt, retrieved against the
 // contract. It used to wait for the panel to produce words — which meant every
@@ -463,8 +465,8 @@ check("so was the reviewer", modelCalls.every((c) => c.reasoning_effort === "hig
 check("it was recognised as a coding problem", events.some((e) => e.phase === "problem_kind" && e.payload?.coding === true));
 check("knowledge was selected", events.some((e) => e.phase === "knowledge_selected"));
 check(
-  "and the contract was what searched for it",
-  events.find((e) => e.phase === "knowledge_selected")?.payload?.from === "contract",
+  "and the verified reading was what searched for it",
+  events.find((e) => e.phase === "knowledge_selected")?.payload?.from === "reading",
   JSON.stringify(events.find((e) => e.phase === "knowledge_selected")?.payload)
 );
 check(
@@ -472,7 +474,7 @@ check(
   firstSolverText.includes("LOCAL KNOWLEDGE / RAG"),
   firstSolverText.slice(0, 200)
 );
-// Retrieval happens once, not once per round: the contract's pack is reused by
+// Retrieval happens once, not once per round: the reading's pack is reused by
 // every later stage rather than re-searched from the answers.
 check(
   "the library was searched once",
@@ -582,14 +584,16 @@ check("the job still completed", patches.some((p) => p.status === "completed"));
 check("the surviving model still produced a report", reports.length === 1);
 DEAD_MODEL = "";
 
-// --- a bench that cannot see falls back rather than failing ----------------
-console.log("\n3b. blind solver seats borrow a reader from further down the roster");
+// --- screenshot jobs fail closed without a vision solver --------------------
+console.log("\n3b. blind solver seats are never silently promoted from a transcript");
 events.length = 0;
 patches.length = 0;
 reports.length = 0;
 modelCalls.length = 0;
 
-await runCouncilJob({
+let blindRosterError = "";
+try {
+  await runCouncilJob({
   id: "job-3b",
   session_id: "session-1",
   settings_snapshot: {
@@ -607,26 +611,17 @@ await runCouncilJob({
     ],
     councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
-});
+  });
+} catch (error) {
+  blindRosterError = String(error);
+}
 
-check("it said no seat could see", events.some((e) => e.phase === "no_seeing_models"));
-check("so it transcribed instead", events.some((e) => e.phase === "reading_done"));
-// The whole point: the reader must be a model that can actually be shown the
-// picture, not one of the blind seats the fallback exists because of.
-const readerEvent = events.find((e) => e.phase === "no_seeing_models");
-check(
-  "the reader was a model that can see",
-  readerEvent?.payload?.readers?.includes("anthropic/claude-fable-5.1") &&
-    !readerEvent?.payload?.readers?.includes("moonshotai/kimi-k3"),
-  JSON.stringify(readerEvent?.payload?.readers)
-);
+check("the readers still read the original image", events.some((e) => e.phase === "reading_done"));
+check("the job rejects a transcript-only solver roster", /vision-capable solver/i.test(blindRosterError), blindRosterError);
 const blindSolver = modelCalls.find(
   (c) => Array.isArray(c.messages[1].content) && !c.messages[0].content.includes("You are reading a screenshot")
 );
-const blindText = blindSolver?.messages[1].content.find((p) => p.type === "text")?.text || "";
-check("the solvers got the reading", blindText.includes("READING OF THE SCREENSHOT"), blindText.slice(0, 120));
-check("and were not sent an image they cannot read", !blindSolver?.messages[1].content.some((p) => p.type === "image_url"));
-check("the job still completed", patches.some((p) => p.status === "completed"));
+check("no blind solver was sent a transcript as a substitute", !blindSolver, JSON.stringify(blindSolver?.model));
 
 // --- the shipped roster, on the wires it actually speaks --------------------
 console.log("\n4. the default roster reaches both TokenRouter wires");

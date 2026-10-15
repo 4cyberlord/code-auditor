@@ -20,12 +20,16 @@ const measured={...victory,runs:{B:{letter:"B",ran:true,ok:true,passed:12,failed
 assert.equal(selectStorySolution(agents,measured,"a")?.provisional,false,"only passing execution completes a code solution");
 assert.equal(selectStorySolution(agents,measured,"a")?.benchmark?.remoteElapsedMs,5);
 assert.equal(selectVerifiedStorySolution(agents,measured,"a")?.source,"validated");
+const porting={...measured,phase:"porting"};
+assert.equal(selectVerifiedStorySolution(agents,porting,"a")?.source,"validated",
+  "the verified primary answer stays visible while optional language ports run");
 assert.deepEqual(missingSuiteLanguages(["c++20", "python3"], [{language:"cpp",harness:"<<<SOLUTION>>>"}]), ["python"],
   "partial harness output cannot verify an untested language");
 const specInstructions=testSpecSystemPrompt();
 assert.match(specInstructions,/reproduce every usable example as an executable test/i);
 assert.match(specInstructions,/If it gives no examples, derive normal cases/i);
 assert.match(specInstructions,/never by running a candidate or copying its answer/i);
+assert.match(specInstructions,/mandatory\s+for every runnable harness/i);
 assert.match(testSpecUserPrompt({question:"Example 1: input [1, 2], output 3",docket:"Candidate A",languages:["python"]}),/Example 1: input \[1, 2\], output 3/);
 assert.deepEqual(extractFunctionSignatures("def solve(nums):\n pass\nfunction verify(x) {\n}\nfn evaluate(v: i32) {}").map(x=>x.name),["solve","verify","evaluate"]);
 console.log("PASS: solution display prefers verified winner; no benchmark attribution without evidence");

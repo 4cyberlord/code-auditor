@@ -50,7 +50,11 @@ use crate::deployment;
 
 /// Reads are small and the function is a single query; one that has not answered
 /// in this long has failed, and falling back beats a spinner that never resolves.
-const TIMEOUT: Duration = Duration::from_secs(30);
+// Session/bootstrap requests sit in front of every capture submission. A
+// half-minute network wait makes the UI look as though agent selection froze;
+// use a short, explicit deadline so the webview can retry or show the real
+// connection failure rather than leaving the user at "selection pending".
+const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct ApiError {
@@ -142,6 +146,7 @@ async fn send<T: DeserializeOwned>(
     })?;
 
     let mut request = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(4))
         .timeout(TIMEOUT)
         .user_agent(crate::deployment::USER_AGENT)
         .build()

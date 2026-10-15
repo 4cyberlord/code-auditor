@@ -1127,7 +1127,10 @@ pub async fn probe_models(
         let gateway_id = &gateway_id;
         async move {
         let started = std::time::Instant::now();
-        let checked = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        // Route discovery must not inherit a gateway's minute-long retry queue.
+        // The real solver request still uses that reliable governed path; this
+        // diagnostic only decides whether to show an agent promptly.
+        let checked = tokio::time::timeout(std::time::Duration::from_secs(12), async {
         let endpoint = endpoint_by_model
             .get(model)
             .map(|s| s.as_str())
@@ -1194,23 +1197,15 @@ pub async fn probe_models(
             ),
         };
 
-        // Probes ride the governed path like every other gateway request.
-        // send_governed's own retry-after handling is what turns a server-side
-        // 429 into a wait rather than a failure.
-        let url_c = target_url.to_string();
-        let key_c = key.clone();
-        let body_c = body.clone();
-        let sent = send_for_provider(
-            || {
-                client
-                    .post(&url_c)
-                    .header("Authorization", format!("Bearer {key_c}"))
-                    .json(&body_c)
-                    .timeout(std::time::Duration::from_secs(25))
-            },
-            &gateway_id,
-        )
-        .await;
+        // A rate-limited diagnostic should fail fast.  Retrying it here used
+        // to postpone all main-app agent assignment behind the shared queue.
+        let sent = client
+            .post(target_url)
+            .header("Authorization", format!("Bearer {key}"))
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
 
         let ms = started.elapsed().as_millis() as u64;
 
@@ -1319,7 +1314,7 @@ pub async fn probe_models(
             model: model.clone(),
             ok: false,
             ms: started.elapsed().as_millis() as u64,
-            error: Some("Model availability check exceeded 90 seconds.".into()),
+            error: Some("Model availability check exceeded 12 seconds.".into()),
             reply: None,
             vision: None,
             vision_note: None,
@@ -1389,11 +1384,15 @@ async fn probe_vision(
         "max_tokens": if provider == "cleanapis" { 2048 } else { 256 },
     });
 
-    let sent = send_for_provider(|| client
+    // Keep preflight out of the solver retry queue.  The actual candidate
+    // request remains governed and receives the normal reliability policy.
+    let sent = client
         .post(url)
         .header("Authorization", format!("Bearer {key}"))
         .json(&body)
-        .timeout(std::time::Duration::from_secs(45)), provider).await;
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
 
     if let Some(path) = &azure_path {
         let _ = crate::azure_storage::remove(path).await;
@@ -1779,12 +1778,26 @@ async fn send_for_provider(
     }
     // Clean API has a separate plan quota. Parallel calls use its own retry
     // response instead of inheriting the TokenRouter/Wiro admission queue.
+    // A 524 is a gateway timeout after our request reached Clean API; it is
+    // transient, unlike an invalid model or credential. Retrying it on a fresh
+    // request lets the Council recover a harness author or a solver pane
+    // without misreporting an E2B failure caused before E2B ever ran.
     for attempt in 0..3u32 {
         let response = send_with_retry(&build).await?;
-        if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS || attempt == 2 {
+        let status = response.status();
+        let retryable_gateway_timeout = matches!(status.as_u16(), 502 | 503 | 504 | 524);
+        if (status != reqwest::StatusCode::TOO_MANY_REQUESTS && !retryable_gateway_timeout)
+            || attempt == 2
+        {
             return Ok(response);
         }
-        let delay = retry_after(Some(&response), attempt);
+        let delay = if retryable_gateway_timeout {
+            // Keep recovery prompt: 524 has no useful Retry-After and the
+            // next eligible model remains the ultimate fallback.
+            std::time::Duration::from_millis(800 * (attempt as u64 + 1))
+        } else {
+            retry_after(Some(&response), attempt)
+        };
         drop(response);
         tokio::time::sleep(delay).await;
     }

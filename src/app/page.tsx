@@ -104,6 +104,7 @@ function Workbench() {
   const reviewRunning = useStore((s) => s.review.status === "running");
   const storyRunId = useStore((s) => s.runId);
   const startAnalysis = useStore((s) => s.start);
+  const approveCaptureReview = useStore((s) => s.approveCaptureReview);
   const signOut = useAuth((s) => s.signOut);
   const sessionsOpen = useStore((s) => s.settings.railPanel === "sessions");
   const historyOpen = useStore((s) => s.settings.railPanel === "history");
@@ -200,10 +201,10 @@ function Workbench() {
         const s = useStore.getState();
         if (s.running || s.preparing) return;
         if (!s.images.length && !s.note.trim()) {
-          s.setShortcutError("Capture or add a question before pressing 14 to start analysis.");
+          s.setShortcutError("Capture or add a question before pressing 13 to start analysis.");
           return;
         }
-        // Shortcut 14 is a background action. Keep the user's current
+        // Shortcut 13 is a background action. Keep the user's current
         // workspace (coding, knowledge, history, or another app's context)
         // unchanged; they can switch to Council when they want to watch it.
         void useStore.getState().start();
@@ -319,6 +320,11 @@ function Workbench() {
 
       {workspace === "council" && intakeOpen && (
         <StoryStripIntake running={running} onStartAnalysis={() => {
+          // The Story intake is itself the capture-review surface.  Captures
+          // set this guard so the compact input bar can ask for confirmation,
+          // but leaving it set here made Start analysis return before it could
+          // upload or assign a single agent.
+          approveCaptureReview();
           // The store chooses available routes, initializes the selected agents,
           // and starts independent image reasoning. Reveal the result workspace now:
           // route discovery performs live gateway checks before it flips

@@ -12,6 +12,7 @@ export default function StoryStripIntake({ onStartAnalysis, running }: Props) {
   const images = useStore((s) => s.images);
   const addImages = useStore((s) => s.addImages);
   const removeImage = useStore((s) => s.removeImage);
+  const restoreRecentCaptures = useStore((s) => s.restoreRecentCaptures);
   const limit = useStore((s) => s.settings.maxImages);
   const [dragging, setDragging] = useState(false);
   const [preview, setPreview] = useState<number | null>(null);
@@ -96,6 +97,7 @@ export default function StoryStripIntake({ onStartAnalysis, running }: Props) {
       <footer className="story-intake-footer">
         <span>More images can be added afterward.</span>
         <div className="story-intake-actions">
+          {!images.length && <button type="button" className="story-intake-secondary" onClick={() => void restoreRecentCaptures()}>Restore last captures</button>}
           <button type="button" className="story-intake-secondary" disabled={images.length >= limit} onClick={() => picker.current?.click()}>Add images</button>
           <button type="button" className="story-intake-primary" disabled={!images.length || running} onClick={onStartAnalysis}>{running ? "Starting…" : "Start analysis"} <span aria-hidden="true">→</span></button>
         </div>

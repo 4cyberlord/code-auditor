@@ -5,6 +5,7 @@ import {
   candidateDocket,
   candidateLanguage,
   countCases,
+  sharedHarnessFailure,
   executionDigest,
   gateFor,
   selectVerifiedCandidate,
@@ -162,6 +163,20 @@ console.log("\n6. PASS/FAIL counting, and the gate that outranks opinion");
   check("exit 0 printing nothing proves nothing", gateFor(run({ passed: 0 })) === "untested");
   check("never executed is untested", gateFor(run({ ran: false })) === "untested");
   check("no record is untested", gateFor(undefined) === "untested");
+
+  const sameHarnessFailure = [
+    run({ ok: false, failed: 2, stdout: "PASS sample\nFAIL zero_boundary got=1 want=2\nFAIL exact_zero_trap got=1 want=2" }),
+    run({ letter: "B", ok: false, failed: 2, stdout: "PASS sample\nFAIL zero_boundary got=1 want=2\nFAIL exact_zero_trap got=1 want=2" }),
+  ];
+  check("shared named assertion failures flag a suspect harness", sharedHarnessFailure(sameHarnessFailure)?.includes("zero_boundary") === true);
+  check("different candidate failures do not replace a harness", sharedHarnessFailure([
+    sameHarnessFailure[0],
+    run({ letter: "B", ok: false, failed: 1, stdout: "FAIL another_case got=3 want=2" }),
+  ]) === null);
+  check("runner crashes do not look like a bad harness", sharedHarnessFailure([
+    run({ ok: false, failed: 0, stdout: "", note: "exit 1" }),
+    run({ letter: "B", ok: false, failed: 0, stdout: "", note: "exit 1" }),
+  ]) === null);
 }
 
 console.log("\n7. the execution digest the reviewers read");

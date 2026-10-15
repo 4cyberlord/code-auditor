@@ -443,22 +443,28 @@ function azureSignedReadUrl(path, seconds = 900) {
 
 async function downloadJobImages(jobId) {
   const rows = await listJobImages(jobId);
-  const out = [];
-  for (const row of rows || []) {
+  // This row set is the immutable, ordered manifest created for one submission
+  // by `solve_job_create`.  Resolve every signed URL before a model is asked to
+  // work: every selected seat receives this same complete manifest rather than
+  // discovering screenshots by session or by a mutable "latest" prefix.
+  const out = await Promise.all((rows || []).map(async (row) => {
     const url = row.storage_bucket === AZURE_SCREENSHOT_BUCKET
       ? azureSignedReadUrl(row.storage_path)
       : await signedStorageUrl(row.storage_path);
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Could not download ${row.file_name}: ${res.status} ${res.statusText}`);
     const bytes = Buffer.from(await res.arrayBuffer());
-    out.push({
+    return {
       position: row.position,
       fileName: row.file_name,
       mime: row.mime || "image/png",
+      // Give gateways the direct, blob-scoped read URL.  `dataUrl` remains a
+      // verified fallback for a provider that cannot fetch a remote URL.
+      url,
       dataUrl: `data:${row.mime || "image/png"};base64,${bytes.toString("base64")}`,
-    });
-  }
-  return out;
+    };
+  }));
+  return out.sort((a, b) => Number(a.position) - Number(b.position));
 }
 
 function chatModels(settings) {
@@ -480,6 +486,26 @@ function chatJudges(settings) {
   return canonicalCouncilSeats(configured, (j) => j?.model, "model", settings?.availableModels)
     .filter((judge) => judge?.model)
     .slice(0, Number(process.env.CODE_AUDITOR_WORKER_JUDGES || 3));
+}
+
+/**
+ * The desktop and the capture overlay must read screenshots through the same
+ * configured reader seats. Solver selection is deliberately independent of
+ * this: a model that is excellent at code need not be the model the owner
+ * chose to transcribe pixels. When an older saved setting has no reader list,
+ * retain the Council-roster fallback rather than inventing a route.
+ */
+function screenshotReaderSeats(settings, fallback) {
+  const extractors = Array.isArray(settings?.extractors) ? settings.extractors : [];
+  const routerModels = settings?.routerModels && typeof settings.routerModels === "object"
+    ? settings.routerModels
+    : {};
+  const configured = extractors
+    .map((provider) => String(routerModels[provider] || "").trim())
+    .filter(Boolean)
+    .map((id) => ({ id }));
+  const seats = configured.length ? configured : fallback;
+  return canonicalCouncilSeats(seats, (seat) => seat?.id, "id", settings?.availableModels);
 }
 
 function gatewayBaseUrl(settings) {
@@ -583,7 +609,7 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
   if (!isPrimaryModel(model)) throw new Error(`${model} is outside the approved ten-model roster.`);
   const content = [{ type: "text", text: user }];
   for (const image of images) {
-    content.push({ type: "image_url", image_url: { url: image.dataUrl } });
+    content.push({ type: "image_url", image_url: { url: image.url || image.dataUrl } });
   }
 
   let temperature = 0.2;
@@ -637,20 +663,12 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
       const answer = json?.choices?.[0]?.message?.content;
       if (answer?.trim()) return answer;
 
-      // A 200 carrying no content is the router, not the model: it is listed as
-      // available, the request was accepted, and the backing route returned
-      // nothing. It clears on its own within minutes.
-      //
-      // This used to throw here, outside the retry loop, so a transient blank
-      // reply killed the seat outright — which is exactly what
-      // "moonshotai/kimi-k3: empty model response" was in Sentry, twice, for
-      // one run. Retrying costs one more request against a limit the pacing
-      // queue already respects.
+      // A 200 carrying no content is a gateway-route failure, not a usable
+      // model answer. Retrying it two more times was multiplying a 60–75s
+      // gateway wait into several minutes while blocking the rest of the job.
+      // The bench records the failed route and keeps the other Council seats
+      // moving; a later job can try the route again after it recovers.
       last = `${model}: empty model response`;
-      if (attempt < 2) {
-        await sleep(2000 * (attempt + 1));
-        continue;
-      }
       break;
     }
 
@@ -683,7 +701,7 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
   if (!isPrimaryModel(model)) throw new Error(`${model} is outside the approved ten-model roster.`);
   const content = [{ type: "input_text", text: user }];
   for (const image of images) {
-    content.push({ type: "input_image", image_url: image.dataUrl });
+    content.push({ type: "input_image", image_url: image.url || image.dataUrl });
   }
 
   let last = "";
@@ -734,10 +752,6 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
       const answer = responseText(json);
       if (answer.trim()) return answer;
       last = `${model}: empty model response`;
-      if (attempt < 2) {
-        await sleep(2000 * (attempt + 1));
-        continue;
-      }
       break;
     }
 
@@ -783,7 +797,12 @@ async function tokenRouterGenerate({ settings, ...args }) {
     ? endpointForCouncilModel(settings?.councilModels, args.model) : "chat";
   // Decided here rather than at six call sites, so no phase can quietly forget
   // to ask a model to think.
-  const reasoning = reasoningForModel(settings, args.model);
+  // Reading and contract extraction are structured, bounded tasks. Giving them
+  // the full solve-time reasoning budget made every run wait behind two sets of
+  // expensive deliberation before a single solver was even assigned. Callers
+  // can explicitly keep those preflight requests concise; actual solutions
+  // still use the user's configured reasoning effort.
+  const reasoning = args.reasoning ?? reasoningForModel(settings, args.model);
   const withThinking = { ...args, model: gatewayModel(args.model, settings),
     apiKey: gatewayCredential(settings), paced: gatewayId(settings) !== "cleanapis", reasoning };
   return endpoint === "responses"
@@ -1473,6 +1492,7 @@ async function readScreenshots({ job, settings, baseUrl, models, images, imageRe
           user: extractionUserPrompt("", manifest),
           images,
           maxTokens: Number(settings.maxTokens || 4096),
+          reasoning: "off",
         });
         const parsed = parseExtraction(text);
         if (!parsed) {
@@ -1524,6 +1544,7 @@ async function readScreenshots({ job, settings, baseUrl, models, images, imageRe
           user: tieBreakUserPrompt(disputed, manifest),
           images,
           maxTokens: Math.min(Number(settings.maxTokens || 4096), 1024),
+          reasoning: "off",
         });
         const picks = parseTieBreak(text, disputed.map((c) => c.field));
         resolved = applyTieBreak(done[0].extraction, done[1].extraction, agreement, picks, tieBreaker.id);
@@ -1658,6 +1679,14 @@ async function selectKnowledge(job, settings, { candidates = [], reading = null,
  * solvers were going to be shown anyway — and skipped outright when the run has
  * fewer than two reachable seats or the owner turned it off.
  */
+function trustedReadingCanStartSolving(reading, settings) {
+  return Boolean(reading?.extraction) &&
+    (reading.readers?.length ?? 0) >= 2 &&
+    reading.agreement?.agree !== false &&
+    Number(reading.extraction.confidence ?? 0) >= Number(settings.readingConfidenceFloor ?? 0.7) &&
+    !(reading.extraction.ambiguities || []).length;
+}
+
 async function readProblemContract({ job, settings, baseUrl, models, images, question, reading, bench }) {
   if (settings.councilProblemContract === false) return { contract: null, agreement: null, readers: [] };
   const seats = bench.keep(models, (m) => m.id).slice(0, 2);
@@ -1678,6 +1707,7 @@ async function readProblemContract({ job, settings, baseUrl, models, images, que
           user: contractUserPrompt({ question, reading: reading?.markdown || reading?.context || "" }),
           images,
           maxTokens: Math.min(Number(settings.maxTokens || 4096), 2048),
+          reasoning: "off",
         });
         const parsed = parseProblemContract(text);
         if (parsed.wellFormed) readings.push(parsed);
@@ -2150,6 +2180,13 @@ export async function runCouncilJob(job) {
   await addEvent(job.id, "info", "downloading_images", "Downloading ordered screenshots from configured private storage.");
   const images = await downloadJobImages(job.id);
   if (!images.length) throw new Error("The job has no downloadable screenshots.");
+  await addEvent(
+    job.id,
+    "info",
+    "images_ready",
+    `Prepared ${images.length} direct image link${images.length === 1 ? "" : "s"} for every selected model.`,
+    { count: images.length, positions: images.map((image) => image.position) }
+  );
 
   // Real references, in the order the images are attached, so the manifest can
   // say whether these are separate problems or one screen cut into pieces.
@@ -2205,16 +2242,15 @@ export async function runCouncilJob(job) {
     settings.overlayMode === "auto" ||
     solveFrom !== "image";
 
-  // Readers are drawn from the whole reachable roster, not from the four solver
-  // seats. This used to hand the picture to `available` — which, when the
-  // fallback fires, is by definition the models that cannot be shown one. The
-  // single case the fallback exists for was the single case it could not work
-  // in, and it spent two calls and half a minute of pacing proving it.
+  // Match the desktop's reader configuration exactly. The overlay's only
+  // difference is how screenshots arrive; it must not quietly substitute
+  // Council solver seats for the configured screenshot readers.
   const roster = Array.isArray(settings.councilModels) && settings.councilModels.length
     ? settings.councilModels
     : COUNCIL_DEFAULT_MODELS;
+  const configuredReaders = screenshotReaderSeats(settings, roster);
   const readerPool = partitionByVision(
-    bench.keep(canonicalCouncilSeats(roster, (m) => m?.id, "id", settings.availableModels), (m) => m.id),
+    bench.keep(configuredReaders, (m) => m.id),
     (m) => m.id,
     settings.probes,
     settings.councilModels
@@ -2250,33 +2286,19 @@ export async function runCouncilJob(job) {
     return;
   }
 
-  // Is the reconstruction worth solving from on its own?
-  //
-  // Only when two readers looked and did not disagree — or disagreed and a
-  // third settled it — and the reading is not hedging about its own confidence.
-  const readingTrusted =
-    Boolean(reading.extraction) &&
-    (reading.readers?.length ?? 0) >= 2 &&
-    reading.agreement?.agree !== false &&
-    Number(reading.extraction?.confidence ?? 0) >= Number(settings.readingConfidenceFloor ?? 0.7);
+  // A reconstruction is useful shared context and can avoid a second contract
+  // pass. It is never a substitute for source-image evidence: every solver
+  // selected for an image job must independently inspect the original capture.
+  const readingTrusted = trustedReadingCanStartSolving(reading, settings);
 
-  const showPicture =
-    solveFrom === "image" ? true : solveFrom === "reading" ? false : !readingTrusted;
-
-  // Who actually solves. When the picture stays behind, a seat that cannot see
-  // is no longer at a disadvantage, so the whole reachable bench solves rather
-  // than only the models with eyes — which is the other half of separating
-  // reconstruction from solving.
-  let solving = showPicture && seeing.length ? seeing : available;
-  const solveImages = showPicture && seeing.length ? images : [];
-  if (!showPicture) {
-    await addEvent(
-      job.id,
-      "info",
-      "solving_from_reading",
-      `The screenshot was reconstructed by ${(reading.readers || []).join(", ") || "the readers"}; the solvers work from that rather than the pixels.`,
-      { readers: reading.readers, confidence: reading.extraction?.confidence ?? null, solveFrom }
-    );
+  // `solveFrom` is retained for backwards-compatible settings snapshots, but
+  // cannot weaken the evidence rule for a screenshot job. A text-only route
+  // must never be promoted merely because readers agreed about their transcript.
+  const showPicture = images.length > 0;
+  let solving = showPicture ? seeing : available;
+  const solveImages = showPicture ? images : [];
+  if (showPicture && !solving.length) {
+    throw new Error("No reachable vision-capable solver is available for this screenshot. Verify the selected model roster and image-capability probes.");
   }
 
   await patchJob(job.id, { progress_phase: "solving" });
@@ -2302,16 +2324,33 @@ export async function runCouncilJob(job) {
   // judges, the synthesis — is handed this same string as "the problem". Folding
   // the contract into it once is what makes it immutable ground truth for the
   // whole run rather than a paragraph one stage happened to be given.
-  const contracting = await readProblemContract({
-    job,
-    settings,
-    baseUrl,
-    models: solving,
-    images: solveImages,
-    question: baseQuestion,
-    reading,
-    bench,
-  });
+  // Two independent, high-confidence image readings already establish the
+  // problem text. Re-asking two of those same routes to restate it is a serial
+  // gate which delays solver assignment without adding evidence. Keep the
+  // contract pass for uncertainty, disagreement, typed-only tasks, and every
+  // other case where its independent specification check earns its cost.
+  const reuseTrustedReading = readingTrusted && Boolean(reading.context?.trim());
+  const contracting = reuseTrustedReading
+    ? (() => {
+        void addEvent(
+          job.id,
+          "info",
+          "problem_contract_reused",
+          "The two screenshot readers agreed with high confidence; using that verified reading directly and starting the Council solvers now.",
+          { readers: reading.readers, confidence: reading.extraction?.confidence ?? null }
+        );
+        return { contract: null, agreement: null, readers: reading.readers || [] };
+      })()
+    : await readProblemContract({
+        job,
+        settings,
+        baseUrl,
+        models: solving,
+        images: solveImages,
+        question: baseQuestion,
+        reading,
+        bench,
+      });
   const contractText = contractBlock(contracting.contract);
   const question = contractText ? `${baseQuestion}\n\n---\n\n${contractText}` : baseQuestion;
 
@@ -2324,10 +2363,10 @@ export async function runCouncilJob(job) {
   // it, so the pack can reach round one now. Only for problems the readers
   // called code: retrieving cp-algorithms and perf counters for a
   // multiple-choice question is noise charged four times over.
-  let knowledge =
-    contracting.contract?.kind === "code"
-      ? await selectKnowledge(job, settings, { contract: contracting.contract, reading })
-      : "";
+  const inferredKind = contracting.contract?.kind || reading.extraction?.kind || "";
+  let knowledge = inferredKind === "code"
+    ? await selectKnowledge(job, settings, { contract: contracting.contract, reading })
+    : "";
   const solverPrompt = [
     userPrompt("", solveImages.length > 0, reading.context, imageRefs, knowledge, policy),
     contractText,

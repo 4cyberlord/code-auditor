@@ -8,6 +8,7 @@ use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
 use reqwest::Url;
 use sha2::Sha256;
+use std::time::Duration as StdDuration;
 
 pub const SECRET: &str = "azure_storage_connection_string";
 pub const BUCKET: &str = "azure:council-images";
@@ -74,7 +75,14 @@ pub fn signed_read_url(path: &str, seconds: u32) -> Result<String, String> {
 
 pub async fn upload(path: &str, mime: &str, bytes: Vec<u8>) -> Result<(), String> {
     let url = signed_url_with(&credentials()?, path, "cw", 600)?;
-    let response = reqwest::Client::new().put(url)
+    // Bound DNS/TLS/transport waits. A failed Azure route must report an error,
+    // never leave the capture submission appearing idle for minutes.
+    let client = reqwest::Client::builder()
+        .connect_timeout(StdDuration::from_secs(5))
+        .timeout(StdDuration::from_secs(20))
+        .build()
+        .map_err(|e| format!("Could not create Azure client: {e}"))?;
+    let response = client.put(url)
         .header("x-ms-blob-type", "BlockBlob")
         .header("x-ms-version", VERSION)
         .header("Content-Type", mime)

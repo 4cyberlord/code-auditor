@@ -38,7 +38,7 @@ export function selectStorySolution(
   council: CouncilSolutionEvidence,
   representative?: string | null,
 ): DisplaySolution | null {
-  if (council.phase === "done" && council.winner) {
+  if ((council.phase === "done" || council.phase === "porting") && council.winner) {
     const winner = council.candidates.find(c => c.letter === council.winner);
     const final = winner?.revised?.code?.trim() ? winner.revised : winner?.final;
     if (final?.code?.trim()) {
@@ -61,7 +61,7 @@ export function selectVerifiedStorySolution(
   council: CouncilSolutionEvidence,
   representative?: string | null,
 ): DisplaySolution | null {
-  if (council.phase !== "done") return null;
+  if (council.phase !== "done" && council.phase !== "porting") return null;
   const report = selectStorySolution(agents, council, representative);
   return report?.benchmark && gateFor(report.benchmark) === "pass" && !report.provisional
     ? report : null;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { highlight } from "@/lib/highlight";
 import { describeCodeLanguage } from "@/lib/solutionLanguage";
 import { agentSpec, gatewayPreset } from "@/lib/models";
@@ -34,7 +34,8 @@ export default function StoryResultWorkspace() {
   // Never show the previous run's answer under that new run's progress text.
   // A solver's first answer is not the Council's choice. Keep the final-code
   // workspace empty until the full comparison settles (or explicitly fails).
-  const awaitingCouncil = settings.councilEnabled && (preparing || running ||
+  const primaryWinnerReady = council.phase === "porting" && Boolean(council.winner);
+  const awaitingCouncil = settings.councilEnabled && !primaryWinnerReady && (preparing || running ||
     (council.phase !== "idle" && council.phase !== "done" && council.phase !== "error" && council.phase !== "cancelled"));
   const finalReviewPending = !viewingRunId && settings.councilEnabled && council.phase === "done" &&
     review.status !== "done" && review.status !== "error";
@@ -44,37 +45,24 @@ export default function StoryResultWorkspace() {
   const reviewRunning = !preparing && review.status === "running";
   const reviewError = preparing ? null : review.error;
   const councilPhase = preparing ? "idle" : council.phase;
-  const [phaseTimes,setPhaseTimes]=useState<Record<string,number>>({});
-  const phaseClock=useRef<{phase:string;at:number;runId:string|null}>({phase:"idle",at:Date.now(),runId:null});
-  useEffect(()=>{
-    const tick=Date.now(),previous=phaseClock.current;
-    if(previous.runId!==runId){
-      phaseClock.current={phase:councilPhase,at:tick,runId};
-      setPhaseTimes({});
-    }else if(previous.phase!==councilPhase){
-      if(previous.phase!=="idle")setPhaseTimes(times=>({...times,[previous.phase]:(times[previous.phase]||0)+Math.max(0,tick-previous.at)}));
-      phaseClock.current={phase:councilPhase,at:tick,runId};
-    }
-  },[councilPhase,runId]);
   const councilError = preparing ? null : council.error;
-  // A translated port has not inherited source-code E2B evidence; keep it hidden.
-  const ports = PORT_LANGUAGES.slice(0,0);
-  // Do not expose a separately unverified translation, even if a stale UI
-  // selection remains from an older render. Only the tested original is shown.
-  const code = report?.code || "";
+  const verifiedPorts = council.ports.filter(port => port.status === "verified");
+  const chosenPort = language === "original" ? null : verifiedPorts.find(port => port.language === language) ?? null;
+  const ports = verifiedPorts.map(port => port.language as keyof typeof PORT_LABELS);
+  const code = chosenPort?.code || report?.code || "";
   const syntax = describeCodeLanguage(code, language === "original" ? report?.language : language);
   const tokens = highlight(code, syntax.id);
   const lineCount = code ? code.split("\n").length : 0;
   const functions = extractFunctionSignatures(code);
   // Keep the tested original's evidence visible when a port is selected,
   // while explicitly saying that the translated code itself is untested.
-  const run = report?.benchmark ?? null;
-  const complexityAudit = councilPhase === "done" && council.winner
+  const run = chosenPort?.run ?? report?.benchmark ?? null;
+  const complexityAudit = (councilPhase === "done" || councilPhase === "porting") && council.winner
     ? agreedComplexityAudits(council.dossier?.judges ?? [])[council.winner]
     : undefined;
   const gate = run ? gateFor(run) : "untested";
-  const benchmarkNote = language !== "original" && run?.ran
-    ? `These measurements belong to the tested original solution, not this ${PORT_LABELS[language as keyof typeof PORT_LABELS] ?? language} translation. This port has not been executed in E2B.`
+  const benchmarkNote = chosenPort?.run?.ran
+    ? `${chosenPort.run.passed} passed / ${chosenPort.run.failed} failed for this ${chosenPort.language} implementation in E2B.`
     : awaitingCouncil
     ? "The Council is still testing and comparing candidates; no final measurement is available yet."
     : councilPhase === "error" ? `Verification stopped: ${councilError || "unknown reason"}`
@@ -83,7 +71,10 @@ export default function StoryResultWorkspace() {
     : run?.ran && run.remoteElapsedMs == null && run.peakMemoryKb == null
       ? `Tests executed${run.provider ? ` via ${run.provider}` : ""}, but this runner did not report per-process runtime or peak-memory telemetry. E2B measurements are not available for this desktop run.`
       : run?.ran ? `${run.passed} passed / ${run.failed} failed` : "No execution measurements are available for this exact solution.";
-  const active = !preparing && runId ? agents.filter(a => a.enabled) : [];
+  // `buildAgents` begins with the user's enabled roster. That is not an
+  // assignment: do not show every enabled model as selected while the
+  // coordinator is still choosing the (at most four) actual solver seats.
+  const active = runId ? agents.filter(a => a.enabled) : [];
   const modelProgress = active.map(agent => ({ agent, lamp: modelLamp(agent) }));
   const readyCount = modelProgress.filter(item => item.lamp === "ready").length;
   const issueCount = modelProgress.filter(item => item.lamp === "issue").length;
@@ -108,7 +99,7 @@ export default function StoryResultWorkspace() {
     !preparing && review.status === "error" && reviewError ? { label: "Solution review", message: reviewError } : null,
   ].filter((entry): entry is { label: string; message: string } => Boolean(entry));
   const councilStage = councilStageText(councilPhase);
-  const processText = preparing ? "Checking up to four approved models for live screenshot vision support." :
+  const processText = preparing ? "Uploading screenshots to Azure and selecting the best approved agents." :
     active.length === 0 && running ? "Choosing verified models for this question." :
     councilStage ? councilStage :
     reviewRunning ? "Reviewing the selected code and its technical report." :
@@ -136,12 +127,9 @@ export default function StoryResultWorkspace() {
   return <main className="story-result" aria-label="Analysis results">
     <header className="story-result-status">
       <span className="story-result-indicator" data-busy={preparing || running || reviewRunning} />
-      <div><strong>{progress}</strong><span>{active.length ? `${readyCount} of ${active.length} selected answers ready` : preparing ? "Checking API routes" : "The engine is preparing the problem"}</span></div>
+      <div><strong>{progress}</strong><span>{active.length ? `${readyCount} of ${active.length} selected answers ready` : preparing ? "Selecting from your approved roster" : "The engine is preparing the problem"}</span></div>
       <span className="story-result-status-note">{active.length ? "Independent image analysis" : "Direct vision · no extraction"}</span>
     </header>
-    {Object.keys(phaseTimes).length>0 && <div className="story-process-text" aria-label="Completed Council stage timing">
-      {Object.entries(phaseTimes).map(([phase,ms])=><span key={phase} style={{marginRight:12}}>{phase}: {(ms/1000).toFixed(1)}s</span>)}
-    </div>}
     <section className="story-agent-progress" aria-label="Selected API model progress">
       <div className="story-agent-progress-heading">
         <strong>Selected API agents</strong>
@@ -149,10 +137,15 @@ export default function StoryResultWorkspace() {
       </div>
       {modelProgress.length > 0 ? <ol className="story-agent-list">
         {modelProgress.map(({ agent, lamp }) => {
-          const label = lamp === "ready" ? "Answer ready" : lamp === "issue" ? "Needs attention" :
+          const evidenceStage = agent.status === "done" && councilPhase === "speccing"
+            ? "harness" : agent.status === "done" && (councilPhase === "verifying" || councilPhase === "reverifying")
+              ? "e2b" : agent.status === "done" && ["contracting", "reviewing", "revising", "judging", "synthesizing", "porting"].includes(councilPhase)
+                ? "council" : lamp;
+          const label = evidenceStage === "harness" ? "Preparing E2B tests" : evidenceStage === "e2b" ? "E2B testing" : evidenceStage === "council" ? "Council review" :
+            lamp === "ready" ? "Answer ready" : lamp === "issue" ? "Needs attention" :
             lamp === "cancelled" ? "Cancelled" : agent.status === "streaming" ? "Generating answer" :
             preparing ? "Verifying image access" : "Waiting for response";
-          return <li className="story-agent-tile" data-lamp={lamp} key={agent.id}>
+          return <li className="story-agent-tile" data-lamp={evidenceStage} key={agent.id}>
             <span className="story-agent-light" aria-hidden="true" />
             <div className="story-agent-identity">
               <strong>{primaryModelLabel(agent.model) ?? agentSpec(agent.provider).label}</strong>
@@ -164,7 +157,7 @@ export default function StoryResultWorkspace() {
             </div>
           </li>;
         })}
-      </ol> : <p className="story-agent-pending">{preparing ? "Checking available models and vision capability…" : "The selected models will appear here when assigned."}</p>}
+      </ol> : <p className="story-agent-pending">{preparing ? "Your screenshots are being stored privately in Azure. Selected agents will appear here as soon as assignment finishes." : "The selected models will appear here when assigned."}</p>}
       <p className="story-process-text" role="status"><span aria-hidden="true" />{processText}</p>
     </section>
     <div className="story-result-columns">

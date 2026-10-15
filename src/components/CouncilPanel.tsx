@@ -343,6 +343,21 @@ export default function CouncilPanel() {
                 <p className="hint">Measured performance comes from the execution provider when available. Big-O complexity is a separate analytical estimate.</p>
               </section>
             )}
+            {council.ports.length > 0 && (
+              <section className="council-execution-metrics" aria-label="Verified language ports" style={{ marginTop: 12 }}>
+                <h4>Optional language implementations</h4>
+                {council.ports.map((port) => (
+                  <details key={port.language}>
+                    <summary>
+                      {port.language} · {port.status === "verified"
+                        ? `${port.run?.passed ?? 0} E2B tests passed`
+                        : `not verified${port.error ? `: ${port.error}` : ""}`}
+                    </summary>
+                    {port.code && <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{port.code}</pre>}
+                  </details>
+                ))}
+              </section>
+            )}
             {Object.keys(council.runs).length > 0 && (
               <div className="council-gates">
                 {council.candidates.map((c) => {

@@ -104,14 +104,31 @@ export async function coordinateAndVerify<Id extends string>(input: {
   let reason = "Validated deterministic fallback";
   let family = "other";
   const coordinatorList = coordinatorCandidates(input.candidates,3);
-  // One batched gateway probe replaces up to three serial coordinator probes.
-  // Preserve priority and require verified exact image transport.
+  const approvedIds=new Set(input.candidates.map(c=>c.id));
+  const fallbackIds=[...input.fallbackOrder]
+    .filter((id, index, values)=>approvedIds.has(id) && values.indexOf(id)===index)
+    .slice(0, Math.min(4, Math.max(1, input.maxSolvers ?? 4)));
+  const fallbackCandidates=fallbackIds.flatMap(id=>{
+    const candidate=input.candidates.find(item=>item.id===id);
+    return candidate ? [candidate] : [];
+  });
+  // Prime coordinator and likely solver routes together.  The old sequence
+  // waited for coordinator diagnostics before fallback diagnostics could even
+  // start, multiplying the time before the main app showed selected agents.
+  const firstPass=[...new Set([...coordinatorList,...fallbackCandidates].map(c=>c.model))];
+  if(firstPass.length) await check(firstPass,input.screenshotCount>0);
   const checkedCoordinators = await verifyGatewayCandidates({
     configured:coordinatorList,catalogue:input.catalogue,
     requireVision:input.screenshotCount>0,allowFamilyAlternatives:false,probe:check,
   });
   rejected.push(...checkedCoordinators.rejected);
   coordinator=checkedCoordinators.routes[0]?.model ?? null;
+  const fallbackWarm=fallbackCandidates.length
+    ? verifyGatewayCandidates({
+      configured:fallbackCandidates,catalogue:input.catalogue,
+      requireVision:input.screenshotCount>0,allowFamilyAlternatives:false,probe:check,
+    })
+    : Promise.resolve(null);
   if(coordinator){
     try{
       const response=await input.ask(coordinator,
@@ -127,7 +144,9 @@ export async function coordinateAndVerify<Id extends string>(input: {
       reason="Coordinator timed out or failed; validated deterministic fallback";
     }
   }
-  const approvedIds=new Set(input.candidates.map(c=>c.id));
+  // Do not begin a second probe wave until the concurrent warm-up has settled.
+  // Its cached results keep this final, contract-enforced selection immediate.
+  await fallbackWarm;
   const unique = new Set<Id>();
   const order=[...assigned,...input.fallbackOrder,...input.candidates.map(c=>c.id)]
     .filter(id=>{

@@ -193,7 +193,6 @@ function StorageCard() {
   // service-role credential from desktop users again.
   const saved = useStore((s) => s.storageKey);
   const refreshKeys = useStore((s) => s.refreshKeys);
-  const destination = useStore((s) => s.settings.imageStorage);
   const patchSettings = useStore((s) => s.patchSettings);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -253,26 +252,16 @@ function StorageCard() {
       <div className="top">
         <span className="dot" style={{ background: STORAGE.accent }} />
         <span className="name">Screenshot Storage</span>
-        <span className="vendor">Private Azure Blob or Supabase</span>
+        <span className="vendor">Private Azure Blob Storage</span>
         <span className="badge" data-tone={azureSaved ? "good" : "warn"}>
           {azureSaved ? "Azure key saved" : "Azure setup needed"}
         </span>
       </div>
       <p className="hint">
-        New screenshots use the destination below. Existing screenshots stay in their original
-        private bucket and remain available. The Azure container is <span className="mono">council-images</span>
-        {" "}in <span className="mono">councilimages</span>; Supabase uses <span className="mono">{STORAGE.bucket}</span>.
+        All new screenshots use the private Azure container <span className="mono">council-images</span>
+        {" "}in <span className="mono">councilimages</span>. Existing historical captures remain in their
+        original private bucket so prior sessions continue to work.
       </p>
-      <div className="row">
-        <label htmlFor="image-storage">Default destination</label>
-        <select id="image-storage" className="field" value={destination}
-          onChange={(event) => patchSettings({
-            imageStorage: event.target.value as "azure" | "supabase", probes: {},
-          })}>
-          <option value="azure">Azure Blob Storage</option>
-          <option value="supabase">Supabase Storage</option>
-        </select>
-      </div>
       <div className="row">
         <label htmlFor="azure-connection">Azure connection string</label>
         <div className="with-btn">
@@ -295,7 +284,7 @@ function StorageCard() {
       </div>
       <p className="hint">Paste the full connection string from Azure → councilimages → Access keys → key1.
         It is stored as a server-side secret, never shown again in this window. Do not paste it in chat.
-        {destination === "azure" && !azureSaved ? " Azure uploads will fail until this is saved." : ""}</p>
+        {!azureSaved ? " Azure uploads will fail until this is saved." : ""}</p>
       {saved && (
         <div className="row">
           <span>Legacy credential</span>
@@ -1631,6 +1620,24 @@ function CouncilCard() {
       </p>
 
       <div className="row">
+        <label htmlFor="default-solution-language">Default solution language</label>
+        <select
+          id="default-solution-language"
+          className="field mono"
+          value={settings.outputLanguage || "Python"}
+          onChange={(event) => patch({ outputLanguage: event.target.value })}
+        >
+          <option value="Python">Python</option>
+          <option value="C++">C++</option>
+          <option value="Rust">Rust</option>
+        </select>
+      </div>
+      <p className="hint">
+        This chooses the primary solution shown first. The other two languages remain available as
+        independently E2B-tested ports after the primary solution is verified.
+      </p>
+
+      <div className="row">
         <label htmlFor="memory-target">Memory goal</label>
         <input id="memory-target" className="field" type="number" min={1} max={1024}
           value={Math.round(settings.memoryTargetKb / 1024)}
@@ -2069,10 +2076,10 @@ function CaptureCard() {
           </div>
         ))}
         {[
-          { keys: "10 · 11 · 12 · 13", route: "Main app: full screen · left · right · region" },
+          { keys: "10 · 11 · 12", route: "Main app: full screen · left · right" },
           { keys: "21 · 22 · 23 · 24", route: "Background coding: full screen · left · right · region" },
           { keys: "31 · 32 · 33 · 34", route: "Background MCQ: full screen · left · right · region" },
-          { keys: "14", route: "Main app: process captured image(s) with enabled models" },
+          { keys: "13", route: "Main app: process captured image(s) with enabled models" },
           { keys: "25", route: "Background coding: submit captured images for processing" },
           { keys: "35", route: "Background MCQ: submit captured images for processing" },
         ].map((route) => (
@@ -2082,7 +2089,7 @@ function CaptureCard() {
           </div>
         ))}
         <p className="hint">
-          Enter each two-digit code quickly. Capture codes stage an image in that workflow; 14, 25,
+          Enter each two-digit code quickly. Capture codes stage an image in that workflow; 13, 25,
           and 35 send that workflow’s staged images for processing. These work when the window is closed
           because the Rust helper owns them. To change a regular shortcut,
           set its environment variable before launch, for example{" "}

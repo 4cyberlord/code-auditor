@@ -6,9 +6,8 @@ use serde_json::Value;
 use std::os::fd::AsRawFd;
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
-    os::unix::net::UnixStream,
-    path::PathBuf,
+    io::Write,
+    path::{Path, PathBuf},
     process::Command,
     time::{Duration, Instant},
 };
@@ -27,7 +26,11 @@ use wry::{WebView, WebViewBuilder};
 const SERVICE: &str = "com.apple.mds.session";
 const HELPER_TOKEN: &str = "mds";
 const SETTINGS_KEY: &str = "app.v1";
-const BUCKET: &str = "screenshots";
+// Overlay captures use the same private Azure container as the main app. The
+// helper receives only a short-lived, blob-scoped SAS URL from the API — never
+// the Azure connection string itself.
+const BUCKET: &str = "azure:council-images";
+const AZURE_STORAGE_VERSION: &str = "2023-11-03";
 const MAX_IMAGES: usize = 10;
 const OVERLAY_WIDTH: f64 = 1320.0;
 const OVERLAY_HEIGHT: f64 = 950.0;
@@ -188,7 +191,7 @@ mod mac_shortcuts {
     static HISTORY_NEXT: AtomicBool = AtomicBool::new(false);
     static HISTORY_OPEN_RESULT: AtomicBool = AtomicBool::new(false);
     static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
-    // Encoded pairs: 00 and 10-14 route to the main app, 21-24 are coding
+    // Encoded pairs: 00 and 10-13 route to the main app, 21-25 are coding
     // overlay controls, and 31-35 are MCQ overlay controls.
     static NUMBER_COMMAND: AtomicU8 = AtomicU8::new(0);
 
@@ -661,8 +664,7 @@ fn run() -> Result<(), String> {
                 10 => send_capture_to_council("screen"),
                 11 => send_capture_to_council("left"),
                 12 => send_capture_to_council("right"),
-                13 => send_capture_to_council("region"),
-                14 => send_process_to_council(),
+                13 => send_process_to_council(),
                 6 => {
                     // 00 belongs to the main-app session rather than the
                     // overlay, so it does not touch staged overlay captures.
@@ -680,6 +682,18 @@ fn run() -> Result<(), String> {
                     overlay_visible = true;
                     let _ = show_overlay(&overlay, true);
                     let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                }
+                25 => {
+                    // This undo is deliberately limited to the visible Coding
+                    // overlay: it cannot alter submitted jobs or MCQ captures.
+                    if overlay_visible && active_view == "coding" {
+                        match remove_last_pending_image("coding") {
+                            Ok(true) => log("removed newest staged coding capture"),
+                            Ok(false) => log("no staged coding capture to remove"),
+                            Err(error) => eprintln!("remove newest capture failed: {error}"),
+                        }
+                        let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                    }
                 }
                 22 | 23 | 31..=34 => {
                     let target_view = if command < 30 { "coding" } else { "mcq" };
@@ -1320,6 +1334,29 @@ fn reset_pending_batch(view: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Remove only the newest unsubmitted capture from one overlay batch.
+/// Submitted jobs and their retained preview files are never touched.
+fn remove_last_pending_image(view: &str) -> Result<bool, String> {
+    let Some(mut batch) = read_pending_for(view)? else { return Ok(false); };
+    let Some(image) = batch.images.pop() else { return Ok(false); };
+    let capture_dir = captures_dir(&batch.id)?;
+    let image_path = Path::new(&image.local_path);
+    if image_path.parent() != Some(capture_dir.as_path()) {
+        return Err("Refusing to remove a capture outside the active batch directory.".into());
+    }
+    if image_path.exists() {
+        fs::remove_file(image_path)
+            .map_err(|e| format!("Could not remove the newest staged screenshot: {e}"))?;
+    }
+    for (index, remaining) in batch.images.iter_mut().enumerate() {
+        remaining.position = index + 1;
+    }
+    batch.status = "collecting".to_string();
+    batch.error = None;
+    save_pending_for(view, &batch)?;
+    Ok(true)
+}
+
 #[derive(Clone, Copy)]
 enum CaptureMode { Full, Region, Left, Right }
 
@@ -1337,7 +1374,7 @@ fn number_pair_command(first: u8, second: u8) -> Option<u8> {
     match first {
         0 if second == 0 => Some(6),
         1 if second <= 4 => Some(10 + second),
-        2 if (1..=4).contains(&second) => Some(20 + second),
+        2 if (1..=5).contains(&second) => Some(20 + second),
         3 if (1..=5).contains(&second) => Some(30 + second),
         _ => None,
     }
@@ -1546,8 +1583,8 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
         previews.push(image.local_path.clone());
         let path = format!("{owner_id}/{session_id}/{}/{}-{}", batch.submission_id.as_deref().unwrap_or_default(), image.position, safe_segment(&image.file_name));
         let signed = api(
-            "storage.uploadUrl",
-            serde_json::json!({ "path": path, "bucket": BUCKET, "idempotent": true }),
+            "storage.azureUploadUrl",
+            serde_json::json!({ "path": path }),
         )
         .await?;
         space_api_calls().await;
@@ -1561,6 +1598,8 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
             .build()
             .map_err(|e| e.to_string())?
             .put(url)
+            .header("x-ms-blob-type", "BlockBlob")
+            .header("x-ms-version", AZURE_STORAGE_VERSION)
             .header(
                 "Content-Type",
                 if image.mime.is_empty() {
@@ -1998,47 +2037,7 @@ fn read_overlay_state_snapshot(active_view: &str, submitted: Option<&SubmittedJo
         }
     }
 
-    if let Some(socket_state) = read_coding_socket_state() {
-        return socket_state;
-    }
-
     fallback.to_string()
-}
-
-fn read_coding_socket_state() -> Option<String> {
-    let entries = fs::read_dir("/tmp").ok()?;
-    let mut sockets: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| name.starts_with(".mds_") && name.ends_with(".sock"))
-                .unwrap_or(false)
-        })
-        .collect();
-    sockets.sort_by_key(|path| {
-        fs::metadata(path)
-            .and_then(|metadata| metadata.modified())
-            .ok()
-    });
-    sockets.reverse();
-
-    for path in sockets {
-        let Ok(stream) = UnixStream::connect(&path) else {
-            continue;
-        };
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
-        let mut buf = Vec::with_capacity(65_536);
-        if stream.take(65_536).read_to_end(&mut buf).is_ok() {
-            if let Ok(text) = String::from_utf8(buf) {
-                if serde_json::from_str::<Value>(&text).is_ok() {
-                    return Some(text);
-                }
-            }
-        }
-    }
-    None
 }
 
 fn mcq_placeholder_state() -> Value {
@@ -2263,80 +2262,34 @@ fn job_progress_message(job: &SubmittedJob) -> String {
 }
 
 fn coding_agents_from_events(job: &SubmittedJob) -> Vec<Value> {
-    let status = match job.status.as_str() {
-        "failed" | "needs_attention" | "cancelled" => "error",
-        "completed" => "done",
-        "queued" => "pending",
-        _ => "running",
-    };
-    let detail = job_progress_message(job);
-    configured_council_agents()
-        .into_iter()
-        .map(|mut agent| {
-            agent["status"] = Value::String(status.to_string());
-            agent["detail"] = Value::String(detail.clone());
-            if job.error.is_some() {
-                agent["error"] = serde_json::to_value(&job.error).unwrap_or(Value::Null);
-            }
-            agent
-        })
-        .collect()
-}
+    // The saved Settings roster describes possible seats, not the final
+    // eligible roster. Show cards only after the worker emits its authoritative
+    // post-routing `solving` event.
+    let models = job.events.iter().rev().find_map(|event| {
+        if event.get("phase").and_then(Value::as_str) != Some("solving") {
+            return None;
+        }
+        event.pointer("/payload/models").and_then(Value::as_array).map(|models| {
+            models.iter().filter_map(Value::as_str).filter(|model| !model.trim().is_empty())
+                .map(str::to_string).collect::<Vec<_>>()
+        }).filter(|models| !models.is_empty())
+    });
+    let Some(models) = models else { return vec![]; };
 
-/// The helper deliberately reads only the cached, non-secret settings snapshot.
-/// That lets its always-on overlay name the same Council seats as the main app,
-/// while leaving credentials and the actual job workflow solely in the app.
-fn configured_council_agents() -> Vec<Value> {
-    let settings = last_good_settings_path()
-        .ok()
-        .and_then(|path| fs::read_to_string(path).ok())
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .and_then(|snapshot| snapshot.get("settings").cloned())
-        .unwrap_or(Value::Null);
-
-    let mut models: Vec<String> = settings
-        .pointer("/councilModels")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|model| model.get("id").and_then(Value::as_str))
-        .map(str::to_string)
-        .collect();
-
-    // The main app can include its own panel answers alongside the configured
-    // Council solvers. Surface that seat only when the setting says it is part
-    // of this run, and cap the compact overlay at the requested four cards.
-    if settings
-        .get("councilIncludePanel")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        models.push("Panel answer".to_string());
-    }
-
-    models.truncate(4);
-    models
-        .into_iter()
-        .enumerate()
-        .map(|(index, model)| {
-            let label = if model == "Panel answer" {
-                "Panel".to_string()
-            } else {
-                model
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&model)
-                    .replace('-', " ")
-            };
-            serde_json::json!({
-                "id": format!("seat-{}", index + 1),
-                "label": label,
-                "model": model,
-                "status": "pending",
-                "detail": "Waiting for Council to begin.",
-            })
-        })
-        .collect()
+    models.into_iter().take(4).enumerate().map(|(index, model)| {
+        let event = job.events.iter().rev().find(|event| {
+            event.pointer("/payload/model").and_then(Value::as_str) == Some(model.as_str())
+                && matches!(event.get("phase").and_then(Value::as_str), Some("solver_done") | Some("solver_failed"))
+        });
+        let failed = event.is_some_and(|event| event.get("phase").and_then(Value::as_str) == Some("solver_failed"));
+        let done = event.is_some_and(|event| event.get("phase").and_then(Value::as_str) == Some("solver_done"));
+        let error = failed.then(|| event.and_then(|event| event.get("message").and_then(Value::as_str)).unwrap_or("Model failed.").to_string());
+        let status = if failed { "error" } else if done { "done" } else if job.status == "queued" { "pending" } else { "running" };
+        let detail = if failed { error.clone().unwrap_or_default() } else if done { "Answer ready; Council is continuing review.".to_string() } else if job.status == "queued" { "Waiting for Council to select eligible agents.".to_string() } else { "Generating candidate answer.".to_string() };
+        let label = model.rsplit('/').next().unwrap_or(&model).replace('-', " ");
+        serde_json::json!({ "id": format!("seat-{}", index + 1), "label": label, "model": model,
+            "status": status, "detail": detail, "error": error })
+    }).collect()
 }
 
 fn coding_solution_from_report(
@@ -2786,7 +2739,7 @@ fn overlay_html() -> &'static str {
               const oldTitle=agents.previousElementSibling;if(oldTitle&&oldTitle.classList.contains('title'))oldTitle.replaceWith(header);else pane.insertBefore(header,agents);
               agents.innerHTML='';
               if(!selected.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='The selected Council agents will appear here.';agents.appendChild(empty);}else{selected.forEach((agent)=>{const card=document.createElement('div');card.className='model-chip';card.dataset.state=stateTone(agent.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=agent.label||agent.id||'Council agent';const model=document.createElement('span');model.className='agent-model';model.textContent=agent.model||'Council';const detail=document.createElement('span');detail.textContent=agentStatusText(agent);card.title=[agent.model,agent.error].filter(Boolean).join(' — ');card.append(dot,name,model,detail);agents.appendChild(card);});}
-              const progress=document.createElement('div');progress.className='overlay-progress';progress.textContent=state.phase==='done'?'Council completed this run. Review the verified solution below.':(state.phase==='error'?'Council needs attention. See the diagnostic below.':(selected.find((agent)=>agent.detail)?.detail||'Council is preparing and reviewing candidate answers.'));
+              const progress=document.createElement('div');progress.className='overlay-progress';const waiting=state.phase==='idle'?'Capture screenshots to begin.':(state.solution&&state.solution.code)||'Council is selecting eligible agents.';progress.textContent=state.phase==='done'?'Council completed this run. Review the verified solution below.':(state.phase==='error'?'Council needs attention. See the diagnostic below.':(selected.find((agent)=>agent.detail)?.detail||waiting));
               agents.after(progress);
               const failures=selected.filter((agent)=>agent.error).map((agent)=>(agent.label||agent.id||'Council agent')+': '+agent.error);
               if(failures.length||state.phase==='error'){const diagnostic=document.createElement('div');diagnostic.className='overlay-diagnostics';const label=document.createElement('b');label.textContent='Run diagnostics';const message=document.createElement('span');message.textContent=failures.join(' · ')||'The Council run reported an issue. The captured images and any available answer remain available.';diagnostic.append(label,message);progress.after(diagnostic);}
@@ -2803,14 +2756,14 @@ mod tests {
     fn number_pairs_route_to_the_requested_workflow_and_capture_shape() {
         let expected = [
             (0, 0, 6),
-            (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13), (1, 4, 14),
-            (2, 1, 21), (2, 2, 22), (2, 3, 23), (2, 4, 24),
+            (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13),
+            (2, 1, 21), (2, 2, 22), (2, 3, 23), (2, 4, 24), (2, 5, 25),
             (3, 1, 31), (3, 2, 32), (3, 3, 33), (3, 4, 34), (3, 5, 35),
         ];
         for (prefix, shape, command) in expected {
             assert_eq!(number_pair_command(prefix, shape), Some(command));
         }
-        for invalid in [(1, 5), (2, 0), (2, 5), (3, 0), (4, 1)] {
+        for invalid in [(1, 5), (2, 0), (3, 0), (4, 1)] {
             assert_eq!(number_pair_command(invalid.0, invalid.1), None);
         }
     }

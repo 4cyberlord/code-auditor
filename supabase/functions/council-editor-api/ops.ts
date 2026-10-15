@@ -27,6 +27,9 @@ export interface Ctx {
 
 /** Platform rows are owned by the nil UUID. */
 const PLATFORM_OWNER = "00000000-0000-0000-0000-000000000000";
+const AZURE_SCREENSHOT_BUCKET = "azure:council-images";
+const AZURE_SCREENSHOT_CONTAINER = "council-images";
+const AZURE_SAS_VERSION = "2023-11-03";
 
 /** The four that open the database and therefore cannot live inside it. */
 const BOOTSTRAP_KEYS = new Set([
@@ -59,6 +62,57 @@ function ok<T>(res: { data: T; error: any }, what: string): T {
     throw new HttpError(500, `Could not ${what}.`);
   }
   return res.data;
+}
+
+function azureConnectionString(value: string) {
+  const fields = new Map(value.split(";").flatMap((part) => {
+    const index = part.indexOf("=");
+    return index > 0 ? [[part.slice(0, index).trim().toLowerCase(), part.slice(index + 1).trim()]] : [];
+  }));
+  const account = fields.get("accountname");
+  const accountKey = fields.get("accountkey");
+  if (account !== "councilimages" || !accountKey) return null;
+  try {
+    const key = Uint8Array.from(atob(accountKey), (character) => character.charCodeAt(0));
+    return key.length ? { account, key } : null;
+  } catch {
+    return null;
+  }
+}
+
+function azurePath(path: string) {
+  if (path.split("/").some((part) => !part || part === "." || part === "..")) return null;
+  return path.split("/").map(encodeURIComponent).join("/");
+}
+
+function base64(bytes: ArrayBuffer) {
+  return btoa(String.fromCharCode(...new Uint8Array(bytes)));
+}
+
+async function azureSignedUploadUrl(connectionString: string, path: string) {
+  const credentials = azureConnectionString(connectionString);
+  const safePath = azurePath(path);
+  if (!credentials || !safePath) throw new HttpError(500, "Azure Storage is not configured correctly for this account.");
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const resource = `/blob/${credentials.account}/${AZURE_SCREENSHOT_CONTAINER}/${path}`;
+  const toSign = ["cw", "", expiresAt, resource, "", "", "https", AZURE_SAS_VERSION,
+    "b", "", "", "", "", "", "", ""].join("\n");
+  const signingKey = await crypto.subtle.importKey(
+    "raw",
+    credentials.key,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = base64(await crypto.subtle.sign("HMAC", signingKey, new TextEncoder().encode(toSign)));
+  const url = new URL(`https://${credentials.account}.blob.core.windows.net/${AZURE_SCREENSHOT_CONTAINER}/${safePath}`);
+  url.searchParams.set("sp", "cw");
+  url.searchParams.set("se", expiresAt);
+  url.searchParams.set("spr", "https");
+  url.searchParams.set("sv", AZURE_SAS_VERSION);
+  url.searchParams.set("sr", "b");
+  url.searchParams.set("sig", signature);
+  return url.toString();
 }
 
 // PostgREST can see an older database schema for a while after an API deploy.
@@ -1179,6 +1233,35 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
       throw new HttpError(500, "Could not start that upload.");
     }
     return { url: data.signedUrl, token: data.token, path: data.path, bucket };
+  },
+
+  /**
+   * A write-only, blob-scoped Azure SAS for an overlay capture. The connection
+   * string remains in the account's secret configuration; unlike `secrets.load`
+   * this operation never returns it to the desktop helper.
+   */
+  "storage.azureUploadUrl": async ({ admin, principal }, args) => {
+    const path = str(args.path, "path");
+    const policyError = validateScreenshotUploadKey(principal.userId, path, SCREENSHOT_BUCKET);
+    if (policyError) throw new HttpError(400, policyError);
+    const rows = ok(
+      await admin
+        .from("app_config")
+        .select("value, owner_id")
+        .eq("key", "azure_storage_connection_string")
+        .eq("secret", true)
+        .or(`owner_id.eq.${principal.userId},owner_id.eq.${PLATFORM_OWNER}`),
+      "read Azure Storage configuration",
+    ) as any[];
+    const row = [...rows].sort((a, b) => (a.owner_id === PLATFORM_OWNER ? -1 : 1)).at(-1);
+    const connectionString = String(row?.value ?? "").trim();
+    if (!connectionString) throw new HttpError(409, "No Azure Storage connection is saved for this account.");
+    return {
+      url: await azureSignedUploadUrl(connectionString, path),
+      path,
+      bucket: AZURE_SCREENSHOT_BUCKET,
+      expiresInSeconds: 600,
+    };
   },
 
   /** Delete a stored object, but only one this project actually recorded. */
