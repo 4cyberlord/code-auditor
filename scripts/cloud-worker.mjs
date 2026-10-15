@@ -2845,17 +2845,23 @@ export async function runCouncilJob(job) {
   // re-answering a question already answered.
   let field3 = field;
   let revisedRuns = {};
-  // Never spend a repair round on failed candidates. Improve only correct
-  // candidates when a reviewer identifies a substantive concern.
-  const revisionCandidates=verifiedCandidates.filter(candidate=>
-    reviewsOf(reviewSets,candidate.letter).some(review=>
+  // Repair genuine candidate failures as well as reviewer-raised concerns.
+  // `requiresRepair` deliberately excludes cancelled runs and a harness that
+  // could not even start: those are execution/harness incidents, not defects
+  // the model can responsibly repair. A candidate that compiled and failed
+  // actual test cases, however, must retain one bounded repair-and-retest
+  // opportunity. Otherwise a single correctable edge case turns a whole job
+  // into "no winner" even though the Council has the diagnostics to fix it.
+  const revisionCandidates=field.filter(candidate=>{
+    const run=benchmark.runs[candidate.letter];
+    const reviewerFoundConcern=isVerified(run) && reviewsOf(reviewSets,candidate.letter).some(review=>
       review.correct==="no" || (review.correct==="unsure" &&
         !/^(none|no issue|n\/a|not applicable)$/i.test(String(review.problems||"").trim()))
-    )
-  );
-  // Reviews still reach every judge and the final synthesis. Only candidates
-  // with execution failure or a substantive correctness concern incur a second
-  // generation and sandbox pass.
+    );
+    return requiresRepair(run)||reviewerFoundConcern;
+  });
+  // A candidate only incurs a second generation and sandbox pass when its
+  // executable evidence failed, or a reviewer found a substantive concern.
   if (revisionCandidates.length > 0) {
     timer.enter("revising");
     await patchJob(job.id, { progress_phase: "revising" });

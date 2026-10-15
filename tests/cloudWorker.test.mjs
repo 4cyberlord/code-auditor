@@ -555,6 +555,11 @@ check(
   events.some((e) => e.phase === "harness_suspect"),
   JSON.stringify(events.map((e) => e.phase))
 );
+check(
+  "test-rejected candidates still receive one bounded repair attempt",
+  events.filter((e) => e.phase === "revision_done").length === 2,
+  JSON.stringify(events.filter((e) => e.phase === "revision_done").map((e) => e.payload?.letter))
+);
 check("the job never claimed completion", !patches.some((p) => p.status === "completed"));
 
 // --- a route that never answers is asked once, not at every stage ----------
