@@ -20,9 +20,12 @@ const prefixPaths = [
 ];
 const endpoint = "https://council-offline-html-upload.council-docs-r2-2f1fd544.workers.dev/upload-batch";
 const audience = "council-language-docs-r2-upload-v1";
+const inventoryEndpoint = "https://council-language-docs-inventory.council-docs-r2-2f1fd544.workers.dev/inventory";
+const alreadyStored = new Set();
+let skipped = 0;
 const maxFiles = 160000;
-const downloadConcurrency = 12;
-const uploadConcurrency = 4;
+const downloadConcurrency = 24;
+const uploadConcurrency = 7;
 const maxFileBytes = 20 * 1024 * 1024;
 const maxBatchBytes = 7 * 1024 * 1024;
 const maxBatchFiles = 30;
@@ -183,7 +186,23 @@ function start(url) {
   downloading.set(url, job);
 }
 
+async function loadPreviouslyStored() {
+  let cursor;
+  for (let i=0;i<250;i++) {
+    const u=new URL(inventoryEndpoint);
+    if(cursor)u.searchParams.set("cursor",cursor);
+    const response=await fetch(u,{headers:{"user-agent":"Mozilla/5.0"},signal:AbortSignal.timeout(30000)});
+    if(!response.ok)throw Error("R2 inventory HTTP "+response.status);
+    const result=await response.json();
+    for(const k of result.keys||[])alreadyStored.add(k);
+    cursor=result.cursor;
+    if(!cursor)break;
+  }
+  console.log("Resume inventory: "+alreadyStored.size+" files already on R2");
+}
 async function main() {
+  try { await loadPreviouslyStored(); }
+  catch(e) { console.warn("Inventory lookup failed, will safely re-upload:", String(e).slice(0,220)); }
   for (const prefix of prefixPaths) enqueue("index.html", origin + prefix);
   const started = Date.now();
   console.log("Crawling " + prefixPaths.length + " language documentation roots");
@@ -201,9 +220,13 @@ async function main() {
     const prefix = prefixPaths.find(p => item.filePath.startsWith(p));
     if (!prefix) continue;
     counts[prefix]++;
-    batch.push({ key: item.filePath.slice(1), bytes: item.bytes });
-    batchBytes += item.bytes.length;
-    await flush();
+    const key=item.filePath.slice(1);
+    if (alreadyStored.has(key)) skipped++;
+    else {
+      batch.push({ key, bytes: item.bytes });
+      batchBytes += item.bytes.length;
+      await flush();
+    }
     if ((counts[prefixPaths[0]] + counts[prefixPaths[1]] + counts[prefixPaths[2]]) % 1000 === 0) {
       console.log("Crawled: " + JSON.stringify(counts) + "; discovered: " + seen.size);
     }
@@ -212,12 +235,12 @@ async function main() {
   await Promise.all(uploading);
   const outcome = {
     elapsed_seconds: Math.round((Date.now() - started) / 1000),
-    discovered: seen.size, crawled: counts, uploaded: uploaded.files,
+    discovered: seen.size, crawled: counts, existing_skipped: skipped, uploaded: uploaded.files,
     batches: uploaded.batches, errors: errors.slice(0, 100),
   };
   console.log("FINAL REPORT " + JSON.stringify(outcome));
-  if (uploaded.files === 0 || prefixPaths.some(p => !counts[p]) ||
-      uploaded.files !== Object.values(counts).reduce((a, b) => a + b, 0) ||
+  if ((uploaded.files + skipped) === 0 || prefixPaths.some(p => !counts[p]) ||
+      (uploaded.files + skipped) !== Object.values(counts).reduce((a, b) => a + b, 0) ||
       errors.length) {
     process.exitCode = 1;
   }
