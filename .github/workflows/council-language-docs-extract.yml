@@ -129,6 +129,9 @@ jobs:
                   except Exception:
                       if attempt==3:raise
                       time.sleep(2*(attempt+1))
+          probe=next((p for p in files if p.name.endswith('.html')),None)
+          if not probe: raise RuntimeError('No HTML probe found')
+          print('R2 connectivity probe:', upload(probe), flush=True)
           failures=[]
           with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
               future_map={pool.submit(upload,p):p for p in files}
