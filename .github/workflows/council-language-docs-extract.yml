@@ -1,0 +1,95 @@
+name: Council language docs extraction
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  extract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.COUNCIL_DOCS_R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.COUNCIL_DOCS_R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      CF_ACCOUNT_ID: ${{ secrets.COUNCIL_DOCS_R2_ACCOUNT_ID }}
+      BUCKET: ${{ vars.COUNCIL_DOCS_R2_BUCKET }}
+    steps:
+      - name: Confirm isolated configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$AWS_ACCESS_KEY_ID"
+          test -n "$AWS_SECRET_ACCESS_KEY"
+          test -n "$CF_ACCOUNT_ID"
+          test "$BUCKET" = "council-language-knowledge"
+      - name: Install extraction dependencies
+        run: sudo apt-get update && sudo apt-get install -y awscli unzip xz-utils
+      - name: Download and inspect archive entries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p archives extracted/python/3.15 extracted/cpp/cppreference-20250209 extracted/rust/1.99.0
+          curl -fL --retry 3 'https://docs.python.org/3.15/archives/python-3.15-docs-html.zip' -o archives/python.zip
+          curl -fL --retry 3 'https://github.com/PeterFeicht/cppreference-doc/releases/download/v20250209/html-book-20250209.zip' -o archives/cpp.zip
+          curl -fL --retry 3 'https://static.rust-lang.org/dist/rust-docs-1.99.0-x86_64-unknown-linux-gnu.tar.xz' -o archives/rust.tar.xz
+          python3 - <<'PY'
+          import pathlib, tarfile, zipfile
+          root = pathlib.Path('archives')
+          for name in ('python.zip','cpp.zip'):
+              with zipfile.ZipFile(root/name) as f:
+                  bad=f.testzip()
+                  if bad: raise ValueError(f'Corrupt member: {bad}')
+                  for m in f.infolist():
+                      p=pathlib.PurePosixPath(m.filename)
+                      if p.is_absolute() or '..' in p.parts or m.filename.startswith('\\'):
+                          raise ValueError(f'Unsafe ZIP path: {m.filename}')
+                      if ((m.external_attr >> 16) & 0o170000) == 0o120000:
+                          raise ValueError(f'ZIP symlink prohibited: {m.filename}')
+          with tarfile.open(root/'rust.tar.xz','r:xz') as f:
+              for m in f:
+                  p=pathlib.PurePosixPath(m.name)
+                  if p.is_absolute() or '..' in p.parts or not (m.isfile() or m.isdir()):
+                      raise ValueError(f'Unsafe TAR member: {m.name}')
+          PY
+          unzip -q archives/python.zip -d extracted/python/3.15
+          unzip -q archives/cpp.zip -d extracted/cpp/cppreference-20250209
+          python3 - <<'PY'
+          import pathlib, tarfile
+          dest=pathlib.Path('extracted/rust/1.99.0')
+          with tarfile.open('archives/rust.tar.xz','r:xz') as f:
+              for m in f:
+                  if m.isdir():
+                      (dest / m.name).mkdir(parents=True,exist_ok=True)
+                  elif m.isfile():
+                      p=dest/m.name
+                      p.parent.mkdir(parents=True,exist_ok=True)
+                      src=f.extractfile(m)
+                      if src is None: raise RuntimeError(m.name)
+                      with src, p.open('wb') as out:
+                          import shutil
+                          shutil.copyfileobj(src,out)
+          PY
+      - name: Upload extracted pages and manifest to R2
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws --endpoint-url "$ENDPOINT" s3 sync extracted/ "s3://$BUCKET/extracted/" --no-progress --only-show-errors
+          python3 - <<'PY'
+          import datetime,hashlib,json,pathlib
+          files=[]
+          for p in sorted(pathlib.Path('extracted').rglob('*')):
+              if p.is_file():
+                  files.append({'path':p.relative_to('extracted').as_posix(),'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          out={'schema_version':1,'generated_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'file_count':len(files),'files':files}
+          pathlib.Path('extracted-manifest.json').write_text(json.dumps(out,separators=(',',':')))
+          print('Uploaded files:',len(files))
+          PY
+          aws --endpoint-url "$ENDPOINT" s3 cp extracted-manifest.json "s3://$BUCKET/manifests/extracted-files.json" --content-type application/json --no-progress
+      - name: Verify uploaded HTML is accessible
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/extracted/" --recursive | grep -E '\.html$' | head -n 1
+          aws --endpoint-url "$ENDPOINT" s3api head-object --bucket "$BUCKET" --key manifests/extracted-files.json >/dev/null
