@@ -23,6 +23,7 @@ import { executionId, validateExecution, parseExecutionOutput, executionStatus, 
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
+import { fetchAuthoritativeLanguageContext, inferDocumentationLanguage } from "./lib/authoritativeLanguageDocs.mjs";
 import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/externalLanguageSources.mjs";
 import { fetchLanguageViaGateway } from "./lib/supabaseLanguageGateway.mjs";
 import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
@@ -1294,11 +1295,22 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
     workerConcurrency(process.env.CODE_AUDITOR_HARNESS_CONCURRENCY, 3, 4),
     async (language) => {
     const pack = packsByLanguage.get(language);
+    // The owner's HTML documentation is consulted FIRST for each target
+    // language, including reference-harness generation. The verified rules
+    // pack still supplies runtime contracts and fallback guidance.
+    const docs = await fetchAuthoritativeLanguageContext(
+      [question, candidateDocket(candidates).slice(0,3000)].join("\n"),
+      {language}
+    );
+    if(docs.prompt)await addEvent(job.id,"info","language_reference_harness",
+      "Consulted the personal documentation server for "+language+" harness generation.",
+      {language,source:docs.source,pages:docs.pages.map(page=>page.url)});
     let lastError = "";
     // The model gets the contract for this language only. Giving it every
     // language's syntax rules is noise and was one source of cross-language
     // harness mistakes; runtime execution below remains the final check.
     const languageKnowledge = [
+      docs.prompt,
       knowledge || settings.knowledgeDigest || "",
       runtimeGuidanceFor(language),
       languagePrompt(pack),
@@ -2364,11 +2376,27 @@ export async function runCouncilJob(job) {
   // called code: retrieving cp-algorithms and perf counters for a
   // multiple-choice question is noise charged four times over.
   const inferredKind = contracting.contract?.kind || reading.extraction?.kind || "";
+  const documentationQuery = [question, reading.extraction?.problemSummary,
+    reading.extraction?.code].filter(Boolean).join("\n");
+  const detectedDocsLanguage = inferDocumentationLanguage(documentationQuery,
+    reading.extraction?.language || settings.outputLanguage || "");
+  // Proactive reference lookup before the first solver: bounded, cached,
+  // server-side and topic-specific, never a full-site download.
+  const initialReference = inferredKind === "code" || detectedDocsLanguage
+    ? await fetchAuthoritativeLanguageContext(documentationQuery, {
+      language:detectedDocsLanguage || "python"
+    })
+    : {language:"",source:"not-applicable",prompt:"",pages:[]};
+  if(initialReference.prompt)await addEvent(job.id,"info","language_reference_primary",
+    "Loaded focused documentation from the personal server before solving.",
+    {language:initialReference.language,source:initialReference.source,
+     pages:initialReference.pages.map(page=>page.url)});
   let knowledge = inferredKind === "code"
     ? await selectKnowledge(job, settings, { contract: contracting.contract, reading })
     : "";
   const solverPrompt = [
-    userPrompt("", solveImages.length > 0, reading.context, imageRefs, knowledge, policy),
+    userPrompt("", solveImages.length > 0, reading.context, imageRefs,
+      [initialReference.prompt,knowledge].filter(Boolean).join("\n\n"), policy),
     contractText,
   ]
     .filter(Boolean)
@@ -2509,6 +2537,9 @@ export async function runCouncilJob(job) {
   if (!knowledge && isCoding) {
     knowledge = await selectKnowledge(job, settings, { candidates: field, reading });
   }
+  // The same relevant documentation is available during reviews, revisions,
+  // judges and synthesis, not only in the initial solve.
+  const councilKnowledge = [initialReference.prompt,knowledge].filter(Boolean).join("\n\n");
 
   timer.enter("benchmark");
   const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field, knowledge, bench);
@@ -2573,7 +2604,7 @@ export async function runCouncilJob(job) {
           baseUrl,
           model: spec.id,
           system: reviewSystemPrompt(),
-          user: reviewUserPrompt({ question, docket, execution, knowledge }),
+          user: reviewUserPrompt({ question, docket, execution, knowledge: councilKnowledge }),
           maxTokens: Number(settings.maxTokens || 4096),
         });
         const parsed = parseReviewSet(text, spec.id);
@@ -2646,7 +2677,7 @@ export async function runCouncilJob(job) {
               docket,
               received,
               execution,
-              knowledge,
+              knowledge: councilKnowledge,
             }),
             maxTokens: Number(settings.maxTokens || 4096),
           });
@@ -2741,7 +2772,7 @@ export async function runCouncilJob(job) {
             docket: docketBoth,
             reviews: reviewDigest(reviewSets),
             execution: executionBoth,
-            knowledge,
+            knowledge: councilKnowledge,
           }),
           maxTokens: Number(settings.maxTokens || 4096),
         });
@@ -2783,7 +2814,7 @@ export async function runCouncilJob(job) {
         reviews: reviewDigest(reviewSets) || "(no reviews were collected)",
         execution: executionBoth,
         judges: judgeDigest(judgeReports) || "(no judges were collected)",
-        knowledge,
+        knowledge: councilKnowledge,
       }),
       maxTokens: Number(settings.maxTokens || 4096),
     });
