@@ -359,10 +359,11 @@ export async function createSolveJob(job: {
 }
 
 export async function listSolveJobs(
-  status: SolveJobStatus | "all" = "all"
+  status: SolveJobStatus | "all" = "all",
+  options: { origin?: "remote-terminal"; offset?: number; limit?: number } = {},
 ): Promise<SolveJob[]> {
   if (!inTauri()) return [];
-  return invoke<SolveJob[]>("solve_job_list", { status });
+  return invoke<SolveJob[]>("solve_job_list", { status, ...options });
 }
 
 export async function listSolveJobEvents(jobId: string): Promise<SolveJobEvent[]> {
