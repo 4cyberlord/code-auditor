@@ -20,7 +20,7 @@ export function ProgressiveCouncilResult({
 }:{
   report:CouncilReportSummary; processing:boolean;
 }){
-  const details=report.report as Published;
+  const details=report.report as unknown as Published;
   const primary=details?.presentation;
   const primaryReady=details?.standing==="verified"&&Boolean(primary?.code);
   const ports=Array.isArray(details?.ports)?details.ports:[];
@@ -52,7 +52,7 @@ export function ProgressiveCouncilResult({
             ? <>
                 <pre className="progressive-result-code">{port.code}</pre>
                 <p>{port.run?.passed??0} executable tests passed
-                  {Number.isFinite(port.run?.remoteElapsedMs)
+                  {typeof port.run?.remoteElapsedMs==="number" && Number.isFinite(port.run.remoteElapsedMs)
                     ? " · Measured execution "+port.run?.remoteElapsedMs+" ms":""}
                 </p>
               </>
