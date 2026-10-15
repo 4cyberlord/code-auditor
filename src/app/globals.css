@@ -2361,6 +2361,46 @@ textarea.field {
   gap: 4px;
   margin-top: 10px;
 }
+.council-gates .badge[data-tone="rejected"] {
+  background: color-mix(in srgb, var(--text-dim) 20%, var(--panel));
+  color: var(--text-dim);
+  border-color: var(--line-strong);
+}
+.progressive-verified-result {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.progressive-result-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.progressive-result-code {
+  overflow: auto;
+  max-height: 300px;
+  padding: 8px;
+  background: var(--code-bg);
+  border-radius: 6px;
+  white-space: pre;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.progressive-result-ports {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.progressive-result-ports details {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px;
+}
+
 .council-tabs {
   flex: none;
   display: flex;
