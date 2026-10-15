@@ -330,6 +330,29 @@ export default function BackgroundJobsPanel() {
     return ()=>{live=false;window.clearInterval(id)};
   },[open,selectedDetailId,selectedDetailStatus]);
 
+  // Report rows can be updated after each language translation finishes while
+  // solve_jobs remains in the same 'porting' phase. Refresh only the JSON
+  // report while running; never re-sign or re-read screenshot assets here.
+  useEffect(() => {
+    if (!open || !selectedDetailId || selectedDetailStatus !== "running") return;
+    let live = true;
+    let busy = false;
+    const refreshVerifiedResult = async () => {
+      if (busy || document.hidden) return;
+      busy = true;
+      try {
+        const updated = await getCouncilReport(selectedDetailId);
+        if (live && updated) setReport(updated);
+      } catch (error) {
+        devLog("cloud-jobs", "verified result refresh failed", { error: String(error) });
+      } finally {
+        busy = false;
+      }
+    };
+    const refreshTimer = window.setInterval(() => void refreshVerifiedResult(), 6000);
+    return () => { live = false; window.clearInterval(refreshTimer); };
+  }, [open, selectedDetailId, selectedDetailStatus]);
+
   return (
     <section className="background-jobs" data-open={open}>
       <div
