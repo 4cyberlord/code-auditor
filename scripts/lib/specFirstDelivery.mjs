@@ -11,6 +11,20 @@ export function preferredLanguages(configured, fallback=["python","rust","cpp"])
  return [...new Set((Array.isArray(configured)&&configured.length?configured:fallback)
    .map(canonicalPortLanguage).filter(Boolean))];
 }
+/**
+ * Respect explicit language requirements in the user's problem. When none is
+ * stated, use the configured output-language order, starting with Python.
+ */
+export function requiredProblemLanguage(question){
+ const text=String(question||"").slice(0,18000);
+ const direct=/(?:required|target|programming|implementation|output)\\s*language\\s*[:=]\\s*(python|rust|c\\+\\+|cpp)\\b/i.exec(text)
+   ||/\\b(?:implement|write|solve|code)\\s+(?:this|it|the\\s+solution|the\\s+program)?\\s*in\\s+(python|rust|c\\+\\+|cpp)\\b/i.exec(text);
+ if(direct)return canonicalPortLanguage(direct[1]);
+ if(/#include\\s*[<"]|\\bstd::|\\bclass\\s+Solution\\s*\\{/.test(text))return "cpp";
+ if(/\\bfn\\s+main\\s*\\(|\\bimpl\\s+Solution\\b/.test(text))return "rust";
+ if(/\\bdef\\s+[a-z_]\\w*\\s*\\(|\\bclass\\s+Solution\\s*:\\s*/.test(text))return "python";
+ return "";
+}
 export function contractSupportsEarlyHarness(question,kind){
  if(kind!=="code")return false;
  const s=String(question||"").slice(0,16000);
