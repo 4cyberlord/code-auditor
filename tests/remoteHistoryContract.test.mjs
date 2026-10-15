@@ -32,8 +32,8 @@ test("remote cloud reports are accessible from BOTH History interfaces", () => {
     assert.match(code, /<RemoteHistory \/>/);
   }
   const remote = read("src/components/RemoteHistory.tsx");
-  assert.match(remote, /getCouncilReport\(selected.id\)/);
-  assert.match(remote, /listSolveJobImages\(selected.id\)/);
+  assert.match(remote, /getCouncilReport\(selectedId\)/);
+  assert.match(remote, /listSolveJobImages\(selectedId\)/);
 });
 
 test("cloud worker can find configured gateway for a credentialed remote job", () => {
