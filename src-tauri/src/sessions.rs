@@ -596,11 +596,18 @@ pub async fn solve_job_create(
 pub async fn solve_job_list(
     db: tauri::State<'_, Db>,
     status: String,
+    origin: Option<String>,
+    offset: Option<i32>,
+    limit: Option<i32>,
 ) -> Result<Vec<SolveJob>, String> {
+    // Old callers omit the optional paging arguments; the API supplies defaults.
+    // The remote History view asks for its own owner-scoped, paged job archive.
     crate::server_api::call(
         db.inner(),
         "jobs.list",
-        serde_json::json!({ "status": status }),
+        serde_json::json!({
+            "status": status, "origin": origin, "offset": offset, "limit": limit
+        }),
     )
     .await
 }
