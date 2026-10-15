@@ -45,26 +45,24 @@ and language packs concurrently instead of waiting for one to finish before
 starting the other. Session-title metadata runs alongside harness preparation
 and is joined before the final report is saved.
 
-### Most likely throttle when solver selection is quick
+### Which gateway is actually in the user's critical path
 
-TokenRouter and Wiro currently pace new model requests globally. The defaults
-are `CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS=13000` and
-`CODE_AUDITOR_TOKENROUTER_JITTER_MS=1500`. Therefore issuing
-`Promise.all` for four solver/reviewer seats does not make them all *start*
-together: the global pacer spaces gateway requests.
+CleanAPIs is the primary Council gateway for this deployment. The current
+worker deliberately disables TokenRouter's per-request pacer when
+`gatewayId(settings) === "cleanapis"`; therefore the earlier 13-second
+TokenRouter default **does not explain current CleanAPIs latency** and is
+not altered in this PR.
 
-To keep existing rate-limit behavior, `CODE_AUDITOR_TOKENROUTER_PACING_SCOPE`
-defaults to `global`. If and **only if** the gateway/account permits
-separate per-model concurrency, an operator can set it to `per_model` on one
-canary worker and verify 429 responses, queue depth, spend, and end-to-end
-latency before rolling out. Requests for each individual model retain the
-existing minimum spacing and jitter; other models may begin in independent
-lanes. Unknown values use the safe `global` mode.
+TokenRouter/Wiro may be used for other configurations later. Those choices
+should remain separate from the editor's independently configurable coding
+providers. Do not change the gateway roster, credentials, retry policy or
+model reasoning budgets merely to address the current Council delay.
 
-Reducing `CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS` is another existing
-operator override, but should not be done without observed quota headroom.
-Raising request concurrency will not improve cases that are bottlenecked by
-model reasoning time or E2B startup; it may make rate limits worse.
+The main post-solve costs to benchmark are reference harness generation and
+preflight, E2B candidate runs plus mutation oracle, parallel review passes,
+conditional revision/re-execution, parallel judges, and final synthesis.
+Keep those correctness steps and capture their measured durations before any
+provider-specific concurrency tuning.
 
 ### How to compare before/after
 
@@ -76,7 +74,4 @@ synthesizing. Benchmark includes harness preflight, E2B and mutation checks,
 so it must not be conflated with model response time. Always compare the same
 model roster, problem categories, E2B account and source-document set.
 
-Targeted check: `node tests/gatewayPacer.test.mjs`; the full `npm test`
-command includes it. All correctness, source-image, runner isolation and
-revised-code evidence checks remain enabled. This commit does not change
-production environment variables or deploy the worker.
+Run the full `npm test` and workflow validation. All correctness, source-image, runner isolation and revised-code evidence checks remain enabled. This commit does not change production environment variables or deploy the worker.
