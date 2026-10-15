@@ -1,0 +1,43 @@
+name: Council Offline Docs Import
+on:
+  push:
+    branches: [feat/r2-language-retrieval-20261015]
+    paths: [.github/workflows/council-offline-docs-import.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Upload first HTML pages with GitHub OIDC
+        shell: bash
+        env:
+          ENDPOINT: https://council-offline-html-upload.council-docs-r2-2f1fd544.workers.dev/upload
+        run: |
+          set -euo pipefail
+          mkdir -p initial
+          TOKEN_ENDPOINT="$ACTIONS_ID_TOKEN_REQUEST_URL"
+          SEP='?'
+          [[ "$TOKEN_ENDPOINT" == *'?'* ]] && SEP='&'
+          TOKEN=$(curl -fsSL -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$TOKEN_ENDPOINT${SEP}audience=council-language-docs-r2-upload-v1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+          test -n "$TOKEN"
+          SOURCE_BASE='http://144.24.31.129/offline-docs'
+          for entry in \
+            'python-3.15.0/python-3.15-docs-html/index.html' \
+            'rust-1.99.0/index.html' \
+            'cpp-26-wg21-n5050/html/index.html'
+          do
+            localfile="initial/${entry//\//_}"
+            curl -fsSL --max-time 25 "$SOURCE_BASE/$entry" -o "$localfile"
+            SHA=$(sha256sum "$localfile" | cut -d ' ' -f 1)
+            echo "Uploading $entry"
+            curl -fsSL --retry 2 -A 'Mozilla/5.0' -X PUT \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "X-Docs-Path: offline-docs/$entry" \
+              -H "X-Docs-Sha256: $SHA" \
+              --data-binary "@$localfile" "$ENDPOINT"
+            echo
+          done
