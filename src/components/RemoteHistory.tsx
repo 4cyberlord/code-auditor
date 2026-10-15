@@ -34,6 +34,7 @@ export default function RemoteHistory() {
   const [olderLoading, setOlderLoading] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const selected = jobs.find((job) => job.id === selectedId) ?? null;
+  const selectedUpdatedAt = selected?.updatedAt;
 
   useEffect(() => {
     let live = true;
@@ -64,15 +65,15 @@ export default function RemoteHistory() {
   }, []);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!selectedId) return;
     let live = true;
     const load = async () => {
       setDetailLoading(true);
       setError(null);
       try {
         const [saved, images] = await Promise.all([
-          getCouncilReport(selected.id),
-          listSolveJobImages(selected.id),
+          getCouncilReport(selectedId),
+          listSolveJobImages(selectedId),
         ]);
         const resolved = await Promise.all(images.map(async (image) => {
           try {
@@ -94,7 +95,7 @@ export default function RemoteHistory() {
     };
     void load();
     return () => { live = false; };
-  }, [selected?.id, selected?.updatedAt]);
+  }, [selectedId, selectedUpdatedAt]);
 
   const loadOlder = async () => {
     if (olderLoading || !hasMore) return;
@@ -172,7 +173,6 @@ export default function RemoteHistory() {
           {previews.length > 0 && (
             <div className="job-images">
               {previews.map((image, index) => (
-                // eslint-disable-next-line @next/next/no-img-element
                 <img key={image.id} src={image.url} style={{ maxWidth: "100%" }}
                   alt={"Remote screenshot " + (index + 1)} />
               ))}
