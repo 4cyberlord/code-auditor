@@ -1,0 +1,43 @@
+name: Stream Full Offline Docs to R2
+on:
+  push:
+    branches: [feat/r2-language-retrieval-20261015]
+    paths: [.github/workflows/council-fast-docs.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+  actions: write
+jobs:
+  stream:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Stop superseded slow mirror run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          status=$(curl -sS -o /tmp/cancel-response.json -w '%{http_code}' \
+            -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            'https://api.github.com/repos/4cyberlord/code-auditor/actions/runs/38788021109/cancel')
+          echo "Old run cancel request HTTP $status"
+          if [[ "$status" != "202" && "$status" != "409" ]]; then
+            cat /tmp/cancel-response.json
+          fi
+      - name: Concurrently crawl and upload HTML assets immediately
+        shell: bash
+        run: node scripts/mirrorOfflineDocs.mjs
+      - name: Check R2 HTML index pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://pub-22a2b42534bc48d98fe9b3415a93963d.r2.dev/offline-docs'
+          curl -fsSL --max-time 20 -o /dev/null "$BASE/python-3.15.0/python-3.15-docs-html/index.html"
+          curl -fsSL --max-time 20 -o /dev/null "$BASE/rust-1.99.0/index.html"
+          curl -fsSL --max-time 20 -o /dev/null "$BASE/cpp-26-wg21-n5050/html/index.html"
