@@ -9,6 +9,10 @@ type Published = {
   winner?:string; standing?:string;
   presentation?:{code?:string;language?:string;complexity?:string};
   ports?:Port[];
+  semanticBlueprint?:{
+    sourceLanguage?:string;explanation?:string;brief?:string;
+    structure?:{classes?:string[];definitions?:Array<{name:string;parameters:string}>;variables?:string[]};
+  };
 };
 /**
  * The running cloud job may already have a fully verified preferred-language
@@ -37,6 +41,13 @@ export function ProgressiveCouncilResult({
         <summary>Working {primary?.language||"primary"} code</summary>
         <pre className="progressive-result-code">{primary?.code}</pre>
       </details>
+      {details.semanticBlueprint?.brief && (
+        <details>
+          <summary>How this verified code works — English translation guide</summary>
+          <p>This is an explanation for the language translators, not a separate proof of correctness.</p>
+          <pre className="progressive-result-brief">{details.semanticBlueprint.brief}</pre>
+        </details>
+      )}
     </>}
     {ports.length>0&&<div className="progressive-result-ports">
       <strong>Other language versions</strong>
