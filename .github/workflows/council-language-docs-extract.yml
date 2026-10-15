@@ -1,10 +1,5 @@
 name: Council language docs extraction
 on:
-  push:
-    branches:
-      - feat/r2-language-retrieval-20261015
-    paths:
-      - .github/workflows/council-language-docs-extract.yml
   workflow_dispatch:
 permissions:
   contents: read
