@@ -367,11 +367,11 @@ export default function CouncilPanel() {
                     <span
                       key={c.letter}
                       className="badge"
-                      data-tone={g2 === "pass" || (!g2 && g1 === "pass") ? "good" : g1 === "fail" || g2 === "fail" ? "bad" : "warn"}
+                      data-tone={g2 === "pass" || (!g2 && g1 === "pass") ? "good" : g1 === "fail" || g2 === "fail" ? "rejected" : "warn"}
                       title={c.model}
                     >
-                      {c.letter} {g1}
-                      {g2 ? ` → ${g2}` : ""}
+                      {c.letter} {g1 === "fail" ? "rejected" : g1}
+                      {g2 ? ` → ${g2 === "fail" ? "rejected" : g2}` : ""}
                     </span>
                   );
                 })}
