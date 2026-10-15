@@ -229,7 +229,7 @@ export default function HistoryPanel() {
               {remoteSelected && (
                 <div className="job-detail" aria-label="Remote solution detail">
                   <div className="job-detail-head">
-                    <strong>(R) {remoteSelected.mode === "mcq" ? "MCQ" : "Council"} report</strong>
+                    <strong>(R) Council report</strong>
                     <button className="btn tiny ghost" onClick={() => setRemoteSelectedId(null)}>Close</button>
                   </div>
                   {remoteLoading && <div className="hint">Loading remote report…</div>}
