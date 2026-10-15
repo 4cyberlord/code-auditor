@@ -116,7 +116,11 @@ jobs:
                           result=json.load(res)
                       if result.get('sha256')!=digest: raise ValueError('Uploaded checksum differs')
                       return rel
-                  except Exception:
+                  except urllib.error.HTTPError as err:
+                      print('Cloudflare upload response',err.code,err.read(512).decode('utf-8','replace'),flush=True)
+                      if attempt==3:raise
+                  except Exception as err:
+                      print('Upload connection issue',str(err)[:300],flush=True)
                       if attempt==3:raise
                       time.sleep(2*(attempt+1))
           probe=next((p for p in files if p.name.endswith('.html')),None)
