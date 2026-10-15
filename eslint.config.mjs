@@ -1,5 +1,6 @@
 import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
+import nextPlugin from "@next/eslint-plugin-next";
 
 const config = [
   {
@@ -9,6 +10,11 @@ const config = [
   },
   ...tseslint.configs.recommended,
   reactHooks.configs.flat.recommended,
+  {
+    plugins: {
+      "@next/next": nextPlugin,
+    },
+  },
   {
     // Two rules arrived with the React Hooks recommended config in version 7
     // and flag 12 places that predate them — mount-time loads that read

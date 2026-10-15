@@ -37,20 +37,22 @@
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-dialog": "^2.7.3",
     "@tauri-apps/plugin-opener": "^2.2.2",
-    "@upstash/qstash": "^2.11.3",
+    "@upstash/qstash": "^2.12.0",
     "next": "^16.3.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
+    "@next/eslint-plugin-next": "16.3.4",
     "@tauri-apps/cli": "^2.2.5",
     "@types/node": "^24.13.3",
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",
-    "eslint": "^9.39.5",
-    "eslint-config-next": "^16.3.4",
-    "typescript": "^5.9.3"
+    "eslint": "^10.12.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.1"
   },
   "overrides": {
     "postcss": "^8.5.26",

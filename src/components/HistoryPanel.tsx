@@ -37,6 +37,8 @@ export default function HistoryPanel() {
   const [remoteError, setRemoteError] = useState<string | null>(null);
   const [remoteLoading, setRemoteLoading] = useState(false);
   const remoteSelected = remoteJobs.find((job) => job.id === remoteSelectedId) ?? null;
+  const selectedRemoteJobId = remoteSelected?.id;
+  const selectedRemoteJobUpdatedAt = remoteSelected?.updatedAt;
 
   // Cloud Council results are stored as council_reports, not ordinary runs.
   // Show only terminal-origin jobs in History, using the authenticated jobs API.
@@ -65,15 +67,15 @@ export default function HistoryPanel() {
   }, [current, open]);
 
   useEffect(() => {
-    if (!remoteSelected) return;
+    if (!selectedRemoteJobId) return;
     let live = true;
     const load = async () => {
       setRemoteLoading(true);
       setRemoteError(null);
       try {
         const [report, images] = await Promise.all([
-          getCouncilReport(remoteSelected.id),
-          listSolveJobImages(remoteSelected.id),
+          getCouncilReport(selectedRemoteJobId),
+          listSolveJobImages(selectedRemoteJobId),
         ]);
         const previews = await Promise.all(images.map(async (image) => {
           try {
@@ -93,7 +95,7 @@ export default function HistoryPanel() {
     };
     void load();
     return () => { live = false; };
-  }, [remoteSelected?.id, remoteSelected?.updatedAt]);
+  }, [selectedRemoteJobId, selectedRemoteJobUpdatedAt]);
 
   useEffect(() => {
     void loadHistory();
@@ -237,7 +239,6 @@ export default function HistoryPanel() {
                     <div className="job-images">
                       {remotePreviews.map((image, index) => (
                         // Signed URLs are scoped to images owned by this session.
-                        // eslint-disable-next-line @next/next/no-img-element
                         <img key={image.id} src={image.url} alt={`Remote screenshot ${index + 1}`} />
                       ))}
                     </div>

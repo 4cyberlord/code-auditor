@@ -2710,7 +2710,8 @@ export const useStore = create<State>((set, get) => ({
     set({ preparing: true });
     try {
     let { images } = get();
-    let { settings, note, keys, gatewayKey } = get();
+    let { settings, keys, gatewayKey } = get();
+    const { note } = get();
     // Make the chosen seats visible before any network operation. Uploading a
     // capture or checking a gateway must never look like a dead submit button.
     set(state => ({

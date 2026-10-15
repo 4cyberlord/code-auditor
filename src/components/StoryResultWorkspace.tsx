@@ -168,7 +168,6 @@ export default function StoryResultWorkspace() {
             <p>{historyImages.length ? "The original screenshots are saved below." : "No text reading or screenshot was retained for this older run."}</p>}
           {historyImages.length > 0 && <div className="story-saved-images">
             {historyImages.map((image, index) => <a key={`${image.name}-${index}`} href={image.dataUrl} target="_blank" rel="noreferrer" title={`Open ${image.name}`}>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={image.dataUrl} alt={`Original question screenshot ${index + 1}`} />
             </a>)}
           </div>}
