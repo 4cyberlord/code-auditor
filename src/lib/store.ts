@@ -78,6 +78,7 @@ import { titleFor, placeholderTitle, isPlaceholder } from "./title.ts";
 import { resolveAnswerLanguage } from "./answerLanguage.ts";
 import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from "./probeFit.ts";
 import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
+import { structuralTranslationGuidanceFor } from "./structuralTranslationGuidance.ts";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
 import { buildOverlayState } from "./overlayState.ts";
 import {
@@ -4591,6 +4592,7 @@ async function generateVerifiedPorts(
         "Return exactly one valid FINAL block with KIND: code and LANGUAGE set to the target language.",
         `ORIGINAL VERIFIED IMPLEMENTATION (${sourceLanguage}):\n\`\`\`${sourceLanguage}\n${final.code}\n\`\`\``,
         problem,
+        structuralTranslationGuidanceFor(sourceLanguage, language),
         knowledge ? `LOCAL LANGUAGE AND ALGORITHM KNOWLEDGE:\n${knowledge}` : "",
       ].filter(Boolean).join("\n\n");
       const text = await bridge.runOnce({ runId, agentId: `council-port:${language}`, attemptId: newAttemptId(),

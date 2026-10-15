@@ -39,6 +39,25 @@ export interface KnowledgeHit {
 const RECORDS: KnowledgeRecord[] = [
   ...THEORETICAL_COMPLEXITY_RECORDS,
   {
+    id: "python-cpp-rust-structural-translation",
+    title: "Python, C++ and Rust structural translation discipline",
+    kind: "runtime",
+    tags: ["port", "translation", "migration", "python", "cpp", "c++", "rust", "ownership", "borrowing", "optional", "result", "raii", "iterators"],
+    summary: "A verified algorithm port preserves semantics across Python, C++ and Rust; it is not a mechanical syntax conversion.",
+    guidance: [
+      "Preserve the verified algorithm, public signature, I/O contract, edge cases, mutation behaviour and asymptotic complexity before applying target-language idioms.",
+      "Infer target types from constraints and tested behaviour; do not silently narrow integers or use unsigned/index types for values that may be negative.",
+      "Represent normal absence separately from recoverable error: Python None, C++ optional/expected, and Rust Option/Result are not interchangeable.",
+      "Translate Python/C++ ownership and mutation semantics deliberately into Rust ownership and borrowing; do not paper over borrow errors with gratuitous clones or unsafe code.",
+      "Choose lazy iterators versus materialized collections based on behaviour and memory needs, then require an independent target-language E2B harness to pass.",
+    ],
+    sources: [
+      { title: "Python language reference", url: "https://docs.python.org/3/reference/", trust: "official", note: "Python semantics and core syntax." },
+      { title: "C++ reference", url: "https://en.cppreference.com/w/", trust: "reference", note: "C++23 language and library behaviour." },
+      { title: "The Rust Reference", url: "https://doc.rust-lang.org/reference/", trust: "official", note: "Rust ownership, borrowing and language semantics." },
+    ],
+  },
+  {
     id: "harness-language-safety",
     title: "Language-aware executable harness rules",
     kind: "runtime",
