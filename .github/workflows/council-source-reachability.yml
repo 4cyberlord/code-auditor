@@ -1,0 +1,24 @@
+name: Council Docs Source Reachability
+on:
+  push:
+    branches: [feat/r2-language-retrieval-20261015]
+    paths: [.github/workflows/council-source-reachability.yml]
+permissions:
+  contents: read
+jobs:
+  source-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Verify user-hosted HTML pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          for uri in \
+            'http://144.24.31.129/offline-docs/python-3.15.0/python-3.15-docs-html/index.html' \
+            'http://144.24.31.129/offline-docs/rust-1.99.0/index.html' \
+            'http://144.24.31.129/offline-docs/cpp-26-wg21-n5050/html/index.html'
+          do
+            echo "Checking $uri"
+            curl -L --fail --max-time 15 -sS -o /dev/null -w 'HTTP %{http_code}; bytes %{size_download}\n' "$uri"
+          done
