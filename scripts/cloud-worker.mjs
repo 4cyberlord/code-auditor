@@ -30,6 +30,7 @@ import { referenceKey, isReferenceValidated, markReferenceValidated } from "./li
 import { phaseTimer } from "./lib/phaseTimings.mjs";
 import { preferredLanguages, requiredProblemLanguage, contractSupportsEarlyHarness, isVerified, evidenceStatus, createBoundedExecutor } from "./lib/specFirstDelivery.mjs";
 import { buildVerifiedSemanticBlueprint } from "./lib/verifiedSemanticBlueprint.mjs";
+import { screenProvisionalCandidate, createProvisionalRecord, buildSolutionHistory } from "./lib/provisionalCouncil.mjs";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1810,8 +1811,12 @@ async function nameSessionFromWork(job, reading, candidates) {
   }
 }
 
-async function saveCouncilReport(job, report) {
+async function saveCouncilReport(job, report, alreadyExists = false) {
   const markdown = councilMarkdown(report);
+  if (alreadyExists) {
+    await updateSavedCouncilReport(job, report);
+    return markdown;
+  }
   await rest("council_reports", {
     method: "POST",
     body: JSON.stringify({
@@ -2568,6 +2573,43 @@ export async function runCouncilJob(job) {
       }):Promise.resolve([]);
   const scheduleE2B=createBoundedExecutor(workerConcurrency(process.env.CODE_AUDITOR_E2B_CONCURRENCY,4,9));
   const eagerRuns=new Map();
+  // Only the FIRST eligible candidate is displayed provisionally. It is an
+  // E2B-tested work-in-progress, NOT the Council's winner. Final selection is
+  // still postponed until all solvers, reviewers and judges finish.
+  const provisionalState={record:null,persisted:false,writing:Promise.resolve()};
+  const publishProvisional=async(candidate,run)=>{
+    if(provisionalState.record || !candidate?.final || !run) return;
+    if(candidateLanguage(candidate.final)!==primaryLanguage)return;
+    const screened=screenProvisionalCandidate({
+      final:candidate.final,run,contractComplexity:contracting.contract?.complexity||""
+    });
+    if(!screened.eligible)return;
+    const provisional=createProvisionalRecord({
+      candidate,run,language:primaryLanguage,screened
+    });
+    provisionalState.record=provisional;
+    const preliminary={
+      stage:"provisional",standing:"provisional",winner:null,
+      provisional,solutionHistory:buildSolutionHistory(provisional,null),
+      synthesis:"An early E2B-tested candidate is available. This is NOT the final Council selection; independent review, harness quality checks, and judging remain pending.",
+      candidates:[],reviews:[],judges:[],runs:{},revisedRuns:{},oracles:[],
+      ports:[],suites:[],
+    };
+    // No competing writers may replace this row until initial save settles.
+    provisionalState.writing=(async()=>{
+      await saveCouncilReport(job,preliminary);
+      provisionalState.persisted=true;
+      await addEvent(job.id,"info","provisional_solution_ready",
+        "Candidate "+candidate.letter+" passed E2B and initial complexity screening; provisional code is available while Council evaluates all models.",
+        {letter:candidate.letter,language:primaryLanguage,passed:run.passed,
+          complexityClaim:screened.claimedBound,complexityAudited:false});
+    })().catch(async(error)=>{
+      await addEvent(job.id,"warn","provisional_save_failed",
+        "Could not display an early solution; final Council verification continues.",
+        {detail:String(error).slice(0,200)}).catch(()=>{});
+    });
+    await provisionalState.writing;
+  };
 
   timer.enter("solving");
   await bench.announce("solving", models.filter((m) => bench.has(m.id)).map((m) => m.id));
@@ -2601,7 +2643,9 @@ export async function runCouncilJob(job) {
             const suite=ready.find(item=>item.language===candidateLanguage(final));
             if(!suite)return null;
             const output=await executeField(job,settings,[suite],[candidates[index]]);
-            return output[letter]||null;
+            const run=output[letter]||null;
+            if(run) await publishProvisional(candidates[index],run);
+            return run;
           }).catch(async err=>{
             await addEvent(job.id,"warn","eager_e2b_fallback","Early Candidate "+letter+" execution failed to start; normal E2B remains available.",
               {letter,detail:String(err).slice(0,180)}).catch(()=>{});
@@ -2694,6 +2738,15 @@ export async function runCouncilJob(job) {
 
   timer.enter("benchmark");
   const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field, knowledge, bench, {preparedSuites,eagerRuns});
+  // When the contract lacked an explicit interface, testing followed the
+  // candidate-aware path; still publish a provisional verified result before
+  // starting the separate Council review/judging stages.
+  if(!provisionalState.record){
+    for(const candidate of field){
+      await publishProvisional(candidate,benchmark.runs[candidate.letter]);
+      if(provisionalState.record)break;
+    }
+  }
   const docket = candidateDocket(field);
   // An execution backend that is down makes every candidate "untested", which
   // reads exactly like every candidate being useless. It is not the same thing
@@ -3167,7 +3220,33 @@ export async function runCouncilJob(job) {
   report.ports=targets.map(language=>({
     language,sourceLetter:decision.winner,model:"",code:"",status:"preparing"
   }));
-  const markdown = await saveCouncilReport(job, report);
+  // The preliminary code is immutable history, even when a later, better
+  // judged solution supersedes it. The UI can show a literal line-level diff
+  // and users can inspect/copy either version.
+  await provisionalState.writing;
+  report.stage="final";
+  if(provisionalState.record){
+    const early=provisionalState.record;
+    const finalCode=verifiedSource?.code||"";
+    report.provisional=early;
+    report.solutionHistory=buildSolutionHistory(early,
+      verifiedSource?.code ? {
+        letter:decision.winner,language:candidateLanguage(verifiedSource),
+        code:finalCode,complexity:report.presentation.complexity,
+        passed:gateRuns[decision.winner]?.passed||0
+      }:null);
+    report.upgrade={
+      changed: Boolean(finalCode && finalCode!==early.code),
+      from:early.letter,to:decision.winner,
+      reason:decision.disagreement||
+        "The independent Council reviewed all passing candidates and selected the final verified solution.",
+    };
+  }
+  const markdown = await saveCouncilReport(job, report, provisionalState.persisted);
+  if(report.upgrade?.changed)await addEvent(job.id,"info","provisional_upgraded",
+    "Council replaced provisional Candidate "+report.upgrade.from+
+    " with final verified Candidate "+report.upgrade.to+".",
+    {from:report.upgrade.from,to:report.upgrade.to,reason:report.upgrade.reason});
   // This saved report is already visible to the Mac UI while job.status is
   // still running. Translation is optional work, not an answer-delivery gate.
   if(isCoding&&verifiedSource?.code&&isVerified(gateRuns[decision.winner])){
