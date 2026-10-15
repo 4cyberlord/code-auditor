@@ -45,7 +45,7 @@ export default function StoryResultWorkspace() {
   const reviewError = preparing ? null : review.error;
   const councilPhase = preparing ? "idle" : council.phase;
   const [phaseTimes,setPhaseTimes]=useState<Record<string,number>>({});
-  const phaseClock=useRef<{phase:string;at:number;runId:string|null}>({phase:"idle",at:Date.now(),runId:null});
+  const phaseClock=useRef<{phase:string;at:number;runId:string|null}>({phase:"idle",at:0,runId:null});
   useEffect(()=>{
     const tick=Date.now(),previous=phaseClock.current;
     if(previous.runId!==runId){
