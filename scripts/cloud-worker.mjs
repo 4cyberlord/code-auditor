@@ -29,6 +29,7 @@ import { fetchLanguageViaGateway } from "./lib/supabaseLanguageGateway.mjs";
 import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
 import { phaseTimer } from "./lib/phaseTimings.mjs";
 import { preferredLanguages, requiredProblemLanguage, contractSupportsEarlyHarness, isVerified, evidenceStatus, createBoundedExecutor } from "./lib/specFirstDelivery.mjs";
+import { buildVerifiedSemanticBlueprint } from "./lib/verifiedSemanticBlueprint.mjs";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -1842,7 +1843,7 @@ async function updateSavedCouncilReport(job,report){
  * prepared, preflight-checked language-native E2B harness.
  */
 async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
-  source,sourceLetter,target,knowledge,bench){
+  source,sourceLetter,target,knowledge,bench,semanticBlueprint){
   let translated="";
   let translator="";
   try{
@@ -1878,6 +1879,8 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
       "Verified source language: "+candidateLanguage(source),
       "Verified source code:\n"+source.code,
       "Verified source candidate: "+sourceLetter,
+      "SHARED ENGLISH SEMANTIC BLUEPRINT (interpretive summary, not executable authority):\n"+(semanticBlueprint?.brief||"Not available; consult exact verified source code."),
+      "If the blueprint conflicts with the problem or verified source, prefer the exact problem and tested source. Never turn a summarized assumption into new behavior.",
       docs.prompt,
       runtimeGuidanceFor(target),
       languagePrompt(pack),
@@ -3148,6 +3151,19 @@ export async function runCouncilJob(job) {
   const verifiedSource=source?.revised||source?.final;
   const targets=(isCoding&&verifiedSource?.code&&isVerified(gateRuns[decision.winner]))
     ? availablePorts:[];
+  // One reusable, readable translation brief for ALL target languages.
+  // This uses the winning agent's existing explanation and extracts source
+  // structure without a second model call or executing untrusted code.
+  const semanticBlueprint=targets.length
+    ? buildVerifiedSemanticBlueprint({
+        source:verifiedSource,
+        sourceLanguage:candidateLanguage(verifiedSource),
+        sourceLetter:decision.winner,
+        problem:question,
+        passedTests:gateRuns[decision.winner]?.passed||0,
+      })
+    : null;
+  if(semanticBlueprint)report.semanticBlueprint=semanticBlueprint;
   report.ports=targets.map(language=>({
     language,sourceLetter:decision.winner,model:"",code:"",status:"preparing"
   }));
@@ -3165,7 +3181,7 @@ export async function runCouncilJob(job) {
     let reportWrite=Promise.resolve();
     await parallelMap(targets,2,async language=>{
       const port=await verifiedLanguagePort(job,settings,baseUrl,models,judges,
-        question,verifiedSource,decision.winner,language,knowledge,bench);
+        question,verifiedSource,decision.winner,language,knowledge,bench,semanticBlueprint);
       // Serialize JSONB report writes: concurrent port workers must not
       // overwrite each other's new verified code or failure status.
       reportWrite=reportWrite.catch(()=>{}).then(async()=>{
