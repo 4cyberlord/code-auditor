@@ -22,6 +22,7 @@ import { createHmac, createSign } from "node:crypto";
 import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
+import { createGatewayPacer } from "./lib/gatewayPacer.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
 import { fetchAuthoritativeLanguageContext, inferDocumentationLanguage } from "./lib/authoritativeLanguageDocs.mjs";
 import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/externalLanguageSources.mjs";
@@ -271,8 +272,13 @@ const TOKENROUTER_TIMEOUT_ATTEMPTS = Math.max(
   1,
   Number(process.env.CODE_AUDITOR_TOKENROUTER_TIMEOUT_ATTEMPTS || 2)
 );
-let tokenRouterNextAt = 0;
-let tokenRouterQueue = Promise.resolve();
+// Conservative global request pacing stays the default. Only installations
+// with verified per-model rate limits should opt into per_model routing.
+const tokenRouterTurn = createGatewayPacer({
+  scope: process.env.CODE_AUDITOR_TOKENROUTER_PACING_SCOPE,
+  minDelayMs: TOKENROUTER_MIN_DELAY_MS,
+  jitterMs: TOKENROUTER_JITTER_MS,
+});
 
 function mustEnv(name) {
   const v = process.env[name];
@@ -597,18 +603,6 @@ async function sleep(ms) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function tokenRouterTurn() {
-  const run = tokenRouterQueue.then(async () => {
-    const now = Date.now();
-    const waitMs = Math.max(0, tokenRouterNextAt - now);
-    if (waitMs > 0) await sleep(waitMs);
-    const jitter = TOKENROUTER_JITTER_MS > 0 ? Math.floor(Math.random() * TOKENROUTER_JITTER_MS) : 0;
-    tokenRouterNextAt = Date.now() + Math.max(0, TOKENROUTER_MIN_DELAY_MS) + jitter;
-  });
-  tokenRouterQueue = run.catch(() => {});
-  await run;
-}
-
 async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off", apiKey, paced = true }) {
   if (!isPrimaryModel(model)) throw new Error(`${model} is outside the approved ten-model roster.`);
   const content = [{ type: "text", text: user }];
@@ -621,7 +615,7 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
   let timeouts = 0;
   let think = noReasoning.has(model) ? "off" : reasoning;
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (paced) await tokenRouterTurn();
+    if (paced) await tokenRouterTurn(model);
     const controller = new AbortController();
     const budget = thinkingBudget(think);
     const timeout = setTimeout(() => controller.abort(), budget);
@@ -712,7 +706,7 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
   let timeouts = 0;
   let think = noReasoning.has(model) ? "off" : reasoning;
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (paced) await tokenRouterTurn();
+    if (paced) await tokenRouterTurn(model);
     const controller = new AbortController();
     const budget = thinkingBudget(think);
     const timeout = setTimeout(() => controller.abort(), budget);
