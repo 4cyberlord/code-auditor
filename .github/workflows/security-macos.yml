@@ -54,7 +54,11 @@ jobs:
       - name: Build desktop application (unsigned CI build)
         env:
           CODE_AUDITOR_ALLOW_ADHOC: '1'
-        run: npm run app:build
+        run: |
+          # GitHub's ephemeral macOS runner has no Apple Developer ID certificate.
+          # Keep production signing config untouched; skip signing in CI only.
+          npm run tauri -- build --bundles app --no-sign
+          node scripts/package-dmg.mjs
 
   docker-runtime-containment:
     runs-on: ubuntu-26.04
