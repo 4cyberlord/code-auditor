@@ -2604,7 +2604,7 @@ export async function runCouncilJob(job) {
           baseUrl,
           model: spec.id,
           system: reviewSystemPrompt(),
-          user: reviewUserPrompt({ question, docket, execution, knowledge }),
+          user: reviewUserPrompt({ question, docket, execution, knowledge: councilKnowledge }),
           maxTokens: Number(settings.maxTokens || 4096),
         });
         const parsed = parseReviewSet(text, spec.id);
@@ -2677,7 +2677,7 @@ export async function runCouncilJob(job) {
               docket,
               received,
               execution,
-              councilKnowledge,
+              knowledge: councilKnowledge,
             }),
             maxTokens: Number(settings.maxTokens || 4096),
           });
@@ -2772,7 +2772,7 @@ export async function runCouncilJob(job) {
             docket: docketBoth,
             reviews: reviewDigest(reviewSets),
             execution: executionBoth,
-            councilKnowledge,
+            knowledge: councilKnowledge,
           }),
           maxTokens: Number(settings.maxTokens || 4096),
         });
@@ -2814,7 +2814,7 @@ export async function runCouncilJob(job) {
         reviews: reviewDigest(reviewSets) || "(no reviews were collected)",
         execution: executionBoth,
         judges: judgeDigest(judgeReports) || "(no judges were collected)",
-        councilKnowledge,
+        knowledge: councilKnowledge,
       }),
       maxTokens: Number(settings.maxTokens || 4096),
     });
