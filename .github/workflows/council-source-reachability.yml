@@ -22,3 +22,10 @@ jobs:
             echo "Checking $uri"
             curl -L --fail --max-time 15 -sS -o /dev/null -w 'HTTP %{http_code}; bytes %{size_download}\n' "$uri"
           done
+      - name: Check Cloudflare Worker endpoint with standard HTTP clients
+        shell: bash
+        run: |
+          for agent in 'Mozilla/5.0' 'curl/8.5.0'; do
+            echo "Checking Cloudflare Worker using $agent"
+            curl -L --max-time 20 -sS -A "$agent" -w '\nHTTP %{http_code}\n' 'https://council-language-source-probe.council-docs-r2-2f1fd544.workers.dev/probe' | head -c 1500 || true
+          done
