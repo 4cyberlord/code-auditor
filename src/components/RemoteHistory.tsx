@@ -15,6 +15,15 @@ import { formatWhen } from "@/lib/when";
 
 const PAGE_SIZE = 40;
 
+function remoteOnly(rows: SolveJob[]): SolveJob[] {
+  // A pre-upgrade API silently ignores the new origin filter. Fail visibly
+  // rather than mislabel ordinary desktop jobs as terminal submissions.
+  if (rows.some((job) => job.settingsSnapshot?.origin !== "remote-terminal")) {
+    throw new Error("Update the Council Editor cloud API to enable remote-only History.");
+  }
+  return rows;
+}
+
 /**
  * Remote Helper creates its OWN session per batch. Never filter these results
  * against the desktop's current session. Only the authenticated owner's jobs
@@ -40,9 +49,9 @@ export default function RemoteHistory() {
     let live = true;
     const refresh = async () => {
       try {
-        const recent = await listSolveJobs("all", {
+        const recent = remoteOnly(await listSolveJobs("all", {
           origin: "remote-terminal", offset: 0, limit: PAGE_SIZE,
-        });
+        }));
         if (!live) return;
         setJobs((previous) => {
           const ids = new Set(recent.map((job) => job.id));
@@ -101,9 +110,16 @@ export default function RemoteHistory() {
     if (olderLoading || !hasMore) return;
     setOlderLoading(true);
     try {
-      const older = await listSolveJobs("all", {
+      const older = remoteOnly(await listSolveJobs("all", {
         origin: "remote-terminal", offset: jobs.length, limit: PAGE_SIZE,
-      });
+      }));
+      const known = new Set(jobs.map((job) => job.id));
+      // Older versions of the API ignore offset and return the same page.
+      // Do not leave an infinitely clickable Load Older button.
+      if (older.length && older.every((job) => known.has(job.id))) {
+        setHasMore(false);
+        throw new Error("Cloud history pagination is unavailable. Deploy the updated Council Editor API.");
+      }
       setJobs((previous) => {
         const ids = new Set(previous.map((job) => job.id));
         return [...previous, ...older.filter((job) => !ids.has(job.id))]
