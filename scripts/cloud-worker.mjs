@@ -3136,7 +3136,8 @@ export async function runCouncilJob(job) {
   // Built from the finished report rather than assembled alongside it, so the
   // helper overlay and the app render the same fields from the same source.
   report.presentation = buildPresentation(report);
-  await sessionNaming;
+  // Session title is optional metadata; it must not delay publishing an
+  // already E2B-verified code answer.
   const availablePorts=preferredLanguages(settings.solutionLanguages).filter(
     lang=>lang!==candidateLanguage(
       (field3.find(c=>c.letter===decision.winner)?.revised
@@ -3169,16 +3170,25 @@ export async function runCouncilJob(job) {
       // overwrite each other's new verified code or failure status.
       reportWrite=reportWrite.catch(()=>{}).then(async()=>{
         report.ports=report.ports.map(item=>item.language===language?port:item);
-        await updateSavedCouncilReport(job,report);
+        try{
+          await updateSavedCouncilReport(job,report);
+        }catch(error){
+          // The primary report has already been saved. Port report writes
+          // are optional; a failed update cannot invalidate working code.
+          await addEvent(job.id,"warn","port_save_failed",
+            "Could not persist "+language+" port; primary verified solution remains available.",
+            {language,error:String(error).slice(0,220)}).catch(()=>{});
+        }
         await addEvent(job.id,port.status==="verified"?"info":"warn",
           port.status==="verified"?"port_verified":"port_failed",
           language+" "+(port.status==="verified"?"port passed E2B":"port could not be independently verified"),
           {language,status:port.status,sourceLetter:decision.winner,
-           elapsedMs:port.run?.remoteElapsedMs??null,error:port.error||null});
+           elapsedMs:port.run?.remoteElapsedMs??null,error:port.error||null}).catch(()=>{});
       });
       await reportWrite;
     });
   }
+  await sessionNaming;
 
   await patchJob(job.id, {
     status: "completed",
