@@ -1,0 +1,27 @@
+name: Stop Council documentation transfers
+on:
+  push:
+    branches: [feat/r2-language-retrieval-20261015]
+    paths: [.github/workflows/council-stop-transfers.yml]
+permissions:
+  contents: read
+  actions: write
+jobs:
+  stop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Cancel active documentation mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for run in 38790730347; do
+            code=$(curl --silent --show-error -o /tmp/cancel-response.json -w '%{http_code}' \
+              -X POST -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/4cyberlord/code-auditor/actions/runs/$run/cancel")
+            echo "Cancel run $run: HTTP $code"
+            if [[ "$code" != "202" && "$code" != "409" ]]; then cat /tmp/cancel-response.json; exit 1; fi
+          done
