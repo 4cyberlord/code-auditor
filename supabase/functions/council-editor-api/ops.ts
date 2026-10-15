@@ -820,13 +820,25 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
   },
 
   "jobs.list": async ({ admin, principal }, args) => {
-    let q = admin
-      .from("solve_jobs")
+    // Pagination is required for durable remote history: a newest-50 global
+    // listing can hide terminal jobs once ordinary desktop jobs accumulate.
+    // Always filter by the authenticated account before paging.
+    const limit = args.limit == null ? 50 : Number(args.limit);
+    const offset = args.offset == null ? 0 : Number(args.offset);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100 ||
+        !Number.isSafeInteger(offset) || offset < 0) {
+      throw new HttpError(400, "Invalid cloud job page.");
+    }
+    let q = admin.from("solve_jobs")
       .select("*")
-      .eq("owner_id", principal.userId)
-      .order("created_at", { ascending: false })
-      .limit(50);
+      .eq("owner_id", principal.userId);
     if (typeof args.status === "string" && args.status !== "all") q = q.eq("status", args.status);
+    if (args.origin != null) {
+      if (args.origin !== "remote-terminal") throw new HttpError(400, "Unsupported job origin.");
+      q = q.contains("settings_snapshot", { origin: "remote-terminal" });
+    }
+    q = q.order("created_at", { ascending: false }).order("id", { ascending: false })
+      .range(offset, offset + limit - 1);
     // deno-lint-ignore no-explicit-any
     return (ok(await q, "list cloud jobs") as any[]).map(solveJobRow);
   },
