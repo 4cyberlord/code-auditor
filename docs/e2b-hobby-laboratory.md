@@ -220,3 +220,20 @@ a job ID or diagnostic log. Re-run the current commit after branch writes
 settle; preserve the exact workflow run link and failed step. The stacked PR
 workflow can run directly against PR #40's branch without temporarily
 retargeting it to main.
+
+### Explicit Build System 2.0 canary commands
+
+After configuring credentials privately (do not add keys to Git):
+
+```bash
+CODE_AUDITOR_E2B_TEMPLATE=council-validators-v2 npm run e2b:template:build
+CODE_AUDITOR_E2B_TEMPLATE=council-validators-v2 npm run e2b:template:smoke
+```
+
+The build uses E2B's code-defined template API; the smoke starts **one**
+isolated, internet-denied sandbox, verifies Python/C++/Rust toolchains and
+the embedded revision marker, and kills it. It needs an E2B Hobby API key;
+it is not called by CI without credentials and is not part of the app's
+normal solve path. Template alias activation on a live worker is a separate,
+explicit deployment step. Since extended validators are in the image,
+starting four agent sandboxes does not install packages four times.
