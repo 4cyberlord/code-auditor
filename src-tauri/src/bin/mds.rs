@@ -1487,7 +1487,7 @@ fn history_main_detail(row:&Value,payload:&Value)->Value {
         "origin":"Main app","status":row.get("status"),"submittedAt":row.get("submittedAt"),
         "summary":summary,"solution":solution,"models":models,"tests":tests,
         "insights":{
-            "approach":review_approach.or_else(||council.pointer("/dossier/synthesis")).unwrap_or(""),
+            "approach":review_approach.or_else(||council.pointer("/dossier/synthesis").and_then(Value::as_str)).unwrap_or(""),
             "time":review.pointer("/efficiency/currentTime").and_then(Value::as_str).unwrap_or(""),
             "space":review.pointer("/efficiency/currentSpace").and_then(Value::as_str).unwrap_or(""),
             "style":review.pointer("/style/note").and_then(Value::as_str).unwrap_or(""),
