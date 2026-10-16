@@ -146,6 +146,7 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_L: u32 = 0x0F;
     const HID_USAGE_KEYBOARD_P: u32 = 0x13;
     const HID_USAGE_KEYBOARD_R: u32 = 0x15;
+    const HID_USAGE_KEYBOARD_Y: u32 = 0x1C;
     const HID_USAGE_KEYBOARD_S: u32 = 0x16;
     const HID_USAGE_KEYBOARD_RETURN: u32 = 0x28;
     const HID_USAGE_KEYBOARD_RIGHT_ARROW: u32 = 0x4F;
@@ -189,6 +190,9 @@ mod mac_shortcuts {
     static HISTORY_NEXT: AtomicBool = AtomicBool::new(false);
     static HISTORY_OPEN: AtomicBool = AtomicBool::new(false);
     static HISTORY_BACK: AtomicBool = AtomicBool::new(false);
+    static LANGUAGE_COMMAND: AtomicU8 = AtomicU8::new(0);
+    static LANGUAGE_KEY_HELD: AtomicU8 = AtomicU8::new(0);
+    static LAST_LANGUAGE_KEY: Mutex<Option<(u32, Instant)>> = Mutex::new(None);
     static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
     static HISTORY_VISIBLE: AtomicBool = AtomicBool::new(false);
     // 1 coding, 2 multiple-choice, 3 shared cloud history.
@@ -286,6 +290,38 @@ mod mac_shortcuts {
             if let Ok(mut previous) = LAST_PANEL_KEY.lock() { *previous = None; }
         }
 
+        // The optional RR / CP / PY view commands are active only in Coding.
+        // The observer doesn't suppress foreground input or log typed text.
+        let lang_key=match usage {
+            HID_USAGE_KEYBOARD_R=>Some(1_u8), HID_USAGE_KEYBOARD_C=>Some(2_u8),
+            HID_USAGE_KEYBOARD_P=>Some(4_u8), HID_USAGE_KEYBOARD_Y=>Some(8_u8),
+            _=>None,
+        };
+        if let Some(bit)=lang_key {
+            if !pressed {LANGUAGE_KEY_HELD.fetch_and(!bit,Ordering::SeqCst);}
+            else if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst)
+                && !HISTORY_VISIBLE.load(Ordering::SeqCst)
+                && !CONTROL_DOWN.load(Ordering::SeqCst)
+                && !OPTION_DOWN.load(Ordering::SeqCst)
+                && !SHIFT_DOWN.load(Ordering::SeqCst)
+                && LANGUAGE_KEY_HELD.fetch_or(bit,Ordering::SeqCst)&bit==0
+            {
+                if let Ok(mut previous)=LAST_LANGUAGE_KEY.lock(){
+                    let pair=previous.take().filter(|(_,at)|at.elapsed()<=Duration::from_millis(650))
+                        .map(|(first,_)|(first,usage));
+                    *previous=Some((usage,Instant::now()));
+                    let choice=match pair {
+                        Some((HID_USAGE_KEYBOARD_R,HID_USAGE_KEYBOARD_R))=>1,
+                        Some((HID_USAGE_KEYBOARD_C,HID_USAGE_KEYBOARD_P))=>2,
+                        Some((HID_USAGE_KEYBOARD_P,HID_USAGE_KEYBOARD_Y))=>3,
+                        _=>0,
+                    };
+                    if choice!=0 {LANGUAGE_COMMAND.store(choice,Ordering::SeqCst);*previous=None;}
+                }
+            }
+        }else if pressed&&usage<HID_USAGE_KEYBOARD_LEFT_CONTROL{
+            if let Ok(mut previous)=LAST_LANGUAGE_KEY.lock(){*previous=None;}
+        }
         // Number pairs route into three independent destinations. The first
         // digit selects the workflow; the second selects its capture mode.
         if pressed && !CONTROL_DOWN.load(Ordering::SeqCst)
@@ -326,17 +362,14 @@ mod mac_shortcuts {
             match (usage, SHIFT_DOWN.load(Ordering::SeqCst)) {
                 (HID_USAGE_KEYBOARD_UP_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_DOWN_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_NEXT.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_UP_ARROW, false) if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) => SCROLL_UP.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_DOWN_ARROW, false) if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) => SCROLL_DOWN.store(true, Ordering::SeqCst),
                 // Back is intentionally local to the read-only History
                 // surface: it never moves the click-through overlay window.
                 (HID_USAGE_KEYBOARD_LEFT_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_BACK.store(true, Ordering::SeqCst),
                 // Right-arrow selects the highlighted saved run and opens its
                 // full read-only Council result in the overlay.
                 (HID_USAGE_KEYBOARD_RIGHT_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_OPEN.store(true, Ordering::SeqCst),
-                // Keep the original overlay navigation as well as arrow-key
-                // navigation for the newer shared History sheet.
-                (HID_USAGE_KEYBOARD_LEFT_BRACKET, true) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_RIGHT_BRACKET, true) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_NEXT.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_BACKSLASH, true) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_OPEN.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_MINUS, false) => FADE_DOWN.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_EQUAL, false) => FADE_UP.store(true, Ordering::SeqCst),
                 _ => {}
@@ -474,6 +507,7 @@ mod mac_shortcuts {
     pub fn take_history_next() -> bool { HISTORY_NEXT.swap(false, Ordering::SeqCst) }
     pub fn take_history_open() -> bool { HISTORY_OPEN.swap(false, Ordering::SeqCst) }
     pub fn take_history_back() -> bool { HISTORY_BACK.swap(false, Ordering::SeqCst) }
+    pub fn take_language_command() -> u8 { LANGUAGE_COMMAND.swap(0, Ordering::SeqCst) }
 }
 
 async fn space_api_calls() {
@@ -709,11 +743,8 @@ fn run() -> Result<(), String> {
                 12 => send_capture_to_council("right"),
                 13 => send_process_to_council(),
                 6 => {
-                    // 00 belongs to the main-app session rather than the
-                    // overlay, so it does not touch staged overlay captures.
-                    send_capture_to_council("new-session");
-                }
-                21 => {
+                    // 00 starts a new Coding overlay workspace. Previous
+                    // finished jobs remain archived; main-app runs are untouched.
                     active_view = "coding".to_string();
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("new session unavailable during screenshot selection");
@@ -1019,10 +1050,10 @@ fn run() -> Result<(), String> {
                 overlay_position.y += 80.0;
                 overlay.set_outer_position(overlay_position);
             }
-            if overlay_visible && mac_shortcuts::take_scroll_up() {
+            if overlay_visible && !history_open && active_view == "coding" && mac_shortcuts::take_scroll_up() {
                 let _ = webview.evaluate_script("window.scrollSolutionBy(-260)");
             }
-            if overlay_visible && mac_shortcuts::take_scroll_down() {
+            if overlay_visible && !history_open && active_view == "coding" && mac_shortcuts::take_scroll_down() {
                 let _ = webview.evaluate_script("window.scrollSolutionBy(260)");
             }
             if overlay_visible && active_view == "coding" && mac_shortcuts::take_fade_down() {
@@ -1087,6 +1118,14 @@ fn run() -> Result<(), String> {
                 let _ = mac_shortcuts::take_history_next();
                 let _ = mac_shortcuts::take_history_open();
                 let _ = mac_shortcuts::take_history_back();
+            }
+            let requested_language=mac_shortcuts::take_language_command();
+            if overlay_visible&&!history_open&&active_view=="coding"&&requested_language!=0 {
+                let language=match requested_language {1=>"rust",2=>"cpp",3=>"python",_=>""};
+                if !language.is_empty() {
+                    let _=webview.evaluate_script(&format!("window.selectVerifiedOverlayLanguage({});",
+                        serde_json::to_string(language).unwrap_or_else(|_|"\"\"".into())));
+                }
             }
             // HH and arrow-only History doesn't change the active solving task.
             mac_shortcuts::set_history_visible(history_open && overlay_visible);
@@ -1309,9 +1348,9 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
             sessions.insert(id.to_owned(),item.clone());
         }
     }
-    // Jobs and runs are both owned by a session. The worker renames the same
+    // Overlay jobs are owned by a session. The worker renames the same
     // session after it understands the captured problem, so use that one title
-    // for both history surfaces instead of maintaining a second overlay name.
+    // for the overlay without importing main-app runs into HH.
     for item in payload.get("jobs").and_then(Value::as_array).into_iter().flatten() {
         let id=item.get("id").and_then(Value::as_str).unwrap_or("");
         if id.is_empty(){continue;}
@@ -1328,26 +1367,6 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
             item.get("resultSummary").and_then(Value::as_str).unwrap_or(""),
             item.get("status").and_then(Value::as_str).unwrap_or("unknown"),
             item.get("createdAt").and_then(Value::as_str).unwrap_or("")));
-    }
-    for item in payload.get("runs").and_then(Value::as_array).into_iter().flatten() {
-        let id=item.get("id").and_then(Value::as_str).unwrap_or("");
-        if id.is_empty(){continue;}
-        let mode=item.get("mode").and_then(Value::as_str).unwrap_or("auto");
-        let at=item.get("startedAt").and_then(Value::as_str).unwrap_or("");
-        let status=if item.get("finishedAt").and_then(Value::as_str).is_some_and(|s|!s.is_empty())
-            {"completed"}else{"running"};
-        let session = item.get("sessionId").and_then(Value::as_str).and_then(|id| sessions.get(id));
-        let title=item.get("title").and_then(Value::as_str)
-            .filter(|s|!s.trim().is_empty())
-            .or_else(||item.get("asked").and_then(Value::as_str)
-            .filter(|s|!s.trim().is_empty())
-            .or_else(||session.and_then(|value| value.get("title").and_then(Value::as_str))))
-            .unwrap_or("Saved main-app run");
-        rows.push(history_row(&format!("main:{id}"),"Main app",
-            if mode=="mcq"{"MCQ"}else if mode=="coding"||mode=="code"{"Coding"}else{"Run"},
-            title,
-            session.and_then(|value| value.get("title").and_then(Value::as_str)).unwrap_or(""),
-            status,at));
     }
     let rows=normalize_history(rows)?;
     Ok((rows,None))
@@ -1744,7 +1763,7 @@ fn number_pair_command(first: u8, second: u8) -> Option<u8> {
     match first {
         0 if second == 0 => Some(6),
         1 if second <= 4 => Some(10 + second),
-        2 if second <= 5 => Some(20 + second),
+        2 if second == 0 || (2..=5).contains(&second) => Some(20 + second),
         3 if (1..=5).contains(&second) => Some(30 + second),
         _ => None,
     }
@@ -2473,7 +2492,7 @@ fn mcq_pending_state(batch: &PendingBatch) -> Value {
         "MCQ batch started. Capture screenshots, then submit.".to_string()
     } else {
         format!(
-            "MCQ batch ready with {} screenshot{}. Press ⌃⌥ ↵ to submit.",
+            "MCQ batch ready with {} screenshot{}. Submit with 24.",
             batch.images.len(),
             if batch.images.len() == 1 { "" } else { "s" }
         )
@@ -2503,7 +2522,7 @@ fn coding_pending_state(batch: &PendingBatch) -> Value {
     } else if batch.status == "submitting" {
         "Uploading screenshots and creating the cloud job...".to_string()
     } else if batch.images.is_empty() {
-        "Batch started. Capture screenshots, then submit.".to_string()
+        "New Coding workspace ready. Capture screenshots, then submit with 24.".to_string()
     } else {
         format!(
             "Batch ready with {} screenshot{}. Press ⌃⌥ ↵ to submit.",
@@ -2515,15 +2534,7 @@ fn coding_pending_state(batch: &PendingBatch) -> Value {
         "runId": batch.id,
         "updatedAt": now(),
         "phase": if batch.error.is_some() { "error" } else { "running" },
-        "agents": [],
-        "solution": {
-            "title": "solution",
-            "language": "",
-            "code": waiting,
-            "source": "helper",
-            "status": "candidate",
-        },
-        "tests": [],
+        "agents": [], "progress": waiting, "solution": Value::Null, "tests": [],
     })
 }
 
@@ -3339,13 +3350,13 @@ mod tests {
         let expected = [
             (0, 0, 6),
             (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13),
-            (2, 0, 20), (2, 1, 21), (2, 2, 22), (2, 3, 23), (2, 4, 24), (2, 5, 25),
+            (2, 0, 20), (2, 2, 22), (2, 3, 23), (2, 4, 24), (2, 5, 25),
             (3, 1, 31), (3, 2, 32), (3, 3, 33), (3, 4, 34), (3, 5, 35),
         ];
         for (prefix, shape, command) in expected {
             assert_eq!(number_pair_command(prefix, shape), Some(command));
         }
-        for invalid in [(1, 5), (2, 6), (3, 0), (4, 1)] {
+        for invalid in [(1, 5), (2, 1), (2, 6), (3, 0), (4, 1)] {
             assert_eq!(number_pair_command(invalid.0, invalid.1), None);
         }
     }
