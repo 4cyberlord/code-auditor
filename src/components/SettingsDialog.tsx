@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import SettingsGlyph from "./SettingsGlyph";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -1305,16 +1306,21 @@ function ReadingCard() {
   </div>;
 }
 
+/** Navigation only: original setting panels and their persistence remain unchanged. */
 const TABS = [
-  { id: "api" as const, label: "API" },
-  { id: "council" as const, label: "Council" },
-  { id: "appearance" as const, label: "Appearance" },
-  { id: "updates" as const, label: "Updates" },
-  { id: "reading" as const, label: "Vision" },
-  { id: "capture" as const, label: "Capture" },
-  { id: "sessions" as const, label: "Sessions" },
-  { id: "limits" as const, label: "Limits" },
-];
+  { id: "overview", label: "Overview", icon: "overview", group: "Overview", detail: "Your workspace at a glance.", keywords: "home status quick start" },
+  { id: "api", label: "Connections", icon: "connections", group: "Intelligence", detail: "API gateways, provider credentials and routing.", keywords: "api key gateway providers credentials models connection" },
+  { id: "council", label: "AI Council", icon: "council", group: "Intelligence", detail: "Configure solvers, judges, synthesis and model health.", keywords: "agent solver judge model intelligence council" },
+  { id: "reading", label: "Vision & Knowledge", icon: "vision", group: "Intelligence", detail: "Screenshot understanding and official language references.", keywords: "vision reading screenshots knowledge docs python cpp rust" },
+  { id: "capture", label: "Capture & Overlay", icon: "capture", group: "Workspace", detail: "Background helper, capture behavior and shortcuts.", keywords: "screen helper hotkey keyboard overlay shortcut capture" },
+  { id: "appearance", label: "Appearance", icon: "appearance", group: "Workspace", detail: "Choose the look of your workspace.", keywords: "theme dark light system display color" },
+  { id: "limits", label: "Execution & Limits", icon: "limits", group: "Workspace", detail: "Request budgets, rate limits and cloud execution.", keywords: "e2b lab sandbox python rust cpp tokens limits rate quota execution" },
+  { id: "sessions", label: "Account & Security", icon: "sessions", group: "Account", detail: "Secure account, storage and session preferences.", keywords: "account pin storage database timezone sessions security" },
+  { id: "updates", label: "About & Updates", icon: "updates", group: "Account", detail: "Check for application releases and updates.", keywords: "version update about release download" },
+] as const;
+
+const SETTINGS_GROUPS = ["Overview", "Intelligence", "Workspace", "Account"] as const;
+
 
 function AppearanceCard() {
   const theme = useStore((s) => s.settings.theme || "system");
@@ -2105,14 +2111,26 @@ function CaptureCard() {
 }
 
 export default function SettingsDialog() {
-  // Seven cards in one scrolling column meant the database setup was below the
-  // fold and effectively invisible. Tabs are here so every group of settings is
-  // one click from the top, not one scroll.
-  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("api");
+  // Navigation redesign only. The existing settings cards and their PIN gates,
+  // persistence, capture hooks, and server integration remain untouched.
+  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("overview");
+  const [search, setSearch] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+  const contentRef = useRef<HTMLElement>(null);
   const open = useStore((s) => s.settingsOpen);
   const setOpen = useStore((s) => s.setSettingsOpen);
   const maxTokens = useStore((s) => s.settings.maxTokens);
   const patch = useStore((s) => s.patchSettings);
+  const gatewayId = useStore((s) => s.settings.gatewayId);
+  const gatewayKey = useStore((s) => s.gatewayKey);
+  const councilEnabled = useStore((s) => s.settings.councilEnabled);
+  const councilModelCount = useStore((s) => s.settings.councilModels.length);
+  const theme = useStore((s) => s.settings.theme);
+  const activeSection = TABS.find((item) => item.id === tab) ?? TABS[0];
+  const normalizedSearch = search.toLocaleLowerCase().trim();
+  const visibleSections = TABS.filter((item) =>
+    !normalizedSearch || `${item.label} ${item.detail} ${item.keywords}`.toLocaleLowerCase().includes(normalizedSearch)
+  );
 
   // Held as text while the field is being edited. Committing on every keystroke
   // meant clearing the box snapped it back to the default, so there was no way
@@ -2134,34 +2152,147 @@ export default function SettingsDialog() {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        searchRef.current?.focus();
+        searchRef.current?.select();
+      } else if (e.key === "Escape") {
+        setOpen(false);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, setOpen]);
 
+  useEffect(() => {
+    // A settings section should open at its heading, not inherit the scroll
+    // position of the previously selected long form.
+    contentRef.current?.scrollTo(0, 0);
+  }, [tab]);
+
   if (!open) return null;
 
   return (
-    <div className="scrim" onMouseDown={(e) => e.target === e.currentTarget && setOpen(false)}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label="Settings">
-        <header>
-          <h2>Settings</h2>
+    <div className="scrim settings-scrim" onMouseDown={(e) => e.target === e.currentTarget && setOpen(false)}>
+      <div className="modal settings-workspace" role="dialog" aria-modal="true" aria-labelledby="settings-workspace-title">
+        <header className="settings-workspace-header">
+          <div className="settings-workspace-mark" aria-hidden="true">
+            <SettingsGlyph name="overview" size={21} />
+          </div>
+          <div className="settings-workspace-heading">
+            <h2 id="settings-workspace-title">Settings</h2>
+            <span>Personalize your Council Editor workspace</span>
+          </div>
           <span className="spacer" />
-          <button className="btn ghost" onClick={() => setOpen(false)}>
-            Close
+          <button className="settings-icon-button" type="button" onClick={() => setOpen(false)} aria-label="Close settings" title="Close settings">
+            <SettingsGlyph name="close" size={17} />
           </button>
         </header>
 
-        <div className="tabs">
-          {TABS.map((t) => (
-            <button key={t.id} data-on={tab === t.id} onClick={() => setTab(t.id)}>
-              {t.label}
-            </button>
-          ))}
-        </div>
+        <div className="settings-workspace-layout">
+          <aside className="settings-workspace-sidebar" aria-label="Settings navigation">
+            <label className="settings-workspace-search">
+              <SettingsGlyph name="search" size={16} />
+              <input
+                ref={searchRef}
+                type="search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search settings"
+                aria-label="Search settings"
+                autoComplete="off"
+              />
+              <kbd>⌘ F</kbd>
+            </label>
+            <nav className="settings-workspace-nav" aria-label="Settings sections">
+              {SETTINGS_GROUPS.map((group) => {
+                const items = visibleSections.filter((item) => item.group === group);
+                if (!items.length) return null;
+                return (
+                  <div className="settings-workspace-nav-group" key={group}>
+                    <div className="settings-workspace-nav-heading">{group}</div>
+                    {items.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className="settings-workspace-nav-item"
+                        data-selected={tab === item.id}
+                        aria-current={tab === item.id ? "page" : undefined}
+                        onClick={() => { setTab(item.id); setSearch(""); }}
+                      >
+                        <SettingsGlyph name={item.icon} size={17} />
+                        <span>{item.label}</span>
+                        {tab === item.id && <SettingsGlyph name="chevron" size={13} />}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })}
+              {visibleSections.length === 0 && (
+                <p className="settings-workspace-no-results">No matching settings. Try “models”, “capture” or “security”.</p>
+              )}
+            </nav>
+            <div className="settings-sidebar-bottom">
+              <SettingsGlyph name="shield" size={15} />
+              <span>Sensitive changes require PIN verification</span>
+            </div>
+          </aside>
 
-        <div className="content">
+          <main ref={contentRef} className="content settings-workspace-content" id="settings-workspace-panel">
+            <div className="settings-workspace-section-heading">
+              <div className="settings-workspace-section-caption">COUNCIL EDITOR / PREFERENCES</div>
+              <h3>{activeSection.label}</h3>
+              <p>{activeSection.detail}</p>
+            </div>
+
+            {tab === "overview" && (
+              <div className="settings-overview">
+                <div className="settings-overview-hero">
+                  <div className="settings-overview-hero-orb" aria-hidden="true"><SettingsGlyph name="council" size={27} /></div>
+                  <div>
+                    <span className="settings-overview-eyebrow">YOUR WORKSPACE</span>
+                    <h4>Everything, in its place.</h4>
+                    <p>Keep your intelligence engine, capture workflows, and preferences organized without changing how Council Editor works.</p>
+                  </div>
+                </div>
+                <div className="settings-overview-metrics">
+                  <button type="button" onClick={() => setTab("api")}>
+                    <span className="settings-overview-metric-label"><SettingsGlyph name="connections" size={15} /> Gateway</span>
+                    <strong>{gatewayPreset(gatewayId).label}</strong>
+                    <span>{gatewayKey ? "Credential present" : "Credential not configured"}</span>
+                  </button>
+                  <button type="button" onClick={() => setTab("council")}>
+                    <span className="settings-overview-metric-label"><SettingsGlyph name="council" size={15} /> AI Council</span>
+                    <strong>{councilModelCount} model{councilModelCount === 1 ? "" : "s"}</strong>
+                    <span>{councilEnabled ? "Enabled in preferences" : "Disabled in preferences"}</span>
+                  </button>
+                  <button type="button" onClick={() => setTab("appearance")}>
+                    <span className="settings-overview-metric-label"><SettingsGlyph name="appearance" size={15} /> Appearance</span>
+                    <strong>{theme === "dark" ? "Dark" : theme === "light" ? "Light" : "System"}</strong>
+                    <span>Current theme preference</span>
+                  </button>
+                </div>
+                <div className="settings-overview-links">
+                  <div className="settings-overview-links-heading">Quick access</div>
+                  {([
+                    { id: "council", label: "AI Engine", description: "Models, solvers, judges and synthesis", icon: "council" },
+                    { id: "limits", label: "E2B Execution & Limits", description: "Cloud laboratory and run budgets", icon: "cloud" },
+                    { id: "capture", label: "Capture & Overlay", description: "Helper state, screen controls and shortcuts", icon: "capture" },
+                    { id: "sessions", label: "Account & Security", description: "PIN-protected account and storage", icon: "shield" },
+                  ] as const).map((item) => (
+                    <button key={item.id} type="button" onClick={() => setTab(item.id)} className="settings-overview-link">
+                      <span className="settings-overview-link-icon"><SettingsGlyph name={item.icon} size={19} /></span>
+                      <span className="settings-overview-link-copy">
+                        <strong>{item.label}</strong>
+                        <small>{item.description}</small>
+                      </span>
+                      <SettingsGlyph name="chevron" size={15} />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
           {tab === "api" && (
             <>
               <SensitiveSettingsGate
@@ -2259,16 +2390,24 @@ export default function SettingsDialog() {
             </p>}
           </div>
           )}
+
+            {tab === "limits" && (
+              <div className="settings-laboratory-notice">
+                <span className="settings-overview-link-icon"><SettingsGlyph name="cloud" size={20} /></span>
+                <div>
+                  <strong>E2B Laboratory</strong>
+                  <p>Python, Rust and C++ verification runs in cloud sandboxes. Sandbox templates, standby capacity and port recovery are server-managed; this page does not claim a live connection or expose credentials.</p>
+                </div>
+                <span className="settings-laboratory-mode">Server-managed</span>
+              </div>
+            )}
+          </main>
         </div>
 
-        <footer>
-          <span style={{ fontSize: 11, color: "var(--text-faint)" }}>
-            Nothing here is sent anywhere except to the provider you enable.
-          </span>
+        <footer className="settings-workspace-footer">
+          <span>Changes are applied when you edit them. Protected settings still require your PIN.</span>
           <span className="spacer" />
-          <button className="btn primary" onClick={() => setOpen(false)}>
-            Done
-          </button>
+          <button className="btn primary" type="button" onClick={() => setOpen(false)}>Done</button>
         </footer>
       </div>
     </div>
