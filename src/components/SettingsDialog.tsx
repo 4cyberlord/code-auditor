@@ -2111,12 +2111,12 @@ function CaptureCard() {
 }
 
 export default function SettingsDialog() {
-  // Seven cards in one scrolling column meant the database setup was below the
-  // fold and effectively invisible. Tabs are here so every group of settings is
-  // one click from the top, not one scroll.
+  // Navigation redesign only. The existing settings cards and their PIN gates,
+  // persistence, capture hooks, and server integration remain untouched.
   const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("overview");
   const [search, setSearch] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
+  const contentRef = useRef<HTMLElement>(null);
   const open = useStore((s) => s.settingsOpen);
   const setOpen = useStore((s) => s.setSettingsOpen);
   const maxTokens = useStore((s) => s.settings.maxTokens);
@@ -2163,6 +2163,12 @@ export default function SettingsDialog() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, setOpen]);
+
+  useEffect(() => {
+    // A settings section should open at its heading, not inherit the scroll
+    // position of the previously selected long form.
+    contentRef.current?.scrollTo(0, 0);
+  }, [tab]);
 
   if (!open) return null;
 
@@ -2212,7 +2218,7 @@ export default function SettingsDialog() {
                         className="settings-workspace-nav-item"
                         data-selected={tab === item.id}
                         aria-current={tab === item.id ? "page" : undefined}
-                        onClick={() => setTab(item.id)}
+                        onClick={() => { setTab(item.id); setSearch(""); }}
                       >
                         <SettingsGlyph name={item.icon} size={17} />
                         <span>{item.label}</span>
@@ -2232,7 +2238,7 @@ export default function SettingsDialog() {
             </div>
           </aside>
 
-          <main className="content settings-workspace-content" id="settings-workspace-panel">
+          <main ref={contentRef} className="content settings-workspace-content" id="settings-workspace-panel">
             <div className="settings-workspace-section-heading">
               <div className="settings-workspace-section-caption">COUNCIL EDITOR / PREFERENCES</div>
               <h3>{activeSection.label}</h3>
