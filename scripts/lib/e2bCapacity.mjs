@@ -33,3 +33,14 @@ export function hobbyWorkerLimit(raw, fallback = 8) {
   const n = Number(raw);
   return Number.isSafeInteger(n) && n > 0 ? Math.min(n, 8) : fallback;
 }
+
+/** Leave at least two slots for reference checks / compulsory cold executions.
+ * Prevents idle standby microVMs from deadlocking a tiny Hobby worker limit.
+ */
+export function standbyBudget(snapshot, requested, reserve = 2) {
+  const total = Math.max(0,Math.trunc(Number(snapshot?.limit) || 0));
+  const used = Math.max(0,Math.trunc(Number(snapshot?.active) || 0));
+  const required = Math.max(1,Math.trunc(Number(reserve) || 2));
+  const wanted = Math.max(0,Math.trunc(Number(requested) || 0));
+  return Math.max(0,Math.min(wanted,total-used-required));
+}
