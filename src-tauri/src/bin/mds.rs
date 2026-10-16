@@ -663,7 +663,9 @@ fn run() -> Result<(), String> {
     let mut history_rows: Vec<Value> = Vec::new();
     let mut history_index = 0_usize;
     let mut history_fetch: Option<tokio::task::JoinHandle<Result<(Vec<Value>,Option<String>),String>>> = None;
-    let mut history_detail_fetch: Option<tokio::task::JoinHandle<Result<Value,String>>> = None;
+    let mut history_detail_fetch: Option<tokio::task::JoinHandle<(String,Result<Value,String>)>> = None;
+    let mut history_detail_requested_id: Option<String> = None;
+    let mut history_detail_cache=std::collections::HashMap::<String,Value>::new();
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
     let mut last_heartbeat = Instant::now();
@@ -778,8 +780,12 @@ fn run() -> Result<(), String> {
             if let Some(task)=history_fetch.take() {
                 match rt.block_on(task) {
                     Ok(Ok((rows,warning))) if history_open => {
+                        let selected_id=history_rows.get(history_index)
+                            .and_then(|v|v.get("id")).and_then(Value::as_str).map(str::to_owned);
                         history_rows=rows;
-                        history_index=history_index.min(history_rows.len().saturating_sub(1));
+                        history_index=selected_id.as_deref().and_then(|id|history_rows.iter()
+                            .position(|v|v.get("id").and_then(Value::as_str)==Some(id)))
+                            .unwrap_or(0);
                         let payload=serde_json::to_string(&history_rows)
                             .unwrap_or_else(|_| "[]".into());
                         let notice=serde_json::to_string(&warning).unwrap_or_else(|_| "null".into());
@@ -800,14 +806,22 @@ fn run() -> Result<(), String> {
                 }
             }
         }
-        if history_detail_fetch.as_ref().is_some_and(|task| task.is_finished()) {
-            if let Some(task) = history_detail_fetch.take() {
-                let script = match rt.block_on(task) {
-                    Ok(Ok(detail)) => format!("window.showSharedHistoryDetail({});", serde_json::to_string(&detail).unwrap_or_else(|_| "{}".into())),
-                    Ok(Err(error)) => format!("window.showSharedHistoryDetail({});", serde_json::json!({"error": error})),
-                    Err(error) => format!("window.showSharedHistoryDetail({});", serde_json::json!({"error": error.to_string()})),
-                };
-                let _ = webview.evaluate_script(&script);
+        if history_detail_fetch.as_ref().is_some_and(|task|task.is_finished()) {
+            if let Some(task)=history_detail_fetch.take() {
+                if let Ok((id,result))=rt.block_on(task) {
+                    let detail=result.unwrap_or_else(|error|serde_json::json!({"error":error}));
+                    if history_detail_cache.len()>=35 {
+                        history_detail_cache.clear();
+                    }
+                    history_detail_cache.insert(id.clone(),detail.clone());
+                    let selected=history_rows.get(history_index).and_then(|r|
+                        r.get("id")).and_then(Value::as_str);
+                    if history_open && overlay_visible && selected==Some(id.as_str()) {
+                        if let Ok(json)=serde_json::to_string(&detail){
+                            let _=webview.evaluate_script(&format!("window.showSharedHistoryDetail({json})"));
+                        }
+                    }
+                }
             }
         }
         if last_capture_cleanup.elapsed() >= Duration::from_secs(3600) {
@@ -890,6 +904,7 @@ fn run() -> Result<(), String> {
                             // authenticated main+overlay history loads off-thread.
                             history_rows = archived_helper_history().unwrap_or_default();
                             history_index = 0;
+                            history_detail_requested_id = None;
                             history_open = true;
                             mac_shortcuts::set_history_visible(true);
                             let rows = serde_json::to_string(&history_rows).unwrap_or_else(|_| "[]".into());
@@ -1017,13 +1032,13 @@ fn run() -> Result<(), String> {
                     let _ = webview.evaluate_script(&format!(
                         "window.selectSharedHistoryRow({history_index})"));
                 }
-                if mac_shortcuts::take_history_open()
-                    && history_detail_fetch.as_ref().is_none_or(|task| task.is_finished())
-                {
-                    if let Some(row) = history_rows.get(history_index).cloned() {
-                        history_detail_fetch = Some(rt.spawn(fetch_history_detail(row)));
-                        let _ = webview.evaluate_script("window.showSharedHistoryDetail({loading:true});");
+                if mac_shortcuts::take_history_open(){
+                    // An explicit re-open refreshes a failed cached read.
+                    if let Some(id)=history_rows.get(history_index).and_then(|r|
+                        r.get("id")).and_then(Value::as_str){
+                        history_detail_cache.remove(id);
                     }
+                    history_detail_requested_id=None;
                 }
             } else {
                 let _ = mac_shortcuts::take_history_previous();
@@ -1031,6 +1046,37 @@ fn run() -> Result<(), String> {
                 let _ = mac_shortcuts::take_history_open();
             }
             // HH and arrow-only History doesn't change the active solving task.
+            // Selecting a row previews it automatically. A pending network read
+            // never blocks Up/Down or overwrites a more recent selection.
+            if history_open && overlay_visible {
+                if let Some(row)=history_rows.get(history_index).cloned() {
+                    if let Some(id)=row.get("id").and_then(Value::as_str).map(str::to_owned) {
+                        if history_detail_requested_id.as_deref()!=Some(id.as_str()) {
+                            history_detail_requested_id=Some(id.clone());
+                            if let Some(detail)=history_detail_cache.get(&id) {
+                                if let Ok(json)=serde_json::to_string(detail){
+                                    let _=webview.evaluate_script(&format!(
+                                        "window.showSharedHistoryDetail({json})"));
+                                }
+                            } else {
+                                let title=row.get("title").and_then(Value::as_str)
+                                    .unwrap_or("Saved result");
+                                let loading=serde_json::json!({"loading":true,"title":title,"id":id});
+                                let _=webview.evaluate_script(&format!(
+                                    "window.showSharedHistoryDetail({loading})"));
+                            }
+                        }
+                        if !history_detail_cache.contains_key(&id) && history_detail_fetch.is_none(){
+                            history_detail_fetch=Some(rt.spawn(async move {
+                                let detail=fetch_history_detail(row).await;
+                                (id,detail)
+                            }));
+                        }
+                    }
+                }
+            } else {
+                history_detail_requested_id=None;
+            }
             mac_shortcuts::set_history_visible(history_open && overlay_visible);
             mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
         }
@@ -1487,6 +1533,8 @@ fn history_overlay_detail(row:&Value, report:Option<&Value>, job:Option<&Value>,
     }
     let presentation=body.get("presentation").unwrap_or(&Value::Null);
     let mcq=if is_mcq{Some(body.clone())}else{None};
+    let question=mcq.as_ref().and_then(|m|m.get("question"))
+        .and_then(Value::as_str).unwrap_or("").to_owned();
     let summary=presentation.get("summary").and_then(Value::as_str)
         .or_else(||presentation.get("approach").and_then(Value::as_str))
         .or_else(||body.get("synthesis").and_then(Value::as_str))
@@ -1497,7 +1545,7 @@ fn history_overlay_detail(row:&Value, report:Option<&Value>, job:Option<&Value>,
         "status":job.and_then(|j|j.get("status")).or_else(||row.get("status")),
         "submittedAt":row.get("submittedAt"),"solution":solution,
         "mcq":mcq,"models":models,"tests":tests,
-        "summary":summary,"question":mcq.as_ref().and_then(|m|m.get("question")).and_then(Value::as_str).unwrap_or(""),
+        "summary":summary,"question":question,
         "insights":{
             "approach":presentation.get("approach").and_then(Value::as_str).unwrap_or(""),
             "time":presentation.get("timeComplexity").and_then(Value::as_str).unwrap_or(""),
@@ -1507,8 +1555,8 @@ fn history_overlay_detail(row:&Value, report:Option<&Value>, job:Option<&Value>,
             "dissent":presentation.get("dissent"),
             "rejected":presentation.get("rejected")
         },
-        "error":job.and_then(|j|j.get("error"))
-            .or_else(||cached.and_then(|j|j.error.as_ref().map(|_|&Value::Null))),
+        "error":job.and_then(|j|j.get("error")).cloned()
+            .or_else(||cached.and_then(|j|j.error.clone().map(Value::String))),
         "imageCount":cached.map(|j|j.previews.len()).unwrap_or(0),
         "images":cached.map(history_local_thumbnails).unwrap_or_default()
     })
