@@ -325,6 +325,9 @@ mod mac_shortcuts {
             match (usage, SHIFT_DOWN.load(Ordering::SeqCst)) {
                 (HID_USAGE_KEYBOARD_UP_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_DOWN_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_NEXT.store(true, Ordering::SeqCst),
+                // Right-arrow selects the highlighted saved run and opens its
+                // full read-only Council result in the overlay.
+                (HID_USAGE_KEYBOARD_RIGHT_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_OPEN.store(true, Ordering::SeqCst),
                 // Keep the original overlay navigation as well as arrow-key
                 // navigation for the newer shared History sheet.
                 (HID_USAGE_KEYBOARD_LEFT_BRACKET, true) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
@@ -1356,18 +1359,14 @@ async fn fetch_history_detail(row: Value) -> Result<Value, String> {
     if let Some(job_id) = id.strip_prefix("job:") {
         let report = api("reports.get", serde_json::json!({"jobId": job_id})).await?;
         let body = report.get("report").unwrap_or(&report);
-        let candidates = body.get("candidates").and_then(Value::as_array).cloned().unwrap_or_default();
-        let winner = body.get("winner").and_then(Value::as_str).unwrap_or("");
-        return Ok(serde_json::json!({
-            "title": row.get("title").and_then(Value::as_str).unwrap_or("Overlay result"),
-            "origin": "Overlay", "status": row.get("status").and_then(Value::as_str).unwrap_or(""),
-            "summary": body.pointer("/presentation/summary").and_then(Value::as_str)
-                .or_else(|| body.pointer("/presentation/approach").and_then(Value::as_str)).unwrap_or("No saved summary."),
-            "solution": coding_solution_from_report(body, winner, &candidates),
-        }));
+        return Ok(serde_json::json!({"state": history_coding_state(job_id, body)}));
     }
     if let Some(run_id) = id.strip_prefix("main:") {
         let payload = api("runs.get", serde_json::json!({"runId": run_id})).await?;
+        if let Some(report) = payload.get("report").filter(|report| !report.is_null()) {
+            let body = report.get("report").unwrap_or(report);
+            return Ok(serde_json::json!({"state": history_coding_state(run_id, body)}));
+        }
         let responses = payload.get("responses").and_then(Value::as_array).cloned().unwrap_or_default();
         let picked = responses.iter().find(|response| response.get("finalCode").and_then(Value::as_str)
             .is_some_and(|code| !code.trim().is_empty()));
@@ -1380,13 +1379,35 @@ async fn fetch_history_detail(row: Value) -> Result<Value, String> {
                 "language": picked.and_then(|response| response.get("finalLanguage").and_then(Value::as_str)).unwrap_or(""),
                 "code": code,
             })));
-        return Ok(serde_json::json!({
-            "title": row.get("title").and_then(Value::as_str).unwrap_or("Main-app result"),
-            "origin": "Main app", "status": row.get("status").and_then(Value::as_str).unwrap_or(""),
-            "summary": summary, "solution": solution,
-        }));
+        return Ok(serde_json::json!({"state": {
+            "runId": run_id, "kind": "coding", "phase": "done", "status": "completed",
+            "progress": "Saved main-app result", "agents": [], "tests": [], "ports": [],
+            "presentation": {"approach": summary},
+            "solution": solution.map(|solution| serde_json::json!({
+                "title": "saved_solution", "language": solution["language"], "code": solution["code"],
+                "source": "Saved main-app run", "status": "reviewed"
+            }))
+        }}));
     }
     Err("The selected history item has no supported source identifier.".into())
+}
+
+/// Reuse the normal, professional coding-overlay state for an archived Council
+/// report. History never invents a result: it only displays the report and
+/// verified language ports which were already saved for that exact run.
+fn history_coding_state(job_id: &str, body: &Value) -> Value {
+    let job = SubmittedJob {
+        id: job_id.to_string(), mode: "coding".to_string(), mcq_model: None,
+        status: "completed".to_string(), progress_phase: "completed".to_string(),
+        submitted_at: String::new(), previews: Vec::new(), error: None,
+        report: Some(serde_json::json!({"report": body})), events: Vec::new(),
+    };
+    let mut state = coding_overlay_state(&job);
+    if let Some(object) = state.as_object_mut() {
+        object.insert("ports".to_string(), body.get("ports").cloned().unwrap_or_else(|| Value::Array(Vec::new())));
+        object.insert("historyResult".to_string(), Value::Bool(true));
+    }
+    state
 }
 
 fn clean_expired_capture_dirs() -> Result<(), String> {
@@ -3055,7 +3076,7 @@ fn overlay_html() -> &'static str {
               if(!root){
                 root=document.createElement('section');
                 root.id='shared-history-sheet';root.className='history-sheet';
-                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Archive</div><div class="history-title">History</div><div class="history-description">Main app and overlay · Coding, MCQ and saved runs</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate · Shift + | Open result</span><span>cc Coding · mm MCQ · hh History</span></footer>';
+                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Archive</div><div class="history-title">History</div><div class="history-description">Main app and overlay · Coding, MCQ and saved runs</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate · → Open result · Shift + | also opens</span><span>cc Coding · mm MCQ · hh History</span></footer>';
                 panel.appendChild(root);
               }
               root.hidden=false;
@@ -3107,6 +3128,7 @@ fn overlay_html() -> &'static str {
               window.setOverlayControls(window.__overlayCurrentState&&(window.__overlayCurrentState.kind==='mcq'||window.__overlayCurrentState.mcq)?'mcq':'coding');
             };
             window.showSharedHistoryDetail=function(detail){
+              if(detail&&detail.state){window.closeSharedHistory();window.updateOverlayState(detail.state);return;}
               const panel=document.getElementById('panel');if(!panel)return;
               let root=document.getElementById('shared-history-detail');
               if(!root){root=document.createElement('section');root.id='shared-history-detail';root.className='history-sheet';panel.appendChild(root);}
@@ -3150,7 +3172,19 @@ fn overlay_html() -> &'static str {
               const failures=selected.filter((agent)=>agent.error).map((agent)=>(agent.label||agent.id||'Council agent')+': '+agent.error);
               if(failures.length||state.phase==='error'){const diagnostic=document.createElement('div');diagnostic.className='overlay-diagnostics';const label=document.createElement('b');label.textContent='Run diagnostics';const message=document.createElement('span');message.textContent=failures.join(' · ')||'The Council run reported an issue. The captured images and any available answer remain available.';diagnostic.append(label,message);progress.after(diagnostic);}
             }
-            window.updateOverlayState=function(state){baseUpdateOverlayState(state);window.setOverlayControls(state&&(state.kind==='mcq'||state.mcq)?'mcq':'coding');if(!state||state.kind!=='mcq')renderStoryAgents(state||{});};
+            function renderVerifiedPorts(state){
+              const primary=state&&state.solution;
+              const ports=Array.isArray(state&&state.ports)?state.ports.filter((port)=>port&&port.status==='verified'&&String(port.code||'').trim()):[];
+              const editor=document.querySelector('.solution-editor');
+              const old=document.getElementById('verified-language-ports');if(old)old.remove();
+              if(!editor||!primary||!ports.length)return;
+              const section=document.createElement('section');section.id='verified-language-ports';section.className='tests';
+              const heading=document.createElement('div');heading.className='tests-head';const label=document.createElement('b');label.textContent='Verified language versions';const count=document.createElement('span');count.textContent=ports.length+' E2B passed';heading.append(label,count);section.append(heading);
+              const choices=[{language:primary.language,code:primary.code,source:primary.source||'Council verified',primary:true},...ports];
+              const list=document.createElement('div');list.className='case-list';
+              choices.forEach((choice,index)=>{const button=document.createElement('button');button.type='button';button.className='case';button.textContent=(choice.primary?'Primary · ':'')+String(choice.language||'Code')+(choice.primary?'':' · E2B verified');button.addEventListener('click',()=>{const code=document.getElementById('solution-code');const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');if(!code)return;window.__overlayDiffHidden=true;renderCodeLines(code,String(choice.code||''),String(choice.language||''));if(title)title.textContent='solution.'+String(choice.language||'code').toLowerCase();if(source)source.textContent=choice.primary?'Council verified':'Verified language port · E2B passed';list.querySelectorAll('button').forEach((item,i)=>item.dataset.selected=i===index?'true':'false');});button.dataset.selected=index===0?'true':'false';list.append(button);});section.append(list);editor.after(section);
+            }
+            window.updateOverlayState=function(state){baseUpdateOverlayState(state);window.setOverlayControls(state&&(state.kind==='mcq'||state.mcq)?'mcq':'coding');if(!state||state.kind!=='mcq'){renderStoryAgents(state||{});renderVerifiedPorts(state||{});}};
     </script></body></html>"#
 }
 
