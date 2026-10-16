@@ -29,7 +29,9 @@
     "app:dev": "npm run helper:sidecar:dev && tauri dev --config src-tauri/tauri.dev.conf.json",
     "app:build": "tauri build --bundles app && node scripts/package-dmg.mjs",
     "app:build:signed": "node scripts/build-signed.mjs",
-    "release:preflight": "node scripts/release-preflight.mjs"
+    "release:preflight": "node scripts/release-preflight.mjs",
+    "e2b:template:build": "node scripts/build-e2b-template.mjs",
+    "e2b:template:smoke": "node scripts/smoke-e2b-template.mjs"
   },
   "dependencies": {
     "@e2b/code-interpreter": "^2.7.2",
