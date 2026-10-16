@@ -3166,6 +3166,11 @@ fn overlay_html() -> &'static str {
             .hud-shortcuts .hud-action{margin-left:1px}
             .hud-shortcuts .hud-key{padding:0 7px;min-width:auto;height:24px}
             .solution-toolbar{display:inline-flex;align-items:center;gap:8px}
+            .overlay-port-list{display:flex;align-items:center;gap:6px;padding:6px 8px;flex-wrap:wrap}
+            .overlay-port-chip{padding:4px 8px;border-radius:8px;border:1px solid rgba(255,255,255,.22);background:rgba(255,255,255,.06);font-size:10px;color:rgba(255,255,255,.74)}
+            .overlay-port-chip[data-selected="true"]{border-color:rgba(184,224,245,.7);background:rgba(184,224,245,.17);color:#fff}
+            .overlay-port-chip[data-available="false"]{opacity:.44}
+
             .overlay-diff-toggle{background:rgba(201,228,245,.12);border:1px solid rgba(201,228,245,.45);color:var(--text);padding:4px 8px;border-radius:7px;font:inherit;cursor:pointer}
             .code-lines li[data-change="remove"]{background:rgba(240,83,83,.18);border-left:3px solid rgba(240,83,83,.7)}
             .code-lines li[data-change="add"]{background:rgba(65,200,120,.16);border-left:3px solid rgba(65,200,120,.7)}
@@ -3418,7 +3423,17 @@ fn overlay_html() -> &'static str {
               const oldTitle=agents.previousElementSibling;if(oldTitle&&oldTitle.classList.contains('title'))oldTitle.replaceWith(header);else pane.insertBefore(header,agents);
               agents.innerHTML='';
               if(!selected.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='The selected Council agents will appear here.';agents.appendChild(empty);}else{selected.forEach((agent)=>{const card=document.createElement('div');card.className='model-chip';card.dataset.state=stateTone(agent.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=agent.label||agent.id||'Council agent';const model=document.createElement('span');model.className='agent-model';model.textContent=agent.model||'Council';const detail=document.createElement('span');detail.textContent=agentStatusText(agent);card.title=[agent.model,agent.error].filter(Boolean).join(' — ');card.append(dot,name,model,detail);agents.appendChild(card);});}
-              const progress=document.createElement('div');progress.className='overlay-progress';const waiting=state.phase==='idle'?'Capture screenshots to begin.':state.progress||'Council is selecting eligible agents.';progress.textContent=state.phase==='done'?'Council completed this run. Review the verified solution below.':(state.phase==='error'?'Council needs attention. See the diagnostic below.':(selected.find((agent)=>agent.detail)?.detail||waiting));
+              const progress=document.createElement('div');progress.className='overlay-progress';const waiting=state.phase==='idle'?'Capture screenshots to begin.':state.progress||'Council is selecting eligible agents.';const stages={queued:'Waiting for the cloud worker',contracting:'Reading the problem contract',
+                reading:'Understanding screenshots',solving:'Generating candidate solutions',
+                speccing:'Preparing independent E2B tests',benchmarking:'Running E2B cases',
+                verifying:'Running E2B verification',reviewing:'Reviewing candidates',
+                revising:'Repairing eligible solutions',reverifying:'Re-testing repaired code',
+                judging:'Independent Council judges',synthesizing:'Selecting verified winner',
+                porting:'Verifying language translations',completed:'Council completed'};
+              const stage=stages[state.progressPhase]||waiting;
+              progress.textContent=state.phase==='done'?'Council completed. Verified solution and ports are available below.':
+                state.phase==='error'?'Council needs attention. See the diagnostic below.':
+                stage+(state.progress&&stage!==state.progress?' · '+String(state.progress).slice(0,145):'');
               agents.after(progress);
               const failures=selected.filter((agent)=>agent.error).map((agent)=>(agent.label||agent.id||'Council agent')+': '+agent.error);
               if(failures.length||state.phase==='error'){const diagnostic=document.createElement('div');diagnostic.className='overlay-diagnostics';const label=document.createElement('b');label.textContent='Run diagnostics';const message=document.createElement('span');message.textContent=failures.join(' · ')||'The Council run reported an issue. The captured images and any available answer remain available.';diagnostic.append(label,message);progress.after(diagnostic);}
@@ -3431,17 +3446,68 @@ fn overlay_html() -> &'static str {
               const context=document.createElement('div');context.id='overlay-history-context';context.className='overlay-history-context';context.textContent='History result · '+shown;context.title=title;
               const progress=pane.querySelector('.overlay-progress');if(progress)progress.after(context);else{const agents=document.getElementById('agents');if(agents)agents.after(context);}
             }
+            // The ghost window must remain click-through and non-focusable.
+            // Language selection is exclusively via observed RR / CP / PY,
+            // never an invisible HTML button competing for foreground focus.
+            const canonicalPortLanguage=value=>{
+              const key=String(value||'').toLowerCase().replace(/[^a-z+]/g,'');
+              return key==='c++'||key==='cpp'||key==='cxx'?'cpp':
+                key==='py'||key==='python'||key==='python3'?'python':
+                key==='rs'||key==='rust'?'rust':key;
+            };
+            window.selectVerifiedOverlayLanguage=function(language){
+              const state=window.__overlayCurrentState;
+              if(!state||state.kind==='mcq'||!state.solution)return false;
+              const desired=canonicalPortLanguage(language);
+              if(!['python','rust','cpp'].includes(desired))return false;
+              window.__overlayDesiredLanguage=desired;
+              renderVerifiedPorts(state);
+              return true;
+            };
             function renderVerifiedPorts(state){
-              const primary=state&&state.solution;
-              const ports=Array.isArray(state&&state.ports)?state.ports.filter((port)=>port&&port.status==='verified'&&String(port.code||'').trim()):[];
-              const editor=document.querySelector('.solution-editor');
+              const primary=state&&state.solution,editor=document.querySelector('.solution-editor');
               const old=document.getElementById('verified-language-ports');if(old)old.remove();
-              if(!editor||!primary||!ports.length)return;
+              if(!editor||!primary||!String(primary.code||'').trim())return;
+              if(window.__overlayLanguageRunId!==state.runId){
+                window.__overlayLanguageRunId=state.runId;
+                window.__overlayDesiredLanguage='';
+              }
+              const ports=Array.isArray(state.ports)?state.ports:[];
+              const validated=ports.filter(port=>port&&port.status==='verified'&&String(port.code||'').trim());
               const section=document.createElement('section');section.id='verified-language-ports';section.className='tests';
-              const heading=document.createElement('div');heading.className='tests-head';const label=document.createElement('b');label.textContent='Verified language versions';const count=document.createElement('span');count.textContent=ports.length+' E2B passed';heading.append(label,count);section.append(heading);
-              const choices=[{language:primary.language,code:primary.code,source:primary.source||'Council verified',primary:true},...ports];
-              const list=document.createElement('div');list.className='case-list';
-              choices.forEach((choice,index)=>{const button=document.createElement('button');button.type='button';button.className='case';button.textContent=(choice.primary?'Primary · ':'')+String(choice.language||'Code')+(choice.primary?'':' · E2B verified');button.addEventListener('click',()=>{const code=document.getElementById('solution-code');const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');if(!code)return;window.__overlayDiffHidden=true;renderCodeLines(code,String(choice.code||''),String(choice.language||''));if(title)title.textContent='solution.'+String(choice.language||'code').toLowerCase();if(source)source.textContent=choice.primary?'Council verified':'Verified language port · E2B passed';list.querySelectorAll('button').forEach((item,i)=>item.dataset.selected=i===index?'true':'false');});button.dataset.selected=index===0?'true':'false';list.append(button);});section.append(list);editor.after(section);
+              const label=document.createElement('b');label.textContent='Verified languages';
+              const summary=document.createElement('span');summary.textContent=validated.length+' independent E2B ports';
+              const header=document.createElement('div');header.className='tests-head';header.append(label,summary);section.append(header);
+              const list=document.createElement('div');list.className='overlay-port-list';
+              const desired=window.__overlayDesiredLanguage;
+              const primaryLang=canonicalPortLanguage(primary.language);
+              const keyPairs=[['python','py'],['rust','rr'],['cpp','cp']];
+              for(const [lang,key] of keyPairs){
+                const available=lang===primaryLang||validated.some(port=>canonicalPortLanguage(port.language)===lang);
+                const chip=document.createElement('span');chip.className='overlay-port-chip';
+                chip.dataset.available=available?'true':'false';chip.dataset.selected=desired===lang?'true':'false';
+                chip.textContent=lang==='cpp'?'C++ · '+key:lang[0].toUpperCase()+lang.slice(1)+' · '+key;
+                chip.title=available?'E2B verified · type '+key+' to select':'Pending independent E2B verification';
+                list.append(chip);
+              }
+              section.append(list);editor.after(section);
+              if(!desired)return;
+              const chosen=primaryLang===desired?primary:
+                validated.find(port=>canonicalPortLanguage(port.language)===desired);
+              const source=document.getElementById('solution-source'),title=document.getElementById('solution-title');
+              if(!chosen){
+                if(source)source.textContent=(desired==='cpp'?'C++':desired)+' not verified yet · primary solution shown';
+                return;
+              }
+              const code=document.getElementById('solution-code');
+              if(code){
+                renderCodeLines(code,String(chosen.code||''),String(chosen.language||desired));
+                code.scrollTop=0;
+              }
+              if(title)title.textContent='solution.'+(desired==='cpp'?'cpp':desired==='python'?'py':'rs');
+              if(source)source.textContent=chosen===primary?'Council-verified primary':'Independently E2B-verified port';
+              // Editing one version or importing from a live report never alters
+              // the saved original code or the cloud report.
             }
             window.updateOverlayState=function(state){baseUpdateOverlayState(state);window.setOverlayControls(state&&(state.kind==='mcq'||state.mcq)?'mcq':'coding');if(!state||state.kind!=='mcq'){renderStoryAgents(state||{});renderHistoryContext(state||{});renderVerifiedPorts(state||{});}};
     </script></body></html>"#
