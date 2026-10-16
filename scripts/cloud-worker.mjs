@@ -1908,7 +1908,9 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
     // Generate it alongside the translation; unknown interfaces keep the
     // original candidate-aware path. Neither path skips independent E2B checks.
     const preparation = await preparePortConcurrently({
-      earlyEligible: contractSupportsEarlyHarness(question,"code"),
+      // Operator rollback: disable overlap without removing any verification step.
+      earlyEligible: process.env.CODE_AUDITOR_PORT_PARALLEL_HARNESS !== "0" &&
+        contractSupportsEarlyHarness(question,"code"),
       prepareEarly: async () => {
         const startedAt=Date.now();
         try {
