@@ -1301,8 +1301,8 @@ fn last_good_settings_path() -> Result<PathBuf, String> {
     Ok(cache_dir()?.join("last-good-settings.json"))
 }
 
-/// One history schema shared by both overlay surfaces and main-app runs.
-/// IDs are namespaced because a session's run and a queued cloud job are
+/// A normalized history-row schema for the helper's persisted cloud jobs.
+/// IDs remain namespaced because a queued cloud job and a main-app run are
 /// distinct artifacts even if the UI assigns them the same title.
 fn history_row(id: &str, origin: &str, kind: &str, title: &str, subtitle: &str,
                status: &str, at: &str) -> Value {
@@ -3337,7 +3337,7 @@ fn overlay_html() -> &'static str {
               if(!root){
                 root=document.createElement('section');
                 root.id='shared-history-sheet';root.className='history-sheet';
-                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Archive</div><div class="history-title">History</div><div class="history-description">Main app and overlay · Coding, MCQ and saved runs</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate · → Open result · Shift + | also opens</span><span>cc Coding · mm MCQ · hh History</span></footer>';
+                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Coding Overlay</div><div class="history-title">History</div><div class="history-description">Overlay captures only · Coding and MCQ results</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate · → Open result</span><span>cc Coding · mm MCQ · hh History</span></footer>';
                 panel.appendChild(root);
               }
               root.hidden=false;
@@ -3365,7 +3365,7 @@ fn overlay_html() -> &'static str {
               });
               if(!list.children.length){
                 const empty=document.createElement('div');empty.className='history-empty';
-                empty.textContent=error?'Could not load cloud history: '+error:loading?'Loading saved account history…':'No saved runs yet. Your next main-app or overlay task will appear here.';
+                empty.textContent=error?'Could not load cloud history: '+error:loading?'Loading saved overlay history…':'No saved overlay runs yet. Your next Coding or MCQ capture will appear here.';
                 list.appendChild(empty);
               }else if(error){
                 const warning=document.createElement('div');warning.className='history-empty';
