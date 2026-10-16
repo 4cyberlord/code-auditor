@@ -325,6 +325,10 @@ mod mac_shortcuts {
             match (usage, SHIFT_DOWN.load(Ordering::SeqCst)) {
                 (HID_USAGE_KEYBOARD_UP_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_DOWN_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_NEXT.store(true, Ordering::SeqCst),
+                // Keep the original overlay navigation as well as arrow-key
+                // navigation for the newer shared History sheet.
+                (HID_USAGE_KEYBOARD_LEFT_BRACKET, true) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_RIGHT_BRACKET, true) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_NEXT.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_BACKSLASH, true) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_OPEN.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_MINUS, false) => FADE_DOWN.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_EQUAL, false) => FADE_UP.store(true, Ordering::SeqCst),
