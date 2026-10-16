@@ -695,13 +695,13 @@ fn run() -> Result<(), String> {
                         let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                     }
                 }
-                22 | 23 | 31..=34 => {
+                20 | 22 | 23 | 31..=34 => {
                     let target_view = if command < 30 { "coding" } else { "mcq" };
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("screenshot capture already in progress");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("screenshot capture unavailable during cloud submission");
-                    } else if let Some(mode) = helper_capture_mode(if command < 30 { command - 20 } else { command % 10 }) {
+                    } else if let Some(mode) = helper_capture_mode(if command == 20 { 1 } else if command < 30 { command - 20 } else { command % 10 }) {
                         active_view = target_view.to_string();
                         capture_active_view = Some(active_view.clone());
                         // Background-route captures open their own coding/MCQ
@@ -1374,7 +1374,7 @@ fn number_pair_command(first: u8, second: u8) -> Option<u8> {
     match first {
         0 if second == 0 => Some(6),
         1 if second <= 4 => Some(10 + second),
-        2 if (1..=5).contains(&second) => Some(20 + second),
+        2 if second <= 5 => Some(20 + second),
         3 if (1..=5).contains(&second) => Some(30 + second),
         _ => None,
     }
@@ -1678,6 +1678,15 @@ fn is_usable_cloud_report(report: &Value, expected_id: &str) -> bool {
             .and_then(Value::as_str);
         if report_id.is_some_and(|id| id != expected_id) { return false; }
     }
+    if body.get("stage").and_then(Value::as_str) == Some("provisional") {
+        let item = body.get("provisional");
+        return item.is_some_and(|p|
+            p.get("status").and_then(Value::as_str) == Some("provisional")
+            && p.get("code").and_then(Value::as_str).is_some_and(|code| !code.trim().is_empty())
+            && p.get("passed").and_then(Value::as_u64).unwrap_or(0) > 0
+            && p.get("failed").and_then(Value::as_u64).unwrap_or(1) == 0
+        );
+    }
     if body.get("kind").and_then(Value::as_str) == Some("mcq") {
         return body.pointer("/answer/label").and_then(Value::as_str)
             .is_some_and(|label| !label.trim().is_empty())
@@ -1753,7 +1762,10 @@ async fn refresh_one_job(mut tracked: SubmittedJob) -> Result<SubmittedJob, Stri
     if matches!(
         tracked.status.as_str(),
         "completed" | "failed" | "needs_attention" | "cancelled"
-    ) && (tracked.report.is_some() || tracked.status != "completed")
+    ) && (tracked.status != "completed" || tracked.report.as_ref().is_some_and(|report| {
+        let body = report.get("report").unwrap_or(report);
+        body.get("stage").and_then(Value::as_str) != Some("provisional")
+    }))
     {
         return Ok(tracked);
     }
@@ -1801,9 +1813,14 @@ async fn refresh_one_job(mut tracked: SubmittedJob) -> Result<SubmittedJob, Stri
     }
     space_api_calls().await;
 
-    // Only a terminal success is a final report. Intermediate report rows may
-    // be partial and must not become the permanently cached answer.
-    if tracked.status == "completed" {
+    // The cloud worker persists a verified preliminary solution before the
+    // judges finish. Fetch that same account-bound report in-flight; never
+    // treat an intermediate row as terminal or switch job identity.
+    let live_ready = tracked.events.iter().any(|event| matches!(
+        event.get("phase").and_then(Value::as_str),
+        Some("provisional_solution_ready" | "primary_solution_ready" | "provisional_upgraded" | "port_verified")
+    ));
+    if tracked.status == "completed" || (tracked.status == "running" && live_ready) {
     let retry_path = cache_dir()?.join(format!("report-retry-{}.json", tracked.id));
     let retry: Value = fs::read_to_string(&retry_path).ok()
        .and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or(Value::Null);
@@ -1828,7 +1845,10 @@ async fn refresh_one_job(mut tracked: SubmittedJob) -> Result<SubmittedJob, Stri
             }
         }
     }
-    if tracked.report.is_none() {
+    if tracked.status == "completed" && tracked.report.as_ref().is_none_or(|report| {
+        report.get("report").unwrap_or(report).get("stage")
+            .and_then(Value::as_str) == Some("provisional")
+    }) {
         let attempts = retry["attempts"].as_u64().unwrap_or(0).saturating_add(1).min(20);
         let delay = (5_u64.saturating_mul(1_u64 << attempts.min(6))).min(300);
         let value = serde_json::json!({
@@ -2818,7 +2838,7 @@ mod tests {
         let expected = [
             (0, 0, 6),
             (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13),
-            (2, 1, 21), (2, 2, 22), (2, 3, 23), (2, 4, 24), (2, 5, 25),
+            (2, 0, 20), (2, 1, 21), (2, 2, 22), (2, 3, 23), (2, 4, 24), (2, 5, 25),
             (3, 1, 31), (3, 2, 32), (3, 3, 33), (3, 4, 34), (3, 5, 35),
         ];
         for (prefix, shape, command) in expected {
