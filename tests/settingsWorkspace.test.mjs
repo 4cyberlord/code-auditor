@@ -9,10 +9,8 @@ for (const id of ["overview", "api", "council", "reading", "capture", "appearanc
   assert.match(settings, new RegExp('id: "' + id + '"'), "Missing setting navigation section: " + id);
 }
 for (const component of ["GatewayCard", "CodingSettingsCard", "ProviderCard", "CouncilCard", "ReadingCard", "CaptureCard", "AppearanceCard", "UpdateCard", "AccountCard", "StorageCard", "TimeZoneCard"]) {
-  assert.ok(settings.includes("<" + component + " "), "Missing original settings panel: " + component);
-  // Singleton self-closing cards have their props separated by spaces or newline.
-  assert.ok(settings.includes("<" + component + " /") || settings.includes("<" + component + "/") ||
-            settings.includes("<" + component + "\n"), "Missing original rendered settings panel: " + component);
+  assert.ok(new RegExp("<" + component + "(?:\\s|/|>)").test(settings),
+    "Missing original rendered settings panel: " + component);
 }
 assert.match(settings, /title="Unlock API settings"[\s\S]*?<GatewayCard\s*\/>/);
 assert.match(settings, /title="Unlock account settings"[\s\S]*?<AccountCard\s*\/>/);
