@@ -1966,6 +1966,7 @@ function CaptureCard() {
           </button>
         </div>
         {helperNote && <p className="hint">{helperNote}</p>}
+        <HelperCard embedded />
       </div>
 
       <div className="provider-card">
@@ -2192,10 +2193,9 @@ export default function SettingsDialog() {
                   where the database does rather than in a tab of its own. */}
               <SensitiveSettingsGate
                 title="Unlock account settings"
-                detail="Confirm your PIN before changing the account PIN, helper authorisation, or storage credentials."
+                detail="Confirm your PIN before changing the account PIN or storage credentials."
               >
                 <AccountCard />
-                <HelperCard />
                 <StorageCard />
               </SensitiveSettingsGate>
               <TimeZoneCard />

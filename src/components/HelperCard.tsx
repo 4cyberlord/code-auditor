@@ -17,7 +17,7 @@ import { reason } from "@/lib/auth";
  * machine now, and a credential nobody can see the terms of is one nobody
  * thinks about until it is a problem.
  */
-export default function HelperCard() {
+export default function HelperCard({ embedded = false }: { embedded?: boolean }) {
   const [auth, setAuth] = useState<bridge.HelperAuth | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -87,8 +87,8 @@ export default function HelperCard() {
   const expiringSoon = daysLeft !== null && daysLeft <= 7 && daysLeft > 0;
   const authenticated = auth?.authorised === true;
 
-  return (
-    <div className="provider-card">
+  const content = (
+    <>
       <div className="top">
         <span
           className="dot"
@@ -100,7 +100,7 @@ export default function HelperCard() {
               : "var(--line)",
           }}
         />
-        <span className="name">Background helper</span>
+        <span className="name">Overlay authentication</span>
         <span className="vendor">
           {auth === null
             ? "checking authentication…"
@@ -149,6 +149,17 @@ export default function HelperCard() {
           {note}
         </p>
       )}
-    </div>
+    </>
+  );
+
+  return embedded ? (
+    <section
+      aria-label="Overlay authentication"
+      style={{ borderTop: "1px solid var(--line)", marginTop: 12, paddingTop: 12 }}
+    >
+      {content}
+    </section>
+  ) : (
+    <div className="provider-card">{content}</div>
   );
 }
