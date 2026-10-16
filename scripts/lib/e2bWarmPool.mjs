@@ -23,6 +23,7 @@ export function createE2BWarmPool({create, destroy, idleMs = 75_000, onEvent = (
           return null;
         }
         slot.lease = lease;
+        slot.readyAt = Date.now();
         slot.state = "ready";
         slot.timer = setTimeout(() => {
           if (slot.state !== "ready") return;
@@ -50,7 +51,9 @@ export function createE2BWarmPool({create, destroy, idleMs = 75_000, onEvent = (
     slot.state = "leased";
     if (slot.timer) clearTimeout(slot.timer);
     slots.delete(letter);
-    emit("reused", {letter, sandboxId: slot.lease?.sandbox?.sandboxId ?? null});
+    slot.lease.warmIdleMs = Math.max(0, Date.now() - slot.readyAt);
+    emit("reused", {letter, sandboxId: slot.lease?.sandbox?.sandboxId ?? null,
+      warmIdleMs: slot.lease.warmIdleMs});
     return slot.lease;
   }
   async function close() {
