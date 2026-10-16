@@ -187,6 +187,7 @@ mod mac_shortcuts {
     static FADE_UP: AtomicBool = AtomicBool::new(false);
     static HISTORY_PREVIOUS: AtomicBool = AtomicBool::new(false);
     static HISTORY_NEXT: AtomicBool = AtomicBool::new(false);
+    static HISTORY_OPEN: AtomicBool = AtomicBool::new(false);
     static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
     static HISTORY_VISIBLE: AtomicBool = AtomicBool::new(false);
     // 1 coding, 2 multiple-choice, 3 shared cloud history.
@@ -324,6 +325,7 @@ mod mac_shortcuts {
             match (usage, SHIFT_DOWN.load(Ordering::SeqCst)) {
                 (HID_USAGE_KEYBOARD_UP_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_DOWN_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_NEXT.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_BACKSLASH, true) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_OPEN.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_MINUS, false) => FADE_DOWN.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_EQUAL, false) => FADE_UP.store(true, Ordering::SeqCst),
                 _ => {}
@@ -459,6 +461,7 @@ mod mac_shortcuts {
     pub fn take_fade_up() -> bool { FADE_UP.swap(false, Ordering::SeqCst) }
     pub fn take_history_previous() -> bool { HISTORY_PREVIOUS.swap(false, Ordering::SeqCst) }
     pub fn take_history_next() -> bool { HISTORY_NEXT.swap(false, Ordering::SeqCst) }
+    pub fn take_history_open() -> bool { HISTORY_OPEN.swap(false, Ordering::SeqCst) }
 }
 
 async fn space_api_calls() {
@@ -656,6 +659,7 @@ fn run() -> Result<(), String> {
     let mut history_rows: Vec<Value> = Vec::new();
     let mut history_index = 0_usize;
     let mut history_fetch: Option<tokio::task::JoinHandle<Result<(Vec<Value>,Option<String>),String>>> = None;
+    let mut history_detail_fetch: Option<tokio::task::JoinHandle<Result<Value,String>>> = None;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
     let mut last_heartbeat = Instant::now();
@@ -790,6 +794,16 @@ fn run() -> Result<(), String> {
                     }
                     _ => {}
                 }
+            }
+        }
+        if history_detail_fetch.as_ref().is_some_and(|task| task.is_finished()) {
+            if let Some(task) = history_detail_fetch.take() {
+                let script = match rt.block_on(task) {
+                    Ok(Ok(detail)) => format!("window.showSharedHistoryDetail({});", serde_json::to_string(&detail).unwrap_or_else(|_| "{}".into())),
+                    Ok(Err(error)) => format!("window.showSharedHistoryDetail({});", serde_json::json!({"error": error})),
+                    Err(error) => format!("window.showSharedHistoryDetail({});", serde_json::json!({"error": error.to_string()})),
+                };
+                let _ = webview.evaluate_script(&script);
             }
         }
         if last_capture_cleanup.elapsed() >= Duration::from_secs(3600) {
@@ -980,9 +994,18 @@ fn run() -> Result<(), String> {
                     let _ = webview.evaluate_script(&format!(
                         "window.selectSharedHistoryRow({history_index})"));
                 }
+                if mac_shortcuts::take_history_open()
+                    && history_detail_fetch.as_ref().is_none_or(|task| task.is_finished())
+                {
+                    if let Some(row) = history_rows.get(history_index).cloned() {
+                        history_detail_fetch = Some(rt.spawn(fetch_history_detail(row)));
+                        let _ = webview.evaluate_script("window.showSharedHistoryDetail({loading:true});");
+                    }
+                }
             } else {
                 let _ = mac_shortcuts::take_history_previous();
                 let _ = mac_shortcuts::take_history_next();
+                let _ = mac_shortcuts::take_history_open();
             }
             // HH and arrow-only History doesn't change the active solving task.
             mac_shortcuts::set_history_visible(history_open && overlay_visible);
@@ -1180,7 +1203,9 @@ fn archived_helper_history() -> Result<Vec<Value>, String> {
     }
     let dir = cache_dir()?.join("job-history");
     if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten().take(2000) {
+        // Keep opening History bounded; older cloud rows remain available via
+        // the account-scoped API below.
+        for entry in entries.flatten().take(200) {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") { continue; }
             let Ok(raw) = fs::read_to_string(path) else { continue; };
@@ -1259,14 +1284,17 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
     // The API exposes main run history per session, not as one flat list.
     // Bounded concurrency keeps older accounts usable without overwhelming
     // the API or bringing synchronous network work onto the macOS event loop.
-    let sessions: Vec<(String,Value)> = sessions.into_iter().collect();
+    let mut sessions: Vec<(String,Value)> = sessions.into_iter().collect();
+    sessions.sort_by(|a,b| b.1.get("updatedAt").and_then(Value::as_str).unwrap_or("")
+        .cmp(a.1.get("updatedAt").and_then(Value::as_str).unwrap_or("")));
+    sessions.truncate(30);
     for chunk in sessions.chunks(6) {
         let responses=join_all(chunk.iter().map(|(id,_)|
             api("runs.list",serde_json::json!({"sessionId":id})))).await;
         for ((_,session),answer) in chunk.iter().zip(responses) {
             match answer {
                 Ok(payload) => for item in payload.as_array().or_else(||payload.get("items").and_then(Value::as_array))
-                    .into_iter().flatten() {
+                    .into_iter().flatten().take(20) {
                     let id=item.get("id").and_then(Value::as_str).unwrap_or("");
                     if id.is_empty(){continue;}
                     let mode=item.get("mode").and_then(Value::as_str).unwrap_or("auto");
@@ -1296,6 +1324,46 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
         Some(format!("Some cloud history is unavailable: {}",errors.join(", ")))
     };
     Ok((rows,notice))
+}
+
+/// Fetch a saved result only after the person opens it from History. The list
+/// itself stays metadata-only and every detail read remains account-scoped.
+async fn fetch_history_detail(row: Value) -> Result<Value, String> {
+    let id = row.get("id").and_then(Value::as_str).unwrap_or("");
+    if let Some(job_id) = id.strip_prefix("job:") {
+        let report = api("reports.get", serde_json::json!({"jobId": job_id})).await?;
+        let body = report.get("report").unwrap_or(&report);
+        let candidates = body.get("candidates").and_then(Value::as_array).cloned().unwrap_or_default();
+        let winner = body.get("winner").and_then(Value::as_str).unwrap_or("");
+        return Ok(serde_json::json!({
+            "title": row.get("title").and_then(Value::as_str).unwrap_or("Overlay result"),
+            "origin": "Overlay", "status": row.get("status").and_then(Value::as_str).unwrap_or(""),
+            "summary": body.pointer("/presentation/summary").and_then(Value::as_str)
+                .or_else(|| body.pointer("/presentation/approach").and_then(Value::as_str)).unwrap_or("No saved summary."),
+            "solution": coding_solution_from_report(body, winner, &candidates),
+        }));
+    }
+    if let Some(run_id) = id.strip_prefix("main:") {
+        let payload = api("runs.get", serde_json::json!({"runId": run_id})).await?;
+        let responses = payload.get("responses").and_then(Value::as_array).cloned().unwrap_or_default();
+        let picked = responses.iter().find(|response| response.get("finalCode").and_then(Value::as_str)
+            .is_some_and(|code| !code.trim().is_empty()));
+        let summary = payload.pointer("/verdict/detail").and_then(Value::as_str)
+            .or_else(|| payload.pointer("/verdict/headline").and_then(Value::as_str))
+            .or_else(|| picked.and_then(|response| response.get("finalAnswer").and_then(Value::as_str)))
+            .unwrap_or("No saved verdict detail.");
+        let solution = picked.and_then(|response| response.get("finalCode").and_then(Value::as_str)
+            .filter(|code| !code.trim().is_empty()).map(|code| serde_json::json!({
+                "language": picked.and_then(|response| response.get("finalLanguage").and_then(Value::as_str)).unwrap_or(""),
+                "code": code,
+            })));
+        return Ok(serde_json::json!({
+            "title": row.get("title").and_then(Value::as_str).unwrap_or("Main-app result"),
+            "origin": "Main app", "status": row.get("status").and_then(Value::as_str).unwrap_or(""),
+            "summary": summary, "solution": solution,
+        }));
+    }
+    Err("The selected history item has no supported source identifier.".into())
 }
 
 fn clean_expired_capture_dirs() -> Result<(), String> {
@@ -2907,15 +2975,8 @@ fn overlay_html() -> &'static str {
             // an actual red/green line diff in the EXISTING code window.
             function overlayDiffRows(before,after){
               const a=String(before||'').split('\n'),b=String(after||'').split('\n'),out=[];
-              if(a.length*b.length>90000){
-                let front=0;while(front<a.length&&front<b.length&&a[front]===b[front])front++;
-                let tail=0;while(tail<a.length-front&&tail<b.length-front&&a[a.length-1-tail]===b[b.length-1-tail])tail++;
-                for(let i=0;i<front;i++)out.push(['same',a[i]]);
-                for(let i=front;i<a.length-tail;i++)out.push(['remove',a[i]]);
-                for(let i=front;i<b.length-tail;i++)out.push(['add',b[i]]);
-                for(let i=a.length-tail;i<a.length;i++)out.push(['same',a[i]]);
-                return out;
-              }
+              if(a.length*b.length>90000||String(before||'').length+String(after||'').length>98304)
+                return [['summary','The provisional and final solutions differ. This diff is too large to render safely; use Show final to view the verified code.']];
               const dp=Array.from({length:a.length+1},()=>new Uint16Array(b.length+1));
               for(let i=a.length-1;i>=0;i--)for(let j=b.length-1;j>=0;j--)
                 dp[i][j]=a[i]===b[j]?dp[i+1][j+1]+1:Math.max(dp[i+1][j],dp[i][j+1]);
@@ -2971,7 +3032,7 @@ fn overlay_html() -> &'static str {
               if(!root){
                 root=document.createElement('section');
                 root.id='shared-history-sheet';root.className='history-sheet';
-                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Archive</div><div class="history-title">History</div><div class="history-description">Main app and overlay · Coding, MCQ and saved runs</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate saved history</span><span>cc Coding · mm MCQ · hh History</span></footer>';
+                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Archive</div><div class="history-title">History</div><div class="history-description">Main app and overlay · Coding, MCQ and saved runs</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate · Shift + | Open result</span><span>cc Coding · mm MCQ · hh History</span></footer>';
                 panel.appendChild(root);
               }
               root.hidden=false;
@@ -3019,7 +3080,24 @@ fn overlay_html() -> &'static str {
             };
             window.closeSharedHistory=function(){
               const root=document.getElementById('shared-history-sheet');if(root)root.hidden=true;
+              const detail=document.getElementById('shared-history-detail');if(detail)detail.hidden=true;
               window.setOverlayControls(window.__overlayCurrentState&&(window.__overlayCurrentState.kind==='mcq'||window.__overlayCurrentState.mcq)?'mcq':'coding');
+            };
+            window.showSharedHistoryDetail=function(detail){
+              const panel=document.getElementById('panel');if(!panel)return;
+              let root=document.getElementById('shared-history-detail');
+              if(!root){root=document.createElement('section');root.id='shared-history-detail';root.className='history-sheet';panel.appendChild(root);}
+              root.hidden=false;root.replaceChildren();
+              const header=document.createElement('header');header.className='history-heading';
+              const head=document.createElement('div');const eyebrow=document.createElement('div');eyebrow.className='history-eyebrow';eyebrow.textContent='Council Editor / Saved result';
+              const title=document.createElement('div');title.className='history-title';title.textContent=detail&&detail.loading?'Loading result…':(detail&&detail.title)||'Saved result';
+              const meta=document.createElement('div');meta.className='history-description';meta.textContent=[detail&&detail.origin,detail&&detail.status].filter(Boolean).join(' · ');
+              head.append(eyebrow,title,meta);header.append(head);root.append(header);
+              const body=document.createElement('div');body.className='history-list';
+              if(detail&&detail.loading){const loading=document.createElement('div');loading.className='history-empty';loading.textContent='Loading the selected account-scoped result…';body.append(loading);}
+              else if(detail&&detail.error){const error=document.createElement('div');error.className='history-empty';error.textContent='Could not open this saved result: '+detail.error;body.append(error);}
+              else {const summary=document.createElement('pre');summary.className='history-row';summary.style.whiteSpace='pre-wrap';summary.textContent=(detail&&detail.summary)||'No saved summary.';body.append(summary);const solution=detail&&detail.solution;if(solution&&solution.code){const code=document.createElement('pre');code.className='history-row';code.style.whiteSpace='pre';code.style.overflow='auto';code.textContent=(solution.language?solution.language+'\n\n':'')+solution.code;body.append(code);}}
+              root.append(body);const footer=document.createElement('footer');footer.className='history-footer';footer.textContent='hh returns to History · cc Coding · mm MCQ';root.append(footer);
             };
             const baseUpdateOverlayState=window.updateOverlayState;
             function agentStatusText(agent){
