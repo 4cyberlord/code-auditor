@@ -3583,6 +3583,52 @@ mod tests {
     }
 
     #[test]
+    fn saved_main_history_only_promotes_a_tested_council_winner() {
+        let row=history_row("main:abc","Main app","Coding","Historical run","","completed","2026-10-15T14:00:00Z");
+        let report=serde_json::json!({
+            "run":{"asked":"Compute a sum"},
+            "responses":[{"model":"unselected-model","finalCode":"print('unverified')"}],
+            "report":{"council":{
+                "winner":"B","phase":"done",
+                "candidates":[
+                    {"letter":"A","model":"unselected-model","final":{"code":"print('unverified')","language":"python"}},
+                    {"letter":"B","model":"winner-model","final":{"code":"print(3)","language":"python"}}
+                ],
+                "runs":{"B":{"ran":true,"ok":true,"passed":3,"failed":0}}
+            }}
+        });
+        let rendered=history_main_detail(&row,&report);
+        assert_eq!(rendered["solution"]["code"],"print(3)");
+        assert_eq!(rendered["insights"]["selectedModel"],"winner-model");
+        assert_eq!(rendered["models"].as_array().map(Vec::len),Some(2));
+        let untested=serde_json::json!({
+            "responses":[{"model":"unselected-model","finalCode":"print('unverified')"}],
+            "report":{"council":{
+                "winner":"B","candidates":[{"letter":"B","model":"winner-model","final":{"code":"print(3)","language":"python"}}],
+                "runs":{"B":{"ran":true,"ok":true,"passed":2,"failed":1}}
+            }}
+        });
+        let denied=history_main_detail(&row,&untested);
+        assert!(denied["solution"].is_null(),"untested candidate code must remain hidden");
+    }
+
+    #[test]
+    fn overlay_history_retains_model_and_mcq_answer_without_invented_code() {
+        let row=history_row("job:abc","Overlay","MCQ","Question","","completed","2026-10-15T14:00:00Z");
+        let report=serde_json::json!({"report":{
+            "kind":"mcq","question":"Which queue?","model":"reader-model",
+            "answerVerified":true,"options":[{"label":"C","text":"FIFO"}],
+            "answer":{"label":"C","text":"FIFO"},"reason":"First in, first out"
+        }});
+        let view=history_overlay_detail(&row,Some(&report),None,&[],None);
+        assert_eq!(view["kind"],"mcq");
+        assert_eq!(view["models"][0]["model"],"reader-model");
+        assert_eq!(view["mcq"]["answer"]["label"],"C");
+        assert!(view["solution"].is_null());
+        assert_eq!(view["images"].as_array().map(Vec::len),Some(0));
+    }
+
+    #[test]
     fn number_pairs_route_to_the_requested_workflow_and_capture_shape() {
         let expected = [
             (0, 0, 6),
