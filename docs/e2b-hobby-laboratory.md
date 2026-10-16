@@ -95,9 +95,12 @@ online judge hidden cases.
 
 Report `e2bEvidence` contains per-candidate status, pass/fail counts,
 provider, sandbox/execution IDs, exit attestation flag, execution duration,
-peak memory, sandbox boot duration and standby age when applicable. These
-measurements are not mathematical proofs of Big-O or language-to-language
-performance rankings; existing Council symbolic reasoning remains independent.
+peak memory, sandbox boot duration and standby age when applicable. For compiled Rust/C++, the sandbox now emits separate nested program-only
+wall-clock and memory measurements; it also preserves the outer
+compiler-plus-execution total. Neither reading should be promoted as a
+cross-language benchmark from a single run. These measurements are not
+mathematical proofs of Big-O or language-to-language performance rankings;
+existing Council symbolic reasoning remains independent.
 
 ## Optional differential traces
 
