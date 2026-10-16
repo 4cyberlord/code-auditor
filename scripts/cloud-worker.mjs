@@ -1163,7 +1163,7 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
     try {
       const local = await runVerification(settings, suite, program, {
         executionId: id,
-        warmPool: !revised ? opts.warmPool : null,
+        warmPool: !revised && (opts.warmSeat || lang === "python") ? opts.warmPool : null,
         candidateLetter: opts.warmSeat || candidate.letter,
         onState: (state, meta) => addEvent(job.id, "info", "execution_state",
           `Candidate ${candidate.letter}${tag}: ${state}.`,
