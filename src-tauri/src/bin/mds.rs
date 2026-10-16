@@ -3340,8 +3340,9 @@ fn overlay_html() -> &'static str {
             function renderHistoryContext(state){
               const old=document.getElementById('overlay-history-context');if(old)old.remove();
               const title=state&&String(state.historyTitle||'').trim();if(!title)return;
+              const shown=title.length>72?title.slice(0,69)+'…':title;
               const pane=document.querySelector('.pictures-pane');if(!pane)return;
-              const context=document.createElement('div');context.id='overlay-history-context';context.className='overlay-history-context';context.textContent='History result · '+title;
+              const context=document.createElement('div');context.id='overlay-history-context';context.className='overlay-history-context';context.textContent='History result · '+shown;context.title=title;
               const progress=pane.querySelector('.overlay-progress');if(progress)progress.after(context);else{const agents=document.getElementById('agents');if(agents)agents.after(context);}
             }
             function renderVerifiedPorts(state){
