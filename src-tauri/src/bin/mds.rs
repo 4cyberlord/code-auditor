@@ -1287,6 +1287,15 @@ fn archived_helper_history() -> Result<Vec<Value>, String> {
     normalize_history(rows)
 }
 
+/// A report saved while a job is still provisional is useful for live overlay
+/// progress, but it is not the durable finished result a person expects when
+/// opening History. Keep the instant local path for completed reports and
+/// otherwise continue to the account-scoped report endpoint below.
+fn is_final_history_report(report: &Value) -> bool {
+    let body = report.get("report").unwrap_or(report);
+    body.get("stage").and_then(Value::as_str) != Some("provisional")
+}
+
 /// A completed overlay report is saved locally by the helper.  History should
 /// open that durable, account-scoped snapshot immediately instead of making a
 /// person wait for the network merely to view a result they have already
@@ -1295,7 +1304,7 @@ fn archived_helper_history() -> Result<Vec<Value>, String> {
 fn cached_history_job(job_id: &str) -> Result<Option<SubmittedJob>, String> {
     for view in ["coding", "mcq"] {
         if let Some(job) = read_submitted_job_for(view)? {
-            if job.id == job_id && job.report.is_some() {
+            if job.id == job_id && job.report.as_ref().is_some_and(is_final_history_report) {
                 return Ok(Some(job));
             }
         }
@@ -1309,7 +1318,7 @@ fn cached_history_job(job_id: &str) -> Result<Option<SubmittedJob>, String> {
         .map_err(|error| format!("Could not read saved overlay result: {error}"))?;
     let job = serde_json::from_str::<SubmittedJob>(&raw)
         .map_err(|error| format!("Could not parse saved overlay result: {error}"))?;
-    Ok((job.id == job_id && job.report.is_some()).then_some(job))
+    Ok((job.id == job_id && job.report.as_ref().is_some_and(is_final_history_report)).then_some(job))
 }
 
 fn normalize_history(rows: Vec<Value>) -> Result<Vec<Value>, String> {
@@ -1346,20 +1355,12 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
         api("sessions.list",serde_json::json!({"status":"archived"})),
     );
     let mut errors=Vec::new();
-    if let Ok(payload)=jobs {
-        for item in payload.as_array().or_else(||payload.get("items").and_then(Value::as_array))
-            .into_iter().flatten() {
-            let id=item.get("id").and_then(Value::as_str).unwrap_or("");
-            if id.is_empty(){continue;}
-            let mode=item.get("mode").and_then(Value::as_str).unwrap_or("council");
-            rows.push(history_row(&format!("job:{id}"),"Overlay",
-                if mode=="mcq"{"MCQ"}else{"Coding"},
-                if mode=="mcq"{"MCQ screenshot task"}else{"Coding screenshot task"},
-                item.get("resultSummary").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(id),
-                item.get("status").and_then(Value::as_str).unwrap_or("unknown"),
-                item.get("createdAt").and_then(Value::as_str).unwrap_or("")));
-        }
-    } else { errors.push("cloud jobs"); }
+    let job_items = match jobs {
+        Ok(payload) => payload.as_array().cloned()
+            .or_else(|| payload.get("items").and_then(Value::as_array).cloned())
+            .unwrap_or_default(),
+        Err(_) => { errors.push("cloud jobs"); Vec::new() }
+    };
     let mut sessions=std::collections::HashMap::<String, Value>::new();
     for response in [active,archived] {
         match response {
@@ -1377,6 +1378,26 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
     // The API exposes main run history per session, not as one flat list.
     // Bounded concurrency keeps older accounts usable without overwhelming
     // the API or bringing synchronous network work onto the macOS event loop.
+    // Jobs and runs are both owned by a session. The worker renames the same
+    // session after it understands the captured problem, so use that one title
+    // for both history surfaces instead of maintaining a second overlay name.
+    for item in job_items {
+        let id=item.get("id").and_then(Value::as_str).unwrap_or("");
+        if id.is_empty(){continue;}
+        let mode=item.get("mode").and_then(Value::as_str).unwrap_or("council");
+        let session_title=item.get("sessionId").and_then(Value::as_str)
+            .and_then(|session_id| sessions.get(session_id))
+            .and_then(|session| session.get("title").and_then(Value::as_str))
+            .filter(|title| !title.trim().is_empty());
+        let title=session_title
+            .or_else(|| item.get("resultSummary").and_then(Value::as_str).filter(|s| !s.trim().is_empty()))
+            .unwrap_or(if mode=="mcq"{"MCQ screenshot task"}else{"Coding screenshot task"});
+        rows.push(history_row(&format!("job:{id}"),"Overlay",
+            if mode=="mcq"{"MCQ"}else{"Coding"}, title,
+            item.get("resultSummary").and_then(Value::as_str).unwrap_or(""),
+            item.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+            item.get("createdAt").and_then(Value::as_str).unwrap_or("")));
+    }
     let mut sessions: Vec<(String,Value)> = sessions.into_iter().collect();
     sessions.sort_by(|a,b| b.1.get("updatedAt").and_then(Value::as_str).unwrap_or("")
         .cmp(a.1.get("updatedAt").and_then(Value::as_str).unwrap_or("")));
@@ -2008,6 +2029,10 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
     user_settings["overlayMode"] = Value::String(
         if active_view == "mcq" { "mcq" } else { "code" }.to_string()
     );
+    // Persist the submission surface with the job. This is metadata only;
+    // both surfaces use the same Council engine and history store.
+    user_settings["source"] = Value::String("overlay".to_string());
+    user_settings["origin"] = Value::String("overlay".to_string());
     batch.mode = Some(mode.clone());
     save_pending_for(active_view, &batch)?;
     let mcq_model = if mode == "mcq" {
@@ -3604,6 +3629,14 @@ mod tests {
         assert_eq!(state["solution"]["code"],"print(2)");
         assert_eq!(state["upgrade"]["changed"],true);
         assert_eq!(state["solutionHistory"].as_array().map(Vec::len),Some(2));
+    }
+
+    #[test]
+    fn history_cache_never_masks_a_final_report_with_a_provisional_snapshot() {
+        assert!(!is_final_history_report(&serde_json::json!({"report": {"stage": "provisional"}})));
+        assert!(is_final_history_report(&serde_json::json!({"report": {"stage": "final"}})));
+        // Older completed reports had no stage marker and remain valid history.
+        assert!(is_final_history_report(&serde_json::json!({"report": {"presentation": {"code": "print(1)"}}})));
     }
 
     #[test]
