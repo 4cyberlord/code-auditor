@@ -67,3 +67,62 @@ export function createBoundedExecutor(concurrency=4){
  }
  return fn=>new Promise((resolve,reject)=>{queue.push({fn,resolve,reject});next()});
 }
+
+
+/**
+ * Spec-first port preparation: overlap translation with an independent
+ * reference-harness build only when the question exposes a callable contract.
+ *
+ * An early suite is never assumed valid by this helper: callers must keep
+ * their existing reference E2B preflight, candidate execution, mutation test,
+ * and verified-only publication gates. If the independent attempt fails,
+ * regenerate using the translated candidate as interface context.
+ *
+ * allSettled is intentional: a failed translation must not leave an in-flight
+ * harness writing events after the port has already been marked failed.
+ */
+export async function preparePortConcurrently({
+  earlyEligible, translate, prepareEarly, prepareAfterTranslation,
+}) {
+  if (typeof translate !== "function" || typeof prepareAfterTranslation !== "function")
+    throw new TypeError("port translation and candidate-aware preparation are required");
+  if (!earlyEligible) {
+    const translation = await translate();
+    return {
+      translation, suites: await prepareAfterTranslation(translation),
+      preparedEarly: false, earlyFailure: null,
+    };
+  }
+  if (typeof prepareEarly !== "function")
+    throw new TypeError("early harness preparation callback is required");
+  const [translated, early] = await Promise.allSettled([
+    Promise.resolve().then(translate),
+    Promise.resolve().then(prepareEarly),
+  ]);
+  if (translated.status === "rejected") throw translated.reason;
+  if (early.status === "fulfilled" && Array.isArray(early.value) && early.value.length) {
+    return {
+      translation: translated.value, suites: early.value,
+      preparedEarly: true, earlyFailure: null,
+    };
+  }
+  return {
+    translation: translated.value,
+    suites: await prepareAfterTranslation(translated.value),
+    preparedEarly: false,
+    earlyFailure: early.status === "rejected" ? String(early.reason) : "No independent suite returned",
+  };
+}
+
+/**
+ * A pre-generated port harness may disagree on a target-language callable
+ * interface. Retry it once with candidate-aware generation ONLY if nothing
+ * executed, not when actual assertions exposed an incorrect solution.
+ */
+export function portHarnessNeedsCandidateRetry(run) {
+  if (!run || isVerified(run) || run.passed > 0 || run.failed > 0) return false;
+  if (run.note === "harness has no splice marker" ||
+      run.note === "generated harness failed static preflight") return true;
+  return Boolean(run.ran && !run.timedOut && !run.canceled &&
+    /candidate\/harness integration or compilation failed/.test(String(run.note || "")));
+}

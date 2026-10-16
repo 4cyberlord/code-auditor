@@ -75,3 +75,44 @@ so it must not be conflated with model response time. Always compare the same
 model roster, problem categories, E2B account and source-document set.
 
 Run the full `npm test` and workflow validation. All correctness, source-image, runner isolation and revised-code evidence checks remain enabled. This commit does not change production environment variables or deploy the worker.
+
+
+## October 16: overlap Rust/C++ port translation and harness preparation
+
+The two requested output ports already run with bounded concurrency, but each
+individual port used to wait for translation (including language documentation
+and pack retrieval) before it could begin generating its E2B reference harness.
+
+When the original problem **explicitly supplies a callable contract**, the
+port worker now launches the *specification-only* target-language reference
+harness alongside source-to-target translation. Reference test values must
+still come from the problem, not the translated candidate. Both asynchronous
+operations are joined before testing or publication. When the callable
+contract is unknown, the original candidate-aware sequence is unchanged.
+
+- A rejected or empty speculative harness falls back to candidate-aware
+  generation after translation; a speculative model failure cannot overwrite
+  the translator choice made at the start of the port.
+- A speculative harness with a language-specific signature mismatch can be
+  regenerated once, only after an E2B integration/compile error with no actual
+  passing or failing cases. Genuine failed assertions are **never** retried
+  merely to obtain a passing suite.
+- Existing independent E2B reference preflight, candidate E2B execution,
+  mutation-oracle checks, verified-only gating, bounded port concurrency,
+  serialized report writes and immediate primary-source publication remain.
+- Cloud event `port_preparation_timing` now exposes elapsed preparation time,
+  translation time, spec-harness time, and whether the spec-first path was
+  used. `port_early_harness_fallback` and `port_interface_retry` capture
+  recovery without disguising it as a successful verification.
+- Set `CODE_AUDITOR_PORT_PARALLEL_HARNESS=0` for immediate per-worker
+  rollback to serial port harness preparation (default is on for eligible
+  callable contracts). No other execution or correctness setting changes.
+- The new concurrency and failure-path regression tests live in
+  `tests/specFirstDelivery.test.mjs`.
+
+No database, model-provider, API-token, live E2B quota, UI geometry or
+production worker deployment change is required. Compare the same real-world
+Rust/C++ problems before/after at the `port_preparation_timing` stage and
+inspect the E2B pass/fail and fallback counts before calling the change faster
+in production. Do not merge unless Node test, typecheck, lint and security
+workflows pass; exercise live E2B separately with trusted credentials.
