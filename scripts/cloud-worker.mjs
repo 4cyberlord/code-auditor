@@ -239,9 +239,9 @@ const REMOTE_RUN_TIMEOUT_MS = 120_000;
 const E2B_CAPACITY = createSandboxCapacity(
   hobbyWorkerLimit(process.env.CODE_AUDITOR_E2B_WORKER_CAP, 8)
 );
-const E2B_WARM_IDLE_MS = Math.max(1_000, Math.min(180_000,
+const E2B_WARM_IDLE_MS = Math.trunc(Math.max(1_000, Math.min(180_000,
   Number(process.env.CODE_AUDITOR_E2B_WARM_IDLE_MS) || 75_000
-));
+)));
 const E2B_TIMEOUT_ATTEMPTS = Math.max(1, Number(process.env.CODE_AUDITOR_E2B_TIMEOUT_ATTEMPTS || 2));
 const TOKENROUTER_MIN_DELAY_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS || 13_000);
 const TOKENROUTER_JITTER_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_JITTER_MS || 1_500);
@@ -1068,6 +1068,7 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
       sandboxId: sandbox.sandboxId,
       bootMs,
       prewarmed: Boolean(standby),
+      warmIdleMs: standby?.warmIdleMs ?? null,
     };
     },
     async (error) => {
@@ -1256,6 +1257,7 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
         truncated: Boolean(local.truncated),
         bootMs: local.bootMs ?? null,
         prewarmed: Boolean(local.prewarmed),
+        warmIdleMs: local.warmIdleMs ?? null,
         network: local.network || "unknown",
         stderr: diagnostic,
         stdout: String(local.stdout || "").slice(0, 4096),
@@ -1424,7 +1426,13 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
         if (suite.referenceCode) {
           const referenceProgram=spliceSuite(suite,suite.referenceCode);
           if (!referenceProgram) throw new Error("Reference could not be inserted.");
-          const version = pack.version + ":" + (process.env.CODE_AUDITOR_E2B_TEMPLATE || "default");
+          const version = [
+             pack.version,
+             process.env.CODE_AUDITOR_E2B_TEMPLATE || "default",
+             process.env.CODE_AUDITOR_E2B_TEMPLATE_REVISION || "unspecified",
+             selectedCppStandard(process.env.CODE_AUDITOR_CPP_STANDARD),
+             job.owner_id || "legacy",
+           ].join(":");
           const key=referenceKey(language,suite.harness,suite.referenceCode,version);
           if (!isReferenceValidated(key)) {
             const outcome=await runVerification(settings,suite,referenceProgram);
