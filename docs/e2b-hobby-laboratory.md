@@ -121,6 +121,8 @@ problem-specific test harnesses.
 ## Safe release procedure
 
 1. Keep this stacked PR based on PR #40, and merge PR #40 first.
+   When validating an intermediate stacked branch against main-only CI,
+   keep the PR draft, then restore its stacked base before the final merge.
 2. Run `node tests/e2bWarmPool.test.mjs`,
    `node tests/e2bEvidence.test.mjs`,
    `node tests/e2bRuntimeProfile.test.mjs`,
