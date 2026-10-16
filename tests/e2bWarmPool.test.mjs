@@ -65,3 +65,12 @@ assert.equal(standbyBudget({active:0,limit:2},4),0);
 assert.equal(standbyBudget({active:1,limit:3},4),0);
 assert.equal(standbyBudget({active:5,limit:8},4),1);
 console.log("PASS: standby never occupies the last two verification slots");
+
+const cleanupFailure = createE2BWarmPool({
+ create: async letter => ({sandbox:{sandboxId:letter}}),
+ destroy: async () => {throw Error("E2B kill failed");},
+});
+cleanupFailure.prewarm(["A"]);
+await assert.rejects(cleanupFailure.close(),/E2B standby cleanup failed/);
+assert.equal(cleanupFailure.snapshot().cleanupFailures,1);
+console.log("PASS: failed sandbox disposal is surfaced rather than silently ignored");
