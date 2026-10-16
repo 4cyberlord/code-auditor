@@ -27,6 +27,7 @@ import {createE2BWarmPool} from "./lib/e2bWarmPool.mjs";
 import {selectedCppStandard} from "./lib/e2bRuntimeProfile.mjs";
 import {compareDifferentialTraces,sharedDifferentialFixtures} from "./lib/e2bDifferential.mjs";
 import {canRepairPort,portRepairPrompt,portRepairSystem} from "./lib/portRecovery.mjs";
+import {analyzePortSource} from "./lib/e2bPortAnalysis.mjs";
 import {assessHarnessTrust, buildE2BEvidenceSummary, buildAlgorithmEvidence, requireTrustedHarness} from "./lib/e2bEvidence.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
 import { fetchAuthoritativeLanguageContext, inferDocumentationLanguage } from "./lib/authoritativeLanguageDocs.mjs";
@@ -2114,7 +2115,8 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
     if(oracle.some(item=>item.survived))
       throw new Error("Generated "+target+" harness missed a deliberate mutation");
     return {language:target,sourceLetter,model:repair?.status==="verified"?sourceSolverModel:translator,
-      code:acceptedFinal.code,status:"verified",run,repair};
+      code:acceptedFinal.code,status:"verified",run,repair,
+      analysis:analyzePortSource(acceptedFinal,run,semanticBlueprint)};
   }catch(err){
     return {language:target,sourceLetter,model:translator,code:"",
       status:"failed",run:lastRun,repair,error:String(err instanceof Error?err.message:err).slice(0,380)};
