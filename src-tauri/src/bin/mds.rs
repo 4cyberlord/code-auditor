@@ -142,6 +142,7 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_B: u32 = 0x05;
     const HID_USAGE_KEYBOARD_C: u32 = 0x06;
     const HID_USAGE_KEYBOARD_M: u32 = 0x10;
+    const HID_USAGE_KEYBOARD_H: u32 = 0x0B;
     const HID_USAGE_KEYBOARD_L: u32 = 0x0F;
     const HID_USAGE_KEYBOARD_P: u32 = 0x13;
     const HID_USAGE_KEYBOARD_R: u32 = 0x15;
@@ -176,8 +177,6 @@ mod mac_shortcuts {
     pub static CAPTURE_LEFT: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE_RIGHT: AtomicBool = AtomicBool::new(false);
     pub static SUBMIT: AtomicBool = AtomicBool::new(false);
-    pub static TOGGLE_OVERLAY: AtomicBool = AtomicBool::new(false);
-    pub static SWITCH_MCQ: AtomicBool = AtomicBool::new(false);
     pub static MOVE_LEFT: AtomicBool = AtomicBool::new(false);
     pub static MOVE_RIGHT: AtomicBool = AtomicBool::new(false);
     pub static MOVE_UP: AtomicBool = AtomicBool::new(false);
@@ -191,6 +190,12 @@ mod mac_shortcuts {
     static HISTORY_NEXT: AtomicBool = AtomicBool::new(false);
     static HISTORY_OPEN_RESULT: AtomicBool = AtomicBool::new(false);
     static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
+    static HISTORY_VISIBLE: AtomicBool = AtomicBool::new(false);
+    // 1 coding, 2 multiple-choice, 3 shared cloud history.
+    static PANEL_COMMAND: AtomicU8 = AtomicU8::new(0);
+    // Suppress hardware key-repeat; require two distinct keydown edges.
+    static PANEL_KEY_HELD: AtomicU8 = AtomicU8::new(0);
+    static LAST_PANEL_KEY: Mutex<Option<(u8, Instant)>> = Mutex::new(None);
     // Encoded pairs: 00 and 10-13 route to the main app, 21-25 are coding
     // overlay controls, and 31-35 are MCQ overlay controls.
     static NUMBER_COMMAND: AtomicU8 = AtomicU8::new(0);
@@ -248,6 +253,39 @@ mod mac_shortcuts {
         let usage = unsafe { IOHIDElementGetUsage(element) };
         let pressed = unsafe { IOHIDValueGetIntegerValue(value) } != 0;
 
+        // Case-insensitive CC/MM/HH via physical HID codes. A double press
+        // must have a key release between taps. The callback does not store
+        // keystrokes or interfere with the underlying app's input stream.
+        let panel_key = match usage {
+            HID_USAGE_KEYBOARD_C => Some((1_u8, 1_u8)),
+            HID_USAGE_KEYBOARD_M => Some((2_u8, 2_u8)),
+            HID_USAGE_KEYBOARD_H => Some((3_u8, 4_u8)),
+            _ => None,
+        };
+        if let Some((command, bit)) = panel_key {
+            if !pressed {
+                PANEL_KEY_HELD.fetch_and(!bit, Ordering::SeqCst);
+            } else if !CONTROL_DOWN.load(Ordering::SeqCst)
+                && !OPTION_DOWN.load(Ordering::SeqCst)
+                && PANEL_KEY_HELD.fetch_or(bit, Ordering::SeqCst) & bit == 0
+            {
+                if let Ok(mut previous) = LAST_PANEL_KEY.lock() {
+                    if super::double_tap_panel(&mut previous, command, Instant::now()).is_some() {
+                        PANEL_COMMAND.store(command, Ordering::SeqCst);
+                    }
+                }
+            }
+        } else if pressed && usage < HID_USAGE_KEYBOARD_LEFT_CONTROL {
+            if let Ok(mut previous) = LAST_PANEL_KEY.lock() { *previous = None; }
+        }
+        if pressed && (usage == HID_USAGE_KEYBOARD_LEFT_CONTROL
+            || usage == HID_USAGE_KEYBOARD_RIGHT_CONTROL
+            || usage == HID_USAGE_KEYBOARD_LEFT_ALT
+            || usage == HID_USAGE_KEYBOARD_RIGHT_ALT)
+        {
+            if let Ok(mut previous) = LAST_PANEL_KEY.lock() { *previous = None; }
+        }
+
         // Number pairs route into three independent destinations. The first
         // digit selects the workflow; the second selects its capture mode.
         if pressed && !CONTROL_DOWN.load(Ordering::SeqCst)
@@ -281,12 +319,14 @@ mod mac_shortcuts {
 
         // These controls are deliberately active only while the coding overlay
         // is visible, so ordinary typing elsewhere is unaffected.
-        if pressed && CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst)
+        if pressed && (CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) || HISTORY_VISIBLE.load(Ordering::SeqCst))
             && !CONTROL_DOWN.load(Ordering::SeqCst)
             && !OPTION_DOWN.load(Ordering::SeqCst)
         {
             match (usage, SHIFT_DOWN.load(Ordering::SeqCst)) {
+                (HID_USAGE_KEYBOARD_UP_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_LEFT_BRACKET, true) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_DOWN_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_NEXT.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_RIGHT_BRACKET, true) => HISTORY_NEXT.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_MINUS, true) => HISTORY_TOGGLE.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_BACKSLASH, true) => HISTORY_OPEN_RESULT.store(true, Ordering::SeqCst),
@@ -342,8 +382,6 @@ mod mac_shortcuts {
                 }
             }
             HID_USAGE_KEYBOARD_B
-            | HID_USAGE_KEYBOARD_C
-            | HID_USAGE_KEYBOARD_M
             | HID_USAGE_KEYBOARD_P
             | HID_USAGE_KEYBOARD_R
             | HID_USAGE_KEYBOARD_S
@@ -354,8 +392,6 @@ mod mac_shortcuts {
             {
                 match usage {
                     HID_USAGE_KEYBOARD_B => START_BATCH.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_C => TOGGLE_OVERLAY.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_M => SWITCH_MCQ.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_P | HID_USAGE_KEYBOARD_S => CAPTURE.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_R => CAPTURE_REGION.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_RETURN => SUBMIT.store(true, Ordering::SeqCst),
@@ -403,12 +439,8 @@ mod mac_shortcuts {
     pub fn take_submit() -> bool {
         SUBMIT.swap(false, Ordering::SeqCst)
     }
-    pub fn take_toggle_overlay() -> bool {
-        TOGGLE_OVERLAY.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_switch_mcq() -> bool {
-        SWITCH_MCQ.swap(false, Ordering::SeqCst)
-    }
+    pub fn take_panel_command() -> u8 { PANEL_COMMAND.swap(0, Ordering::SeqCst) }
+    pub fn set_history_visible(value: bool) { HISTORY_VISIBLE.store(value, Ordering::SeqCst); }
     pub fn take_move_left() -> bool {
         MOVE_LEFT.swap(false, Ordering::SeqCst)
     }
@@ -1368,6 +1400,17 @@ fn helper_capture_mode(digit: u8) -> Option<CaptureMode> {
         4 => Some(CaptureMode::Region),
         _ => None,
     }
+}
+
+/// Commands for the three overlay surfaces. This records only C, M or H,
+/// never text typed into applications. The OS HID callback uses physical
+/// key usages, making caps lock and shift equivalent for this command.
+fn double_tap_panel(previous: &mut Option<(u8, Instant)>, key: u8, at: Instant) -> Option<u8> {
+    let matched = previous.as_ref().is_some_and(|(last, time)|
+        *last == key && at.saturating_duration_since(*time) <= Duration::from_millis(650)
+    );
+    *previous = if matched { None } else { Some((key, at)) };
+    if matched { Some(key) } else { None }
 }
 
 fn number_pair_command(first: u8, second: u8) -> Option<u8> {
