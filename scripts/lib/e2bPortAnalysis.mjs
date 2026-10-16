@@ -5,7 +5,7 @@ function claimFor(label,text) {
   const match=pattern.exec(description);
   // The Council also emits "O(n) time, O(1) space"; parse that style without
   // guessing missing claims from timing or memory measurements.
-  const alternate=new RegExp("(O\\\\s*\\\\([^)]{1,90}\\\\))\\\\s*"+label+"(?:\\\\s+complexity)?\\\\b","i").exec(description);
+  const alternate=new RegExp("(O\\s*\\([^)]{1,90}\\))\\s*"+label+"(?:\\s+complexity)?\\b","i").exec(description);
   return (match?.[1] || alternate?.[1] || "").replace(/\\s+/g," ").slice(0,90) || null;
 }
 export function analyzePortSource(final,run,sourceBlueprint) {
