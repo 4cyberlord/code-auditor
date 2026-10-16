@@ -12,7 +12,6 @@ export const PINNED_PYTHON_VALIDATORS = Object.freeze([
 /** The toolchain is installed into an E2B template at build time, never per-run. */
 export function extendedValidatorBuildCommands() {
   return [
-    "python3 -m pip install --no-cache-dir " + PINNED_PYTHON_VALIDATORS.map(x => "'" + x + "'").join(" "),
     "python3 -m pytest --version",
     "python3 -m mypy --version",
     "radon --version",
