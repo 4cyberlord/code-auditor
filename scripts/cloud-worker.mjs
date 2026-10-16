@@ -666,16 +666,30 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
     const text = await resp.text();
     last = `${resp.status} ${resp.statusText}: ${text}`;
     if (resp.ok) {
-      const json = JSON.parse(text);
-      const answer = json?.choices?.[0]?.message?.content;
-      if (answer?.trim()) return answer;
+      let answer = "";
+      try {
+        answer = chatCompletionText(JSON.parse(text));
+      } catch {
+        throw new Error(`${model}: gateway returned malformed JSON`);
+      }
+      if (answer.trim()) return answer;
 
-      // A 200 carrying no content is a gateway-route failure, not a usable
-      // model answer. Retrying it two more times was multiplying a 60–75s
-      // gateway wait into several minutes while blocking the rest of the job.
-      // The bench records the failed route and keeps the other Council seats
-      // moving; a later job can try the route again after it recovers.
+      // Some OpenAI-compatible routes acknowledge a reasoning request with a
+      // 200 but omit `message.content`.  That is neither a candidate answer
+      // nor evidence that the model cannot write a harness. Retry the same
+      // request without reasoning once, then give the route its remaining
+      // bounded retry.  This is especially important for the spec phase: a
+      // single empty completion must not turn an otherwise solved problem into
+      // an E2B failure.
       last = `${model}: empty model response`;
+      if (think !== "off") {
+        noReasoning.add(model);
+        think = "off";
+      }
+      if (attempt < 2) {
+        await sleep(250 * (attempt + 1));
+        continue;
+      }
       break;
     }
 
@@ -702,6 +716,24 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
     await sleep(waitMs);
   }
   throw new Error(`${model}: ${last}`);
+}
+
+/**
+ * OpenAI-compatible gateways do not all serialize a completion identically.
+ * Accept the documented string form and the content-part form used by newer
+ * compatible routes, while deliberately ignoring reasoning-only fields.
+ */
+function chatCompletionText(json) {
+  const choice = json?.choices?.[0] || {};
+  const content = choice?.message?.content ?? choice?.text ?? "";
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => {
+    if (typeof part === "string") return part;
+    if (typeof part?.text === "string") return part.text;
+    if (typeof part?.content === "string") return part.content;
+    return "";
+  }).join("");
 }
 
 async function tokenRouterResponses({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off", apiKey, paced = true }) {
@@ -1309,24 +1341,35 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
     // The model gets the contract for this language only. Giving it every
     // language's syntax rules is noise and was one source of cross-language
     // harness mistakes; runtime execution below remains the final check.
+    // Harness writers need the problem contract, candidate signatures and a
+    // few language constraints — not an entire documentation chapter plus
+    // every retrieved note.  Oversized spec prompts are the pattern behind
+    // several gateway 200/empty responses, despite the same route succeeding
+    // for the shorter solver request. Keep the most relevant material while
+    // bounding the request well below the smallest supported context window.
     const languageKnowledge = [
-      docs.prompt,
-      knowledge || settings.knowledgeDigest || "",
-      runtimeGuidanceFor(language),
-      languagePrompt(pack),
+      docs.prompt.slice(0, 1_800),
+      String(knowledge || settings.knowledgeDigest || "").slice(0, 1_800),
+      runtimeGuidanceFor(language).slice(0, 1_400),
+      languagePrompt(pack, 1_800),
     ].filter(Boolean).join("\n\n");
     for (const model of specModels.filter(candidate => !bench.has(candidate)).slice(0, 3)) {
       try {
         const specText = await tokenRouterGenerate({
           settings, baseUrl, model, system: testSpecSystemPrompt(),
           user: testSpecUserPrompt({
-            question, docket: candidateDocket(candidates) || "No candidate code exists yet. Derive the test cases, outputs and API signature only from the problem specification.", languages: [language],
+            question: String(question || "").slice(0, 8_000),
+            docket: (candidateDocket(candidates) || "No candidate code exists yet. Derive the test cases, outputs and API signature only from the problem specification.").slice(0, 7_000),
+            languages: [language],
             knowledge: [
               languageKnowledge,
               lastError ? `THE PRIOR HARNESS WAS REJECTED: ${lastError.slice(0, 650)}. Repair only the harness.` : "",
             ].filter(Boolean).join("\n\n"),
           }),
-          maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
+          // A compact, complete Python suite and reference fit comfortably in
+          // this budget.  Asking a gateway for an arbitrary larger answer is
+          // less reliable and was returning HTTP 200 with an empty body.
+          maxTokens: Math.min(6_144, Math.max(Number(settings.maxTokens || 4096), 4_096)),
         });
         const suite = parseTestSuites(specText).find(item => item.language === language);
         if (!suite) throw new Error("No valid executable harness block parsed.");
