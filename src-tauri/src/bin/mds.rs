@@ -1522,7 +1522,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
     batch.owner_id = Some(owner_id.clone());
     save_pending_for(active_view, &batch)?;
 
-    let user_settings = if let Some(snapshot) = batch.settings_snapshot.clone() {
+    let mut user_settings = if let Some(snapshot) = batch.settings_snapshot.clone() {
         snapshot
     } else {
         let loaded = api("settings.load", serde_json::json!({ "key": SETTINGS_KEY })).await;
@@ -1558,6 +1558,13 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
             "mcq".to_string()
         } else { "council".to_string() }
     });
+    // The helper uses the SAME cloud Council job pipeline as the main app.
+    // A Coding overlay submission must not be auto-routed into MCQ merely
+    // because the desktop's saved overlay preference was "auto".
+    // This override affects this one job snapshot, not account settings.
+    user_settings["overlayMode"] = Value::String(
+        if active_view == "mcq" { "mcq" } else { "code" }.to_string()
+    );
     batch.mode = Some(mode.clone());
     save_pending_for(active_view, &batch)?;
     let mcq_model = if mode == "mcq" {
@@ -2145,119 +2152,47 @@ fn coding_pending_state(batch: &PendingBatch) -> Value {
 
 fn coding_overlay_state(job: &SubmittedJob) -> Value {
     let progress = job_progress_message(job);
-    let Some(report) = job.report.as_ref() else {
-        let phase = match job.status.as_str() {
-            "failed" | "needs_attention" | "cancelled" => "error",
-            "completed" => "done",
-            _ => "running",
-        };
-        return serde_json::json!({
-            "runId": job.id,
-            "updatedAt": now(),
-            "phase": phase,
-            "agents": coding_agents_from_events(job),
-            "solution": {
-                "title": "solution",
-                "language": "",
-                "code": if job.error.as_deref().unwrap_or("").is_empty() {
-                    progress
-                } else {
-                    job.error.clone().unwrap_or(progress)
-                },
-                "source": "helper",
-                "status": "candidate",
-            },
-            "tests": [],
-        });
+    let phase = match job.status.as_str() {
+        "failed" | "needs_attention" | "cancelled" => "error",
+        "completed" => "done",
+        _ => "running",
     };
-
-    let body = report.get("report").unwrap_or(report);
-    let candidates = body
-        .get("candidates")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let winner = body
-        .get("winner")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let agents: Vec<Value> = candidates
-        .iter()
-        .take(4)
-        .map(|candidate| {
-            let letter = candidate
-                .get("letter")
-                .and_then(Value::as_str)
-                .unwrap_or("?");
-            let model = candidate
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let error = candidate
-                .get("error")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string());
-            let has_code = candidate
-                .pointer("/final/code")
-                .and_then(Value::as_str)
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-            let status = if error.is_some() {
-                "error"
-            } else if !winner.is_empty() && letter.eq_ignore_ascii_case(&winner) {
-                "done"
-            } else if has_code {
-                "done"
-            } else {
-                "pending"
-            };
+    let body = job.report.as_ref().map(|r| r.get("report").unwrap_or(r));
+    let candidates: Vec<Value> = body.and_then(|b| b.get("candidates"))
+        .and_then(Value::as_array).cloned().unwrap_or_default();
+    let winner = body.and_then(|b| b.get("winner")).and_then(Value::as_str)
+        .unwrap_or("").trim();
+    let agents = if candidates.is_empty() {
+        coding_agents_from_events(job)
+    } else {
+        candidates.iter().take(4).map(|candidate| {
+            let letter = candidate.get("letter").and_then(Value::as_str).unwrap_or("?");
+            let model = candidate.get("model").and_then(Value::as_str).unwrap_or("");
+            let error = candidate.get("error").and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            let has_code = candidate.pointer("/final/code").and_then(Value::as_str)
+                .is_some_and(|code| !code.trim().is_empty());
+            let status = if error.is_some() { "error" }
+                else if has_code { "done" } else { "pending" };
             serde_json::json!({
-                "id": letter,
-                "label": letter,
-                "model": model,
-                "status": status,
-                "error": error,
-                "detail": if has_code { "Answer ready" } else { "Awaiting candidate answer" },
+                "id": letter, "label": model.rsplit('/').next().unwrap_or(model),
+                "model": model, "status": status, "error": error,
+                "detail": if !winner.is_empty() && letter.eq_ignore_ascii_case(winner)
+                    { "Council selection" } else if has_code { "Candidate ready" }
+                    else { "Awaiting candidate answer" }
             })
-        })
-        .collect();
-
-    let solution = coding_solution_from_report(body, &winner, &candidates)
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "title": "solution",
-                "language": "",
-                "code": if progress.is_empty() {
-                    "Council finished, but no code was returned.".to_string()
-                } else {
-                    progress
-                },
-                "source": "helper",
-                "status": "candidate",
-            })
-        });
-
-    let tests = coding_tests_from_report(body);
-
+        }).collect()
+    };
+    let solution = body.and_then(|b| coding_solution_from_report(b, winner, &candidates));
+    let tests = body.map(coding_tests_from_report).unwrap_or_default();
     serde_json::json!({
-        "runId": job.id,
-        "updatedAt": now(),
-        "phase": match job.status.as_str() {
-            "failed" | "needs_attention" | "cancelled" => "error",
-            "completed" => "done",
-            _ => "running",
-        },
-        "agents": agents,
-        "solution": solution,
-        "tests": tests,
-        // Standing, approach, per-candidate evidence and the bench's dissent,
-        // already computed on the report. The thought-process panes had nothing
-        // to render because nothing was sending them anything.
-        "presentation": body.get("presentation").cloned().unwrap_or(Value::Null),
+        "runId": job.id, "updatedAt": now(), "kind": "coding",
+        "phase": phase, "status": job.status,
+        "progress": progress, "error": job.error,
+        "agents": agents, "solution": solution, "tests": tests,
+        "presentation": body.and_then(|b| b.get("presentation")).cloned(),
+        "upgrade": body.and_then(|b| b.get("upgrade")).cloned(),
+        "solutionHistory": body.and_then(|b| b.get("solutionHistory")).cloned()
     })
 }
 
@@ -2312,109 +2247,59 @@ fn coding_agents_from_events(job: &SubmittedJob) -> Vec<Value> {
     }).collect()
 }
 
-fn coding_solution_from_report(
-    body: &Value,
-    winner: &str,
-    candidates: &[Value],
-) -> Option<Value> {
-    // What the council shipped, when it shipped something. The presentation
-    // carries the synthesis' assembled answer — reviewed, revised, executed and
-    // gated — which is a better thing to put in front of a user than whichever
-    // candidate happens to sit first in the array.
-    if let Some(code) = body
-        .pointer("/presentation/code")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|code| !code.is_empty())
-    {
-        let language = body
-            .pointer("/presentation/language")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let source = body
-            .pointer("/presentation/provenance")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("council")
-            .to_string();
-        let standing = body
-            .pointer("/presentation/standing")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let title = if language.is_empty() {
-            "solution".to_string()
-        } else {
-            format!("solution.{language}")
-        };
-        let status = if standing == "verified" { "reviewed" } else { "candidate" };
+fn coding_solution_from_report(body: &Value, winner: &str, candidates: &[Value]) -> Option<Value> {
+    // Early code may appear ONLY after the shared E2B gate approved it.
+    if body.get("stage").and_then(Value::as_str) == Some("provisional") {
+        let early = body.get("provisional")?;
+        let code = early.get("code").and_then(Value::as_str)?.trim();
+        if code.is_empty()
+            || early.get("status").and_then(Value::as_str) != Some("provisional")
+            || early.get("passed").and_then(Value::as_u64).unwrap_or(0) == 0
+            || early.get("failed").and_then(Value::as_u64).unwrap_or(1) > 0
+        { return None; }
+        let lang = early.get("language").and_then(Value::as_str).unwrap_or("");
+        let letter = early.get("letter").and_then(Value::as_str).unwrap_or("?");
         return Some(serde_json::json!({
-            "title": title,
-            "language": language,
-            "code": code,
-            "source": source,
-            "status": status,
+            "title": format!("solution.{lang}"), "language": lang, "code": code,
+            "source": format!("Candidate {letter} · E2B verified"), "status": "provisional"
         }));
     }
-
-    let pick = if !winner.is_empty() {
-        candidates.iter().find(|candidate| {
-            candidate
-                .get("letter")
-                .and_then(Value::as_str)
-                .map(|letter| letter.eq_ignore_ascii_case(winner))
-                .unwrap_or(false)
-        })
-    } else {
-        None
+    // The cloud Council and desktop share the deterministic winner gates.
+    // The synthesis' prose or an arbitrary candidate is never accepted as code.
+    if body.pointer("/presentation/standing").and_then(Value::as_str) == Some("verified") {
+        if let Some(code) = body.pointer("/presentation/code").and_then(Value::as_str)
+            .map(str::trim).filter(|code| !code.is_empty()) {
+            let lang = body.pointer("/presentation/language").and_then(Value::as_str).unwrap_or("");
+            let source = body.pointer("/presentation/provenance").and_then(Value::as_str).unwrap_or("Council");
+            return Some(serde_json::json!({
+                "title": format!("solution.{lang}"), "language": lang, "code": code,
+                "source": source, "status": "reviewed"
+            }));
+        }
     }
-    .or_else(|| {
-        candidates.iter().find(|candidate| {
-            candidate
-                .pointer("/final/code")
-                .and_then(Value::as_str)
-                .map(|code| !code.trim().is_empty())
-                .unwrap_or(false)
-        })
-    })?;
-
-    let code = pick
-        .pointer("/final/code")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|code| !code.is_empty())
-        .or_else(|| {
-            pick.get("text")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-        })?;
-    let language = pick
-        .pointer("/final/language")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let letter = pick
-        .get("letter")
-        .and_then(Value::as_str)
-        .unwrap_or("solution");
-    let model = pick.get("model").and_then(Value::as_str).unwrap_or("");
-    let title = if language.is_empty() {
-        format!("solution.{letter}")
-    } else {
-        format!("solution.{language}")
-    };
-    let source = if model.is_empty() {
-        letter.to_string()
-    } else {
-        format!("{letter} · {model}")
-    };
+    // Legacy cloud reports without presentation still require actual matching
+    // benchmark proof for the winner. Do not fall back to candidate A or logs.
+    let chosen = candidates.iter().find(|candidate|
+        candidate.get("letter").and_then(Value::as_str)
+            .is_some_and(|letter| !winner.is_empty() && letter.eq_ignore_ascii_case(winner))
+    )?;
+    let revised = chosen.pointer("/revised/code").and_then(Value::as_str)
+        .is_some_and(|code| !code.trim().is_empty());
+    let runs = if revised { "revisedRuns" } else { "runs" };
+    let evidence = body.get(runs)?.get(winner)?;
+    if evidence.get("ran").and_then(Value::as_bool) != Some(true)
+        || evidence.get("ok").and_then(Value::as_bool) != Some(true)
+        || evidence.get("passed").and_then(Value::as_u64).unwrap_or(0) == 0
+        || evidence.get("failed").and_then(Value::as_u64).unwrap_or(1) != 0
+    { return None; }
+    let final_code = if revised { chosen.get("revised") } else { chosen.get("final") }?;
+    let code = final_code.get("code").and_then(Value::as_str)?.trim();
+    if code.is_empty() { return None; }
+    let lang = final_code.get("language").and_then(Value::as_str).unwrap_or("");
     Some(serde_json::json!({
-        "title": title,
-        "language": language,
-        "code": code,
-        "source": source,
-        "status": if winner.is_empty() { "candidate" } else { "reviewed" },
+        "title": format!("solution.{lang}"), "language": lang, "code": code,
+        "source": chosen.get("model").and_then(Value::as_str).unwrap_or("Council"),
+        "status": "reviewed"
     }))
 }
 
