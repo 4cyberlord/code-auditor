@@ -2783,7 +2783,7 @@ fn overlay_html() -> &'static str {
               const oldTitle=agents.previousElementSibling;if(oldTitle&&oldTitle.classList.contains('title'))oldTitle.replaceWith(header);else pane.insertBefore(header,agents);
               agents.innerHTML='';
               if(!selected.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='The selected Council agents will appear here.';agents.appendChild(empty);}else{selected.forEach((agent)=>{const card=document.createElement('div');card.className='model-chip';card.dataset.state=stateTone(agent.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=agent.label||agent.id||'Council agent';const model=document.createElement('span');model.className='agent-model';model.textContent=agent.model||'Council';const detail=document.createElement('span');detail.textContent=agentStatusText(agent);card.title=[agent.model,agent.error].filter(Boolean).join(' — ');card.append(dot,name,model,detail);agents.appendChild(card);});}
-              const progress=document.createElement('div');progress.className='overlay-progress';const waiting=state.phase==='idle'?'Capture screenshots to begin.':(state.solution&&state.solution.code)||'Council is selecting eligible agents.';progress.textContent=state.phase==='done'?'Council completed this run. Review the verified solution below.':(state.phase==='error'?'Council needs attention. See the diagnostic below.':(selected.find((agent)=>agent.detail)?.detail||waiting));
+              const progress=document.createElement('div');progress.className='overlay-progress';const waiting=state.phase==='idle'?'Capture screenshots to begin.':state.progress||'Council is selecting eligible agents.';progress.textContent=state.phase==='done'?'Council completed this run. Review the verified solution below.':(state.phase==='error'?'Council needs attention. See the diagnostic below.':(selected.find((agent)=>agent.detail)?.detail||waiting));
               agents.after(progress);
               const failures=selected.filter((agent)=>agent.error).map((agent)=>(agent.label||agent.id||'Council agent')+': '+agent.error);
               if(failures.length||state.phase==='error'){const diagnostic=document.createElement('div');diagnostic.className='overlay-diagnostics';const label=document.createElement('b');label.textContent='Run diagnostics';const message=document.createElement('span');message.textContent=failures.join(' · ')||'The Council run reported an issue. The captured images and any available answer remain available.';diagnostic.append(label,message);progress.after(diagnostic);}
@@ -2889,7 +2889,7 @@ mod tests {
                             "error": null
                         }
                     ],
-                    "suites": [{ "language": "python" }]
+                    "suites": [{ "language": "python" }], "presentation": {"standing":"verified", "code":"def solve():\n    return 42", "language":"py","provenance":"Candidate B"}
                 }
             })),
             events: vec![],
@@ -2925,7 +2925,7 @@ mod tests {
         };
         let state = coding_overlay_state(&job);
         assert_eq!(state["phase"], "running");
-        assert_eq!(state["solution"]["code"], "print(42)");
+        assert!(state["solution"].is_null(), "an unverified early candidate cannot appear in the code editor");
     }
 
     #[test]
@@ -2948,10 +2948,57 @@ mod tests {
         };
         let state = coding_overlay_state(&job);
         assert_eq!(state["phase"], "running");
-        assert!(state["solution"]["code"]
-            .as_str()
-            .unwrap_or("")
-            .contains("Asking models"));
+        assert!(state["solution"].is_null(), "worker progress must not masquerade as generated code");
+        assert!(state["progress"].as_str().unwrap_or("").contains("Asking models"));
+    }
+
+    #[test]
+    fn coding_overlay_presents_verified_early_code_and_upgrade_diff_history() {
+        let report = serde_json::json!({"job_id":"early-1","report":{
+            "stage":"provisional","winner":null,
+            "provisional":{"status":"provisional","letter":"A","code":"print(1)",
+                "language":"python","passed":3,"failed":0},
+            "solutionHistory":[{"version":"provisional","code":"print(1)","language":"python"}]
+        }});
+        assert!(is_usable_cloud_report(&report,"early-1"));
+        let job = SubmittedJob {
+            id:"early-1".into(), mode:"council".into(), mcq_model:None,
+            status:"running".into(), progress_phase:"reviewing".into(), submitted_at:now(),
+            previews:vec![], error:None, report:Some(report), events:vec![]
+        };
+        let state = coding_overlay_state(&job);
+        assert_eq!(state["solution"]["status"],"provisional");
+        assert_eq!(state["solution"]["code"],"print(1)");
+        assert_eq!(state["phase"],"running");
+        assert!(is_usable_cloud_report(&serde_json::json!({"report":{
+            "stage":"provisional","provisional":{"status":"provisional",
+            "code":"print(1)","passed":1,"failed":0}
+        }}),"early-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"report":{
+            "stage":"provisional","provisional":{"status":"provisional",
+            "code":"print(1)","passed":0,"failed":0}
+        }}),"early-1"));
+    }
+
+    #[test]
+    fn finalized_upgrade_shows_tested_winner_and_preserves_both_versions() {
+        let job = SubmittedJob {
+            id:"upgrade".into(),mode:"council".into(),mcq_model:None,
+            status:"completed".into(),progress_phase:"completed".into(),submitted_at:now(),
+            previews:vec![],error:None,events:vec![],
+            report:Some(serde_json::json!({"report":{
+                "stage":"final","winner":"B",
+                "presentation":{"standing":"verified","code":"print(2)","language":"python"},
+                "solutionHistory":[
+                    {"version":"provisional","code":"print(1)","language":"python"},
+                    {"version":"final","code":"print(2)","language":"python"}
+                ],"upgrade":{"changed":true,"from":"A","to":"B"}
+            }}))
+        };
+        let state = coding_overlay_state(&job);
+        assert_eq!(state["solution"]["code"],"print(2)");
+        assert_eq!(state["upgrade"]["changed"],true);
+        assert_eq!(state["solutionHistory"].as_array().map(Vec::len),Some(2));
     }
 
     #[test]
