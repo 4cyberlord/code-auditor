@@ -48,3 +48,27 @@ export function requireTrustedHarness(trust, strict=false) {
     throw new Error("E2B harness trust gate rejected verification: " + trust.risks.join("; "));
   return trust.risks.length === 0;
 }
+
+/** Overlay-ready, bounded, provenance-labelled solution explanation.
+ * Claims are separate from measured test results; no new model call.
+ */
+export function buildAlgorithmEvidence(blueprint, run) {
+  if (!blueprint || !run?.ran) return null;
+  const names = String(run.stdout || "").split(/\r?\n/)
+    .filter(line => /^\s*PASS\b/.test(line)).map(line =>
+      line.replace(/^\s*PASS\s*/, "").trim().slice(0,100))
+    .filter(Boolean).slice(0,12);
+  return {
+    source:"verified-primary-source-and-e2b-run",
+    approach:blueprint.explanation || "",
+    dataStructures:blueprint.structure?.dataStructures || [],
+    controlFlow:blueprint.structure?.controlFlow || [],
+    complexityClaim:blueprint.complexityClaim || null,
+    complexityIndependentlyProved:false,
+    testedCaseNames:names,
+    passed:finite(run.passed) ?? 0,
+    failed:finite(run.failed) ?? 0,
+    measuredRuntimeMs:finite(run.remoteElapsedMs),
+    measuredPeakMemoryKb:finite(run.peakMemoryKb),
+  };
+}
