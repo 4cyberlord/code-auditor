@@ -3178,6 +3178,7 @@ fn overlay_html() -> &'static str {
               }
               root.hidden=false;
               if(Array.isArray(rows))root.__rows=rows;
+              else if(error)root.__rows=[];
               root.__rows=root.__rows||[];
               window.__historyLoading=Boolean(loading);
               window.__historyError=error||'';
@@ -3185,7 +3186,9 @@ fn overlay_html() -> &'static str {
               list.replaceChildren();
               root.__rows.forEach((item,i)=>{
                 const row=document.createElement('div');row.className='history-row';row.dataset.index=String(i);
-                const n=document.createElement('span');n.className='history-number';n.textContent=String(i+1).padStart(2,'0');
+                // The newest task is the first row, so it receives the
+                // highest visible sequence number, matching the main History.
+                const n=document.createElement('span');n.className='history-number';n.textContent=String(root.__rows.length-i).padStart(2,'0');
                 const info=document.createElement('div');info.className='history-info';
                 const title=document.createElement('div');title.className='history-row-title';title.textContent=item.title||'Saved task';
                 const subtitle=document.createElement('div');subtitle.className='history-row-subtitle';subtitle.textContent=[item.origin||'',item.subtitle||''].filter(Boolean).join(' · ').slice(0,240);
@@ -3202,7 +3205,7 @@ fn overlay_html() -> &'static str {
                 list.appendChild(empty);
               }else if(error){
                 const warning=document.createElement('div');warning.className='history-empty';
-                warning.textContent='Showing cached history. Cloud sync: '+error;
+                warning.textContent='History is temporarily unavailable: '+error;
                 list.prepend(warning);
               }
               const counter=root.querySelector('#history-counter');
