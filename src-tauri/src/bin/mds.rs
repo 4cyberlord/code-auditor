@@ -146,6 +146,7 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_L: u32 = 0x0F;
     const HID_USAGE_KEYBOARD_P: u32 = 0x13;
     const HID_USAGE_KEYBOARD_R: u32 = 0x15;
+    const HID_USAGE_KEYBOARD_Y: u32 = 0x1C;
     const HID_USAGE_KEYBOARD_S: u32 = 0x16;
     const HID_USAGE_KEYBOARD_RETURN: u32 = 0x28;
     const HID_USAGE_KEYBOARD_RIGHT_ARROW: u32 = 0x4F;
@@ -167,9 +168,6 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_0: u32 = 0x27;
     const HID_USAGE_KEYBOARD_MINUS: u32 = 0x2D;
     const HID_USAGE_KEYBOARD_EQUAL: u32 = 0x2E;
-    const HID_USAGE_KEYBOARD_LEFT_BRACKET: u32 = 0x2F;
-    const HID_USAGE_KEYBOARD_RIGHT_BRACKET: u32 = 0x30;
-    const HID_USAGE_KEYBOARD_BACKSLASH: u32 = 0x31;
 
     pub static START_BATCH: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE: AtomicBool = AtomicBool::new(false);
@@ -189,6 +187,9 @@ mod mac_shortcuts {
     static HISTORY_NEXT: AtomicBool = AtomicBool::new(false);
     static HISTORY_OPEN: AtomicBool = AtomicBool::new(false);
     static HISTORY_BACK: AtomicBool = AtomicBool::new(false);
+    static LANGUAGE_COMMAND: AtomicU8 = AtomicU8::new(0);
+    static LANGUAGE_KEY_HELD: AtomicU8 = AtomicU8::new(0);
+    static LAST_LANGUAGE_KEY: Mutex<Option<(u32, Instant)>> = Mutex::new(None);
     static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
     static HISTORY_VISIBLE: AtomicBool = AtomicBool::new(false);
     // 1 coding, 2 multiple-choice, 3 shared cloud history.
@@ -286,6 +287,38 @@ mod mac_shortcuts {
             if let Ok(mut previous) = LAST_PANEL_KEY.lock() { *previous = None; }
         }
 
+        // The optional RR / CP / PY view commands are active only in Coding.
+        // The observer doesn't suppress foreground input or log typed text.
+        let lang_key=match usage {
+            HID_USAGE_KEYBOARD_R=>Some(1_u8), HID_USAGE_KEYBOARD_C=>Some(2_u8),
+            HID_USAGE_KEYBOARD_P=>Some(4_u8), HID_USAGE_KEYBOARD_Y=>Some(8_u8),
+            _=>None,
+        };
+        if let Some(bit)=lang_key {
+            if !pressed {LANGUAGE_KEY_HELD.fetch_and(!bit,Ordering::SeqCst);}
+            else if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst)
+                && !HISTORY_VISIBLE.load(Ordering::SeqCst)
+                && !CONTROL_DOWN.load(Ordering::SeqCst)
+                && !OPTION_DOWN.load(Ordering::SeqCst)
+                && !SHIFT_DOWN.load(Ordering::SeqCst)
+                && LANGUAGE_KEY_HELD.fetch_or(bit,Ordering::SeqCst)&bit==0
+            {
+                if let Ok(mut previous)=LAST_LANGUAGE_KEY.lock(){
+                    let pair=previous.take().filter(|(_,at)|at.elapsed()<=Duration::from_millis(650))
+                        .map(|(first,_)|(first,usage));
+                    *previous=Some((usage,Instant::now()));
+                    let choice=match pair {
+                        Some((HID_USAGE_KEYBOARD_R,HID_USAGE_KEYBOARD_R))=>1,
+                        Some((HID_USAGE_KEYBOARD_C,HID_USAGE_KEYBOARD_P))=>2,
+                        Some((HID_USAGE_KEYBOARD_P,HID_USAGE_KEYBOARD_Y))=>3,
+                        _=>0,
+                    };
+                    if choice!=0 {LANGUAGE_COMMAND.store(choice,Ordering::SeqCst);*previous=None;}
+                }
+            }
+        }else if pressed&&usage<HID_USAGE_KEYBOARD_LEFT_CONTROL{
+            if let Ok(mut previous)=LAST_LANGUAGE_KEY.lock(){*previous=None;}
+        }
         // Number pairs route into three independent destinations. The first
         // digit selects the workflow; the second selects its capture mode.
         if pressed && !CONTROL_DOWN.load(Ordering::SeqCst)
@@ -326,17 +359,14 @@ mod mac_shortcuts {
             match (usage, SHIFT_DOWN.load(Ordering::SeqCst)) {
                 (HID_USAGE_KEYBOARD_UP_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_DOWN_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_NEXT.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_UP_ARROW, false) if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) => SCROLL_UP.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_DOWN_ARROW, false) if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) => SCROLL_DOWN.store(true, Ordering::SeqCst),
                 // Back is intentionally local to the read-only History
                 // surface: it never moves the click-through overlay window.
                 (HID_USAGE_KEYBOARD_LEFT_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_BACK.store(true, Ordering::SeqCst),
                 // Right-arrow selects the highlighted saved run and opens its
                 // full read-only Council result in the overlay.
                 (HID_USAGE_KEYBOARD_RIGHT_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_OPEN.store(true, Ordering::SeqCst),
-                // Keep the original overlay navigation as well as arrow-key
-                // navigation for the newer shared History sheet.
-                (HID_USAGE_KEYBOARD_LEFT_BRACKET, true) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_RIGHT_BRACKET, true) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_NEXT.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_BACKSLASH, true) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_OPEN.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_MINUS, false) => FADE_DOWN.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_EQUAL, false) => FADE_UP.store(true, Ordering::SeqCst),
                 _ => {}
@@ -474,6 +504,7 @@ mod mac_shortcuts {
     pub fn take_history_next() -> bool { HISTORY_NEXT.swap(false, Ordering::SeqCst) }
     pub fn take_history_open() -> bool { HISTORY_OPEN.swap(false, Ordering::SeqCst) }
     pub fn take_history_back() -> bool { HISTORY_BACK.swap(false, Ordering::SeqCst) }
+    pub fn take_language_command() -> u8 { LANGUAGE_COMMAND.swap(0, Ordering::SeqCst) }
 }
 
 async fn space_api_calls() {
@@ -709,11 +740,8 @@ fn run() -> Result<(), String> {
                 12 => send_capture_to_council("right"),
                 13 => send_process_to_council(),
                 6 => {
-                    // 00 belongs to the main-app session rather than the
-                    // overlay, so it does not touch staged overlay captures.
-                    send_capture_to_council("new-session");
-                }
-                21 => {
+                    // 00 starts a new Coding overlay workspace. Previous
+                    // finished jobs remain archived; main-app runs are untouched.
                     active_view = "coding".to_string();
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("new session unavailable during screenshot selection");
@@ -941,6 +969,8 @@ fn run() -> Result<(), String> {
                             if let Some(task) = history_detail_fetch.take() { task.abort(); }
                             mac_shortcuts::set_history_visible(false);
                             let _ = webview.evaluate_script("window.closeSharedHistory()");
+                            overlay_refresh.sent_state=None;
+                            overlay_refresh.sent_previews=None;
                             active_view = target_view.to_string();
                             overlay_visible = true;
                             event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
@@ -1019,10 +1049,10 @@ fn run() -> Result<(), String> {
                 overlay_position.y += 80.0;
                 overlay.set_outer_position(overlay_position);
             }
-            if overlay_visible && mac_shortcuts::take_scroll_up() {
+            if overlay_visible && !history_open && active_view == "coding" && mac_shortcuts::take_scroll_up() {
                 let _ = webview.evaluate_script("window.scrollSolutionBy(-260)");
             }
-            if overlay_visible && mac_shortcuts::take_scroll_down() {
+            if overlay_visible && !history_open && active_view == "coding" && mac_shortcuts::take_scroll_down() {
                 let _ = webview.evaluate_script("window.scrollSolutionBy(260)");
             }
             if overlay_visible && active_view == "coding" && mac_shortcuts::take_fade_down() {
@@ -1053,6 +1083,8 @@ fn run() -> Result<(), String> {
                         history_open = false;
                         mac_shortcuts::set_history_visible(false);
                         let _ = webview.evaluate_script("window.closeSharedHistory()");
+                        overlay_refresh.sent_state=None;
+                        overlay_refresh.sent_previews=None;
                         let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                     }
                 }
@@ -1087,6 +1119,14 @@ fn run() -> Result<(), String> {
                 let _ = mac_shortcuts::take_history_next();
                 let _ = mac_shortcuts::take_history_open();
                 let _ = mac_shortcuts::take_history_back();
+            }
+            let requested_language=mac_shortcuts::take_language_command();
+            if overlay_visible&&!history_open&&active_view=="coding"&&requested_language!=0 {
+                let language=match requested_language {1=>"rust",2=>"cpp",3=>"python",_=>""};
+                if !language.is_empty() {
+                    let _=webview.evaluate_script(&format!("window.selectVerifiedOverlayLanguage({});",
+                        serde_json::to_string(language).unwrap_or_else(|_|"\"\"".into())));
+                }
             }
             // HH and arrow-only History doesn't change the active solving task.
             mac_shortcuts::set_history_visible(history_open && overlay_visible);
@@ -1261,8 +1301,8 @@ fn last_good_settings_path() -> Result<PathBuf, String> {
     Ok(cache_dir()?.join("last-good-settings.json"))
 }
 
-/// One history schema shared by both overlay surfaces and main-app runs.
-/// IDs are namespaced because a session's run and a queued cloud job are
+/// A normalized history-row schema for the helper's persisted cloud jobs.
+/// IDs remain namespaced because a queued cloud job and a main-app run are
 /// distinct artifacts even if the UI assigns them the same title.
 fn history_row(id: &str, origin: &str, kind: &str, title: &str, subtitle: &str,
                status: &str, at: &str) -> Value {
@@ -1309,9 +1349,9 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
             sessions.insert(id.to_owned(),item.clone());
         }
     }
-    // Jobs and runs are both owned by a session. The worker renames the same
+    // Overlay jobs are owned by a session. The worker renames the same
     // session after it understands the captured problem, so use that one title
-    // for both history surfaces instead of maintaining a second overlay name.
+    // for the overlay without importing main-app runs into HH.
     for item in payload.get("jobs").and_then(Value::as_array).into_iter().flatten() {
         let id=item.get("id").and_then(Value::as_str).unwrap_or("");
         if id.is_empty(){continue;}
@@ -1328,26 +1368,6 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
             item.get("resultSummary").and_then(Value::as_str).unwrap_or(""),
             item.get("status").and_then(Value::as_str).unwrap_or("unknown"),
             item.get("createdAt").and_then(Value::as_str).unwrap_or("")));
-    }
-    for item in payload.get("runs").and_then(Value::as_array).into_iter().flatten() {
-        let id=item.get("id").and_then(Value::as_str).unwrap_or("");
-        if id.is_empty(){continue;}
-        let mode=item.get("mode").and_then(Value::as_str).unwrap_or("auto");
-        let at=item.get("startedAt").and_then(Value::as_str).unwrap_or("");
-        let status=if item.get("finishedAt").and_then(Value::as_str).is_some_and(|s|!s.is_empty())
-            {"completed"}else{"running"};
-        let session = item.get("sessionId").and_then(Value::as_str).and_then(|id| sessions.get(id));
-        let title=item.get("title").and_then(Value::as_str)
-            .filter(|s|!s.trim().is_empty())
-            .or_else(||item.get("asked").and_then(Value::as_str)
-            .filter(|s|!s.trim().is_empty())
-            .or_else(||session.and_then(|value| value.get("title").and_then(Value::as_str))))
-            .unwrap_or("Saved main-app run");
-        rows.push(history_row(&format!("main:{id}"),"Main app",
-            if mode=="mcq"{"MCQ"}else if mode=="coding"||mode=="code"{"Coding"}else{"Run"},
-            title,
-            session.and_then(|value| value.get("title").and_then(Value::as_str)).unwrap_or(""),
-            status,at));
     }
     let rows=normalize_history(rows)?;
     Ok((rows,None))
@@ -1744,7 +1764,7 @@ fn number_pair_command(first: u8, second: u8) -> Option<u8> {
     match first {
         0 if second == 0 => Some(6),
         1 if second <= 4 => Some(10 + second),
-        2 if second <= 5 => Some(20 + second),
+        2 if second == 0 || (2..=5).contains(&second) => Some(20 + second),
         3 if (1..=5).contains(&second) => Some(30 + second),
         _ => None,
     }
@@ -2330,7 +2350,11 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
     // screenshots too, not screenshots staged for the following job.
     let pending = read_pending_for(active_view)?;
     let pending_has_images = pending.as_ref().is_some_and(|batch| !batch.images.is_empty());
-    let payload = if running || !pending_has_images {
+    // An explicit 00 session owns the Coding surface immediately, including
+    // before its first image. The old cloud solve keeps running in the helper
+    // and its saved record; don't display it over a new blank workspace.
+    let coding_pending = active_view=="coding" && pending.is_some();
+    let payload = if !coding_pending && (running || !pending_has_images) {
         let paths = submitted.as_ref().map(|job| job.previews.as_slice()).unwrap_or_default();
         let sources = if paths.iter().all(|path| path.starts_with("data:")) {
             paths.to_vec() // legacy job preview format
@@ -2362,7 +2386,10 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
     // Keep the displayed state paired with the displayed screenshots.
     // A completed job remains available in the job cache while a subsequent
     // batch is being collected. Show pending state with pending thumbnails.
-    let state = if !running {
+    let state = if coding_pending {
+        serde_json::to_string(&coding_pending_state(pending.as_ref().unwrap()))
+            .unwrap_or_else(|_| "{}".to_string())
+    } else if !running {
         if let Some(batch) = pending.as_ref() {
             if pending_has_images {
                 let pending_state = if active_view == "mcq" {
@@ -2473,7 +2500,7 @@ fn mcq_pending_state(batch: &PendingBatch) -> Value {
         "MCQ batch started. Capture screenshots, then submit.".to_string()
     } else {
         format!(
-            "MCQ batch ready with {} screenshot{}. Press ⌃⌥ ↵ to submit.",
+            "MCQ batch ready with {} screenshot{}. Submit with 24.",
             batch.images.len(),
             if batch.images.len() == 1 { "" } else { "s" }
         )
@@ -2503,7 +2530,7 @@ fn coding_pending_state(batch: &PendingBatch) -> Value {
     } else if batch.status == "submitting" {
         "Uploading screenshots and creating the cloud job...".to_string()
     } else if batch.images.is_empty() {
-        "Batch started. Capture screenshots, then submit.".to_string()
+        "New Coding workspace ready. Capture screenshots, then submit with 24.".to_string()
     } else {
         format!(
             "Batch ready with {} screenshot{}. Press ⌃⌥ ↵ to submit.",
@@ -2515,15 +2542,72 @@ fn coding_pending_state(batch: &PendingBatch) -> Value {
         "runId": batch.id,
         "updatedAt": now(),
         "phase": if batch.error.is_some() { "error" } else { "running" },
-        "agents": [],
-        "solution": {
-            "title": "solution",
-            "language": "",
-            "code": waiting,
-            "source": "helper",
-            "status": "candidate",
-        },
-        "tests": [],
+        "agents": [], "progress": waiting, "solution": Value::Null, "tests": [],
+    })
+}
+
+// Project only source-backed, read-only sidebar evidence. A listed harness
+// assertion is not invented evidence: it comes from the stored reference test.
+fn coding_sidebar_evidence(body:&Value)->Value {
+    let p=body.get("presentation").unwrap_or(&Value::Null);
+    let blueprint=body.get("semanticBlueprint").unwrap_or(&Value::Null);
+    let structure=blueprint.get("structure").unwrap_or(&Value::Null);
+    let summary=blueprint.get("explanation").and_then(Value::as_str).unwrap_or("");
+    let approach=p.get("approach").and_then(Value::as_str)
+        .filter(|s|!s.trim().is_empty()).unwrap_or(summary);
+    let structures:Vec<String>=structure.get("dataStructures")
+        .and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str)
+        .take(6).map(|name|{
+            let why=match name {
+                "dictionaries / hash maps"=>"keyed lookup or counting",
+                "sets"=>"membership and uniqueness checks",
+                "lists / dynamic arrays"=>"ordered storage and traversal",
+                "heaps / priority queues"=>"priority-based extraction",
+                "binary search"=>"reducing a sorted search space",
+                "sorting"=>"ordering values for comparison",
+                _=>"operation found in source",
+            };
+            format!("{name} — {why} (inferred from code)")
+        }).collect();
+    let control=structure.get("controlFlow").and_then(Value::as_array)
+        .into_iter().flatten().filter_map(Value::as_str).take(4)
+        .collect::<Vec<_>>().join(", ");
+    let language=p.get("language").and_then(Value::as_str).unwrap_or("");
+    let verified=p.get("standing").and_then(Value::as_str)==Some("verified");
+    let mut cases=Vec::<String>::new();
+    if verified {
+        for suite in body.get("suites").and_then(Value::as_array).into_iter().flatten(){
+            if !language.is_empty() && suite.get("language").and_then(Value::as_str)!=Some(language) {continue;}
+            if let Some(harness)=suite.get("harness").and_then(Value::as_str){
+                for line in harness.lines(){
+                    let line=line.trim();
+                    if line.len()>9 && line.len()<170
+                        && (line.starts_with("assert ") || line.starts_with("assert(")
+                            || line.starts_with("assert_eq!") || line.starts_with("assert_eq(")
+                            || line.starts_with("assertEqual("))
+                        && !cases.iter().any(|existing|existing==line)
+                    {
+                        cases.push(line.to_owned());
+                        if cases.len()>=4 {break;}
+                    }
+                }
+            }
+            if cases.len()>=4 {break;}
+        }
+    }
+    let tests=p.get("evidence").and_then(Value::as_array)
+        .into_iter().flatten().filter(|row|
+            row.get("gate").and_then(Value::as_str)==Some("pass"))
+        .map(|row|format!("Candidate {} · {} passed / {} failed in E2B",
+            row.get("letter").and_then(Value::as_str).unwrap_or("?"),
+            row.get("passed").and_then(Value::as_u64).unwrap_or(0),
+            row.get("failed").and_then(Value::as_u64).unwrap_or(0)))
+        .take(4).collect::<Vec<_>>().join("\n");
+    serde_json::json!({
+        "summary":summary.chars().take(480).collect::<String>(),
+        "approach":approach.chars().take(800).collect::<String>(),
+        "structures":structures,"controlFlow":control,"edgeCases":cases,
+        "testing":tests,"edgeCoverageKnown":!cases.is_empty()
     })
 }
 
@@ -2549,14 +2633,22 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
                 .filter(|s| !s.is_empty());
             let has_code = candidate.pointer("/final/code").and_then(Value::as_str)
                 .is_some_and(|code| !code.trim().is_empty());
-            let status = if error.is_some() { "error" }
+            let gate = body.and_then(|b|b.pointer("/presentation/evidence"))
+                .and_then(Value::as_array).into_iter().flatten()
+                .find(|row|row.get("letter").and_then(Value::as_str)==Some(letter))
+                .and_then(|row|row.get("gate").and_then(Value::as_str)).unwrap_or("untested");
+            let status = if error.is_some() || gate=="fail" { "error" }
                 else if has_code { "done" } else { "pending" };
+            let detail = if error.is_some() { "Solver failed" }
+                else if gate=="pass" && letter.eq_ignore_ascii_case(winner) {"Council winner · E2B passed"}
+                else if gate=="pass" {"E2B tests passed · Council reviewed"}
+                else if gate=="fail" {"Answer generated · E2B failed"}
+                else if has_code {"Answer generated · validation pending"}
+                else {"Awaiting model answer"};
             serde_json::json!({
                 "id": letter, "label": model.rsplit('/').next().unwrap_or(model),
                 "model": model, "status": status, "error": error,
-                "detail": if !winner.is_empty() && letter.eq_ignore_ascii_case(winner)
-                    { "Council selection" } else if has_code { "Candidate ready" }
-                    else { "Awaiting candidate answer" }
+                "detail": detail, "gate": gate
             })
         }).collect()
     };
@@ -2568,6 +2660,9 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
         "progress": progress, "error": job.error,
         "agents": agents, "solution": solution, "tests": tests,
         "presentation": body.and_then(|b| b.get("presentation")).cloned(),
+        "insights": body.map(coding_sidebar_evidence),
+        "ports": body.and_then(|b|b.get("ports")).cloned().unwrap_or_else(||Value::Array(Vec::new())),
+        "progressPhase": job.progress_phase,
         "upgrade": body.and_then(|b| b.get("upgrade")).cloned(),
         "solutionHistory": body.and_then(|b| b.get("solutionHistory")).cloned()
     })
@@ -2924,11 +3019,11 @@ fn overlay_html() -> &'static str {
       html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden}
 	      body{box-sizing:border-box;padding:16px 22px 22px;color:var(--text);font:600 14px -apple-system,BlinkMacSystemFont,sans-serif;display:flex;flex-direction:column;align-items:center;gap:14px}
 		      .hudbar{box-sizing:border-box;display:flex;align-items:center;gap:10px;max-width:1180px;min-height:42px;padding:6px 12px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,.13),rgba(255,255,255,.045)),rgba(18,19,18,.58);box-shadow:0 14px 36px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.18);backdrop-filter:blur(18px) saturate(1.25);white-space:nowrap;color:rgba(255,255,255,.84);font-size:11px;font-weight:800}
-		      .hud-logo{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:#f5d83b;color:#24210a;font-size:10px;font-weight:900;box-shadow:0 0 0 2px rgba(255,226,69,.28),0 0 24px rgba(245,216,59,.32);flex:0 0 32px}
+		      .hud-logo{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.14);color:rgba(255,255,255,.92);font-size:10px;font-weight:900;box-shadow:inset 0 1px 0 rgba(255,255,255,.28);flex:0 0 32px}
 		      .hud-key,.hud-pause{display:grid;place-items:center;min-width:32px;height:28px;padding:0 10px;border-radius:8px;background:rgba(255,255,255,.13);box-shadow:inset 0 1px 0 rgba(255,255,255,.08);color:rgba(255,255,255,.9);flex:0 0 auto}
 		      .hud-action{color:rgba(255,255,255,.68);margin-left:4px}
-	      .hud-meter{display:inline-flex;align-items:end;gap:2px;height:18px;padding:0 2px}.hud-meter i{display:block;width:3px;border-radius:3px;background:#f5d83b;box-shadow:0 0 9px rgba(245,216,59,.34)}.hud-meter i:nth-child(1){height:7px}.hud-meter i:nth-child(2){height:12px}.hud-meter i:nth-child(3){height:9px}
-	      #panel{box-sizing:border-box;width:100%;flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;border:2px solid rgba(245,216,59,.72);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(245,216,59,.16),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(245,216,59,.18),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
+	      .hud-meter{display:inline-flex;align-items:end;gap:2px;height:18px;padding:0 2px}.hud-meter i{display:block;width:3px;border-radius:3px;background:rgba(205,224,242,.7);box-shadow:0 0 9px rgba(190,215,235,.18)}.hud-meter i:nth-child(1){height:7px}.hud-meter i:nth-child(2){height:12px}.hud-meter i:nth-child(3){height:9px}
+	      #panel{box-sizing:border-box;width:100%;flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;border:1px solid rgba(255,255,255,.26);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(205,222,239,.10),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(255,255,255,.09),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
             .pane{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:10px;padding:18px;overflow:hidden}.pane+ .pane{border-left:1px solid var(--pane-line)}
             .pictures-pane{align-items:flex-start}
             .title{font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.95;text-shadow:0 1px 2px var(--title-shadow)}
@@ -2951,18 +3046,18 @@ fn overlay_html() -> &'static str {
             .agent-header{box-sizing:border-box;width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:2px}
             .agent-header .title{font-size:11px}.agent-summary{color:var(--muted);font-size:10px;white-space:nowrap}
             .overlay-progress,.overlay-diagnostics{box-sizing:border-box;width:100%;padding:9px 10px;border:1px solid rgba(114,159,255,.34);border-radius:9px;background:rgba(67,112,199,.12);color:rgba(231,240,255,.86);font-size:10px;line-height:1.35}
-            .overlay-history-context{box-sizing:border-box;width:100%;padding:8px 10px;border:1px solid rgba(245,216,59,.45);border-radius:9px;background:rgba(245,216,59,.10);color:rgba(255,246,188,.96);font-size:10px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            .overlay-history-context{box-sizing:border-box;width:100%;padding:8px 10px;border:1px solid rgba(201,228,245,.45);border-radius:9px;background:rgba(201,228,245,.10);color:rgba(255,246,188,.96);font-size:10px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
             .overlay-diagnostics{border-color:rgba(255,107,107,.48);background:rgba(255,107,107,.1);color:rgba(255,226,226,.94)}
             .overlay-diagnostics b{display:block;margin-bottom:2px;color:#ffd7d7}
-	            .solution-editor{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:650px;display:flex;flex-direction:column;border:1px solid var(--panel-line);border-radius:9px;background:var(--editor-bg);overflow:hidden}
+	            .solution-editor{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;border:1px solid var(--panel-line);border-radius:9px;background:var(--editor-bg);overflow:hidden}
             .editor-head,.tests-head{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.76);font-size:11px}
             .editor-head b,.tests-head b{color:rgba(255,255,255,.95)}
-	            .code-lines{flex:1;margin:0;padding:13px 0;color:var(--code-text);font:500 12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line}
+	            .code-lines{flex:1;min-height:0;margin:0;padding:13px 0;color:var(--code-text);font:500 12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line}
 	            .code-lines li{display:grid;grid-template-columns:42px minmax(0,1fr);min-height:20px;padding:0 14px 0 0;list-style:none;counter-increment:code-line}
 	            .code-lines li:before{content:counter(code-line);padding-right:12px;text-align:right;color:rgba(255,255,255,.3)}
 	            .code-lines code{display:block;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
             .kw{color:var(--kw)}.fn{color:var(--fn)}.arg{color:var(--arg)}.num{color:var(--num)}.str{color:var(--str)}.built{color:var(--built)}.op{color:var(--op)}.cm{color:var(--cm)}
-	            .tests{box-sizing:border-box;width:100%;max-height:86px;border:1px solid var(--panel-line);border-radius:9px;background:var(--tests-bg);overflow:hidden}
+	            .tests{box-sizing:border-box;width:100%;min-height:58px;max-height:120px;overflow-y:auto;border:1px solid var(--panel-line);border-radius:9px;background:var(--tests-bg);overflow:hidden}
 	            .case-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;padding:7px}
 	            .case{min-width:0;padding:5px;border:1px solid rgba(255,255,255,.12);border-radius:7px;background:rgba(255,255,255,.045);font-size:10px;color:rgba(255,255,255,.82)}
             .case b{display:block;margin-bottom:4px;color:rgba(255,255,255,.95)}
@@ -2983,7 +3078,7 @@ fn overlay_html() -> &'static str {
               scrollbar-color:rgba(255,255,255,.22) transparent;
             }
             .thought-pane .thought-item{
-              --insight-accent:#f5d83b;
+              --insight-accent:#c9e4f5;
               counter-increment:insight-step;
               position:relative;box-sizing:border-box;flex:0 0 auto;width:100%;
               display:grid;grid-template-columns:3px minmax(0,1fr);grid-template-rows:auto auto;
@@ -3041,7 +3136,7 @@ fn overlay_html() -> &'static str {
               .mcq-answer b{color:#ffdf5d}
               .mcq-options{box-sizing:border-box;width:100%;display:flex;flex-direction:column;gap:8px;overflow:auto}
               .mcq-option{padding:10px;border:1px solid var(--panel-line);border-radius:9px;background:var(--box-fill);font-size:13px;line-height:1.35}
-              .mcq-option[data-picked="true"]{border-color:rgba(245,216,59,.72);background:rgba(245,216,59,.12)}
+              .mcq-option[data-picked="true"]{border-color:rgba(201,228,245,.72);background:rgba(201,228,245,.12)}
               .mcq-reason{min-height:220px;font-size:13px}
               .mcq-history{box-sizing:border-box;width:100%;flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;overflow:auto}
               .mcq-history-row{padding:10px;border:1px solid var(--panel-line);border-radius:9px;background:var(--box-fill);font-size:12px;line-height:1.35;color:var(--muted)}
@@ -3059,27 +3154,32 @@ fn overlay_html() -> &'static str {
             .history-sheet{position:absolute;z-index:30;inset:0;box-sizing:border-box;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;padding:27px 32px 22px;background:linear-gradient(135deg,rgba(13,18,25,.95),rgba(18,24,32,.96));backdrop-filter:blur(24px) saturate(1.3);color:#f5f7fa}
             .history-sheet[hidden]{display:none}
             .history-heading{display:flex;align-items:start;justify-content:space-between;gap:15px;flex-wrap:wrap;padding-bottom:15px;border-bottom:1px solid rgba(255,255,255,.18)}
-            .history-eyebrow{color:#f5d83b;font-size:10px;font-weight:850;letter-spacing:.16em;text-transform:uppercase}
+            .history-eyebrow{color:#c9e4f5;font-size:10px;font-weight:850;letter-spacing:.16em;text-transform:uppercase}
             .history-title{font-size:25px;font-weight:800;letter-spacing:-.035em;margin:5px 0 4px}
             .history-description{font-size:12px;font-weight:500;color:rgba(245,247,250,.58)}
             .history-counter{font:700 11px SFMono-Regular,Menlo,monospace;color:rgba(245,247,250,.66);padding:10px 12px;border:1px solid rgba(255,255,255,.16);border-radius:10px}
             .history-list{overflow-x:hidden;overflow-y:auto;min-height:0;flex:1;padding:8px 0;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.25) transparent}
             .history-row{display:flex;align-items:center;gap:16px;min-height:66px;padding:13px 14px 13px 10px;border-bottom:1px solid rgba(255,255,255,.1);border-left:3px solid transparent;box-sizing:border-box;transition:background .16s,border .16s}
-            .history-row[data-selected="true"]{border-left-color:#f5d83b;background:linear-gradient(90deg,rgba(245,216,59,.16),rgba(245,216,59,.025))}
+            .history-row[data-selected="true"]{border-left-color:#c9e4f5;background:linear-gradient(90deg,rgba(201,228,245,.16),rgba(201,228,245,.025))}
             .history-number{width:37px;flex:0 0 37px;text-align:center;font:700 12px SFMono-Regular,Menlo,monospace;color:rgba(255,255,255,.45)}
-            .history-row[data-selected="true"] .history-number{color:#f5d83b}
+            .history-row[data-selected="true"] .history-number{color:#c9e4f5}
             .history-info{flex:1;min-width:0}
             .history-row-title{font-size:13px;color:white;font-weight:720;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
             .history-row-subtitle{font-size:11px;font-weight:500;color:rgba(245,247,250,.55);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:5px}
             .history-meta{display:flex;flex-direction:column;align-items:flex-end;gap:6px;font-size:10px;white-space:nowrap;color:rgba(255,255,255,.65)}
-            .history-kind{padding:3px 7px;border-radius:7px;background:rgba(245,216,59,.12);color:#f5d83b;font-weight:800;letter-spacing:.02em}
+            .history-kind{padding:3px 7px;border-radius:7px;background:rgba(201,228,245,.12);color:#c9e4f5;font-weight:800;letter-spacing:.02em}
             .history-empty{padding:44px 16px;font-size:13px;font-weight:500;text-align:center;color:rgba(255,255,255,.66)}
             .history-footer{border-top:1px solid rgba(255,255,255,.15);padding-top:13px;display:flex;justify-content:space-between;gap:12px;font-size:11px;color:rgba(255,255,255,.6);font-weight:600}
             .hud-shortcuts{display:flex;align-items:center;flex-wrap:wrap;gap:5px 9px;min-width:0}
             .hud-shortcuts .hud-action{margin-left:1px}
             .hud-shortcuts .hud-key{padding:0 7px;min-width:auto;height:24px}
             .solution-toolbar{display:inline-flex;align-items:center;gap:8px}
-            .overlay-diff-toggle{background:rgba(245,216,59,.12);border:1px solid rgba(245,216,59,.45);color:var(--text);padding:4px 8px;border-radius:7px;font:inherit;cursor:pointer}
+            .overlay-port-list{display:flex;align-items:center;gap:6px;padding:6px 8px;flex-wrap:wrap}
+            .overlay-port-chip{padding:4px 8px;border-radius:8px;border:1px solid rgba(255,255,255,.22);background:rgba(255,255,255,.06);font-size:10px;color:rgba(255,255,255,.74)}
+            .overlay-port-chip[data-selected="true"]{border-color:rgba(184,224,245,.7);background:rgba(184,224,245,.17);color:#fff}
+            .overlay-port-chip[data-available="false"]{opacity:.44}
+
+            .overlay-diff-toggle{background:rgba(201,228,245,.12);border:1px solid rgba(201,228,245,.45);color:var(--text);padding:4px 8px;border-radius:7px;font:inherit;cursor:pointer}
             .code-lines li[data-change="remove"]{background:rgba(240,83,83,.18);border-left:3px solid rgba(240,83,83,.7)}
             .code-lines li[data-change="add"]{background:rgba(65,200,120,.16);border-left:3px solid rgba(65,200,120,.7)}
             .code-lines li[data-change="same"]{border-left:3px solid transparent}
@@ -3093,7 +3193,7 @@ fn overlay_html() -> &'static str {
                 ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
                 : view==='mcq'
                 ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31'],['Left','32'],['Right','33'],['Region','34'],['Submit','35']]
-                : [['Coding','cc'],['MCQ','mm'],['History','hh'],['Full','20'],['New','21'],['Left','22'],['Right','23'],['Submit','24'],['Undo','25']];
+                : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py']];
               const fingerprint=controls.map(([name,key])=>name+key).join('|');
               if(host.dataset.shortcutSet===fingerprint)return;
               host.dataset.shortcutSet=fingerprint;host.replaceChildren();
@@ -3105,7 +3205,28 @@ fn overlay_html() -> &'static str {
             };
             const esc=(s)=>String(s||'').replace(/[&<>]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 	            window.scrollSolutionBy=function(delta){const el=document.getElementById('solution-code');if(el)el.scrollTop+=delta;};
-            function highlight(code,lang){let h=esc(code);if(/py|python/i.test(lang||'')){h=h.replace(/([=+\-*\/])/g,'<span class="op">$1</span>').replace(/\b(\d+)\b/g,'<span class="num">$1</span>').replace(/\b(def|for|in|if|return|class|else|elif|while|try|except|with|as|from|import)\b/g,'<span class="kw">$1</span>').replace(/\b(enumerate|range|len|print|set|dict|list)\b/g,'<span class="built">$1</span>');}return h;}
+            function highlight(code,lang){
+              // Tokenize first, escape each token at emission. Never regex over
+              // generated HTML or accept source as markup.
+              const language=String(lang||'').toLowerCase();
+              const kw=language.includes('rust')?/\b(?:fn|impl|struct|enum|trait|let|mut|pub|use|match|self|return|if|else|while|for|loop|const|static|where|async|await)\b/g:
+                language.includes('cpp')||language.includes('c++')?/\b(?:auto|bool|char|class|const|constexpr|double|else|enum|for|if|int|long|namespace|private|protected|public|return|short|signed|static|struct|template|typename|unsigned|using|void|while)\b/g:
+                /\b(?:def|for|in|if|return|class|else|elif|while|try|except|with|as|from|import|async|await|yield|lambda|pass|break|continue|True|False|None)\b/g;
+              const pattern=/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\/\/[^\n]*|#[^\n]*|\b\d+(?:\.\d+)?\b|\b[A-Za-z_]\w*\b)/g;
+              const words=new Set([...String(code||'').matchAll(kw)].map(match=>match[0]));
+              let html='',offset=0;
+              for(const match of String(code||'').matchAll(pattern)){
+                html+=esc(code.slice(offset,match.index));const token=match[0];
+                let cls='';
+                if(words.has(token))cls='kw';
+                else if(/^["']/.test(token))cls='str';
+                else if(/^\d/.test(token))cls='num';
+                else if(token.startsWith('//')||token.startsWith('#'))cls='cm';
+                html+=cls?'<span class="'+cls+'">'+esc(token)+'</span>':esc(token);
+                offset=match.index+token.length;
+              }
+              return html+esc(code.slice(offset));
+            }
 		            function stateTone(status){if(status==='done')return'done';if(status==='streaming'||status==='reviewing'||status==='running')return'working';if(status==='error')return'error';if(status==='cancelled')return'cancelled';return'pending';}
             function codeWithReferenceComment(code,lang){return String(code||'');}
 		            function renderCodeLines(target,code,lang){target.innerHTML='';codeWithReferenceComment(code,lang).split('\n').forEach((line)=>{const li=document.createElement('li');const c=document.createElement('code');c.innerHTML=highlight(line||' ',lang);li.appendChild(c);target.appendChild(li);});}
@@ -3159,11 +3280,52 @@ fn overlay_html() -> &'static str {
             document.addEventListener('click',function(event){
               if(event.target&&event.target.id==='overlay-diff-toggle')window.toggleOverlayCodeDiff();
             });
-            function renderCouncilInsights(presentation){const p=presentation||{};const root=document.querySelector('.thought-list');if(!root)return;const items=root.querySelectorAll('.thought-item');const set=(index,value)=>{const el=items[index]&&items[index].querySelector('.thought-space');if(el)el.textContent=value||'Not reported by Council.';};set(0,p.approach);set(2,p.dataStructures);const complexity=String(p.complexity||'');const timeMatch=complexity.match(/(?:time|runtime)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);const spaceMatch=complexity.match(/(?:space|memory)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);set(3,p.timeComplexity||(timeMatch&&timeMatch[1])||complexity);set(4,p.spaceComplexity||(spaceMatch&&spaceMatch[1]));set(5,Array.isArray(p.dissent)?p.dissent.join('\n'):p.dissent);set(6,Array.isArray(p.evidence)?p.evidence.map(e=>[e.letter,e.gate,e.passed!==undefined?'passed: '+e.passed:'',e.failed!==undefined?'failed: '+e.failed:'',Number.isFinite(e.elapsedMs)?'elapsed: '+e.elapsedMs+' ms':'',Number.isFinite(e.peakMemoryKb)?'peak memory: '+e.peakMemoryKb+' KB':'',e.runtime||''].filter(Boolean).join(' · ')).join('\n'):'');set(7,Array.isArray(p.rejected)?p.rejected.join('\n'):p.rejected);}
+            function renderCouncilInsights(presentation,state){
+              const p=presentation||{},extra=state&&state.insights||{};
+              const root=document.querySelector('.thought-list');if(!root)return;
+              if(root.dataset.codingOrder!=='set'){
+                const items=Array.from(root.querySelectorAll('.thought-item'));
+                // Keep the function-notes element intact while arranging the
+                // eight existing insight surfaces in the requested order.
+                const order=[0,2,5,6,3,4,1,7];
+                const labels=['Solution summary','Data structures / Algorithm','Edge cases tested','Testing results',
+                  'Time complexity','Space complexity','Functions','Approach · how it works'];
+                order.forEach((old,i)=>{
+                  const item=items[old];if(!item)return;
+                  const heading=item.querySelector('.thought-heading');
+                  if(heading)heading.textContent=labels[i];
+                  root.append(item);
+                });
+                root.dataset.codingOrder='set';
+              }
+              const items=root.querySelectorAll('.thought-item');
+              const set=(index,value)=>{
+                const el=items[index]?.querySelector('.thought-space');
+                if(el&&index!==6)el.textContent=value||'Not recorded in this Council report.';
+              };
+              const structures=Array.isArray(extra.structures)?extra.structures.join('\n'):'';
+              const algorithm=extra.controlFlow?'Algorithm flow: '+extra.controlFlow:'';
+              set(0,extra.summary||p.approach);
+              set(1,[structures,algorithm].filter(Boolean).join('\n'));
+              set(2,Array.isArray(extra.edgeCases)&&extra.edgeCases.length
+                ? extra.edgeCases.map((x,i)=>String(i+1)+'. '+x).join('\n')
+                : 'Specific edge-case assertions were not preserved in the verified report; no examples are invented.');
+              const evidence=Array.isArray(p.evidence)?p.evidence.map(e=>
+                [e.letter,e.gate,e.passed!==undefined?'passed: '+e.passed:'',
+                e.failed!==undefined?'failed: '+e.failed:'',
+                Number.isFinite(e.elapsedMs)?'elapsed: '+e.elapsedMs+' ms':''].filter(Boolean).join(' · ')).join('\n'):'';
+              set(3,extra.testing||evidence||'Waiting for executable verification.');
+              const claim=String(p.complexity||'');
+              const time=claim.match(/(?:time|runtime)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);
+              const space=claim.match(/(?:space|memory)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);
+              set(4,p.timeComplexity||time?.[1]||'Not separately audited');
+              set(5,p.spaceComplexity||space?.[1]||'Not separately audited');
+              set(7,extra.approach||p.approach);
+            }
                         window.updatePreviews=function(images){window.__lastPreviews=images||[];const pictures=document.getElementById('pictures');if(!pictures)return;if(pictures.__sources&&pictures.__sources.length===images.length&&images.every((src,i)=>src===pictures.__sources[i]))return;pictures.__sources=images.slice();pictures.innerHTML='';if(!images.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Captured images will appear here';pictures.appendChild(empty);return;}images.forEach((src,i)=>{const pill=document.createElement('div');pill.className='picture-pill';const img=document.createElement('img');img.src=src;img.alt='Capture '+(i+1);const count=document.createElement('span');count.className='picture-count';count.textContent=(i+1)+'/10';pill.appendChild(img);pill.appendChild(count);pictures.appendChild(pill);});};
                 function renderMcq(state){const savedPictures=document.getElementById('pictures');const left=document.querySelector('.pictures-pane');const right=document.querySelector('.thought-pane');const m=state.mcq||{};const picked=(m.answer&&m.answer.label)||'';const found=Array.isArray(m.options)?m.options:[];const position=found.findIndex((o)=>o.label===picked);const ordinal=(n)=>n%100>=11&&n%100<=13?'th':n%10===1?'st':n%10===2?'nd':n%10===3?'rd':'th';const formatted=m.answerVerified===true&&position>=0?'✅ '+picked+' ('+(position+1)+ordinal(position+1)+' Option) - '+String((m.answer&&m.answer.text)||found[position].text||''):'';const displayAnswer=formatted||String(m.displayAnswer||'');const selectedModel=(m.model&&String(m.model).trim())?String(m.model).trim():'none';const hasModel=selectedModel.toLowerCase()!=='none';left.innerHTML='<div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title-row"><div class="title">Question</div><div class="mcq-model-pill" data-enabled="'+(hasModel?'true':'false')+'">'+esc(hasModel?selectedModel:'No Model')+'</div></div><div class="mcq-box mcq-question"></div><div class="title">Answer</div><div class="mcq-box mcq-answer"></div>';if(savedPictures)document.getElementById('pictures').replaceWith(savedPictures);right.innerHTML='<div class="title">Question history</div><div class="mcq-history"></div>';document.querySelector('.mcq-question').textContent=m.question||state.progress||'Reading the captured question...';document.querySelector('.mcq-answer').innerHTML='<b>'+esc(displayAnswer||(picked||'Answer'))+'</b>'+(displayAnswer?'':(m.answer&&m.answer.text?' — '+esc(m.answer.text):''))+'<br><br>'+esc(m.reason||state.error||state.progress||'Waiting for the MCQ worker result...');const hist=document.querySelector('.mcq-history');const add=(title,body,level,meta)=>{const row=document.createElement('div');row.className='mcq-history-row';row.dataset.level=level||'info';const h=document.createElement('b');h.textContent=title;const p=document.createElement('div');p.textContent=body||'';row.appendChild(h);row.appendChild(p);if(meta&&meta.length){const mrow=document.createElement('div');mrow.className='mcq-history-meta';meta.forEach((x)=>{const s=document.createElement('span');s.textContent=x;mrow.appendChild(s);});row.appendChild(mrow);}hist.appendChild(row);};add('AI selected',selectedModel,'info',[state.status||'',state.phase||''].filter(Boolean));add('Captured question',m.question||'Waiting for the screenshot reading.',state.error?'error':'info',[state.status||'',state.phase||''].filter(Boolean));if(m.options&&m.options.length){add('Choices found',(m.options||[]).map((o)=>(o.label?o.label+'. ':'')+(o.text||'')).join('\\n'),'info',[]);}if(m.knowledgeUsed!==undefined){add('Local knowledge check',m.knowledgeUsed?'A local knowledge match or guidance was included before the model answer.':'The local knowledge pack was checked before the model answer, but no direct match was used.','info',[selectedModel]);}if(picked||m.reason){add('Selected answer',(picked?picked+': ':'')+(m.answer&&m.answer.text?m.answer.text:'')+'\\n'+(m.reason||''),'info',[selectedModel]);}(m.whyNot||[]).forEach((x)=>add('Rejected choice '+(x.label||''),x.reason||'Not selected.','info',[]));(state.history||[]).forEach((e)=>add(e.phase||'worker event',e.message||'',e.level||'info',[e.createdAt||''].filter(Boolean)));if(!hist.children.length)add('Waiting','The helper is waiting for the worker history.','info',[]);window.updatePreviews(window.__lastPreviews||[]);}
 			            function restoreCodingShell(){if(document.getElementById('agents'))return;document.getElementById('panel').innerHTML='<div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div>';window.updatePreviews(window.__lastPreviews||[]);}
-			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};window.__overlayCurrentState=state;if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'Council verified':state.solution.status==='provisional'?'E2B passed · Council reviewing':('candidate · '+(state.solution.source||''));renderOverlayCodeResult(code,state);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation);}};
+			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};window.__overlayCurrentState=state;if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'Council verified':state.solution.status==='provisional'?'E2B passed · Council reviewing':('candidate · '+(state.solution.source||''));renderOverlayCodeResult(code,state);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation,state);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation,state);}};
             // Keep the existing capture and result renderer intact, then give
             // its agent output the same clear, glassy Council presentation as
             // the Story workspace. This is intentionally display-only.
@@ -3175,7 +3337,7 @@ fn overlay_html() -> &'static str {
               if(!root){
                 root=document.createElement('section');
                 root.id='shared-history-sheet';root.className='history-sheet';
-                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Archive</div><div class="history-title">History</div><div class="history-description">Main app and overlay · Coding, MCQ and saved runs</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate · → Open result · Shift + | also opens</span><span>cc Coding · mm MCQ · hh History</span></footer>';
+                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Coding Overlay</div><div class="history-title">History</div><div class="history-description">Overlay captures only · Coding and MCQ results</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate · → Open result</span><span>cc Coding · mm MCQ · hh History</span></footer>';
                 panel.appendChild(root);
               }
               root.hidden=false;
@@ -3203,7 +3365,7 @@ fn overlay_html() -> &'static str {
               });
               if(!list.children.length){
                 const empty=document.createElement('div');empty.className='history-empty';
-                empty.textContent=error?'Could not load cloud history: '+error:loading?'Loading saved account history…':'No saved runs yet. Your next main-app or overlay task will appear here.';
+                empty.textContent=error?'Could not load cloud history: '+error:loading?'Loading saved overlay history…':'No saved overlay runs yet. Your next Coding or MCQ capture will appear here.';
                 list.appendChild(empty);
               }else if(error){
                 const warning=document.createElement('div');warning.className='history-empty';
@@ -3269,7 +3431,17 @@ fn overlay_html() -> &'static str {
               const oldTitle=agents.previousElementSibling;if(oldTitle&&oldTitle.classList.contains('title'))oldTitle.replaceWith(header);else pane.insertBefore(header,agents);
               agents.innerHTML='';
               if(!selected.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='The selected Council agents will appear here.';agents.appendChild(empty);}else{selected.forEach((agent)=>{const card=document.createElement('div');card.className='model-chip';card.dataset.state=stateTone(agent.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=agent.label||agent.id||'Council agent';const model=document.createElement('span');model.className='agent-model';model.textContent=agent.model||'Council';const detail=document.createElement('span');detail.textContent=agentStatusText(agent);card.title=[agent.model,agent.error].filter(Boolean).join(' — ');card.append(dot,name,model,detail);agents.appendChild(card);});}
-              const progress=document.createElement('div');progress.className='overlay-progress';const waiting=state.phase==='idle'?'Capture screenshots to begin.':state.progress||'Council is selecting eligible agents.';progress.textContent=state.phase==='done'?'Council completed this run. Review the verified solution below.':(state.phase==='error'?'Council needs attention. See the diagnostic below.':(selected.find((agent)=>agent.detail)?.detail||waiting));
+              const progress=document.createElement('div');progress.className='overlay-progress';const waiting=state.phase==='idle'?'Capture screenshots to begin.':state.progress||'Council is selecting eligible agents.';const stages={queued:'Waiting for the cloud worker',contracting:'Reading the problem contract',
+                reading:'Understanding screenshots',solving:'Generating candidate solutions',
+                speccing:'Preparing independent E2B tests',benchmarking:'Running E2B cases',
+                verifying:'Running E2B verification',reviewing:'Reviewing candidates',
+                revising:'Repairing eligible solutions',reverifying:'Re-testing repaired code',
+                judging:'Independent Council judges',synthesizing:'Selecting verified winner',
+                porting:'Verifying language translations',completed:'Council completed'};
+              const stage=stages[state.progressPhase]||waiting;
+              progress.textContent=state.phase==='done'?'Council completed. Verified solution and ports are available below.':
+                state.phase==='error'?'Council needs attention. See the diagnostic below.':
+                stage+(state.progress&&stage!==state.progress?' · '+String(state.progress).slice(0,145):'');
               agents.after(progress);
               const failures=selected.filter((agent)=>agent.error).map((agent)=>(agent.label||agent.id||'Council agent')+': '+agent.error);
               if(failures.length||state.phase==='error'){const diagnostic=document.createElement('div');diagnostic.className='overlay-diagnostics';const label=document.createElement('b');label.textContent='Run diagnostics';const message=document.createElement('span');message.textContent=failures.join(' · ')||'The Council run reported an issue. The captured images and any available answer remain available.';diagnostic.append(label,message);progress.after(diagnostic);}
@@ -3282,17 +3454,68 @@ fn overlay_html() -> &'static str {
               const context=document.createElement('div');context.id='overlay-history-context';context.className='overlay-history-context';context.textContent='History result · '+shown;context.title=title;
               const progress=pane.querySelector('.overlay-progress');if(progress)progress.after(context);else{const agents=document.getElementById('agents');if(agents)agents.after(context);}
             }
+            // The ghost window must remain click-through and non-focusable.
+            // Language selection is exclusively via observed RR / CP / PY,
+            // never an invisible HTML button competing for foreground focus.
+            const canonicalPortLanguage=value=>{
+              const key=String(value||'').toLowerCase().replace(/[^a-z+]/g,'');
+              return key==='c++'||key==='cpp'||key==='cxx'?'cpp':
+                key==='py'||key==='python'||key==='python3'?'python':
+                key==='rs'||key==='rust'?'rust':key;
+            };
+            window.selectVerifiedOverlayLanguage=function(language){
+              const state=window.__overlayCurrentState;
+              if(!state||state.kind==='mcq'||!state.solution)return false;
+              const desired=canonicalPortLanguage(language);
+              if(!['python','rust','cpp'].includes(desired))return false;
+              window.__overlayDesiredLanguage=desired;
+              renderVerifiedPorts(state);
+              return true;
+            };
             function renderVerifiedPorts(state){
-              const primary=state&&state.solution;
-              const ports=Array.isArray(state&&state.ports)?state.ports.filter((port)=>port&&port.status==='verified'&&String(port.code||'').trim()):[];
-              const editor=document.querySelector('.solution-editor');
+              const primary=state&&state.solution,editor=document.querySelector('.solution-editor');
               const old=document.getElementById('verified-language-ports');if(old)old.remove();
-              if(!editor||!primary||!ports.length)return;
+              if(!editor||!primary||!String(primary.code||'').trim())return;
+              if(window.__overlayLanguageRunId!==state.runId){
+                window.__overlayLanguageRunId=state.runId;
+                window.__overlayDesiredLanguage='';
+              }
+              const ports=Array.isArray(state.ports)?state.ports:[];
+              const validated=ports.filter(port=>port&&port.status==='verified'&&String(port.code||'').trim());
               const section=document.createElement('section');section.id='verified-language-ports';section.className='tests';
-              const heading=document.createElement('div');heading.className='tests-head';const label=document.createElement('b');label.textContent='Verified language versions';const count=document.createElement('span');count.textContent=ports.length+' E2B passed';heading.append(label,count);section.append(heading);
-              const choices=[{language:primary.language,code:primary.code,source:primary.source||'Council verified',primary:true},...ports];
-              const list=document.createElement('div');list.className='case-list';
-              choices.forEach((choice,index)=>{const button=document.createElement('button');button.type='button';button.className='case';button.textContent=(choice.primary?'Primary · ':'')+String(choice.language||'Code')+(choice.primary?'':' · E2B verified');button.addEventListener('click',()=>{const code=document.getElementById('solution-code');const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');if(!code)return;window.__overlayDiffHidden=true;renderCodeLines(code,String(choice.code||''),String(choice.language||''));if(title)title.textContent='solution.'+String(choice.language||'code').toLowerCase();if(source)source.textContent=choice.primary?'Council verified':'Verified language port · E2B passed';list.querySelectorAll('button').forEach((item,i)=>item.dataset.selected=i===index?'true':'false');});button.dataset.selected=index===0?'true':'false';list.append(button);});section.append(list);editor.after(section);
+              const label=document.createElement('b');label.textContent='Verified languages';
+              const summary=document.createElement('span');summary.textContent=validated.length+' independent E2B ports';
+              const header=document.createElement('div');header.className='tests-head';header.append(label,summary);section.append(header);
+              const list=document.createElement('div');list.className='overlay-port-list';
+              const desired=window.__overlayDesiredLanguage;
+              const primaryLang=canonicalPortLanguage(primary.language);
+              const keyPairs=[['python','py'],['rust','rr'],['cpp','cp']];
+              for(const [lang,key] of keyPairs){
+                const available=lang===primaryLang||validated.some(port=>canonicalPortLanguage(port.language)===lang);
+                const chip=document.createElement('span');chip.className='overlay-port-chip';
+                chip.dataset.available=available?'true':'false';chip.dataset.selected=desired===lang?'true':'false';
+                chip.textContent=lang==='cpp'?'C++ · '+key:lang[0].toUpperCase()+lang.slice(1)+' · '+key;
+                chip.title=available?'E2B verified · type '+key+' to select':'Pending independent E2B verification';
+                list.append(chip);
+              }
+              section.append(list);editor.after(section);
+              if(!desired)return;
+              const chosen=primaryLang===desired?primary:
+                validated.find(port=>canonicalPortLanguage(port.language)===desired);
+              const source=document.getElementById('solution-source'),title=document.getElementById('solution-title');
+              if(!chosen){
+                if(source)source.textContent=(desired==='cpp'?'C++':desired)+' not verified yet · primary solution shown';
+                return;
+              }
+              const code=document.getElementById('solution-code');
+              if(code){
+                renderCodeLines(code,String(chosen.code||''),String(chosen.language||desired));
+                code.scrollTop=0;
+              }
+              if(title)title.textContent='solution.'+(desired==='cpp'?'cpp':desired==='python'?'py':'rs');
+              if(source)source.textContent=chosen===primary?'Council-verified primary':'Independently E2B-verified port';
+              // Editing one version or importing from a live report never alters
+              // the saved original code or the cloud report.
             }
             window.updateOverlayState=function(state){baseUpdateOverlayState(state);window.setOverlayControls(state&&(state.kind==='mcq'||state.mcq)?'mcq':'coding');if(!state||state.kind!=='mcq'){renderStoryAgents(state||{});renderHistoryContext(state||{});renderVerifiedPorts(state||{});}};
     </script></body></html>"#
@@ -3335,17 +3558,59 @@ mod tests {
     }
 
     #[test]
+    fn coding_projection_preserves_verified_port_and_real_edge_evidence() {
+        let job=SubmittedJob {
+            id:Uuid::new_v4().to_string(),mode:"coding".into(),mcq_model:None,
+            status:"completed".into(),progress_phase:"completed".into(),
+            submitted_at:now(),previews:vec![],error:None,
+            events:vec![],
+            report:Some(serde_json::json!({"report":{
+                "winner":"A",
+                "candidates":[{"letter":"A","model":"model-coding",
+                    "final":{"code":"def solve(x):\n    return x","language":"python"}}],
+                "presentation":{
+                    "standing":"verified","code":"def solve(x):\n    return x",
+                    "language":"python","approach":"Return the input",
+                    "evidence":[{"letter":"A","gate":"pass","passed":3,"failed":0}]
+                },
+                "semanticBlueprint":{
+                    "explanation":"Return the given value unchanged.",
+                    "structure":{"dataStructures":["lists / dynamic arrays"],
+                        "controlFlow":["explicit return values"]}
+                },
+                "suites":[{"language":"python","harness":
+                    "assert solve([]) == []\nassert solve([1]) == [1]\nassert solve([1,1]) == [1,1]"}],
+                "ports":[{"language":"rust","status":"verified","code":"fn main() {}"}]
+            }})),
+        };
+        let projected=coding_overlay_state(&job);
+        assert_eq!(projected["agents"][0]["status"],"done");
+        assert_eq!(projected["agents"][0]["gate"],"pass");
+        assert_eq!(projected["ports"][0]["language"],"rust");
+        assert_eq!(projected["insights"]["edgeCases"].as_array().map(Vec::len),Some(3));
+        assert_eq!(projected["insights"]["summary"],"Return the given value unchanged.");
+        let mut no_evidence=job.clone();
+        no_evidence.report=Some(serde_json::json!({"report":{
+            "presentation":{"standing":"unverified","language":"python"},
+            "suites":[{"language":"python","harness":"assert solve([]) == []"}]
+        }}));
+        let unseen=coding_overlay_state(&no_evidence);
+        assert_eq!(unseen["insights"]["edgeCases"].as_array().map(Vec::len),Some(0),
+            "Never present proposed harness assertions as tested without Council standing");
+    }
+
+    #[test]
     fn number_pairs_route_to_the_requested_workflow_and_capture_shape() {
         let expected = [
             (0, 0, 6),
             (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13),
-            (2, 0, 20), (2, 1, 21), (2, 2, 22), (2, 3, 23), (2, 4, 24), (2, 5, 25),
+            (2, 0, 20), (2, 2, 22), (2, 3, 23), (2, 4, 24), (2, 5, 25),
             (3, 1, 31), (3, 2, 32), (3, 3, 33), (3, 4, 34), (3, 5, 35),
         ];
         for (prefix, shape, command) in expected {
             assert_eq!(number_pair_command(prefix, shape), Some(command));
         }
-        for invalid in [(1, 5), (2, 6), (3, 0), (4, 1)] {
+        for invalid in [(1, 5), (2, 1), (2, 6), (3, 0), (4, 1)] {
             assert_eq!(number_pair_command(invalid.0, invalid.1), None);
         }
     }
@@ -3640,7 +3905,11 @@ mod tests {
             images: vec![], error: None,
         };
         assert!(mcq_pending_state(&batch)["progress"].as_str().unwrap_or("").contains("Uploading"));
-        assert!(coding_pending_state(&batch)["solution"]["code"].as_str().unwrap_or("").contains("Uploading"));
+        let coding = coding_pending_state(&batch);
+        assert!(coding["progress"].as_str().unwrap_or("").contains("Uploading"));
+        assert!(coding["solution"].is_null(), "Upload progress must not be rendered as executable solution code");
+        assert!(coding["agents"].as_array().is_some_and(Vec::is_empty));
+        assert!(coding["tests"].as_array().is_some_and(Vec::is_empty));
     }
 
     #[test]
