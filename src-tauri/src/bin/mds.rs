@@ -1154,23 +1154,140 @@ fn last_good_settings_path() -> Result<PathBuf, String> {
     Ok(cache_dir()?.join("last-good-settings.json"))
 }
 
-fn load_coding_history() -> Result<Vec<SubmittedJob>, String> {
+/// One history schema shared by both overlay surfaces and main-app runs.
+/// IDs are namespaced because a session's run and a queued cloud job are
+/// distinct artifacts even if the UI assigns them the same title.
+fn history_row(id: &str, origin: &str, kind: &str, title: &str, subtitle: &str,
+               status: &str, at: &str) -> Value {
+    serde_json::json!({
+        "id": id, "origin": origin, "kind": kind, "title": title,
+        "subtitle": subtitle, "status": status, "submittedAt": at
+    })
+}
+
+fn archived_helper_history() -> Result<Vec<Value>, String> {
     let mut rows = Vec::new();
-    if let Some(current) = read_submitted_job_for("coding")? {
-        if current.mode == "council" { rows.push(current); }
+    for view in ["coding", "mcq"] {
+        if let Some(job) = read_submitted_job_for(view)? {
+            rows.push(history_row(&format!("job:{}",job.id),"Overlay",
+                if job.mode=="mcq"{"MCQ"}else{"Coding"},
+                if job.mode=="mcq"{"MCQ screenshot task"}else{"Coding screenshot task"},
+                &job.id, &job.status, &job.submitted_at));
+        }
     }
     let dir = cache_dir()?.join("job-history");
     if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten().take(500) {
+        for entry in entries.flatten().take(2000) {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") { continue; }
             let Ok(raw) = fs::read_to_string(path) else { continue; };
             let Ok(job) = serde_json::from_str::<SubmittedJob>(&raw) else { continue; };
-            if job.mode == "council" && !rows.iter().any(|known| known.id == job.id) { rows.push(job); }
+            rows.push(history_row(&format!("job:{}",job.id),"Overlay",
+                if job.mode=="mcq"{"MCQ"}else{"Coding"},
+                if job.mode=="mcq"{"MCQ screenshot task"}else{"Coding screenshot task"},
+                &job.id,&job.status,&job.submitted_at));
         }
     }
-    rows.sort_by(|a, b| b.submitted_at.cmp(&a.submitted_at));
-    rows.truncate(100);
+    normalize_history(rows)
+}
+
+fn normalize_history(rows: Vec<Value>) -> Result<Vec<Value>, String> {
+    let mut map = std::collections::HashMap::<String,Value>::new();
+    for row in rows {
+        let Some(id)=row.get("id").and_then(Value::as_str).map(str::to_owned) else { continue; };
+        if let Some(old) = map.get(&id) {
+            let a=old.get("origin").and_then(Value::as_str).unwrap_or("");
+            let b=row.get("origin").and_then(Value::as_str).unwrap_or("");
+            if a=="Overlay" && b=="Overlay" && old.get("status").and_then(Value::as_str)==Some("completed") {
+                // A saved completed result should not be replaced by an
+                // older, queued snapshot with the same job ID.
+                continue;
+            }
+        }
+        map.insert(id,row);
+    }
+    let mut results: Vec<Value> = map.into_values().collect();
+    results.sort_by(|a,b| b.get("submittedAt").and_then(Value::as_str).unwrap_or("")
+        .cmp(a.get("submittedAt").and_then(Value::as_str).unwrap_or("")));
+    Ok(results)
+}
+
+/// Uses only existing, account-scoped API operations. No new schema or
+/// privileged keys on macOS. Fetch main-app runs from BOTH active and archived
+/// sessions; fetch cloud queued-job history separately; fold local snapshots
+/// in for items no longer in the API's most-recent-job page.
+async fn fetch_unified_history() -> Result<Vec<Value>, String> {
+    use futures_util::future::join_all;
+    let mut rows = archived_helper_history()?;
+    let (jobs,active,archived)=tokio::join!(
+        api("jobs.list",serde_json::json!({"status":"all"})),
+        api("sessions.list",serde_json::json!({"status":"active"})),
+        api("sessions.list",serde_json::json!({"status":"archived"})),
+    );
+    let mut errors=Vec::new();
+    if let Ok(payload)=jobs {
+        for item in payload.as_array().or_else(||payload.get("items").and_then(Value::as_array))
+            .into_iter().flatten() {
+            let id=item.get("id").and_then(Value::as_str).unwrap_or("");
+            if id.is_empty(){continue;}
+            let mode=item.get("mode").and_then(Value::as_str).unwrap_or("council");
+            rows.push(history_row(&format!("job:{id}"),"Overlay",
+                if mode=="mcq"{"MCQ"}else{"Coding"},
+                if mode=="mcq"{"MCQ screenshot task"}else{"Coding screenshot task"},
+                item.get("resultSummary").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(id),
+                item.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+                item.get("createdAt").and_then(Value::as_str).unwrap_or("")));
+        }
+    } else { errors.push("cloud jobs"); }
+    let mut sessions=std::collections::HashMap::<String, Value>::new();
+    for response in [active,archived] {
+        match response {
+            Ok(payload) => {
+                for item in payload.as_array().or_else(||payload.get("items").and_then(Value::as_array))
+                    .into_iter().flatten() {
+                    if let Some(id)=item.get("id").and_then(Value::as_str) {
+                        sessions.insert(id.to_owned(),item.clone());
+                    }
+                }
+            }
+            Err(_) => errors.push("main sessions"),
+        }
+    }
+    // The API exposes main run history per session, not as one flat list.
+    // Bounded concurrency keeps older accounts usable without overwhelming
+    // the API or bringing synchronous network work onto the macOS event loop.
+    let sessions: Vec<(String,Value)> = sessions.into_iter().collect();
+    for chunk in sessions.chunks(6) {
+        let responses=join_all(chunk.iter().map(|(id,_)|
+            api("runs.list",serde_json::json!({"sessionId":id})))).await;
+        for ((_,session),answer) in chunk.iter().zip(responses) {
+            match answer {
+                Ok(payload) => for item in payload.as_array().or_else(||payload.get("items").and_then(Value::as_array))
+                    .into_iter().flatten() {
+                    let id=item.get("id").and_then(Value::as_str).unwrap_or("");
+                    if id.is_empty(){continue;}
+                    let mode=item.get("mode").and_then(Value::as_str).unwrap_or("auto");
+                    let at=item.get("startedAt").and_then(Value::as_str).unwrap_or("");
+                    let status=if item.get("finishedAt").and_then(Value::as_str).is_some_and(|s|!s.is_empty())
+                        {"completed"}else{"running"};
+                    let title=item.get("asked").and_then(Value::as_str)
+                        .filter(|s|!s.trim().is_empty())
+                        .or_else(||session.get("title").and_then(Value::as_str))
+                        .unwrap_or("Saved main-app run");
+                    rows.push(history_row(&format!("main:{id}"),"Main app",
+                        if mode=="mcq"{"MCQ"}else if mode=="coding"||mode=="code"{"Coding"}else{"Run"},
+                        title,
+                        session.get("title").and_then(Value::as_str).unwrap_or(""),
+                        status,at));
+                },
+                Err(_) => errors.push("main runs"),
+            }
+        }
+    }
+    let rows=normalize_history(rows)?;
+    if rows.is_empty() && !errors.is_empty() {
+        return Err(format!("Could not load {}. Check the background helper authorization.",errors.join(", ")));
+    }
     Ok(rows)
 }
 
