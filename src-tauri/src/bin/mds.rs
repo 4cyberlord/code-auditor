@@ -168,9 +168,6 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_0: u32 = 0x27;
     const HID_USAGE_KEYBOARD_MINUS: u32 = 0x2D;
     const HID_USAGE_KEYBOARD_EQUAL: u32 = 0x2E;
-    const HID_USAGE_KEYBOARD_LEFT_BRACKET: u32 = 0x2F;
-    const HID_USAGE_KEYBOARD_RIGHT_BRACKET: u32 = 0x30;
-    const HID_USAGE_KEYBOARD_BACKSLASH: u32 = 0x31;
 
     pub static START_BATCH: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE: AtomicBool = AtomicBool::new(false);
@@ -972,6 +969,8 @@ fn run() -> Result<(), String> {
                             if let Some(task) = history_detail_fetch.take() { task.abort(); }
                             mac_shortcuts::set_history_visible(false);
                             let _ = webview.evaluate_script("window.closeSharedHistory()");
+                            overlay_refresh.sent_state=None;
+                            overlay_refresh.sent_previews=None;
                             active_view = target_view.to_string();
                             overlay_visible = true;
                             event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
@@ -1084,6 +1083,8 @@ fn run() -> Result<(), String> {
                         history_open = false;
                         mac_shortcuts::set_history_visible(false);
                         let _ = webview.evaluate_script("window.closeSharedHistory()");
+                        overlay_refresh.sent_state=None;
+                        overlay_refresh.sent_previews=None;
                         let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                     }
                 }
@@ -2349,7 +2350,11 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
     // screenshots too, not screenshots staged for the following job.
     let pending = read_pending_for(active_view)?;
     let pending_has_images = pending.as_ref().is_some_and(|batch| !batch.images.is_empty());
-    let payload = if running || !pending_has_images {
+    // An explicit 00 session owns the Coding surface immediately, including
+    // before its first image. The old cloud solve keeps running in the helper
+    // and its saved record; don't display it over a new blank workspace.
+    let coding_pending = active_view=="coding" && pending.is_some();
+    let payload = if !coding_pending && (running || !pending_has_images) {
         let paths = submitted.as_ref().map(|job| job.previews.as_slice()).unwrap_or_default();
         let sources = if paths.iter().all(|path| path.starts_with("data:")) {
             paths.to_vec() // legacy job preview format
@@ -2381,7 +2386,10 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
     // Keep the displayed state paired with the displayed screenshots.
     // A completed job remains available in the job cache while a subsequent
     // batch is being collected. Show pending state with pending thumbnails.
-    let state = if !running {
+    let state = if coding_pending {
+        serde_json::to_string(&coding_pending_state(pending.as_ref().unwrap()))
+            .unwrap_or_else(|_| "{}".to_string())
+    } else if !running {
         if let Some(batch) = pending.as_ref() {
             if pending_has_images {
                 let pending_state = if active_view == "mcq" {
