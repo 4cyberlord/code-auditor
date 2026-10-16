@@ -655,7 +655,7 @@ fn run() -> Result<(), String> {
     let mut history_open = false;
     let mut history_rows: Vec<Value> = Vec::new();
     let mut history_index = 0_usize;
-    let mut history_fetch: Option<tokio::task::JoinHandle<Result<Vec<Value>,String>>> = None;
+    let mut history_fetch: Option<tokio::task::JoinHandle<Result<(Vec<Value>,Option<String>),String>>> = None;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
     let mut last_heartbeat = Instant::now();
@@ -769,13 +769,14 @@ fn run() -> Result<(), String> {
         if history_fetch.as_ref().is_some_and(|task| task.is_finished()) {
             if let Some(task)=history_fetch.take() {
                 match rt.block_on(task) {
-                    Ok(Ok(rows)) if history_open => {
+                    Ok(Ok((rows,warning))) if history_open => {
                         history_rows=rows;
                         history_index=history_index.min(history_rows.len().saturating_sub(1));
                         let payload=serde_json::to_string(&history_rows)
                             .unwrap_or_else(|_| "[]".into());
+                        let notice=serde_json::to_string(&warning).unwrap_or_else(|_| "null".into());
                         let _ = webview.evaluate_script(&format!(
-                            "window.showSharedHistory({payload},{history_index},false,null)"));
+                            "window.showSharedHistory({payload},{history_index},false,{notice})"));
                     }
                     Ok(Err(error)) if history_open => {
                         let safe=serde_json::to_string(&error).unwrap_or_else(|_| "\"History unavailable\"".into());
@@ -1218,7 +1219,7 @@ fn normalize_history(rows: Vec<Value>) -> Result<Vec<Value>, String> {
 /// privileged keys on macOS. Fetch main-app runs from BOTH active and archived
 /// sessions; fetch cloud queued-job history separately; fold local snapshots
 /// in for items no longer in the API's most-recent-job page.
-async fn fetch_unified_history() -> Result<Vec<Value>, String> {
+async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> {
     use futures_util::future::join_all;
     let mut rows = archived_helper_history()?;
     let (jobs,active,archived)=tokio::join!(
@@ -1290,7 +1291,11 @@ async fn fetch_unified_history() -> Result<Vec<Value>, String> {
     if rows.is_empty() && !errors.is_empty() {
         return Err(format!("Could not load {}. Check the background helper authorization.",errors.join(", ")));
     }
-    Ok(rows)
+    let notice=if errors.is_empty() { None } else {
+        errors.sort_unstable();errors.dedup();
+        Some(format!("Some cloud history is unavailable: {}",errors.join(", ")))
+    };
+    Ok((rows,notice))
 }
 
 fn clean_expired_capture_dirs() -> Result<(), String> {
