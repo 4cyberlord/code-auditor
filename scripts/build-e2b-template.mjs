@@ -7,6 +7,7 @@ import "./lib/config.mjs";
 import { Template, defaultBuildLogger } from "e2b";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import {extendedValidatorBuildCommands} from "./lib/e2bRuntimeProfile.mjs";
 
 function loadDotEnv(file) {
   if (!existsSync(file)) return;
@@ -36,7 +37,7 @@ if (!process.env.E2B_API_KEY?.trim()) {
 
 const alias = process.env.CODE_AUDITOR_E2B_TEMPLATE || "code-editor-runners";
 
-const template = Template()
+let template = Template()
   .fromTemplate("code-interpreter-v1")
   .aptInstall(["time", "curl", "ca-certificates", "build-essential", "pkg-config", "golang-go"], {
     noInstallRecommends: true,
@@ -64,6 +65,13 @@ const template = Template()
     { user: "root" }
   );
 
+if (process.env.CODE_AUDITOR_E2B_EXTENDED_VALIDATORS === "1") {
+  // Build-time only: all four Python sandboxes use the exact same image.
+  // The existing template stays unchanged unless explicitly requested.
+  template = template.aptInstall(["clang-tidy", "clang-format"], {
+    noInstallRecommends: true,
+  }).runCmd(extendedValidatorBuildCommands(), {user:"root"});
+}
 console.log(`Building E2B template "${alias}"...`);
 const info = await Template.build(template, alias, {
   onBuildLogs: defaultBuildLogger(),
