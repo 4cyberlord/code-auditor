@@ -3378,27 +3378,141 @@ fn overlay_html() -> &'static str {
                 row.dataset.selected=yes?'true':'false';
                 if(yes)row.scrollIntoView({block:'nearest'});
               });
+              hiSyncNavigation();
             };
             window.closeSharedHistory=function(){
               const root=document.getElementById('shared-history-sheet');if(root)root.hidden=true;
               const detail=document.getElementById('shared-history-detail');if(detail)detail.hidden=true;
               window.setOverlayControls(window.__overlayCurrentState&&(window.__overlayCurrentState.kind==='mcq'||window.__overlayCurrentState.mcq)?'mcq':'coding');
             };
+            function hiElement(tag,cls,value){
+              const element=document.createElement(tag);
+              if(cls)element.className=cls;
+              if(value!==undefined)element.textContent=String(value);
+              return element;
+            }
+            function hiInsight(root,label,value){
+              const str=Array.isArray(value)?value.filter(Boolean).join('\n'):String(value||'').trim();
+              if(!str)return;
+              const section=hiElement('section','hi-insight');
+              section.append(hiElement('span','hi-insight-label',label),hiElement('div','hi-insight-text',str));
+              root.append(section);
+            }
+            function hiSyncNavigation(){
+              const list=document.getElementById('shared-history-sheet');
+              const sheet=document.getElementById('shared-history-detail');
+              if(!list||!sheet||sheet.hidden)return;
+              const selected=Array.from(list.querySelectorAll('.history-row')).findIndex(el=>el.dataset.selected==='true');
+              sheet.querySelectorAll('.hi-side-row').forEach((row,index)=>{
+                const active=index===Math.max(0,selected);
+                row.dataset.selected=active?'true':'false';
+                if(active)row.scrollIntoView({block:'nearest'});
+              });
+            }
+            // Arrow-selecting a saved run renders its evidence in the familiar
+            // code-and-insights layout. This never touches the live batch.
             window.showSharedHistoryDetail=function(detail){
               const panel=document.getElementById('panel');if(!panel)return;
               let root=document.getElementById('shared-history-detail');
-              if(!root){root=document.createElement('section');root.id='shared-history-detail';root.className='history-sheet';panel.appendChild(root);}
+              if(!root){root=hiElement('section','history-sheet hi-root');root.id='shared-history-detail';panel.append(root);}
               root.hidden=false;root.replaceChildren();
-              const header=document.createElement('header');header.className='history-heading';
-              const head=document.createElement('div');const eyebrow=document.createElement('div');eyebrow.className='history-eyebrow';eyebrow.textContent='Council Editor / Saved result';
-              const title=document.createElement('div');title.className='history-title';title.textContent=detail&&detail.loading?'Loading result…':(detail&&detail.title)||'Saved result';
-              const meta=document.createElement('div');meta.className='history-description';meta.textContent=[detail&&detail.origin,detail&&detail.status].filter(Boolean).join(' · ');
-              head.append(eyebrow,title,meta);header.append(head);root.append(header);
-              const body=document.createElement('div');body.className='history-list';
-              if(detail&&detail.loading){const loading=document.createElement('div');loading.className='history-empty';loading.textContent='Loading the selected account-scoped result…';body.append(loading);}
-              else if(detail&&detail.error){const error=document.createElement('div');error.className='history-empty';error.textContent='Could not open this saved result: '+detail.error;body.append(error);}
-              else {const summary=document.createElement('pre');summary.className='history-row';summary.style.whiteSpace='pre-wrap';summary.textContent=(detail&&detail.summary)||'No saved summary.';body.append(summary);const solution=detail&&detail.solution;if(solution&&solution.code){const code=document.createElement('pre');code.className='history-row';code.style.whiteSpace='pre';code.style.overflow='auto';code.textContent=(solution.language?solution.language+'\n\n':'')+solution.code;body.append(code);}}
-              root.append(body);const footer=document.createElement('footer');footer.className='history-footer';footer.textContent='hh returns to History · cc Coding · mm MCQ';root.append(footer);
+              const history=document.getElementById('shared-history-sheet');
+              const rows=history&&Array.isArray(history.__rows)?history.__rows:[];
+              const selectedIndex=Math.max(0,Array.from(history?.querySelectorAll('.history-row')||[]).findIndex(x=>x.dataset.selected==='true'));
+              const selected=rows[selectedIndex]||{};
+              const title=detail?.title||selected.title||'Saved result';
+              const header=hiElement('header','hi-header');const headline=hiElement('div','hi-headline');
+              headline.append(hiElement('div','history-eyebrow','Council Editor / History'),
+                hiElement('strong','',title),
+                hiElement('small','',[detail?.origin||selected.origin,selected.kind,detail?.status||selected.status].filter(Boolean).join(' · ')));
+              header.append(headline,hiElement('span','hi-header-hint','↑ ↓ Browse · hh Close · cc Coding · mm MCQ'));root.append(header);
+              const grid=hiElement('div','hi-grid');
+              const sidebar=hiElement('aside','hi-sidebar');sidebar.append(hiElement('div','hi-sidebar-title','History'));
+              const sideList=hiElement('div','hi-side-list');
+              rows.forEach((row,i)=>{const el=hiElement('div','hi-side-row');el.dataset.selected=i===selectedIndex?'true':'false';
+                el.append(hiElement('b','',row.title||'Saved task'),
+                  hiElement('span','',[row.origin,row.kind,row.status].filter(Boolean).join(' · ')));sideList.append(el);});
+              sidebar.append(sideList);
+              const main=hiElement('section','hi-main');
+              main.append(hiElement('div','hi-section-label','Saved screenshots'));
+              const thumbnails=hiElement('div','hi-thumbs');
+              const images=Array.isArray(detail?.images)?detail.images.slice(0,4):[];
+              images.forEach((item,i)=>{const src=String(item?.src||'');
+                if(!src.startsWith('data:image/png;base64,')&&!src.startsWith('https://'))return;
+                const image=hiElement('img','hi-thumb');image.src=src;image.alt='Screenshot '+(i+1);
+                image.referrerPolicy='no-referrer';image.loading='lazy';image.title=item.label||image.alt;
+                thumbnails.append(image);});
+              const imageCount=Number(detail?.imageCount||0);
+              if(!thumbnails.children.length)thumbnails.append(hiElement('span','hi-photo-label',
+                imageCount?'Screenshots recorded; previews unavailable':'No saved screenshots'));
+              if(imageCount>images.length)thumbnails.append(hiElement('span','hi-photo-label','+'+(imageCount-images.length)+' more'));
+              main.append(thumbnails,hiElement('div','hi-section-label',detail?.kind==='mcq'?'Answer':'Solution'));
+              const codebox=hiElement('div','hi-codebox');const bar=hiElement('div','hi-codebar');
+              const solution=detail?.solution,mcq=detail?.mcq;
+              const lang=String(solution?.language||'');
+              bar.append(hiElement('b','',lang?'solution · '+lang:mcq?'Selected answer':'Saved solution'),
+                hiElement('span','',solution?.status==='reviewed'?'Council verified':
+                  solution?.status==='provisional'?'E2B passed · preliminary':''));
+              codebox.append(bar);
+              if(detail?.loading){codebox.append(hiElement('div','hi-msg','Retrieving this task, its saved models and verification evidence…'));}
+              else if(detail?.error&&!detail?.id){codebox.append(hiElement('div','hi-msg','Unable to retrieve this saved result: '+detail.error));}
+              else if(mcq&&mcq.kind==='mcq'){
+                const opts=Array.isArray(mcq.options)?mcq.options:[];
+                const choice=mcq.answer||{};
+                const matched=opts.some(x=>x.label===choice.label&&(!choice.text||x.text===choice.text));
+                const chosen=mcq.answerVerified===true&&matched
+                  ?String(choice.label||'')+' · '+String(choice.text||'')
+                  :'No source-verified answer recorded';
+                const answerText=[mcq.question||detail.question||'', '',chosen,mcq.reason||'', '',
+                  ...opts.map(o=>String(o.label||'')+'. '+String(o.text||''))].join('\n');
+                codebox.append(hiElement('div','hi-msg',answerText));
+              }else if(solution&&typeof solution.code==='string'&&solution.code.trim()){
+                const lines=hiElement('ol','code-lines');
+                renderCodeLines(lines,solution.code,lang);
+                codebox.append(lines);
+              }else {
+                codebox.append(hiElement('div','hi-msg',
+                  'No Council/E2B-verified solution was saved. Unverified candidate code is not presented as the selected answer.'));
+              }
+              main.append(codebox);
+              const brief=detail?.question||detail?.summary;
+              if(brief)main.append(hiElement('div','hi-brief',brief));
+              const rail=hiElement('div','hi-tests');const tests=Array.isArray(detail?.tests)?detail.tests:[];
+              if(!tests.length)rail.append(hiElement('span','hi-photo-label','No saved execution-test evidence'));
+              tests.slice(0,6).forEach(t=>{const pill=hiElement('span','hi-test-pill',
+                String(t.name||'Test')+' · '+String(t.status||'unverified'));
+                pill.dataset.status=String(t.status||'');
+                pill.title=[t.expected,t.actual].filter(Boolean).join(' · ').slice(0,300);
+                rail.append(pill);});
+              main.append(rail);
+              const aside=hiElement('aside','hi-aside');
+              const modelSection=hiElement('section','hi-insight');
+              const models=Array.isArray(detail?.models)?detail.models:[];
+              modelSection.append(hiElement('span','hi-insight-label','Models involved'+(models.length?' · '+models.length:'')));
+              if(!models.length)modelSection.append(hiElement('div','hi-insight-text','Model roster not saved for this run.'));
+              models.slice(0,8).forEach(m=>{const card=hiElement('div','hi-model');
+                card.append(hiElement('b',m.role==='Selected winner'?'hi-selected-winner':'',m.model||'Unnamed model'),
+                  hiElement('small','',[m.role,m.status].filter(Boolean).join(' · ')));modelSection.append(card);});
+              aside.append(modelSection);
+              const insights=detail?.insights||{};
+              hiInsight(aside,'Approach',insights.approach||detail?.summary);
+              hiInsight(aside,'Time complexity',insights.time);
+              hiInsight(aside,'Space complexity',insights.space);
+              hiInsight(aside,'Selected model',insights.selectedModel);
+              hiInsight(aside,'Judge',insights.judge);
+              hiInsight(aside,'Code style',insights.style);
+              hiInsight(aside,'Trade-offs',insights.tradeoffs);
+              hiInsight(aside,'Review notes',insights.dissent);
+              hiInsight(aside,'Rejected approaches',insights.rejected);
+              if(mcq&&mcq.kind==='mcq'){
+                hiInsight(aside,'Answer rationale',mcq.reason);
+                hiInsight(aside,'Other choices',Array.isArray(mcq.whyNot)?
+                  mcq.whyNot.map(w=>String(w.label||'')+': '+String(w.reason||'')):[]);
+              }
+              if(detail?.error)hiInsight(aside,'Recorded issue',detail.error);
+              grid.append(sidebar,main,aside);root.append(grid);
+              root.append(hiElement('footer','hi-footer','Read-only archive · ↑ ↓ switches saved tasks · Active work remains unchanged'));
+              hiSyncNavigation();
             };
             const baseUpdateOverlayState=window.updateOverlayState;
             function agentStatusText(agent){
