@@ -185,10 +185,8 @@ mod mac_shortcuts {
     pub static SCROLL_DOWN: AtomicBool = AtomicBool::new(false);
     static FADE_DOWN: AtomicBool = AtomicBool::new(false);
     static FADE_UP: AtomicBool = AtomicBool::new(false);
-    static HISTORY_TOGGLE: AtomicBool = AtomicBool::new(false);
     static HISTORY_PREVIOUS: AtomicBool = AtomicBool::new(false);
     static HISTORY_NEXT: AtomicBool = AtomicBool::new(false);
-    static HISTORY_OPEN_RESULT: AtomicBool = AtomicBool::new(false);
     static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
     static HISTORY_VISIBLE: AtomicBool = AtomicBool::new(false);
     // 1 coding, 2 multiple-choice, 3 shared cloud history.
@@ -325,11 +323,7 @@ mod mac_shortcuts {
         {
             match (usage, SHIFT_DOWN.load(Ordering::SeqCst)) {
                 (HID_USAGE_KEYBOARD_UP_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_LEFT_BRACKET, true) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_DOWN_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_NEXT.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_RIGHT_BRACKET, true) => HISTORY_NEXT.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_MINUS, true) => HISTORY_TOGGLE.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_BACKSLASH, true) => HISTORY_OPEN_RESULT.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_MINUS, false) => FADE_DOWN.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_EQUAL, false) => FADE_UP.store(true, Ordering::SeqCst),
                 _ => {}
@@ -463,10 +457,8 @@ mod mac_shortcuts {
     pub fn set_coding_overlay_visible(value: bool) { CODING_OVERLAY_VISIBLE.store(value, Ordering::SeqCst); }
     pub fn take_fade_down() -> bool { FADE_DOWN.swap(false, Ordering::SeqCst) }
     pub fn take_fade_up() -> bool { FADE_UP.swap(false, Ordering::SeqCst) }
-    pub fn take_history_toggle() -> bool { HISTORY_TOGGLE.swap(false, Ordering::SeqCst) }
     pub fn take_history_previous() -> bool { HISTORY_PREVIOUS.swap(false, Ordering::SeqCst) }
     pub fn take_history_next() -> bool { HISTORY_NEXT.swap(false, Ordering::SeqCst) }
-    pub fn take_history_open_result() -> bool { HISTORY_OPEN_RESULT.swap(false, Ordering::SeqCst) }
 }
 
 async fn space_api_calls() {
@@ -991,11 +983,7 @@ fn run() -> Result<(), String> {
                 let _ = mac_shortcuts::take_history_previous();
                 let _ = mac_shortcuts::take_history_next();
             }
-            // Ignore old specialty-key history actions; history is now opened
-            // by HH, not a punctuation key combination. Do not load results
-            // into the active Coding or MCQ task when browsing the list.
-            let _ = mac_shortcuts::take_history_toggle();
-            let _ = mac_shortcuts::take_history_open_result();
+            // HH and arrow-only History doesn't change the active solving task.
             mac_shortcuts::set_history_visible(history_open && overlay_visible);
             mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
         }
@@ -3063,6 +3051,38 @@ fn overlay_html() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_distinct_quick_letter_double_taps_open_panels() {
+        let start = Instant::now();
+        let mut last = None;
+        assert_eq!(double_tap_panel(&mut last, 1, start), None);
+        assert_eq!(double_tap_panel(&mut last, 1, start + Duration::from_millis(230)), Some(1));
+        // A completed pair resets; holding a key is filtered at the HID edge.
+        assert_eq!(double_tap_panel(&mut last, 1, start + Duration::from_millis(400)), None);
+        assert_eq!(double_tap_panel(&mut last, 2, start + Duration::from_millis(475)), None);
+        assert_eq!(double_tap_panel(&mut last, 2, start + Duration::from_millis(900)), Some(2));
+        assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(1000)), None);
+        assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(1701)), None);
+        assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(1710)), Some(3));
+    }
+
+    #[test]
+    fn combined_history_keeps_main_runs_and_both_overlay_job_types() {
+        let old=history_row("job:123","Overlay","Coding","Code","local","completed",
+            "2026-10-15T12:00:00Z");
+        let current=history_row("job:123","Overlay","Coding","Code","cloud","completed",
+            "2026-10-15T12:00:00Z");
+        let mcq=history_row("job:456","Overlay","MCQ","Question","remote","completed",
+            "2026-10-15T14:00:00Z");
+        let main=history_row("main:123","Main app","Run","Previous main result","",
+            "completed","2026-10-15T13:00:00Z");
+        let rows=normalize_history(vec![old,current,mcq,main]).unwrap();
+        assert_eq!(rows.len(),3);
+        assert_eq!(rows[0]["id"],"job:456");
+        assert_eq!(rows[1]["id"],"main:123");
+        assert_eq!(rows[2]["id"],"job:123");
+    }
 
     #[test]
     fn number_pairs_route_to_the_requested_workflow_and_capture_shape() {
