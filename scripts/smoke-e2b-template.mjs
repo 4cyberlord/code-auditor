@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 /** Explicit E2B Hobby smoke test. Never runs during normal CI/PR processing. */
+// Production obtains the E2B credential and template alias from app_config.
+// Load that source first so this script exercises the same configuration path
+// as the worker, while still permitting explicit environment overrides.
+import "./lib/config.mjs";
 import { Sandbox } from "e2b";
 const key = String(process.env.E2B_API_KEY || "").trim();
 const alias = String(process.env.CODE_AUDITOR_E2B_TEMPLATE || "").trim();
@@ -21,7 +25,7 @@ if (!key || !alias) {
       "cargo --version",
       "test -x /usr/bin/time",
       "test \"$(command -v python3)\" != ''",
-      "if [ \"$COUNCIL_LAB_TEMPLATE_REVISION\" = '' ]; then exit 49; fi",
+      "test -s /etc/council-template-revision",
     ].join("; ");
     const quote = value => "'" + String(value).replaceAll("'", String.raw`'"'"'`) + "'";
     const result=await sandbox.commands.run("bash -lc " + quote(cmd),{timeoutMs:60_000});

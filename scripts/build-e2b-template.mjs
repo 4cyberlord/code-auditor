@@ -39,6 +39,7 @@ if (!process.env.E2B_API_KEY?.trim()) {
 // production template. Point CODE_AUDITOR_E2B_TEMPLATE to this name ONLY after smoke tests.
 const alias = process.env.CODE_AUDITOR_E2B_TEMPLATE || "council-validators-v2";
 const revision = process.env.CODE_AUDITOR_E2B_TEMPLATE_REVISION || "council-lab-v2";
+const shellQuote = (value) => "'" + String(value).replaceAll("'", "'\\\"'\\\"'") + "'";
 
 let template = Template()
   .fromTemplate("code-interpreter-v1")
@@ -56,6 +57,8 @@ let template = Template()
       "CARGO_HOME=/opt/rust/cargo RUSTUP_HOME=/opt/rust/rustup /opt/rust/cargo/bin/cargo --version",
       "go version",
       "/usr/bin/time --version | head -1",
+      `printf '%s\\n' ${shellQuote(revision)} > /etc/council-template-revision`,
+      "chmod 0644 /etc/council-template-revision",
     ],
     { user: "root" }
   )
