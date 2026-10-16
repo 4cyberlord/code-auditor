@@ -945,10 +945,10 @@ case "$lang" in
   bash|sh|shell) file=main.sh; cp code.txt "$file"; command='bash main.sh'; runtime='${providerLabel} bash' ;;
   ruby|rb) file=main.rb; cp code.txt "$file"; command='ruby main.rb'; runtime='${providerLabel} ruby' ;;
   php) file=main.php; cp code.txt "$file"; command='php main.php'; runtime='${providerLabel} php' ;;
-  cpp|c++|cc|cxx) file=main.cpp; cp code.txt "$file"; command='c++ -std=${selectedCppStandard(process.env.CODE_AUDITOR_CPP_STANDARD)} -O2 main.cpp -o prog && ./prog'; runtime='${providerLabel} c++ -O2' ;;
+  cpp|c++|cc|cxx) file=main.cpp; cp code.txt "$file"; command='c++ -std=${selectedCppStandard(process.env.CODE_AUDITOR_CPP_STANDARD)} -O2 main.cpp -o prog && if [ -x /usr/bin/time ]; then /usr/bin/time -f "CA_PROGRAM_METRICS elapsed_s=%e maxrss_kb=%M" ./prog; else ./prog; fi'; runtime='${providerLabel} c++ -O2' ;;
   java) file=Main.java; cp code.txt "$file"; command='javac Main.java && java Main'; runtime='${providerLabel} javac + java' ;;
   go|golang) file=main.go; cp code.txt "$file"; command='go run main.go'; runtime='${providerLabel} go' ;;
-  rust|rs) file=main.rs; cp code.txt "$file"; command='rustc -O main.rs -o prog 2>&1 && ./prog'; runtime='${providerLabel} rustc -O' ;;
+  rust|rs) file=main.rs; cp code.txt "$file"; command='rustc -O main.rs -o prog 2>&1 && if [ -x /usr/bin/time ]; then /usr/bin/time -f "CA_PROGRAM_METRICS elapsed_s=%e maxrss_kb=%M" ./prog; else ./prog; fi'; runtime='${providerLabel} rustc -O' ;;
   *) echo "Unsupported remote benchmark language: $lang" >&2; exit 97 ;;
 esac
 status=0
@@ -1058,6 +1058,8 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
       durationMs: Date.now() - started,
       remoteElapsedMs: parsed.remoteElapsedMs,
       peakMemoryKb: parsed.peakMemoryKb,
+      totalElapsedMs: parsed.totalElapsedMs,
+      totalPeakMemoryKb: parsed.totalPeakMemoryKb,
       timedOut: false,
       truncated: out.truncated || err.truncated,
       executionId: id,
@@ -1248,6 +1250,8 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
         // second run on Actions looked necessary at all.
         remoteElapsedMs: local.remoteElapsedMs ?? null,
         peakMemoryKb: local.peakMemoryKb ?? null,
+        totalElapsedMs: local.totalElapsedMs ?? null,
+        totalPeakMemoryKb: local.totalPeakMemoryKb ?? null,
         provider: local.provider || executionProvider(settings),
         executionId: local.executionId || id,
         sandboxId: local.sandboxId || null,
