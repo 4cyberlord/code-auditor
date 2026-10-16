@@ -104,6 +104,9 @@ contract is unknown, the original candidate-aware sequence is unchanged.
   translation time, spec-harness time, and whether the spec-first path was
   used. `port_early_harness_fallback` and `port_interface_retry` capture
   recovery without disguising it as a successful verification.
+- Set `CODE_AUDITOR_PORT_PARALLEL_HARNESS=0` for immediate per-worker
+  rollback to serial port harness preparation (default is on for eligible
+  callable contracts). No other execution or correctness setting changes.
 - The new concurrency and failure-path regression tests live in
   `tests/specFirstDelivery.test.mjs`.
 
