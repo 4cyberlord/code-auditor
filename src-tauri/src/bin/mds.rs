@@ -1328,11 +1328,13 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
                         .filter(|s|!s.trim().is_empty())
                         .or_else(||session.get("title").and_then(Value::as_str))
                         .unwrap_or("Saved main-app run");
-                    rows.push(history_row(&format!("main:{id}"),"Main app",
+                    let mut saved=history_row(&format!("main:{id}"),"Main app",
                         if mode=="mcq"{"MCQ"}else if mode=="coding"||mode=="code"{"Coding"}else{"Run"},
                         title,
                         session.get("title").and_then(Value::as_str).unwrap_or(""),
-                        status,at));
+                        status,at);
+                    saved["sessionId"]=Value::String(session.get("id").and_then(Value::as_str).unwrap_or("").to_string());
+                    rows.push(saved);
                 },
                 Err(_) => errors.push("main runs"),
             }
@@ -1349,44 +1351,232 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
     Ok((rows,notice))
 }
 
-/// Fetch a saved result only after the person opens it from History. The list
-/// itself stays metadata-only and every detail read remains account-scoped.
-async fn fetch_history_detail(row: Value) -> Result<Value, String> {
-    let id = row.get("id").and_then(Value::as_str).unwrap_or("");
-    if let Some(job_id) = id.strip_prefix("job:") {
-        let report = api("reports.get", serde_json::json!({"jobId": job_id})).await?;
-        let body = report.get("report").unwrap_or(&report);
-        let candidates = body.get("candidates").and_then(Value::as_array).cloned().unwrap_or_default();
-        let winner = body.get("winner").and_then(Value::as_str).unwrap_or("");
-        return Ok(serde_json::json!({
-            "title": row.get("title").and_then(Value::as_str).unwrap_or("Overlay result"),
-            "origin": "Overlay", "status": row.get("status").and_then(Value::as_str).unwrap_or(""),
-            "summary": body.pointer("/presentation/summary").and_then(Value::as_str)
-                .or_else(|| body.pointer("/presentation/approach").and_then(Value::as_str)).unwrap_or("No saved summary."),
-            "solution": coding_solution_from_report(body, winner, &candidates),
-        }));
+/// Load the archived overlay copy for offline History, without trusting a
+/// filename supplied by the UI. The cloud report is still the authoritative
+/// source for new jobs.
+fn archived_history_job(job_id: &str) -> Option<SubmittedJob> {
+    Uuid::parse_str(job_id).ok()?;
+    for view in ["coding","mcq"] {
+        if let Ok(Some(job))=read_submitted_job_for(view) {
+            if job.id==job_id {return Some(job);}
+        }
     }
-    if let Some(run_id) = id.strip_prefix("main:") {
-        let payload = api("runs.get", serde_json::json!({"runId": run_id})).await?;
-        let responses = payload.get("responses").and_then(Value::as_array).cloned().unwrap_or_default();
-        let picked = responses.iter().find(|response| response.get("finalCode").and_then(Value::as_str)
-            .is_some_and(|code| !code.trim().is_empty()));
-        let summary = payload.pointer("/verdict/detail").and_then(Value::as_str)
-            .or_else(|| payload.pointer("/verdict/headline").and_then(Value::as_str))
-            .or_else(|| picked.and_then(|response| response.get("finalAnswer").and_then(Value::as_str)))
-            .unwrap_or("No saved verdict detail.");
-        let solution = picked.and_then(|response| response.get("finalCode").and_then(Value::as_str)
-            .filter(|code| !code.trim().is_empty()).map(|code| serde_json::json!({
-                "language": picked.and_then(|response| response.get("finalLanguage").and_then(Value::as_str)).unwrap_or(""),
-                "code": code,
-            })));
-        return Ok(serde_json::json!({
-            "title": row.get("title").and_then(Value::as_str).unwrap_or("Main-app result"),
-            "origin": "Main app", "status": row.get("status").and_then(Value::as_str).unwrap_or(""),
-            "summary": summary, "solution": solution,
-        }));
+    let path=cache_dir().ok()?.join("job-history").join(format!("{job_id}.json"));
+    let raw=fs::read(path).ok()?;
+    let job:SubmittedJob=serde_json::from_slice(&raw).ok()?;
+    (job.id==job_id).then_some(job)
+}
+
+/// Only archived captures inside this helper's own cache become thumbnails.
+/// No paths from a cloud record are opened on the Mac. Large captures are
+/// deliberately omitted rather than embedding multi-megabyte data URIs.
+fn history_local_thumbnails(job: &SubmittedJob) -> Vec<Value> {
+    let root=match cache_dir(){Ok(p)=>p.join("captures"),Err(_)=>return vec![]};
+    let canonical_root=match root.canonicalize(){Ok(p)=>p,Err(_)=>return vec![]};
+    job.previews.iter().take(4).filter_map(|path|{
+        if path.starts_with("data:image/png;base64,") && path.len()<=1_400_000 {
+            return Some(serde_json::json!({"src":path,"label":"Captured screenshot"}));
+        }
+        let file=Path::new(path).canonicalize().ok()?;
+        if !file.starts_with(&canonical_root) || file.extension().and_then(|x|x.to_str())!=Some("png") {
+            return None;
+        }
+        let metadata=fs::metadata(&file).ok()?;
+        if !metadata.is_file() || metadata.len()>1_000_000{return None;}
+        let bytes=fs::read(&file).ok()?;
+        Some(serde_json::json!({
+            "src":format!("data:image/png;base64,{}",base64::engine::general_purpose::STANDARD.encode(bytes)),
+            "label":"Captured screenshot"
+        }))
+    }).collect()
+}
+
+fn history_report_body<'a>(value:&'a Value)->&'a Value {
+    value.get("report").unwrap_or(value)
+}
+
+/// Stored main-app Council reports use {council,review}, whereas the worker
+/// stores {presentation,candidates,runs,...}. Both can be rendered with the
+/// same verified winner/evidence gate; never pick the first candidate.
+fn history_coding_evidence(body:&Value)->(Option<Value>,Vec<Value>,Vec<Value>,Value) {
+    let body=history_report_body(body);
+    let council=body.get("council").unwrap_or(body);
+    let candidates=council.get("candidates").and_then(Value::as_array)
+        .cloned().unwrap_or_default();
+    let winner=council.get("winner").and_then(Value::as_str).unwrap_or("");
+    let solution=coding_solution_from_report(council,winner,&candidates);
+    let tests=coding_tests_from_report(council);
+    let models:Vec<Value>=candidates.iter().take(8).map(|c|{
+        let model=c.get("model").and_then(Value::as_str).unwrap_or("Council agent");
+        let letter=c.get("letter").and_then(Value::as_str).unwrap_or("");
+        serde_json::json!({
+            "model":model, "role":if letter.eq_ignore_ascii_case(winner)&&!winner.is_empty(){"Selected winner"}else{"Candidate"},
+            "status":if c.get("error").and_then(Value::as_str).is_some_and(|x|!x.is_empty()){"error"}else{"done"},
+            "letter":letter
+        })
+    }).collect();
+    (solution,tests,models,council.clone())
+}
+
+fn history_main_detail(row:&Value,payload:&Value)->Value {
+    let report=payload.get("report").filter(|v|v.is_object()).unwrap_or(&Value::Null);
+    let (solution,tests,mut models,council)=history_coding_evidence(report);
+    let responses=payload.get("responses").and_then(Value::as_array).cloned().unwrap_or_default();
+    if models.is_empty() {
+        models=responses.iter().take(8).map(|response|serde_json::json!({
+            "model":response.get("model").and_then(Value::as_str).unwrap_or(""),
+            "status":response.get("status").and_then(Value::as_str).unwrap_or(""),
+            "role":"Model response · not verified winner"
+        })).collect();
     }
-    Err("The selected history item has no supported source identifier.".into())
+    let review=report.get("review").and_then(|x|x.get("data")).unwrap_or(&Value::Null);
+    let verdict=payload.get("verdict").unwrap_or(&Value::Null);
+    let summary=verdict.get("detail").and_then(Value::as_str)
+        .or_else(||verdict.get("headline").and_then(Value::as_str))
+        .unwrap_or("No saved Council summary.");
+    let review_approach=review.pointer("/approach/current").and_then(Value::as_str);
+    let selected=candidates_selected_model(&council);
+    serde_json::json!({
+        "title":row.get("title"),"id":row.get("id"),"kind":"coding",
+        "origin":"Main app","status":row.get("status"),"submittedAt":row.get("submittedAt"),
+        "summary":summary,"solution":solution,"models":models,"tests":tests,
+        "insights":{
+            "approach":review_approach.or_else(||council.pointer("/dossier/synthesis")).unwrap_or(""),
+            "time":review.pointer("/efficiency/currentTime").and_then(Value::as_str).unwrap_or(""),
+            "space":review.pointer("/efficiency/currentSpace").and_then(Value::as_str).unwrap_or(""),
+            "style":review.pointer("/style/note").and_then(Value::as_str).unwrap_or(""),
+            "selectedModel":selected,
+            "judge":verdict.get("judgeProvider").and_then(Value::as_str).unwrap_or(""),
+            "reliability":verdict.get("reliability").and_then(Value::as_str).unwrap_or("")
+        },
+        "question":payload.pointer("/run/asked").and_then(Value::as_str).unwrap_or(""),
+        "imageCount":0,
+        "images":[]
+    })
+}
+
+fn candidates_selected_model(council:&Value)->String{
+    let winner=council.get("winner").and_then(Value::as_str).unwrap_or("");
+    council.get("candidates").and_then(Value::as_array).and_then(|rows|
+        rows.iter().find(|c|c.get("letter").and_then(Value::as_str)
+            .is_some_and(|letter|letter.eq_ignore_ascii_case(winner)))
+    ).and_then(|c|c.get("model").and_then(Value::as_str))
+        .unwrap_or("").to_string()
+}
+
+fn history_overlay_detail(row:&Value, report:Option<&Value>, job:Option<&Value>,events:&[Value], cached:Option<&SubmittedJob>)->Value{
+    let raw=report.or_else(||cached.and_then(|j|j.report.as_ref()));
+    let body=raw.map(history_report_body).unwrap_or(&Value::Null);
+    let mode=job.and_then(|j|j.get("mode")).and_then(Value::as_str)
+        .or_else(||cached.map(|j|j.mode.as_str())).unwrap_or("council");
+    let is_mcq=mode=="mcq"||body.get("kind").and_then(Value::as_str)==Some("mcq");
+    let (solution,tests,mut models,_)=if is_mcq {
+        (None,vec![],vec![],Value::Null)
+    }else{history_coding_evidence(body)};
+    if is_mcq {
+        if let Some(model)=body.get("model").and_then(Value::as_str).filter(|x|!x.is_empty()){
+            models.push(serde_json::json!({"model":model,"role":"Answer model","status":"done"}));
+        }
+    }
+    if models.is_empty(){
+        if let Some(event)=events.iter().rev().find(|e|e.get("phase").and_then(Value::as_str)==Some("solving")){
+            models=event.pointer("/payload/models").and_then(Value::as_array).into_iter().flatten()
+                .filter_map(Value::as_str).take(8)
+                .map(|name|serde_json::json!({"model":name,"role":"Selected solver","status":"unknown"})).collect();
+        }
+    }
+    let presentation=body.get("presentation").unwrap_or(&Value::Null);
+    let mcq=if is_mcq{Some(body.clone())}else{None};
+    let summary=presentation.get("summary").and_then(Value::as_str)
+        .or_else(||presentation.get("approach").and_then(Value::as_str))
+        .or_else(||body.get("synthesis").and_then(Value::as_str))
+        .unwrap_or("");
+    serde_json::json!({
+        "title":row.get("title"),"id":row.get("id"),
+        "origin":"Overlay","kind":if is_mcq{"mcq"}else{"coding"},
+        "status":job.and_then(|j|j.get("status")).or_else(||row.get("status")),
+        "submittedAt":row.get("submittedAt"),"solution":solution,
+        "mcq":mcq,"models":models,"tests":tests,
+        "summary":summary,"question":mcq.as_ref().and_then(|m|m.get("question")).and_then(Value::as_str).unwrap_or(""),
+        "insights":{
+            "approach":presentation.get("approach").and_then(Value::as_str).unwrap_or(""),
+            "time":presentation.get("timeComplexity").and_then(Value::as_str).unwrap_or(""),
+            "space":presentation.get("spaceComplexity").and_then(Value::as_str).unwrap_or(""),
+            "selectedModel":presentation.get("provenance").and_then(Value::as_str).unwrap_or(""),
+            "tradeoffs":presentation.get("tradeoffs").and_then(Value::as_str).unwrap_or(""),
+            "dissent":presentation.get("dissent"),
+            "rejected":presentation.get("rejected")
+        },
+        "error":job.and_then(|j|j.get("error"))
+            .or_else(||cached.and_then(|j|j.error.as_ref().map(|_|&Value::Null))),
+        "imageCount":cached.map(|j|j.previews.len()).unwrap_or(0),
+        "images":cached.map(history_local_thumbnails).unwrap_or_default()
+    })
+}
+
+async fn history_signed_images(rows:Vec<Value>)->(Vec<Value>,usize){
+    use futures_util::future::join_all;
+    let count=rows.len();
+    let results=join_all(rows.into_iter().take(4).map(|image|async move{
+        let bucket=image.get("storageBucket").and_then(Value::as_str).unwrap_or("");
+        let path=image.get("storagePath").and_then(Value::as_str).unwrap_or("");
+        let name=image.get("fileName").and_then(Value::as_str).unwrap_or("Screenshot");
+        // Azure blobs currently have no authenticated read-SAS API. Don't
+        // create an unprotected URL or turn the private path into a browser URL.
+        if bucket.is_empty()||bucket.starts_with("azure:")||path.is_empty(){return None;}
+        let signed=api("storage.sign",serde_json::json!({"bucket":bucket,"path":path,"seconds":900})).await.ok()?;
+        let src=signed.get("url").and_then(Value::as_str)?;
+        if !src.starts_with("https://"){return None;}
+        Some(serde_json::json!({"src":src,"label":name}))
+    })).await;
+    (results.into_iter().flatten().collect(),count)
+}
+
+/// The list is metadata-only. When a row is selected, fetch the selected
+/// account's cloud report, actual model roster, evidence, and small thumbnails.
+/// Failed or unverified jobs still open, without pretending to have verified code.
+async fn fetch_history_detail(row:Value)->Result<Value,String>{
+    let id=row.get("id").and_then(Value::as_str).unwrap_or("");
+    if let Some(job_id)=id.strip_prefix("job:"){
+        let cached=archived_history_job(job_id);
+        let (report,job,events,images)=tokio::join!(
+            api("reports.get",serde_json::json!({"jobId":job_id})),
+            api("jobs.get",serde_json::json!({"jobId":job_id})),
+            api("jobs.events",serde_json::json!({"jobId":job_id})),
+            api("jobs.images",serde_json::json!({"jobId":job_id}))
+        );
+        if cached.is_none() && job.is_err(){return Err(format!("This saved cloud job could not be loaded: {}",job.err().unwrap_or_default()));}
+        let events=events.ok().and_then(|x|x.as_array().cloned()).unwrap_or_default();
+        let mut detail=history_overlay_detail(&row,
+            report.as_ref().ok().filter(|v|!v.is_null()),
+            job.as_ref().ok().filter(|v|!v.is_null()),
+            &events,cached.as_ref());
+        if let Ok(images)=images{
+            if let Some(arr)=images.as_array(){
+                let (signed,count)=history_signed_images(arr.clone()).await;
+                detail["imageCount"]=Value::from(count);
+                // Cloud-backed thumbnails take priority, but fall back to
+                // privately cached captures if Azure can't sign read URLs.
+                if !signed.is_empty(){detail["images"]=Value::from(signed);}
+            }
+        }
+        return Ok(detail);
+    }
+    if let Some(run_id)=id.strip_prefix("main:"){
+        let payload=api("runs.get",serde_json::json!({"runId":run_id})).await?;
+        let mut detail=history_main_detail(&row,&payload);
+        if let Some(session_id)=row.get("sessionId").and_then(Value::as_str){
+            if let Ok(images)=api("screenshots.list",serde_json::json!({"sessionId":session_id})).await{
+                if let Some(arr)=images.as_array(){
+                    let (signed,count)=history_signed_images(arr.clone()).await;
+                    detail["imageCount"]=Value::from(count);
+                    detail["images"]=Value::from(signed);
+                }
+            }
+        }
+        return Ok(detail);
+    }
+    Err("This History record has no supported source identifier.".into())
 }
 
 fn clean_expired_capture_dirs() -> Result<(), String> {
