@@ -6771,3 +6771,302 @@ body[data-dragging="row"] * {
   .settings-workspace-nav-item { transition: none; }
   .modal.settings-workspace .settings-workspace-content { scroll-behavior: auto; }
 }
+
+
+/* Settings form polish: scoped strictly to the Control Center.
+   Main editor inputs, overlay sizing and capture controls are untouched. */
+.settings-workspace .settings-workspace-content .provider-card {
+  padding: 22px 23px;
+}
+
+.settings-workspace .settings-workspace-content .provider-card .top {
+  flex-wrap: wrap;
+  row-gap: 9px;
+  margin-bottom: 18px;
+}
+
+.settings-workspace .settings-workspace-content .provider-card .row {
+  grid-template-columns: minmax(138px, 174px) minmax(0, 1fr);
+  gap: 15px;
+  min-width: 0;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.settings-workspace .settings-workspace-content .provider-card .row:has(> .vendor) {
+  grid-template-columns: minmax(138px, 174px) minmax(0, 1fr) auto;
+}
+
+.settings-workspace .settings-workspace-content .provider-card .row > * {
+  min-width: 0;
+}
+
+.settings-workspace .settings-workspace-content .provider-card .row label {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 590;
+  line-height: 1.4;
+}
+
+.settings-workspace .settings-workspace-content .field,
+.settings-workspace .settings-workspace-content select.field {
+  min-height: 42px;
+  height: 42px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg-sunken);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.4;
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.settings-workspace .settings-workspace-content .field.mono {
+  font-size: 12px;
+  letter-spacing: -0.1px;
+}
+
+.settings-workspace .settings-workspace-content .field::placeholder {
+  color: var(--text-faint);
+  opacity: 0.9;
+}
+
+.settings-workspace .settings-workspace-content .field:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.settings-workspace .settings-workspace-content textarea.field {
+  height: auto;
+  min-height: 112px;
+  width: 100%;
+  max-height: 280px;
+  padding: 13px 15px;
+  line-height: 1.7;
+  resize: vertical;
+  font-size: 12px;
+  font-weight: 450;
+}
+
+.settings-workspace .settings-workspace-content .provider-card .row .with-btn {
+  gap: 9px;
+  align-items: center;
+}
+
+.settings-workspace .settings-workspace-content .provider-card .row .with-btn > .field {
+  min-width: min(150px, 100%);
+}
+
+.settings-workspace .settings-workspace-content .provider-card .row .with-btn > .btn,
+.settings-workspace .settings-workspace-content .provider-card .row .with-btn > .btn.tiny {
+  height: 42px;
+  min-height: 42px;
+  padding: 0 13px;
+  border-radius: 9px;
+}
+
+.settings-workspace .settings-workspace-content .provider-card .segmented {
+  min-height: 40px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px;
+  border-radius: 10px;
+  align-items: stretch;
+}
+
+.settings-workspace .settings-workspace-content .provider-card .segmented button {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 30px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  white-space: normal;
+  line-height: 1.25;
+}
+
+.settings-workspace .settings-workspace-content .provider-card .hint {
+  max-width: 74ch;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.settings-workspace .settings-workspace-content .provider-card .row + .hint {
+  margin: -5px 0 16px min(190px, 25%);
+}
+
+.settings-workspace .settings-workspace-content .settings-form-section-heading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 20px;
+  margin: 22px 0 17px;
+}
+
+.settings-workspace .settings-workspace-content .settings-form-section-heading:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+  margin-top: 12px;
+}
+
+.settings-workspace .settings-form-section-heading > span {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 710;
+  letter-spacing: -0.18px;
+}
+
+.settings-workspace .settings-form-section-heading > small {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 470;
+}
+
+.settings-workspace .settings-form-caption {
+  color: var(--text-faint);
+  font-size: 10.5px;
+  line-height: 1.5;
+  margin: -5px 0 17px;
+  overflow-wrap: anywhere;
+}
+
+.settings-workspace .settings-form-caption code {
+  color: var(--text-dim);
+  font-size: inherit;
+  border-radius: 4px;
+  background: var(--bg-sunken);
+  padding: 2px 5px;
+}
+
+.settings-workspace .settings-inline-help {
+  display: block;
+  margin: 0 0 17px;
+  padding: 0;
+  border: 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+.settings-workspace .settings-inline-help summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 550;
+  list-style: none;
+  border-radius: 6px;
+  padding: 5px 1px;
+}
+
+.settings-workspace .settings-inline-help summary::-webkit-details-marker { display: none; }
+.settings-workspace .settings-inline-help summary::before {
+  content: "›";
+  display: inline-block;
+  color: var(--accent);
+  font-size: 17px;
+  line-height: 10px;
+  transform-origin: center;
+  transition: transform 120ms ease;
+}
+.settings-workspace .settings-inline-help[open] summary::before { transform: rotate(90deg); }
+.settings-workspace .settings-inline-help summary:hover { color: var(--text); }
+.settings-workspace .settings-inline-help summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.settings-workspace .settings-inline-help p {
+  border-left: 2px solid var(--line-strong);
+  padding: 4px 0 4px 12px;
+  margin: 7px 0 0;
+  max-width: 72ch;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.settings-workspace .settings-council-card .settings-roster-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  align-items: stretch;
+  margin: 0 0 12px;
+}
+
+.settings-workspace .settings-council-card .settings-roster-row > label {
+  padding-top: 0 !important;
+  font-weight: 670;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.settings-workspace .settings-council-card .settings-roster-row textarea {
+  min-height: 100px;
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.settings-workspace .settings-council-card .row.settings-model-health-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 9px 0;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+  align-items: center;
+}
+
+.settings-workspace .settings-council-card .settings-model-health-row > .field {
+  width: auto;
+  flex: 1 1 180px;
+  height: auto;
+  min-height: 34px;
+  padding: 8px 11px;
+  border-color: var(--line);
+  font-size: 11px;
+}
+
+.settings-workspace .settings-council-card .settings-model-health-row > span:not(.field) {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.settings-workspace .settings-council-card .settings-form-section-heading + .row {
+  margin-top: 0;
+}
+
+@media (max-width: 900px) {
+  .settings-workspace .settings-workspace-content .provider-card .row {
+    grid-template-columns: minmax(115px, 146px) minmax(0, 1fr);
+    gap: 11px;
+  }
+  .settings-workspace .settings-workspace-content .provider-card .row:has(> .vendor) {
+    grid-template-columns: minmax(115px, 146px) minmax(0, 1fr) auto;
+  }
+}
+@media (max-width: 700px) {
+  .settings-workspace .settings-workspace-content .provider-card {
+    padding: 18px 16px;
+  }
+  .settings-workspace .settings-workspace-content .provider-card .row,
+  .settings-workspace .settings-workspace-content .provider-card .row:has(> .vendor) {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+    margin-bottom: 14px;
+  }
+  .settings-workspace .settings-workspace-content .provider-card .row + .hint {
+    margin: 0 0 16px;
+  }
+  .settings-workspace .settings-council-card .settings-model-health-row {
+    flex-wrap: wrap;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-workspace .settings-inline-help summary::before { transition: none; }
+}
