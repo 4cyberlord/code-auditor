@@ -7070,3 +7070,22 @@ body[data-dragging="row"] * {
 @media (prefers-reduced-motion: reduce) {
   .settings-workspace .settings-inline-help summary::before { transition: none; }
 }
+
+
+/* Keep roster labels and textareas stacked. This must exceed the generic
+   two-column settings row specificity without changing unrelated forms. */
+.settings-workspace .settings-workspace-content .provider-card .row.settings-roster-row {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+}
+@media (max-width: 700px) {
+  .settings-workspace .settings-workspace-content .provider-card .row.settings-roster-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+/* Long helper paths and model identifiers must wrap within their panels. */
+.settings-workspace .settings-workspace-content .provider-card .mono.small,
+.settings-workspace .settings-workspace-content .provider-card .row > span.mono {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
