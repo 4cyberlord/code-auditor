@@ -21,6 +21,28 @@ jobs:
           node-version: '24'
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+        id: rust-toolchain
+        # GitHub hosted macOS occasionally cannot resolve static.rust-lang.org.
+        # A bounded retry below recovers transient DNS failures without skipping Rust checks.
+        continue-on-error: true
+      - name: Recover transient Rust toolchain download failure
+        if: steps.rust-toolchain.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4; do
+            echo "Rust toolchain install retry ${attempt}/4"
+            if rustup toolchain install stable --profile minimal --no-self-update &&
+               rustup default stable && rustc --version && cargo --version; then
+              echo "Rust toolchain recovered."
+              exit 0
+            fi
+            if [[ "$attempt" -lt 4 ]]; then sleep $((attempt * 12)); fi
+          done
+          echo "::error::Rust toolchain cannot be installed after four attempts; investigate DNS/TLS to static.rust-lang.org, not the application source."
+          exit 1
+      - name: Verify Rust toolchain
+        run: rustc --version && cargo --version
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
