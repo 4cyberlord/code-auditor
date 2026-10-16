@@ -22,6 +22,8 @@ import { createHmac, createSign } from "node:crypto";
 import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
+import {createSandboxCapacity, hobbyWorkerLimit} from "./lib/e2bCapacity.mjs";
+import {createE2BWarmPool} from "./lib/e2bWarmPool.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
 import { fetchAuthoritativeLanguageContext, inferDocumentationLanguage } from "./lib/authoritativeLanguageDocs.mjs";
 import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/externalLanguageSources.mjs";
@@ -229,6 +231,14 @@ const {
 
 const MAX_OUTPUT = 64 * 1024;
 const REMOTE_RUN_TIMEOUT_MS = 120_000;
+// Process-local guard includes idle prewarmed microVMs and active execution.
+// A distributed quota gate is still required before multi-replica rollouts.
+const E2B_CAPACITY = createSandboxCapacity(
+  hobbyWorkerLimit(process.env.CODE_AUDITOR_E2B_WORKER_CAP, 8)
+);
+const E2B_WARM_IDLE_MS = Math.max(1_000, Math.min(180_000,
+  Number(process.env.CODE_AUDITOR_E2B_WARM_IDLE_MS) || 75_000
+));
 const E2B_TIMEOUT_ATTEMPTS = Math.max(1, Number(process.env.CODE_AUDITOR_E2B_TIMEOUT_ATTEMPTS || 2));
 const TOKENROUTER_MIN_DELAY_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS || 13_000);
 const TOKENROUTER_JITTER_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_JITTER_MS || 1_500);
@@ -974,30 +984,48 @@ export function repoFor(env = process.env) {
   return String(env.GITHUB_REPOSITORY || env.CODE_AUDITOR_GITHUB_REPOSITORY || "").trim();
 }
 
+/** E2B microVMs share the same isolated template, not filesystem state.
+ * Capacity permits are held for the FULL lifetime (including standby).
+ */
+async function createE2BLease({executionId, timeoutMs, purpose="benchmark", slot="", jobId=""}) {
+  const release = await E2B_CAPACITY.acquire();
+  try {
+    const { Sandbox } = await import("@e2b/code-interpreter");
+    const bootStarted = Date.now();
+    const template = String(process.env.CODE_AUDITOR_E2B_TEMPLATE || "").trim();
+    const opts = {
+      apiKey: secret("E2B_API_KEY"),
+      timeoutMs,
+      allowInternetAccess: false,
+      metadata: {
+        executionId, app: "code-editor", workerId: WORKER_ID, purpose,
+        ...(slot ? {solverSeat:slot} : {}),
+        ...(jobId ? {jobId} : {}),
+        template: template || "code-interpreter-v1",
+      },
+    };
+    const sandbox = template ? await Sandbox.create(template, opts) : await Sandbox.create(opts);
+    return {sandbox, release, bootMs: Date.now() - bootStarted};
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
+
 async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, options = {}) {
   const policy = validateExecution(language, code, timeoutMs);
   const id = options.executionId || executionId();
   const started = Date.now();
-  const { Sandbox } = await import("@e2b/code-interpreter");
-  const bootStarted = Date.now();
-  const template = String(process.env.CODE_AUDITOR_E2B_TEMPLATE || "").trim();
-  const opts = {
-    apiKey: secret("E2B_API_KEY"),
-    timeoutMs: Math.max(policy.timeoutMs + 30_000, 90_000),
-    // E2B microVM egress is denied unless a future explicitly approved
-    // network policy is implemented and tested.
-    allowInternetAccess: false,
-    metadata: {
-      executionId: id,
-      app: "code-editor",
-      workerId: WORKER_ID,
-      purpose: "benchmark",
-      template: template || "code-interpreter-v1",
-    },
-  };
-  const sandbox = template ? await Sandbox.create(template, opts) : await Sandbox.create(opts);
-  const bootMs = Date.now() - bootStarted;
-  return withSandboxLifecycle(sandbox,
+  // Solver A/B/C/D may already own a separate E2B microVM from the
+  // same immutable template. Consume it only once; other passes are cold.
+  const standby = options.warmPool && options.candidateLetter
+    ? await options.warmPool.take(options.candidateLetter) : null;
+  const lease = standby || await createE2BLease({
+    executionId: id, timeoutMs: Math.max(policy.timeoutMs + 30_000, 90_000)
+  });
+  const {sandbox, bootMs} = lease;
+  try {
+  return await withSandboxLifecycle(sandbox,
     () => options.onState?.("running", { executionId: id, sandboxId: sandbox.sandboxId, bootMs }),
     async () => {
     let result;
@@ -1036,6 +1064,7 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
       provider: "e2b",
       sandboxId: sandbox.sandboxId,
       bootMs,
+      prewarmed: Boolean(standby),
     };
     },
     async (error) => {
@@ -1043,6 +1072,10 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
       await options.onState?.(state, { executionId: id, sandboxId: sandbox.sandboxId, reason: String(error).slice(0, 200) });
     }
   );
+  } finally {
+    // The sandbox lifecycle has already called kill(), including on failure.
+    lease.release();
+  }
 }
 
 function executionProvider(settings) {
@@ -1070,7 +1103,8 @@ async function runVerification(settings, suite, program, options = {}) {
   let last;
   for (let attempt = 1; attempt <= E2B_TIMEOUT_ATTEMPTS; attempt += 1) {
     try {
-      const result = await runE2BCode(suite.language, program, timeoutMs, options);
+      const result = await runE2BCode(suite.language, program, timeoutMs,
+        attempt === 1 ? options : {...options, warmPool: null});
       if (!result.timedOut || attempt === E2B_TIMEOUT_ATTEMPTS) return result;
       last = new Error(`E2B execution timed out (attempt ${attempt})`);
     } catch (error) {
@@ -1125,6 +1159,8 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
     try {
       const local = await runVerification(settings, suite, program, {
         executionId: id,
+        warmPool: !revised ? opts.warmPool : null,
+        candidateLetter: candidate.letter,
         onState: (state, meta) => addEvent(job.id, "info", "execution_state",
           `Candidate ${candidate.letter}${tag}: ${state}.`,
           { ...meta, letter: candidate.letter, state }).catch(() => {}),
@@ -1216,6 +1252,7 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
         timedOut: Boolean(local.timedOut),
         truncated: Boolean(local.truncated),
         bootMs: local.bootMs ?? null,
+        prewarmed: Boolean(local.prewarmed),
         network: local.network || "unknown",
         stderr: diagnostic,
         stdout: String(local.stdout || "").slice(0, 4096),
@@ -1444,7 +1481,7 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   }));
   const completed=Object.fromEntries(eagerEntries.filter(([,run])=>run));
   const stillPending=candidates.filter(candidate=>!completed[candidate.letter]);
-  const remaining=stillPending.length?await executeField(job,settings,suites,stillPending):{};
+  const remaining=stillPending.length?await executeField(job,settings,suites,stillPending,{warmPool:options.warmPool}):{};
   const runs={...completed,...remaining};
   const oracles=await runMutationOracle(job, settings, suites, candidates, runs);
   return { suites, runs, oracles };
@@ -2309,6 +2346,8 @@ async function claim(job) {
 }
 
 export async function runCouncilJob(job) {
+  let warmPool = null;
+  try {
   if (job.mode === "mcq") {
     await runMcqJob(job);
     return;
@@ -2709,6 +2748,33 @@ export async function runCouncilJob(job) {
     await provisionalState.writing;
   };
 
+  // Opt-in canary: four independent E2B copies are created while the solver
+  // models reason, ready for their first Python E2B candidate runs. Never warm
+  // MCQ jobs, absent E2B credentials, or an unsupported primary language.
+  if (process.env.CODE_AUDITOR_E2B_PREWARM === "1" &&
+      inferredKind === "code" && primaryLanguage === "python" &&
+      secret("E2B_API_KEY")) {
+    warmPool = createE2BWarmPool({
+      idleMs: E2B_WARM_IDLE_MS,
+      create: letter => createE2BLease({
+        executionId: executionId(), purpose: "standby-python",
+        slot: letter, jobId: job.id,
+        timeoutMs: Math.max(REMOTE_RUN_TIMEOUT_MS + E2B_WARM_IDLE_MS + 60_000, 180_000),
+      }),
+      destroy: async lease => {
+        try { await lease.sandbox.kill(); }
+        finally { lease.release(); }
+      },
+      onEvent: (name, meta) => addEvent(job.id, name === "failed" ? "warn" : "info",
+        "e2b_prewarm_" + name, "Standby Python sandbox " + name + " for " + meta.letter,
+        meta).catch(() => {}),
+    });
+    warmPool.prewarm(solving.map((_, index) => letterFor(index)));
+    await addEvent(job.id,"info","e2b_prewarm_requested",
+      "Requested up to four isolated standby Python sandboxes; idle sandboxes expire automatically.",
+      {seats:Math.min(4,solving.length),idleMs:E2B_WARM_IDLE_MS,
+       capacity:E2B_CAPACITY.snapshot()});
+  }
   timer.enter("solving");
   await bench.announce("solving", models.filter((m) => bench.has(m.id)).map((m) => m.id));
   await addEvent(
@@ -2740,7 +2806,7 @@ export async function runCouncilJob(job) {
             const ready=await preparedSuites;
             const suite=ready.find(item=>item.language===candidateLanguage(final));
             if(!suite)return null;
-            const output=await executeField(job,settings,[suite],[candidates[index]]);
+            const output=await executeField(job,settings,[suite],[candidates[index]],{warmPool});
             const run=output[letter]||null;
             if(run) await publishProvisional(candidates[index],run);
             return run;
@@ -2835,7 +2901,11 @@ export async function runCouncilJob(job) {
   const councilKnowledge = [initialReference.prompt,knowledge].filter(Boolean).join("\n\n");
 
   timer.enter("benchmark");
-  const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field, knowledge, bench, {preparedSuites,eagerRuns});
+  const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field, knowledge, bench, {preparedSuites,eagerRuns,warmPool});
+  // All original candidates have finished. Do not pay for standby capacity
+  // throughout later reviews, judges or language porting.
+  await warmPool?.close();
+  warmPool = null;
   // When the contract lacked an explicit interface, testing followed the
   // candidate-aware path; still publish a provisional verified result before
   // starting the separate Council review/judging stages.
@@ -3407,6 +3477,10 @@ export async function runCouncilJob(job) {
       jobId: job.id,
       phase: "completed",
     }).catch(() => {});
+  }
+  } finally {
+    // Also disposes late-arriving E2B creates after a failed/cancelled job.
+    await warmPool?.close();
   }
 }
 
