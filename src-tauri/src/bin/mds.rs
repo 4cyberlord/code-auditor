@@ -3011,11 +3011,11 @@ fn overlay_html() -> &'static str {
       html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden}
 	      body{box-sizing:border-box;padding:16px 22px 22px;color:var(--text);font:600 14px -apple-system,BlinkMacSystemFont,sans-serif;display:flex;flex-direction:column;align-items:center;gap:14px}
 		      .hudbar{box-sizing:border-box;display:flex;align-items:center;gap:10px;max-width:1180px;min-height:42px;padding:6px 12px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,.13),rgba(255,255,255,.045)),rgba(18,19,18,.58);box-shadow:0 14px 36px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.18);backdrop-filter:blur(18px) saturate(1.25);white-space:nowrap;color:rgba(255,255,255,.84);font-size:11px;font-weight:800}
-		      .hud-logo{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:#f5d83b;color:#24210a;font-size:10px;font-weight:900;box-shadow:0 0 0 2px rgba(255,226,69,.28),0 0 24px rgba(245,216,59,.32);flex:0 0 32px}
+		      .hud-logo{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.14);color:rgba(255,255,255,.92);font-size:10px;font-weight:900;box-shadow:inset 0 1px 0 rgba(255,255,255,.28);flex:0 0 32px}
 		      .hud-key,.hud-pause{display:grid;place-items:center;min-width:32px;height:28px;padding:0 10px;border-radius:8px;background:rgba(255,255,255,.13);box-shadow:inset 0 1px 0 rgba(255,255,255,.08);color:rgba(255,255,255,.9);flex:0 0 auto}
 		      .hud-action{color:rgba(255,255,255,.68);margin-left:4px}
-	      .hud-meter{display:inline-flex;align-items:end;gap:2px;height:18px;padding:0 2px}.hud-meter i{display:block;width:3px;border-radius:3px;background:#f5d83b;box-shadow:0 0 9px rgba(245,216,59,.34)}.hud-meter i:nth-child(1){height:7px}.hud-meter i:nth-child(2){height:12px}.hud-meter i:nth-child(3){height:9px}
-	      #panel{box-sizing:border-box;width:100%;flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;border:2px solid rgba(245,216,59,.72);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(245,216,59,.16),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(245,216,59,.18),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
+	      .hud-meter{display:inline-flex;align-items:end;gap:2px;height:18px;padding:0 2px}.hud-meter i{display:block;width:3px;border-radius:3px;background:rgba(205,224,242,.7);box-shadow:0 0 9px rgba(190,215,235,.18)}.hud-meter i:nth-child(1){height:7px}.hud-meter i:nth-child(2){height:12px}.hud-meter i:nth-child(3){height:9px}
+	      #panel{box-sizing:border-box;width:100%;flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;border:1px solid rgba(255,255,255,.26);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(205,222,239,.10),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(255,255,255,.09),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
             .pane{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:10px;padding:18px;overflow:hidden}.pane+ .pane{border-left:1px solid var(--pane-line)}
             .pictures-pane{align-items:flex-start}
             .title{font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.95;text-shadow:0 1px 2px var(--title-shadow)}
@@ -3038,18 +3038,18 @@ fn overlay_html() -> &'static str {
             .agent-header{box-sizing:border-box;width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:2px}
             .agent-header .title{font-size:11px}.agent-summary{color:var(--muted);font-size:10px;white-space:nowrap}
             .overlay-progress,.overlay-diagnostics{box-sizing:border-box;width:100%;padding:9px 10px;border:1px solid rgba(114,159,255,.34);border-radius:9px;background:rgba(67,112,199,.12);color:rgba(231,240,255,.86);font-size:10px;line-height:1.35}
-            .overlay-history-context{box-sizing:border-box;width:100%;padding:8px 10px;border:1px solid rgba(245,216,59,.45);border-radius:9px;background:rgba(245,216,59,.10);color:rgba(255,246,188,.96);font-size:10px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            .overlay-history-context{box-sizing:border-box;width:100%;padding:8px 10px;border:1px solid rgba(201,228,245,.45);border-radius:9px;background:rgba(201,228,245,.10);color:rgba(255,246,188,.96);font-size:10px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
             .overlay-diagnostics{border-color:rgba(255,107,107,.48);background:rgba(255,107,107,.1);color:rgba(255,226,226,.94)}
             .overlay-diagnostics b{display:block;margin-bottom:2px;color:#ffd7d7}
-	            .solution-editor{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:650px;display:flex;flex-direction:column;border:1px solid var(--panel-line);border-radius:9px;background:var(--editor-bg);overflow:hidden}
+	            .solution-editor{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;border:1px solid var(--panel-line);border-radius:9px;background:var(--editor-bg);overflow:hidden}
             .editor-head,.tests-head{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.76);font-size:11px}
             .editor-head b,.tests-head b{color:rgba(255,255,255,.95)}
-	            .code-lines{flex:1;margin:0;padding:13px 0;color:var(--code-text);font:500 12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line}
+	            .code-lines{flex:1;min-height:0;margin:0;padding:13px 0;color:var(--code-text);font:500 12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line}
 	            .code-lines li{display:grid;grid-template-columns:42px minmax(0,1fr);min-height:20px;padding:0 14px 0 0;list-style:none;counter-increment:code-line}
 	            .code-lines li:before{content:counter(code-line);padding-right:12px;text-align:right;color:rgba(255,255,255,.3)}
 	            .code-lines code{display:block;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
             .kw{color:var(--kw)}.fn{color:var(--fn)}.arg{color:var(--arg)}.num{color:var(--num)}.str{color:var(--str)}.built{color:var(--built)}.op{color:var(--op)}.cm{color:var(--cm)}
-	            .tests{box-sizing:border-box;width:100%;max-height:86px;border:1px solid var(--panel-line);border-radius:9px;background:var(--tests-bg);overflow:hidden}
+	            .tests{box-sizing:border-box;width:100%;min-height:58px;max-height:120px;overflow-y:auto;border:1px solid var(--panel-line);border-radius:9px;background:var(--tests-bg);overflow:hidden}
 	            .case-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;padding:7px}
 	            .case{min-width:0;padding:5px;border:1px solid rgba(255,255,255,.12);border-radius:7px;background:rgba(255,255,255,.045);font-size:10px;color:rgba(255,255,255,.82)}
             .case b{display:block;margin-bottom:4px;color:rgba(255,255,255,.95)}
@@ -3070,7 +3070,7 @@ fn overlay_html() -> &'static str {
               scrollbar-color:rgba(255,255,255,.22) transparent;
             }
             .thought-pane .thought-item{
-              --insight-accent:#f5d83b;
+              --insight-accent:#c9e4f5;
               counter-increment:insight-step;
               position:relative;box-sizing:border-box;flex:0 0 auto;width:100%;
               display:grid;grid-template-columns:3px minmax(0,1fr);grid-template-rows:auto auto;
@@ -3128,7 +3128,7 @@ fn overlay_html() -> &'static str {
               .mcq-answer b{color:#ffdf5d}
               .mcq-options{box-sizing:border-box;width:100%;display:flex;flex-direction:column;gap:8px;overflow:auto}
               .mcq-option{padding:10px;border:1px solid var(--panel-line);border-radius:9px;background:var(--box-fill);font-size:13px;line-height:1.35}
-              .mcq-option[data-picked="true"]{border-color:rgba(245,216,59,.72);background:rgba(245,216,59,.12)}
+              .mcq-option[data-picked="true"]{border-color:rgba(201,228,245,.72);background:rgba(201,228,245,.12)}
               .mcq-reason{min-height:220px;font-size:13px}
               .mcq-history{box-sizing:border-box;width:100%;flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;overflow:auto}
               .mcq-history-row{padding:10px;border:1px solid var(--panel-line);border-radius:9px;background:var(--box-fill);font-size:12px;line-height:1.35;color:var(--muted)}
@@ -3146,27 +3146,27 @@ fn overlay_html() -> &'static str {
             .history-sheet{position:absolute;z-index:30;inset:0;box-sizing:border-box;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;padding:27px 32px 22px;background:linear-gradient(135deg,rgba(13,18,25,.95),rgba(18,24,32,.96));backdrop-filter:blur(24px) saturate(1.3);color:#f5f7fa}
             .history-sheet[hidden]{display:none}
             .history-heading{display:flex;align-items:start;justify-content:space-between;gap:15px;flex-wrap:wrap;padding-bottom:15px;border-bottom:1px solid rgba(255,255,255,.18)}
-            .history-eyebrow{color:#f5d83b;font-size:10px;font-weight:850;letter-spacing:.16em;text-transform:uppercase}
+            .history-eyebrow{color:#c9e4f5;font-size:10px;font-weight:850;letter-spacing:.16em;text-transform:uppercase}
             .history-title{font-size:25px;font-weight:800;letter-spacing:-.035em;margin:5px 0 4px}
             .history-description{font-size:12px;font-weight:500;color:rgba(245,247,250,.58)}
             .history-counter{font:700 11px SFMono-Regular,Menlo,monospace;color:rgba(245,247,250,.66);padding:10px 12px;border:1px solid rgba(255,255,255,.16);border-radius:10px}
             .history-list{overflow-x:hidden;overflow-y:auto;min-height:0;flex:1;padding:8px 0;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.25) transparent}
             .history-row{display:flex;align-items:center;gap:16px;min-height:66px;padding:13px 14px 13px 10px;border-bottom:1px solid rgba(255,255,255,.1);border-left:3px solid transparent;box-sizing:border-box;transition:background .16s,border .16s}
-            .history-row[data-selected="true"]{border-left-color:#f5d83b;background:linear-gradient(90deg,rgba(245,216,59,.16),rgba(245,216,59,.025))}
+            .history-row[data-selected="true"]{border-left-color:#c9e4f5;background:linear-gradient(90deg,rgba(201,228,245,.16),rgba(201,228,245,.025))}
             .history-number{width:37px;flex:0 0 37px;text-align:center;font:700 12px SFMono-Regular,Menlo,monospace;color:rgba(255,255,255,.45)}
-            .history-row[data-selected="true"] .history-number{color:#f5d83b}
+            .history-row[data-selected="true"] .history-number{color:#c9e4f5}
             .history-info{flex:1;min-width:0}
             .history-row-title{font-size:13px;color:white;font-weight:720;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
             .history-row-subtitle{font-size:11px;font-weight:500;color:rgba(245,247,250,.55);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:5px}
             .history-meta{display:flex;flex-direction:column;align-items:flex-end;gap:6px;font-size:10px;white-space:nowrap;color:rgba(255,255,255,.65)}
-            .history-kind{padding:3px 7px;border-radius:7px;background:rgba(245,216,59,.12);color:#f5d83b;font-weight:800;letter-spacing:.02em}
+            .history-kind{padding:3px 7px;border-radius:7px;background:rgba(201,228,245,.12);color:#c9e4f5;font-weight:800;letter-spacing:.02em}
             .history-empty{padding:44px 16px;font-size:13px;font-weight:500;text-align:center;color:rgba(255,255,255,.66)}
             .history-footer{border-top:1px solid rgba(255,255,255,.15);padding-top:13px;display:flex;justify-content:space-between;gap:12px;font-size:11px;color:rgba(255,255,255,.6);font-weight:600}
             .hud-shortcuts{display:flex;align-items:center;flex-wrap:wrap;gap:5px 9px;min-width:0}
             .hud-shortcuts .hud-action{margin-left:1px}
             .hud-shortcuts .hud-key{padding:0 7px;min-width:auto;height:24px}
             .solution-toolbar{display:inline-flex;align-items:center;gap:8px}
-            .overlay-diff-toggle{background:rgba(245,216,59,.12);border:1px solid rgba(245,216,59,.45);color:var(--text);padding:4px 8px;border-radius:7px;font:inherit;cursor:pointer}
+            .overlay-diff-toggle{background:rgba(201,228,245,.12);border:1px solid rgba(201,228,245,.45);color:var(--text);padding:4px 8px;border-radius:7px;font:inherit;cursor:pointer}
             .code-lines li[data-change="remove"]{background:rgba(240,83,83,.18);border-left:3px solid rgba(240,83,83,.7)}
             .code-lines li[data-change="add"]{background:rgba(65,200,120,.16);border-left:3px solid rgba(65,200,120,.7)}
             .code-lines li[data-change="same"]{border-left:3px solid transparent}
@@ -3180,7 +3180,7 @@ fn overlay_html() -> &'static str {
                 ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
                 : view==='mcq'
                 ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31'],['Left','32'],['Right','33'],['Region','34'],['Submit','35']]
-                : [['Coding','cc'],['MCQ','mm'],['History','hh'],['Full','20'],['New','21'],['Left','22'],['Right','23'],['Submit','24'],['Undo','25']];
+                : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py']];
               const fingerprint=controls.map(([name,key])=>name+key).join('|');
               if(host.dataset.shortcutSet===fingerprint)return;
               host.dataset.shortcutSet=fingerprint;host.replaceChildren();
@@ -3192,7 +3192,28 @@ fn overlay_html() -> &'static str {
             };
             const esc=(s)=>String(s||'').replace(/[&<>]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 	            window.scrollSolutionBy=function(delta){const el=document.getElementById('solution-code');if(el)el.scrollTop+=delta;};
-            function highlight(code,lang){let h=esc(code);if(/py|python/i.test(lang||'')){h=h.replace(/([=+\-*\/])/g,'<span class="op">$1</span>').replace(/\b(\d+)\b/g,'<span class="num">$1</span>').replace(/\b(def|for|in|if|return|class|else|elif|while|try|except|with|as|from|import)\b/g,'<span class="kw">$1</span>').replace(/\b(enumerate|range|len|print|set|dict|list)\b/g,'<span class="built">$1</span>');}return h;}
+            function highlight(code,lang){
+              // Tokenize first, escape each token at emission. Never regex over
+              // generated HTML or accept source as markup.
+              const language=String(lang||'').toLowerCase();
+              const kw=language.includes('rust')?/\b(?:fn|impl|struct|enum|trait|let|mut|pub|use|match|self|return|if|else|while|for|loop|const|static|where|async|await)\b/g:
+                language.includes('cpp')||language.includes('c++')?/\b(?:auto|bool|char|class|const|constexpr|double|else|enum|for|if|int|long|namespace|private|protected|public|return|short|signed|static|struct|template|typename|unsigned|using|void|while)\b/g:
+                /\b(?:def|for|in|if|return|class|else|elif|while|try|except|with|as|from|import|async|await|yield|lambda|pass|break|continue|True|False|None)\b/g;
+              const pattern=/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\/\/[^\n]*|#[^\n]*|\b\d+(?:\.\d+)?\b|\b[A-Za-z_]\w*\b)/g;
+              const words=new Set([...String(code||'').matchAll(kw)].map(match=>match[0]));
+              let html='',offset=0;
+              for(const match of String(code||'').matchAll(pattern)){
+                html+=esc(code.slice(offset,match.index));const token=match[0];
+                let cls='';
+                if(words.has(token))cls='kw';
+                else if(/^["']/.test(token))cls='str';
+                else if(/^\d/.test(token))cls='num';
+                else if(token.startsWith('//')||token.startsWith('#'))cls='cm';
+                html+=cls?'<span class="'+cls+'">'+esc(token)+'</span>':esc(token);
+                offset=match.index+token.length;
+              }
+              return html+esc(code.slice(offset));
+            }
 		            function stateTone(status){if(status==='done')return'done';if(status==='streaming'||status==='reviewing'||status==='running')return'working';if(status==='error')return'error';if(status==='cancelled')return'cancelled';return'pending';}
             function codeWithReferenceComment(code,lang){return String(code||'');}
 		            function renderCodeLines(target,code,lang){target.innerHTML='';codeWithReferenceComment(code,lang).split('\n').forEach((line)=>{const li=document.createElement('li');const c=document.createElement('code');c.innerHTML=highlight(line||' ',lang);li.appendChild(c);target.appendChild(li);});}
@@ -3246,11 +3267,52 @@ fn overlay_html() -> &'static str {
             document.addEventListener('click',function(event){
               if(event.target&&event.target.id==='overlay-diff-toggle')window.toggleOverlayCodeDiff();
             });
-            function renderCouncilInsights(presentation){const p=presentation||{};const root=document.querySelector('.thought-list');if(!root)return;const items=root.querySelectorAll('.thought-item');const set=(index,value)=>{const el=items[index]&&items[index].querySelector('.thought-space');if(el)el.textContent=value||'Not reported by Council.';};set(0,p.approach);set(2,p.dataStructures);const complexity=String(p.complexity||'');const timeMatch=complexity.match(/(?:time|runtime)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);const spaceMatch=complexity.match(/(?:space|memory)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);set(3,p.timeComplexity||(timeMatch&&timeMatch[1])||complexity);set(4,p.spaceComplexity||(spaceMatch&&spaceMatch[1]));set(5,Array.isArray(p.dissent)?p.dissent.join('\n'):p.dissent);set(6,Array.isArray(p.evidence)?p.evidence.map(e=>[e.letter,e.gate,e.passed!==undefined?'passed: '+e.passed:'',e.failed!==undefined?'failed: '+e.failed:'',Number.isFinite(e.elapsedMs)?'elapsed: '+e.elapsedMs+' ms':'',Number.isFinite(e.peakMemoryKb)?'peak memory: '+e.peakMemoryKb+' KB':'',e.runtime||''].filter(Boolean).join(' · ')).join('\n'):'');set(7,Array.isArray(p.rejected)?p.rejected.join('\n'):p.rejected);}
+            function renderCouncilInsights(presentation,state){
+              const p=presentation||{},extra=state&&state.insights||{};
+              const root=document.querySelector('.thought-list');if(!root)return;
+              if(root.dataset.codingOrder!=='set'){
+                const items=Array.from(root.querySelectorAll('.thought-item'));
+                // Keep the function-notes element intact while arranging the
+                // eight existing insight surfaces in the requested order.
+                const order=[0,2,5,6,3,4,1,7];
+                const labels=['Solution summary','Data structures / Algorithm','Edge cases tested','Testing results',
+                  'Time complexity','Space complexity','Functions','Approach · how it works'];
+                order.forEach((old,i)=>{
+                  const item=items[old];if(!item)return;
+                  const heading=item.querySelector('.thought-heading');
+                  if(heading)heading.textContent=labels[i];
+                  root.append(item);
+                });
+                root.dataset.codingOrder='set';
+              }
+              const items=root.querySelectorAll('.thought-item');
+              const set=(index,value)=>{
+                const el=items[index]?.querySelector('.thought-space');
+                if(el&&index!==6)el.textContent=value||'Not recorded in this Council report.';
+              };
+              const structures=Array.isArray(extra.structures)?extra.structures.join('\n'):'';
+              const algorithm=extra.controlFlow?'Algorithm flow: '+extra.controlFlow:'';
+              set(0,extra.summary||p.approach);
+              set(1,[structures,algorithm].filter(Boolean).join('\n'));
+              set(2,Array.isArray(extra.edgeCases)&&extra.edgeCases.length
+                ? extra.edgeCases.map((x,i)=>String(i+1)+'. '+x).join('\n')
+                : 'Specific edge-case assertions were not preserved in the verified report; no examples are invented.');
+              const evidence=Array.isArray(p.evidence)?p.evidence.map(e=>
+                [e.letter,e.gate,e.passed!==undefined?'passed: '+e.passed:'',
+                e.failed!==undefined?'failed: '+e.failed:'',
+                Number.isFinite(e.elapsedMs)?'elapsed: '+e.elapsedMs+' ms':''].filter(Boolean).join(' · ')).join('\n'):'';
+              set(3,extra.testing||evidence||'Waiting for executable verification.');
+              const claim=String(p.complexity||'');
+              const time=claim.match(/(?:time|runtime)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);
+              const space=claim.match(/(?:space|memory)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);
+              set(4,p.timeComplexity||time?.[1]||'Not separately audited');
+              set(5,p.spaceComplexity||space?.[1]||'Not separately audited');
+              set(7,extra.approach||p.approach);
+            }
                         window.updatePreviews=function(images){window.__lastPreviews=images||[];const pictures=document.getElementById('pictures');if(!pictures)return;if(pictures.__sources&&pictures.__sources.length===images.length&&images.every((src,i)=>src===pictures.__sources[i]))return;pictures.__sources=images.slice();pictures.innerHTML='';if(!images.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Captured images will appear here';pictures.appendChild(empty);return;}images.forEach((src,i)=>{const pill=document.createElement('div');pill.className='picture-pill';const img=document.createElement('img');img.src=src;img.alt='Capture '+(i+1);const count=document.createElement('span');count.className='picture-count';count.textContent=(i+1)+'/10';pill.appendChild(img);pill.appendChild(count);pictures.appendChild(pill);});};
                 function renderMcq(state){const savedPictures=document.getElementById('pictures');const left=document.querySelector('.pictures-pane');const right=document.querySelector('.thought-pane');const m=state.mcq||{};const picked=(m.answer&&m.answer.label)||'';const found=Array.isArray(m.options)?m.options:[];const position=found.findIndex((o)=>o.label===picked);const ordinal=(n)=>n%100>=11&&n%100<=13?'th':n%10===1?'st':n%10===2?'nd':n%10===3?'rd':'th';const formatted=m.answerVerified===true&&position>=0?'✅ '+picked+' ('+(position+1)+ordinal(position+1)+' Option) - '+String((m.answer&&m.answer.text)||found[position].text||''):'';const displayAnswer=formatted||String(m.displayAnswer||'');const selectedModel=(m.model&&String(m.model).trim())?String(m.model).trim():'none';const hasModel=selectedModel.toLowerCase()!=='none';left.innerHTML='<div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title-row"><div class="title">Question</div><div class="mcq-model-pill" data-enabled="'+(hasModel?'true':'false')+'">'+esc(hasModel?selectedModel:'No Model')+'</div></div><div class="mcq-box mcq-question"></div><div class="title">Answer</div><div class="mcq-box mcq-answer"></div>';if(savedPictures)document.getElementById('pictures').replaceWith(savedPictures);right.innerHTML='<div class="title">Question history</div><div class="mcq-history"></div>';document.querySelector('.mcq-question').textContent=m.question||state.progress||'Reading the captured question...';document.querySelector('.mcq-answer').innerHTML='<b>'+esc(displayAnswer||(picked||'Answer'))+'</b>'+(displayAnswer?'':(m.answer&&m.answer.text?' — '+esc(m.answer.text):''))+'<br><br>'+esc(m.reason||state.error||state.progress||'Waiting for the MCQ worker result...');const hist=document.querySelector('.mcq-history');const add=(title,body,level,meta)=>{const row=document.createElement('div');row.className='mcq-history-row';row.dataset.level=level||'info';const h=document.createElement('b');h.textContent=title;const p=document.createElement('div');p.textContent=body||'';row.appendChild(h);row.appendChild(p);if(meta&&meta.length){const mrow=document.createElement('div');mrow.className='mcq-history-meta';meta.forEach((x)=>{const s=document.createElement('span');s.textContent=x;mrow.appendChild(s);});row.appendChild(mrow);}hist.appendChild(row);};add('AI selected',selectedModel,'info',[state.status||'',state.phase||''].filter(Boolean));add('Captured question',m.question||'Waiting for the screenshot reading.',state.error?'error':'info',[state.status||'',state.phase||''].filter(Boolean));if(m.options&&m.options.length){add('Choices found',(m.options||[]).map((o)=>(o.label?o.label+'. ':'')+(o.text||'')).join('\\n'),'info',[]);}if(m.knowledgeUsed!==undefined){add('Local knowledge check',m.knowledgeUsed?'A local knowledge match or guidance was included before the model answer.':'The local knowledge pack was checked before the model answer, but no direct match was used.','info',[selectedModel]);}if(picked||m.reason){add('Selected answer',(picked?picked+': ':'')+(m.answer&&m.answer.text?m.answer.text:'')+'\\n'+(m.reason||''),'info',[selectedModel]);}(m.whyNot||[]).forEach((x)=>add('Rejected choice '+(x.label||''),x.reason||'Not selected.','info',[]));(state.history||[]).forEach((e)=>add(e.phase||'worker event',e.message||'',e.level||'info',[e.createdAt||''].filter(Boolean)));if(!hist.children.length)add('Waiting','The helper is waiting for the worker history.','info',[]);window.updatePreviews(window.__lastPreviews||[]);}
 			            function restoreCodingShell(){if(document.getElementById('agents'))return;document.getElementById('panel').innerHTML='<div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div>';window.updatePreviews(window.__lastPreviews||[]);}
-			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};window.__overlayCurrentState=state;if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'Council verified':state.solution.status==='provisional'?'E2B passed · Council reviewing':('candidate · '+(state.solution.source||''));renderOverlayCodeResult(code,state);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation);}};
+			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};window.__overlayCurrentState=state;if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'Council verified':state.solution.status==='provisional'?'E2B passed · Council reviewing':('candidate · '+(state.solution.source||''));renderOverlayCodeResult(code,state);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation,state);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation,state);}};
             // Keep the existing capture and result renderer intact, then give
             // its agent output the same clear, glassy Council presentation as
             // the Story workspace. This is intentionally display-only.
