@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf, sync::{Mutex, OnceLock}, thread, time::{Duration, Instant}};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+    thread,
+    time::{Duration, Instant},
+};
 use tauri::{AppHandle, Emitter};
 
 const GHOST_LABEL: &str = "com.apple.mds.useragent";
@@ -102,11 +108,14 @@ static HEADLESS_PROCESS_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 
 fn mark_headless_process() {
     let guard = HEADLESS_PROCESS_AT.get_or_init(|| Mutex::new(None));
-    if let Ok(mut at) = guard.lock() { *at = Some(Instant::now()); }
+    if let Ok(mut at) = guard.lock() {
+        *at = Some(Instant::now());
+    }
 }
 
 pub(crate) fn recent_headless_process() -> bool {
-    HEADLESS_PROCESS_AT.get()
+    HEADLESS_PROCESS_AT
+        .get()
         .and_then(|guard| guard.lock().ok())
         .and_then(|at| *at)
         .is_some_and(|at| at.elapsed() < Duration::from_secs(2))
@@ -123,17 +132,26 @@ pub(crate) fn watch_app_capture_requests(app: AppHandle) {
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.filter_map(Result::ok) {
                 let path = entry.path();
-                if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
+                if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                    continue;
+                }
                 let claimed = path.with_extension("processing");
-                if fs::rename(&path, &claimed).is_err() { continue; }
-                let recent = fs::metadata(&claimed).and_then(|meta| meta.modified())
-                    .ok().and_then(|modified| modified.elapsed().ok())
+                if fs::rename(&path, &claimed).is_err() {
+                    continue;
+                }
+                let recent = fs::metadata(&claimed)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
                     .is_some_and(|age| age <= Duration::from_secs(15));
-                let mode = fs::read_to_string(&claimed).ok()
+                let mode = fs::read_to_string(&claimed)
+                    .ok()
                     .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
                     .and_then(|request| request["mode"].as_str().map(str::to_owned));
                 let _ = fs::remove_file(&claimed);
-                if !recent { continue; }
+                if !recent {
+                    continue;
+                }
                 let event = match mode.as_deref() {
                     Some("screen") => Some("shortcut://capture-screen"),
                     Some("region") => Some("shortcut://capture"),
@@ -143,7 +161,9 @@ pub(crate) fn watch_app_capture_requests(app: AppHandle) {
                     _ => None,
                 };
                 if let Some(event) = event {
-                    if mode.as_deref() == Some("process") { mark_headless_process(); }
+                    if mode.as_deref() == Some("process") {
+                        mark_headless_process();
+                    }
                     let _ = app.emit(event, ());
                 }
             }
@@ -592,6 +612,10 @@ pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
     bootout(GHOST_LABEL);
     std::thread::sleep(std::time::Duration::from_millis(300));
     let helper = install_helper_bundle(&bundled)?;
+    // The helper is a distinct signed executable, so give it access to the
+    // already-issued scoped token if one exists. A missing token is normal on
+    // first install; the next desktop sign-in will mint it.
+    let _ = crate::helper_auth::allow_installed_helper();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("Could not create ghost plist dir: {e}"))?;
@@ -619,7 +643,10 @@ pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
         status.problem = Some(if !out.status.success() && !detail.is_empty() {
             format!("The launchd service refused the background helper: {detail}")
         } else if !out.status.success() {
-            format!("The launchd service refused the background helper with exit status {}.", out.status)
+            format!(
+                "The launchd service refused the background helper with exit status {}.",
+                out.status
+            )
         } else if detail.is_empty() {
             "The launchd service did not load the background helper.".to_string()
         } else {
@@ -653,30 +680,55 @@ pub async fn background_helper_uninstall() -> Result<GhostModeStatus, String> {
 pub(crate) fn capture_owner_pid() -> Option<u32> {
     #[cfg(target_os = "macos")]
     {
-        let value: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(helper_status_path().ok()?).ok()?
-        ).ok()?;
-        if value["hotkeysAvailable"] != true { return None; }
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(helper_status_path().ok()?).ok()?)
+                .ok()?;
+        if value["hotkeysAvailable"] != true {
+            return None;
+        }
         let pid = value["pid"].as_u64()?;
         let stamp = chrono::DateTime::parse_from_rfc3339(value["updatedAt"].as_str()?).ok()?;
-        let age = chrono::Utc::now().signed_duration_since(stamp).num_seconds();
-        if !(0..=12).contains(&age) || pid == 0 || pid > i32::MAX as u64 { return None; }
-        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 { return None; }
+        let age = chrono::Utc::now()
+            .signed_duration_since(stamp)
+            .num_seconds();
+        if !(0..=12).contains(&age) || pid == 0 || pid > i32::MAX as u64 {
+            return None;
+        }
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            return None;
+        }
         Some(pid as u32)
     }
     #[cfg(not(target_os = "macos"))]
-    { None }
+    {
+        None
+    }
 }
 pub(crate) fn forward_capture(mode: &str) -> bool {
-    let Some(pid) = capture_owner_pid() else { return false; };
-    if !matches!(mode, "region" | "screen" | "left" | "right") { return false; }
-    let Ok(dir) = support_dir().map(|p| p.join("cache/capture-commands")) else { return false; };
-    if std::fs::create_dir_all(&dir).is_err() { return false; }
+    let Some(pid) = capture_owner_pid() else {
+        return false;
+    };
+    if !matches!(mode, "region" | "screen" | "left" | "right") {
+        return false;
+    }
+    let Ok(dir) = support_dir().map(|p| p.join("cache/capture-commands")) else {
+        return false;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
     let id = uuid::Uuid::new_v4().to_string();
     let temp = dir.join(format!(".{id}.tmp"));
     let target = dir.join(format!("{id}.json"));
     let ack = dir.join(format!("{id}.ack"));
-    if std::fs::write(&temp, serde_json::json!({"pid":pid,"mode":mode}).to_string()).is_err() { return false; }
+    if std::fs::write(
+        &temp,
+        serde_json::json!({"pid":pid,"mode":mode}).to_string(),
+    )
+    .is_err()
+    {
+        return false;
+    }
     if std::fs::rename(&temp, &target).is_err() {
         let _ = std::fs::remove_file(&temp);
         return false;
@@ -686,7 +738,9 @@ pub(crate) fn forward_capture(mode: &str) -> bool {
             let _ = std::fs::remove_file(&ack);
             return true;
         }
-        if capture_owner_pid() != Some(pid) { break; }
+        if capture_owner_pid() != Some(pid) {
+            break;
+        }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     // Fallback is safe only when the still-unclaimed inbox file was removed.

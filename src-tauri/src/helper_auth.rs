@@ -1,6 +1,8 @@
 // src-tauri/src/helper_auth.rs
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 use crate::db::Db;
 
@@ -8,8 +10,61 @@ const SERVICE: &str = "com.apple.mds.session";
 const ACCOUNT: &str = "mds";
 
 pub fn store_token(token: &str) -> Result<(), String> {
+    // A LaunchAgent is a separately signed executable. The Keychain item's
+    // default ACL trusts only the desktop process which created it, so a token
+    // can exist and be valid at the server while the helper is still refused
+    // locally. On macOS explicitly trust both executables. This stays scoped
+    // to the current user and these two signed programs; it is not an
+    // unrestricted Keychain item.
+    #[cfg(target_os = "macos")]
+    {
+        let desktop = std::env::current_exe()
+            .map_err(|e| format!("Could not locate the desktop app for Keychain access: {e}"))?;
+        let home = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .ok_or("Could not locate the home directory for Keychain access.")?;
+        let helper = home.join(
+            "Library/Application Support/.com.apple.mds/bin/com.apple.mds.app/Contents/MacOS/mds",
+        );
+
+        let mut command = Command::new("/usr/bin/security");
+        command
+            .arg("add-generic-password")
+            .arg("-U")
+            .arg("-s")
+            .arg(SERVICE)
+            .arg("-a")
+            .arg(ACCOUNT)
+            .arg("-T")
+            .arg(&desktop);
+        if helper.is_file() {
+            command.arg("-T").arg(helper);
+        }
+        let output = command
+            .arg("-w")
+            .arg(token)
+            .output()
+            .map_err(|e| format!("Could not update helper Keychain access: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Could not update helper Keychain access: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "macos"))]
     let entry = Entry::new(SERVICE, ACCOUNT).map_err(|e| e.to_string())?;
+    #[cfg(not(target_os = "macos"))]
     entry.set_password(token).map_err(|e| e.to_string())
+}
+
+/// Called after the helper bundle is installed so an existing token gains the
+/// helper executable in its ACL without requiring another interactive login.
+pub fn allow_installed_helper() -> Result<(), String> {
+    let token = read_token()?;
+    store_token(&token)
 }
 
 #[allow(dead_code)]
