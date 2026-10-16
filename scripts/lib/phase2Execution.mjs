@@ -29,22 +29,33 @@ export function parseExecutionOutput(raw) {
   const complete = Boolean(match && stdoutBegin >= 0 && stdoutEnd > stdoutBegin && stderrBegin > stdoutEnd && stderrEnd > stderrBegin);
   const stdout = complete ? text.slice(stdoutBegin + "CA_STDOUT_BEGIN\n".length, stdoutEnd) : "";
   const stderr = complete ? text.slice(stderrBegin + "CA_STDERR_BEGIN\n".length, stderrEnd) : "";
-  const metrics = {};
+  const metrics = {}, programMetrics = {};
   for (const line of (complete ? stderr : "").split("\n")) {
-    if (!line.startsWith("CA_METRICS ")) continue;
-    for (const pair of line.slice("CA_METRICS ".length).split(/\s+/)) {
-      const [key, value] = pair.split("=");
-      if (key) metrics[key] = value;
+    const prefix = line.startsWith("CA_PROGRAM_METRICS ") ? "CA_PROGRAM_METRICS "
+      : line.startsWith("CA_METRICS ") ? "CA_METRICS " : null;
+    if (!prefix) continue;
+    const target = prefix === "CA_PROGRAM_METRICS " ? programMetrics : metrics;
+    for (const pair of line.slice(prefix.length).split(/\s+/)) {
+      const [key,value] = pair.split("=");
+      if (key) target[key] = value;
     }
   }
   const metric = (x) => x != null && x !== "" && Number.isFinite(Number(x)) && Number(x) >= 0 ? Number(x) : null;
   const seconds = metric(metrics.elapsed_s);
+  const totalElapsedMs = complete ? (seconds != null ? Math.round(seconds*1000) : metric(metrics.elapsed_ms)) : null;
+  const programSeconds = metric(programMetrics.elapsed_s);
+  const programElapsedMs = complete && programSeconds != null ? Math.round(programSeconds*1000) : null;
   return {
     complete, stdout, stderr,
     exitCode: complete && Number.isSafeInteger(Number(match[1])) ? Number(match[1]) : null,
     runtime: complete ? match[2].trim() : "remote",
-    remoteElapsedMs: complete ? (seconds != null ? Math.round(seconds * 1000) : metric(metrics.elapsed_ms)) : null,
-    peakMemoryKb: complete ? metric(metrics.maxrss_kb) : null,
+    // For compiled C++/Rust prefer the nested timed program itself rather than
+    // claiming compiler startup is algorithm execution. Keep total separately.
+    remoteElapsedMs: programElapsedMs ?? totalElapsedMs,
+    peakMemoryKb: complete ? (metric(programMetrics.maxrss_kb) ?? metric(metrics.maxrss_kb)) : null,
+    totalElapsedMs,
+    totalPeakMemoryKb: complete ? metric(metrics.maxrss_kb) : null,
+    programElapsedMs,
   };
 }
 export function executionStatus(result) {
