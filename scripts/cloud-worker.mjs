@@ -1162,7 +1162,7 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
       const local = await runVerification(settings, suite, program, {
         executionId: id,
         warmPool: !revised ? opts.warmPool : null,
-        candidateLetter: candidate.letter,
+        candidateLetter: opts.warmSeat || candidate.letter,
         onState: (state, meta) => addEvent(job.id, "info", "execution_state",
           `Candidate ${candidate.letter}${tag}: ${state}.`,
           { ...meta, letter: candidate.letter, state }).catch(() => {}),
@@ -1930,7 +1930,7 @@ async function updateSavedCouncilReport(job,report){
  * prepared, preflight-checked language-native E2B harness.
  */
 async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
-  source,sourceLetter,target,knowledge,bench,semanticBlueprint){
+  source,sourceLetter,target,knowledge,bench,semanticBlueprint,portWarmPool=null){
   let translated="";
   let translator="";
   const portStartedAt = Date.now();
@@ -2025,7 +2025,7 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
         translationMs,earlyHarnessMs,preparedEarly:preparation.preparedEarly});
     let suite=suites.find(item=>item.language===target);
     if(!suite)throw new Error("No validated E2B harness for "+target);
-    let runs=await executeField(job,settings,[suite],candidates);
+    let runs=await executeField(job,settings,[suite],candidates,{warmPool:portWarmPool,warmSeat:target});
     let run=runs.P;
     // Spec-only generation can infer a different callable interface for the
     // target language. On a compile/integration error (never a failed test
@@ -3445,10 +3445,33 @@ export async function runCouncilJob(job) {
   }
   if(targets.length){
     await patchJob(job.id,{progress_phase:"porting"});
+    // Only after the verified primary winner is available: reserve one
+    // isolated Rust and one isolated C++ slot during port translation/harness
+    // generation. Never allocate these before the primary result is saved.
+    let portWarmPool = null;
+    if (process.env.CODE_AUDITOR_E2B_PREWARM_PORTS === "1" &&
+        secret("E2B_API_KEY")) {
+      portWarmPool = createE2BWarmPool({
+        idleMs:E2B_WARM_IDLE_MS,
+        create: language => createE2BLease({
+          executionId:executionId(), purpose:"standby-port-"+language,
+          slot:language,jobId:job.id,
+          timeoutMs:Math.max(REMOTE_RUN_TIMEOUT_MS + E2B_WARM_IDLE_MS + 60_000,180_000),
+        }),
+        destroy:async lease => {
+          try { await lease.sandbox.kill(); }
+          finally { lease.release(); }
+        },
+        onEvent:(name,meta) => addEvent(job.id,name==="failed"?"warn":"info",
+          "e2b_port_prewarm_"+name,"Port sandbox "+name+" for "+meta.letter,meta).catch(()=>{}),
+      });
+      portWarmPool.prewarm(targets);
+    }
+    try {
     let reportWrite=Promise.resolve();
     await parallelMap(targets,2,async language=>{
       const port=await verifiedLanguagePort(job,settings,baseUrl,models,judges,
-        question,verifiedSource,decision.winner,language,knowledge,bench,semanticBlueprint);
+        question,verifiedSource,decision.winner,language,knowledge,bench,semanticBlueprint,portWarmPool);
       // Serialize JSONB report writes: concurrent port workers must not
       // overwrite each other's new verified code or failure status.
       reportWrite=reportWrite.catch(()=>{}).then(async()=>{
@@ -3473,6 +3496,9 @@ export async function runCouncilJob(job) {
       });
       await reportWrite;
     });
+    } finally {
+      await portWarmPool?.close();
+    }
   }
   await sessionNaming;
 
