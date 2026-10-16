@@ -3905,7 +3905,11 @@ mod tests {
             images: vec![], error: None,
         };
         assert!(mcq_pending_state(&batch)["progress"].as_str().unwrap_or("").contains("Uploading"));
-        assert!(coding_pending_state(&batch)["solution"]["code"].as_str().unwrap_or("").contains("Uploading"));
+        let coding = coding_pending_state(&batch);
+        assert!(coding["progress"].as_str().unwrap_or("").contains("Uploading"));
+        assert!(coding["solution"].is_null(), "Upload progress must not be rendered as executable solution code");
+        assert!(coding["agents"].as_array().is_some_and(Vec::is_empty));
+        assert!(coding["tests"].as_array().is_some_and(Vec::is_empty));
     }
 
     #[test]
