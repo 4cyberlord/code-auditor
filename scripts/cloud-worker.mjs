@@ -22,7 +22,7 @@ import { createHmac, createSign } from "node:crypto";
 import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
-import {createSandboxCapacity, hobbyWorkerLimit} from "./lib/e2bCapacity.mjs";
+import {createSandboxCapacity, hobbyWorkerLimit, standbyBudget} from "./lib/e2bCapacity.mjs";
 import {createE2BWarmPool} from "./lib/e2bWarmPool.mjs";
 import {selectedCppStandard} from "./lib/e2bRuntimeProfile.mjs";
 import {compareDifferentialTraces,sharedDifferentialFixtures} from "./lib/e2bDifferential.mjs";
@@ -2771,9 +2771,10 @@ export async function runCouncilJob(job) {
   // Opt-in canary: four independent E2B copies are created while the solver
   // models reason, ready for their first Python E2B candidate runs. Never warm
   // MCQ jobs, absent E2B credentials, or an unsupported primary language.
+  const pythonStandbyCount=standbyBudget(E2B_CAPACITY.snapshot(),Math.min(4,solving.length));
   if (process.env.CODE_AUDITOR_E2B_PREWARM === "1" &&
       inferredKind === "code" && primaryLanguage === "python" &&
-      secret("E2B_API_KEY")) {
+      pythonStandbyCount > 0 && secret("E2B_API_KEY")) {
     warmPool = createE2BWarmPool({
       idleMs: E2B_WARM_IDLE_MS,
       create: letter => createE2BLease({
@@ -2789,10 +2790,10 @@ export async function runCouncilJob(job) {
         "e2b_prewarm_" + name, "Standby Python sandbox " + name + " for " + meta.letter,
         meta).catch(() => {}),
     });
-    warmPool.prewarm(solving.map((_, index) => letterFor(index)));
+    warmPool.prewarm(solving.slice(0,pythonStandbyCount).map((_, index) => letterFor(index)));
     await addEvent(job.id,"info","e2b_prewarm_requested",
       "Requested up to four isolated standby Python sandboxes; idle sandboxes expire automatically.",
-      {seats:Math.min(4,solving.length),idleMs:E2B_WARM_IDLE_MS,
+      {seats:pythonStandbyCount,idleMs:E2B_WARM_IDLE_MS,
        capacity:E2B_CAPACITY.snapshot()});
   }
   timer.enter("solving");
@@ -3476,8 +3477,9 @@ export async function runCouncilJob(job) {
       ? question + "\\n\\nAdditional tested Python input fixtures for target-language cross-checking (not an authority for expected outputs): " +
         JSON.stringify(caseFixtures).slice(0,1800) : question;
     let portWarmPool = null;
+    const portStandbyCount=standbyBudget(E2B_CAPACITY.snapshot(),targets.length);
     if (process.env.CODE_AUDITOR_E2B_PREWARM_PORTS === "1" &&
-        secret("E2B_API_KEY")) {
+        portStandbyCount > 0 && secret("E2B_API_KEY")) {
       portWarmPool = createE2BWarmPool({
         idleMs:E2B_WARM_IDLE_MS,
         create: language => createE2BLease({
@@ -3492,7 +3494,7 @@ export async function runCouncilJob(job) {
         onEvent:(name,meta) => addEvent(job.id,name==="failed"?"warn":"info",
           "e2b_port_prewarm_"+name,"Port sandbox "+name+" for "+meta.letter,meta).catch(()=>{}),
       });
-      portWarmPool.prewarm(targets);
+      portWarmPool.prewarm(targets.slice(0,portStandbyCount));
     }
     try {
     let reportWrite=Promise.resolve();
