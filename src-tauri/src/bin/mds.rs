@@ -1377,6 +1377,90 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
     Ok((rows,notice))
 }
 
+/// Main-app runs persist the live desktop Council state as
+/// `{ council, review }`, whereas cloud jobs persist the already-normalized
+/// worker report.  Adapt the former into the latter shape before handing it to
+/// the overlay.  This keeps History honest (only saved data is shown) while
+/// preserving the winner, E2B evidence, runtime data, complexity and verified
+/// language ports that the main app already saved.
+fn main_council_history_report(council: &Value) -> Value {
+    let candidates = council.get("candidates").cloned().unwrap_or_else(|| Value::Array(Vec::new()));
+    let winner = council.get("winner").and_then(Value::as_str).unwrap_or("").trim();
+    let runs = council.get("runs").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let revised_runs = council.get("revisedRuns").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let candidate_rows = candidates.as_array().cloned().unwrap_or_default();
+
+    let evidence: Vec<Value> = candidate_rows.iter().map(|candidate| {
+        let letter = candidate.get("letter").and_then(Value::as_str).unwrap_or("?");
+        let revised = candidate.pointer("/revised/code").and_then(Value::as_str)
+            .is_some_and(|code| !code.trim().is_empty());
+        let run = if revised { revised_runs.get(letter) } else { runs.get(letter) }
+            .unwrap_or(&Value::Null);
+        let ran = run.get("ran").and_then(Value::as_bool).unwrap_or(false);
+        let passed = run.get("passed").and_then(Value::as_u64).unwrap_or(0);
+        let failed = run.get("failed").and_then(Value::as_u64).unwrap_or(0);
+        let ok = run.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        let gate = if ran && ok && passed > 0 && failed == 0 { "pass" }
+            else if ran { "fail" } else { "untested" };
+        serde_json::json!({
+            "letter": letter,
+            "model": candidate.get("model").and_then(Value::as_str).unwrap_or("Council agent"),
+            "gate": gate,
+            "passed": passed,
+            "failed": failed,
+            "revised": revised,
+            "runtime": run.get("runtime").and_then(Value::as_str).unwrap_or(""),
+            "elapsedMs": run.get("remoteElapsedMs").and_then(Value::as_i64)
+                .or_else(|| run.get("durationMs").and_then(Value::as_i64)),
+            "peakMemoryKb": run.get("peakMemoryKb").and_then(Value::as_i64),
+            "note": run.get("note").and_then(Value::as_str).unwrap_or(""),
+        })
+    }).collect();
+
+    let selected = candidate_rows.iter().find(|candidate| candidate.get("letter")
+        .and_then(Value::as_str).is_some_and(|letter| letter.eq_ignore_ascii_case(winner)));
+    let selected_final = selected.and_then(|candidate| {
+        let revised = candidate.pointer("/revised/code").and_then(Value::as_str)
+            .is_some_and(|code| !code.trim().is_empty());
+        if revised { candidate.get("revised") } else { candidate.get("final") }
+    });
+    let winner_evidence = evidence.iter().find(|row| row.get("letter").and_then(Value::as_str)
+        .is_some_and(|letter| letter.eq_ignore_ascii_case(winner)));
+    let verified = winner_evidence.is_some_and(|row| row.get("gate").and_then(Value::as_str) == Some("pass"));
+    let code = selected_final.and_then(|final_| final_.get("code")).and_then(Value::as_str)
+        .filter(|code| !code.trim().is_empty()).unwrap_or("");
+    let language = selected_final.and_then(|final_| final_.get("language")).and_then(Value::as_str).unwrap_or("");
+    let complexity = selected_final.and_then(|final_| final_.get("complexity")).and_then(Value::as_str).unwrap_or("");
+    let approach = council.pointer("/dossier/synthesis/approach").and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| council.get("synthesis").and_then(Value::as_str)).unwrap_or("");
+    let time = council.pointer("/dossier/judges/0/reviews/0/time").and_then(Value::as_str).unwrap_or("");
+    let space = council.pointer("/dossier/judges/0/reviews/0/space").and_then(Value::as_str).unwrap_or("");
+    let provenance = selected.map(|candidate| format!("Candidate {winner} — {}",
+        candidate.get("model").and_then(Value::as_str).unwrap_or("Council"))).unwrap_or_default();
+
+    serde_json::json!({
+        "candidates": candidates,
+        "runs": runs,
+        "revisedRuns": revised_runs,
+        "winner": winner,
+        "ports": council.get("ports").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+        "presentation": {
+            "standing": if verified { "verified" } else { "unverified" },
+            "provenance": provenance,
+            "approach": approach,
+            "timeComplexity": time,
+            "spaceComplexity": space,
+            "complexity": complexity,
+            "code": if verified { code } else { "" },
+            "language": if verified { language } else { "" },
+            "evidence": evidence,
+            "dissent": [],
+            "rejected": [],
+        }
+    })
+}
+
 /// Fetch a saved result only after the person opens it from History. The list
 /// itself stays metadata-only and every detail read remains account-scoped.
 async fn fetch_history_detail(row: Value) -> Result<Value, String> {
@@ -1397,6 +1481,10 @@ async fn fetch_history_detail(row: Value) -> Result<Value, String> {
     }
     if let Some(run_id) = id.strip_prefix("main:") {
         let payload = api("runs.get", serde_json::json!({"runId": run_id})).await?;
+        if let Some(council) = payload.pointer("/report/council").filter(|council| council.is_object()) {
+            let report = main_council_history_report(council);
+            return Ok(serde_json::json!({"state": history_coding_state(run_id, &report)}));
+        }
         if let Some(report) = payload.get("report").filter(|report| !report.is_null()) {
             let body = report.get("report").unwrap_or(report);
             return Ok(serde_json::json!({"state": history_coding_state(run_id, body)}));
@@ -3462,6 +3550,29 @@ mod tests {
         assert_eq!(state["solution"]["code"],"print(2)");
         assert_eq!(state["upgrade"]["changed"],true);
         assert_eq!(state["solutionHistory"].as_array().map(Vec::len),Some(2));
+    }
+
+    #[test]
+    fn main_history_council_record_adapts_to_a_full_overlay_result() {
+        let saved_council = serde_json::json!({
+            "winner": "A",
+            "candidates": [{
+                "letter": "A", "model": "openai/gpt-5.6-sol",
+                "final": {"kind": "code", "language": "python", "code": "print(42)",
+                    "complexity": "Time: O(n); Space: O(1)"}
+            }],
+            "runs": {"A": {"ran": true, "ok": true, "passed": 6, "failed": 0,
+                "runtime": "python3", "durationMs": 41, "note": ""}},
+            "revisedRuns": {},
+            "dossier": {"synthesis": {"approach": "Scan the input once."}},
+            "ports": [{"language": "rust", "status": "verified", "code": "fn main() {}"}]
+        });
+        let report = main_council_history_report(&saved_council);
+        let state = history_coding_state("saved-main-run", &report);
+        assert_eq!(state["solution"]["code"], "print(42)");
+        assert_eq!(state["presentation"]["approach"], "Scan the input once.");
+        assert_eq!(state["tests"][0]["status"], "passed");
+        assert_eq!(state["ports"][0]["language"], "rust");
     }
 
     #[test]
