@@ -2851,7 +2851,27 @@ fn overlay_html() -> &'static str {
 	              .mcq-model-pill[data-enabled="false"]{border-color:rgba(255,107,107,.48);background:rgba(255,107,107,.1)}
 	              .mcq-model-pill[data-enabled="false"]::before{background:#ff6b6b;box-shadow:0 0 10px rgba(255,107,107,.82),0 0 0 3px rgba(255,107,107,.16)}
 		      .empty{opacity:.72;font-size:12px;font-weight:600;padding:4px;white-space:nowrap;text-shadow:0 1px 2px var(--title-shadow)}
-	            .hud-shortcuts{display:flex;align-items:center;flex-wrap:wrap;gap:5px 9px;min-width:0}
+	            #panel{position:relative}
+            .history-sheet{position:absolute;z-index:30;inset:0;box-sizing:border-box;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;padding:27px 32px 22px;background:linear-gradient(135deg,rgba(13,18,25,.95),rgba(18,24,32,.96));backdrop-filter:blur(24px) saturate(1.3);color:#f5f7fa}
+            .history-sheet[hidden]{display:none}
+            .history-heading{display:flex;align-items:start;justify-content:space-between;gap:15px;flex-wrap:wrap;padding-bottom:15px;border-bottom:1px solid rgba(255,255,255,.18)}
+            .history-eyebrow{color:#f5d83b;font-size:10px;font-weight:850;letter-spacing:.16em;text-transform:uppercase}
+            .history-title{font-size:25px;font-weight:800;letter-spacing:-.035em;margin:5px 0 4px}
+            .history-description{font-size:12px;font-weight:500;color:rgba(245,247,250,.58)}
+            .history-counter{font:700 11px SFMono-Regular,Menlo,monospace;color:rgba(245,247,250,.66);padding:10px 12px;border:1px solid rgba(255,255,255,.16);border-radius:10px}
+            .history-list{overflow-x:hidden;overflow-y:auto;min-height:0;flex:1;padding:8px 0;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.25) transparent}
+            .history-row{display:flex;align-items:center;gap:16px;min-height:66px;padding:13px 14px 13px 10px;border-bottom:1px solid rgba(255,255,255,.1);border-left:3px solid transparent;box-sizing:border-box;transition:background .16s,border .16s}
+            .history-row[data-selected="true"]{border-left-color:#f5d83b;background:linear-gradient(90deg,rgba(245,216,59,.16),rgba(245,216,59,.025))}
+            .history-number{width:37px;flex:0 0 37px;text-align:center;font:700 12px SFMono-Regular,Menlo,monospace;color:rgba(255,255,255,.45)}
+            .history-row[data-selected="true"] .history-number{color:#f5d83b}
+            .history-info{flex:1;min-width:0}
+            .history-row-title{font-size:13px;color:white;font-weight:720;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+            .history-row-subtitle{font-size:11px;font-weight:500;color:rgba(245,247,250,.55);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:5px}
+            .history-meta{display:flex;flex-direction:column;align-items:flex-end;gap:6px;font-size:10px;white-space:nowrap;color:rgba(255,255,255,.65)}
+            .history-kind{padding:3px 7px;border-radius:7px;background:rgba(245,216,59,.12);color:#f5d83b;font-weight:800;letter-spacing:.02em}
+            .history-empty{padding:44px 16px;font-size:13px;font-weight:500;text-align:center;color:rgba(255,255,255,.66)}
+            .history-footer{border-top:1px solid rgba(255,255,255,.15);padding-top:13px;display:flex;justify-content:space-between;gap:12px;font-size:11px;color:rgba(255,255,255,.6);font-weight:600}
+            .hud-shortcuts{display:flex;align-items:center;flex-wrap:wrap;gap:5px 9px;min-width:0}
             .hud-shortcuts .hud-action{margin-left:1px}
             .hud-shortcuts .hud-key{padding:0 7px;min-width:auto;height:24px}
             .solution-toolbar{display:inline-flex;align-items:center;gap:8px}
@@ -2865,9 +2885,11 @@ fn overlay_html() -> &'static str {
             // Keep the overlay's real capture controls, not generic demo shortcuts.
             window.setOverlayControls=function(view){
               const host=document.getElementById('hud-shortcuts');if(!host)return;
-              const controls=view==='mcq'
-                ? [['MCQ','⌃⌥ M'],['Full','31'],['Left','32'],['Right','33'],['Region','34'],['Submit','35']]
-                : [['Coding','⌃⌥ C'],['Full','20'],['New','21'],['Left','22'],['Right','23'],['Submit','24'],['Undo','25']];
+              const controls=view==='history'
+                ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
+                : view==='mcq'
+                ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31'],['Left','32'],['Right','33'],['Region','34'],['Submit','35']]
+                : [['Coding','cc'],['MCQ','mm'],['History','hh'],['Full','20'],['New','21'],['Left','22'],['Right','23'],['Submit','24'],['Undo','25']];
               const fingerprint=controls.map(([name,key])=>name+key).join('|');
               if(host.dataset.shortcutSet===fingerprint)return;
               host.dataset.shortcutSet=fingerprint;host.replaceChildren();
@@ -2948,10 +2970,64 @@ fn overlay_html() -> &'static str {
             // Keep the existing capture and result renderer intact, then give
             // its agent output the same clear, glassy Council presentation as
             // the Story workspace. This is intentionally display-only.
-            window.showCodingHistory=function(rows,selected){const panel=document.getElementById('panel');let root=document.getElementById('coding-history');if(!root){root=document.createElement('div');root.id='coding-history';root.style.cssText='position:absolute;inset:16px;z-index:20;display:flex;flex-direction:column;gap:14px;padding:20px;border:1px solid rgba(255,255,255,.22);border-radius:14px;background:rgba(19,23,32,.96);color:white;overflow:hidden';panel.appendChild(root);}root.hidden=false;root.innerHTML='';const title=document.createElement('h3');title.textContent='Coding history · { / } navigate · | open · _ close';root.appendChild(title);const list=document.createElement('div');list.style.cssText='flex:1;overflow:auto;display:flex;flex-direction:column;gap:7px';(rows||[]).forEach((item,index)=>{const row=document.createElement('div');row.className='coding-history-row';row.dataset.index=String(index);row.style.cssText='padding:11px 13px;border:1px solid rgba(255,255,255,.18);border-radius:9px;color:rgba(255,255,255,.78);font-size:12px';row.textContent=(index+1)+'. '+(item.submittedAt||'')+' · '+(item.status||'')+' · '+String(item.id||'').slice(0,12);list.appendChild(row);});if(!list.children.length){const empty=document.createElement('div');empty.textContent='No coding history yet.';list.appendChild(empty);}root.appendChild(list);window.selectCodingHistoryRow(selected||0);};
-            window.selectCodingHistoryRow=function(selected){const root=document.getElementById('coding-history');if(!root)return;root.querySelectorAll('.coding-history-row').forEach((row,index)=>{const active=index===selected;row.style.background=active?'rgba(245,216,59,.17)':'transparent';row.style.borderColor=active?'rgba(245,216,59,.84)':'rgba(255,255,255,.18)';if(active)row.scrollIntoView({block:'nearest'});});};
-            window.closeCodingHistory=function(){const root=document.getElementById('coding-history');if(root)root.hidden=true;};
-            window.openCodingHistoryResult=function(state){window.closeCodingHistory();window.updateOverlayState(state);};
+            // Shared account history is read-only. Neither opening HH nor
+            // navigating it mutates the live Coding/MCQ batch or runs a solver.
+            window.showSharedHistory=function(rows,selected,loading,error){
+              const panel=document.getElementById('panel');if(!panel)return;
+              let root=document.getElementById('shared-history-sheet');
+              if(!root){
+                root=document.createElement('section');
+                root.id='shared-history-sheet';root.className='history-sheet';
+                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Archive</div><div class="history-title">History</div><div class="history-description">Main app and overlay · Coding, MCQ and saved runs</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate saved history</span><span>cc Coding · mm MCQ · hh History</span></footer>';
+                panel.appendChild(root);
+              }
+              root.hidden=false;
+              if(Array.isArray(rows))root.__rows=rows;
+              root.__rows=root.__rows||[];
+              window.__historyLoading=Boolean(loading);
+              window.__historyError=error||'';
+              const list=root.querySelector('#history-list');
+              list.replaceChildren();
+              root.__rows.forEach((item,i)=>{
+                const row=document.createElement('div');row.className='history-row';row.dataset.index=String(i);
+                const n=document.createElement('span');n.className='history-number';n.textContent=String(i+1).padStart(2,'0');
+                const info=document.createElement('div');info.className='history-info';
+                const title=document.createElement('div');title.className='history-row-title';title.textContent=item.title||'Saved task';
+                const subtitle=document.createElement('div');subtitle.className='history-row-subtitle';subtitle.textContent=[item.origin||'',item.subtitle||''].filter(Boolean).join(' · ').slice(0,240);
+                const meta=document.createElement('div');meta.className='history-meta';
+                const kind=document.createElement('span');kind.className='history-kind';kind.textContent=item.kind||'Run';
+                const stamp=document.createElement('span');
+                const date=new Date(item.submittedAt||'');stamp.textContent=Number.isFinite(date.getTime())?date.toLocaleString():String(item.submittedAt||'');
+                const status=document.createElement('span');status.textContent=item.status||'';
+                info.append(title,subtitle);meta.append(kind,stamp,status);row.append(n,info,meta);list.appendChild(row);
+              });
+              if(!list.children.length){
+                const empty=document.createElement('div');empty.className='history-empty';
+                empty.textContent=error?'Could not load cloud history: '+error:loading?'Loading saved account history…':'No saved runs yet. Your next main-app or overlay task will appear here.';
+                list.appendChild(empty);
+              }else if(error){
+                const warning=document.createElement('div');warning.className='history-empty';
+                warning.textContent='Showing cached history. Cloud sync: '+error;
+                list.prepend(warning);
+              }
+              const counter=root.querySelector('#history-counter');
+              counter.textContent=root.__rows.length+' saved'+(loading?' · syncing':'');
+              window.selectSharedHistoryRow(selected||0);
+              window.setOverlayControls('history');
+            };
+            window.selectSharedHistoryRow=function(selected){
+              const root=document.getElementById('shared-history-sheet');
+              if(!root||root.hidden)return;
+              root.querySelectorAll('.history-row').forEach((row,i)=>{
+                const yes=i===selected;
+                row.dataset.selected=yes?'true':'false';
+                if(yes)row.scrollIntoView({block:'nearest'});
+              });
+            };
+            window.closeSharedHistory=function(){
+              const root=document.getElementById('shared-history-sheet');if(root)root.hidden=true;
+              window.setOverlayControls(window.__overlayCurrentState&&(window.__overlayCurrentState.kind==='mcq'||window.__overlayCurrentState.mcq)?'mcq':'coding');
+            };
             const baseUpdateOverlayState=window.updateOverlayState;
             function agentStatusText(agent){
               if(agent.error)return String(agent.error);
