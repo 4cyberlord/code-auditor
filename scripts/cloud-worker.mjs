@@ -25,6 +25,7 @@ import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
 import {createSandboxCapacity, hobbyWorkerLimit} from "./lib/e2bCapacity.mjs";
 import {createE2BWarmPool} from "./lib/e2bWarmPool.mjs";
 import {selectedCppStandard} from "./lib/e2bRuntimeProfile.mjs";
+import {compareDifferentialTraces,sharedDifferentialFixtures} from "./lib/e2bDifferential.mjs";
 import {assessHarnessTrust, buildE2BEvidenceSummary, requireTrustedHarness} from "./lib/e2bEvidence.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
 import { fetchAuthoritativeLanguageContext, inferDocumentationLanguage } from "./lib/authoritativeLanguageDocs.mjs";
@@ -1395,7 +1396,12 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
     for (const model of specModels.filter(candidate => !bench.has(candidate)).slice(0, 3)) {
       try {
         const specText = await tokenRouterGenerate({
-          settings, baseUrl, model, system: testSpecSystemPrompt(),
+          settings, baseUrl, model, system: testSpecSystemPrompt() +
+             (process.env.CODE_AUDITOR_E2B_DIFFERENTIAL === "1"
+               ? "\\nOPTIONAL TRACE: For up to eight deterministic, JSON-compatible test inputs," +
+                 " print CA_DIFF_CASE followed by a space and a JSON object with fields id, input, actual." +
+                 " These must be the actual candidate outputs; retain all required PASS/FAIL assertions." +
+                 " Use stable case IDs and fixtures from the problem; omit non-JSON or multi-answer cases." : ""),
           user: testSpecUserPrompt({
             question: String(question || "").slice(0, 8_000),
             docket: (candidateDocket(candidates) || "No candidate code exists yet. Derive the test cases, outputs and API signature only from the problem specification.").slice(0, 7_000),
@@ -3448,6 +3454,11 @@ export async function runCouncilJob(job) {
     // Only after the verified primary winner is available: reserve one
     // isolated Rust and one isolated C++ slot during port translation/harness
     // generation. Never allocate these before the primary result is saved.
+    const caseFixtures = process.env.CODE_AUDITOR_E2B_DIFFERENTIAL === "1"
+      ? sharedDifferentialFixtures(gateRuns[decision.winner]?.stdout) : [];
+    const portProblem = caseFixtures.length
+      ? question + "\\n\\nAdditional tested Python input fixtures for target-language cross-checking (not an authority for expected outputs): " +
+        JSON.stringify(caseFixtures).slice(0,1800) : question;
     let portWarmPool = null;
     if (process.env.CODE_AUDITOR_E2B_PREWARM_PORTS === "1" &&
         secret("E2B_API_KEY")) {
@@ -3471,7 +3482,21 @@ export async function runCouncilJob(job) {
     let reportWrite=Promise.resolve();
     await parallelMap(targets,2,async language=>{
       const port=await verifiedLanguagePort(job,settings,baseUrl,models,judges,
-        question,verifiedSource,decision.winner,language,knowledge,bench,semanticBlueprint,portWarmPool);
+        portProblem,verifiedSource,decision.winner,language,knowledge,bench,semanticBlueprint,portWarmPool);
+      if (process.env.CODE_AUDITOR_E2B_DIFFERENTIAL === "1" && port.status === "verified") {
+        port.differential=compareDifferentialTraces(
+          gateRuns[decision.winner]?.stdout, port.run?.stdout);
+        if (port.differential.status === "disagreement") {
+          await addEvent(job.id,"warn","port_differential_disagreement",
+            "Matching fixture inputs produced different outputs in "+language+".",
+            {language,caseIds:port.differential.mismatches}).catch(()=>{});
+          if (process.env.CODE_AUDITOR_E2B_DIFFERENTIAL_STRICT === "1") {
+            port.status="failed";
+            port.error="Cross-language differential disagreement on common fixtures";
+            port.code="";
+          }
+        }
+      }
       // Serialize JSONB report writes: concurrent port workers must not
       // overwrite each other's new verified code or failure status.
       reportWrite=reportWrite.catch(()=>{}).then(async()=>{
