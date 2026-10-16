@@ -15,8 +15,8 @@ export function extendedValidatorBuildCommands() {
     "python3 -m pip install --no-cache-dir " + PINNED_PYTHON_VALIDATORS.map(x => "'" + x + "'").join(" "),
     "python3 -m pytest --version",
     "python3 -m mypy --version",
-    "python3 -m radon --version",
-    "python3 -m ruff --version",
+    "radon --version",
+    "ruff --version",
     "clang-tidy --version | head -1",
   ];
 }
