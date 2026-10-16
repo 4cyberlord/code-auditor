@@ -3202,6 +3202,46 @@ fn overlay_html() -> &'static str {
             .code-lines li[data-change="add"]{background:rgba(65,200,120,.16);border-left:3px solid rgba(65,200,120,.7)}
             .code-lines li[data-change="same"]{border-left:3px solid transparent}
             .code-lines li[data-change] code{overflow-wrap:anywhere}
+
+            /* Read-only History inspector; inherits the existing HUD and glass. */
+            .hi-root{z-index:36;padding:16px 19px 14px;gap:11px}
+            .hi-header{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:44px;padding:2px 5px 10px;border-bottom:1px solid rgba(255,255,255,.15)}
+            .hi-headline{min-width:0;flex:1}.hi-headline strong{display:block;font-size:17px;font-weight:800;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:3px}
+            .hi-headline small{font-size:10px;letter-spacing:.025em;color:rgba(255,255,255,.59);font-weight:600}
+            .hi-header-hint{font-size:10px;white-space:nowrap;color:rgba(255,255,255,.62)}
+            .hi-grid{display:grid;grid-template-columns:minmax(165px,205px) minmax(340px,1.5fr) minmax(250px,.88fr);gap:13px;flex:1;min-height:0;min-width:0}
+            .hi-sidebar,.hi-main,.hi-aside{min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+            .hi-sidebar{border-right:1px solid rgba(255,255,255,.13);padding-right:11px}
+            .hi-sidebar-title,.hi-section-label{font-size:10px;font-weight:850;letter-spacing:.1em;text-transform:uppercase;color:#f5d83b;margin:8px 0 10px}
+            .hi-side-list{min-height:0;overflow:auto;flex:1;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.21) transparent}
+            .hi-side-row{padding:10px 8px;border-left:3px solid transparent;border-bottom:1px solid rgba(255,255,255,.095);overflow:hidden}
+            .hi-side-row[data-selected="true"]{border-left-color:#f5d83b;background:rgba(245,216,59,.11)}
+            .hi-side-row b{display:block;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#fff}
+            .hi-side-row span{display:block;font-size:9px;color:rgba(255,255,255,.52);margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            .hi-thumbs{display:flex;align-items:center;gap:7px;flex:0 0 auto;padding:8px 9px;border:1px dashed rgba(255,255,255,.28);border-radius:9px;background:rgba(255,255,255,.045);min-height:52px;max-height:73px;overflow:hidden}
+            .hi-thumb{width:80px;height:52px;object-fit:cover;object-position:top;border-radius:6px;border:1px solid rgba(255,255,255,.25);flex:0 0 auto}
+            .hi-photo-label{font-size:10px;font-weight:600;color:rgba(255,255,255,.5)}
+            .hi-codebox{display:flex;flex-direction:column;min-height:0;flex:1;overflow:hidden;border:1px solid rgba(255,255,255,.17);border-radius:11px;background:rgba(2,7,13,.65)}
+            .hi-codebar{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border-bottom:1px solid rgba(255,255,255,.11);gap:8px;font:750 11px SFMono-Regular,Menlo,monospace}
+            .hi-codebar b{color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+            .hi-codebar span{font:700 10px -apple-system,sans-serif;color:#f5d83b}
+            .hi-codebox .code-lines{flex:1;min-height:0;overflow:auto;font-size:11.5px;line-height:1.6}
+            .hi-msg{min-height:0;flex:1;overflow:auto;padding:16px;color:rgba(255,255,255,.75);font-size:12px;line-height:1.65;white-space:pre-wrap;overflow-wrap:anywhere}
+            .hi-brief{font-size:11px;line-height:1.5;color:rgba(255,255,255,.65);margin:8px 0 0;max-height:65px;overflow:auto}
+            .hi-tests{display:flex;align-items:center;gap:7px;margin-top:8px;min-height:47px;max-height:90px;overflow:auto;border-top:1px solid rgba(255,255,255,.13);font-size:10px}
+            .hi-test-pill{flex:0 0 auto;border:1px solid rgba(255,255,255,.18);border-radius:7px;padding:7px;color:rgba(255,255,255,.83)}
+            .hi-test-pill[data-status="passed"]{border-color:rgba(70,207,120,.44);color:#a3f1ba}
+            .hi-test-pill[data-status="failed"]{border-color:rgba(251,116,116,.5);color:#ffc0c0}
+            .hi-aside{overflow:auto;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.2) transparent;padding:0 5px 0 2px}
+            .hi-insight{padding:10px 3px 12px;border-bottom:1px solid rgba(255,255,255,.14)}
+            .hi-insight-label{display:block;font-size:10px;letter-spacing:.065em;color:#f5d83b;font-weight:850;text-transform:uppercase;margin-bottom:6px}
+            .hi-insight-text{white-space:pre-wrap;overflow-wrap:anywhere;color:rgba(255,255,255,.77);font-size:11px;line-height:1.55;font-weight:500}
+            .hi-model{padding:7px 0;border-bottom:1px solid rgba(255,255,255,.08)}
+            .hi-model:last-child{border-bottom:0}.hi-model b{display:block;font-size:11px;color:rgba(255,255,255,.95);font-weight:750;overflow-wrap:anywhere}
+            .hi-model small{font-size:9px;color:rgba(255,255,255,.53);display:block;margin-top:4px}
+            .hi-selected-winner{color:#a4ebc1!important}
+            .hi-footer{flex:0 0 auto;border-top:1px solid rgba(255,255,255,.13);padding:10px 4px 0;display:flex;justify-content:space-between;gap:8px;color:rgba(255,255,255,.58);font-size:10px;font-weight:650}
+            @media(max-width:950px){.hi-grid{grid-template-columns:140px minmax(280px,1fr) 230px;gap:9px}.hi-header-hint{display:none}}
         </style></head><body><div class="hudbar" id="hudbar"><span class="hud-logo">CA</span><span class="hud-pause">||</span><span class="hud-meter"><i></i><i></i><i></i></span><span id="hud-shortcuts" class="hud-shortcuts"></span></div><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><script>
 	            // HUD labels come from the numeric command table handled by mac_shortcuts.
             // Keep the overlay's real capture controls, not generic demo shortcuts.
