@@ -188,6 +188,7 @@ mod mac_shortcuts {
     static HISTORY_PREVIOUS: AtomicBool = AtomicBool::new(false);
     static HISTORY_NEXT: AtomicBool = AtomicBool::new(false);
     static HISTORY_OPEN: AtomicBool = AtomicBool::new(false);
+    static HISTORY_BACK: AtomicBool = AtomicBool::new(false);
     static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
     static HISTORY_VISIBLE: AtomicBool = AtomicBool::new(false);
     // 1 coding, 2 multiple-choice, 3 shared cloud history.
@@ -325,6 +326,9 @@ mod mac_shortcuts {
             match (usage, SHIFT_DOWN.load(Ordering::SeqCst)) {
                 (HID_USAGE_KEYBOARD_UP_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_DOWN_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_NEXT.store(true, Ordering::SeqCst),
+                // Back is intentionally local to the read-only History
+                // surface: it never moves the click-through overlay window.
+                (HID_USAGE_KEYBOARD_LEFT_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_BACK.store(true, Ordering::SeqCst),
                 // Right-arrow selects the highlighted saved run and opens its
                 // full read-only Council result in the overlay.
                 (HID_USAGE_KEYBOARD_RIGHT_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_OPEN.store(true, Ordering::SeqCst),
@@ -469,6 +473,7 @@ mod mac_shortcuts {
     pub fn take_history_previous() -> bool { HISTORY_PREVIOUS.swap(false, Ordering::SeqCst) }
     pub fn take_history_next() -> bool { HISTORY_NEXT.swap(false, Ordering::SeqCst) }
     pub fn take_history_open() -> bool { HISTORY_OPEN.swap(false, Ordering::SeqCst) }
+    pub fn take_history_back() -> bool { HISTORY_BACK.swap(false, Ordering::SeqCst) }
 }
 
 async fn space_api_calls() {
@@ -665,6 +670,7 @@ fn run() -> Result<(), String> {
     let mut history_open = false;
     let mut history_rows: Vec<Value> = Vec::new();
     let mut history_index = 0_usize;
+    let mut history_detail_open = false;
     let mut history_fetch: Option<tokio::task::JoinHandle<Result<(Vec<Value>,Option<String>),String>>> = None;
     let mut history_detail_fetch: Option<tokio::task::JoinHandle<Result<Value,String>>> = None;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
@@ -805,12 +811,14 @@ fn run() -> Result<(), String> {
         }
         if history_detail_fetch.as_ref().is_some_and(|task| task.is_finished()) {
             if let Some(task) = history_detail_fetch.take() {
-                let script = match rt.block_on(task) {
-                    Ok(Ok(detail)) => format!("window.showSharedHistoryDetail({});", serde_json::to_string(&detail).unwrap_or_else(|_| "{}".into())),
-                    Ok(Err(error)) => format!("window.showSharedHistoryDetail({});", serde_json::json!({"error": error})),
-                    Err(error) => format!("window.showSharedHistoryDetail({});", serde_json::json!({"error": error.to_string()})),
-                };
-                let _ = webview.evaluate_script(&script);
+                if history_open && history_detail_open {
+                    let script = match rt.block_on(task) {
+                        Ok(Ok(detail)) => format!("window.showSharedHistoryDetail({});", serde_json::to_string(&detail).unwrap_or_else(|_| "{}".into())),
+                        Ok(Err(error)) => format!("window.showSharedHistoryDetail({});", serde_json::json!({"error": error})),
+                        Err(error) => format!("window.showSharedHistoryDetail({});", serde_json::json!({"error": error.to_string()})),
+                    };
+                    let _ = webview.evaluate_script(&script);
+                }
             }
         }
         if last_capture_cleanup.elapsed() >= Duration::from_secs(3600) {
@@ -884,6 +892,8 @@ fn run() -> Result<(), String> {
                         // over the previous task view.
                         if overlay_visible && history_open {
                             history_open = false;
+                            history_detail_open = false;
+                            if let Some(task) = history_detail_fetch.take() { task.abort(); }
                             mac_shortcuts::set_history_visible(false);
                             let _ = webview.evaluate_script("window.closeSharedHistory()");
                             overlay_visible = false;
@@ -894,6 +904,7 @@ fn run() -> Result<(), String> {
                             history_rows = archived_helper_history().unwrap_or_default();
                             history_index = 0;
                             history_open = true;
+                            history_detail_open = false;
                             mac_shortcuts::set_history_visible(true);
                             let rows = serde_json::to_string(&history_rows).unwrap_or_else(|_| "[]".into());
                             history_fetch = Some(rt.spawn(fetch_unified_history()));
@@ -913,6 +924,8 @@ fn run() -> Result<(), String> {
                             let _ = show_overlay(&overlay, false);
                         } else {
                             history_open = false;
+                            history_detail_open = false;
+                            if let Some(task) = history_detail_fetch.take() { task.abort(); }
                             mac_shortcuts::set_history_visible(false);
                             let _ = webview.evaluate_script("window.closeSharedHistory()");
                             active_view = target_view.to_string();
@@ -1010,21 +1023,49 @@ fn run() -> Result<(), String> {
             // Arrows navigate only while HH history is visible. They are
             // observed by IOHID and do not capture normal application keys.
             if history_open && overlay_visible {
-                if mac_shortcuts::take_history_previous() {
+                if mac_shortcuts::take_history_back() {
+                    if history_detail_open {
+                        // First ← returns from the opened saved result to its
+                        // selected row. Do not let an in-flight remote lookup
+                        // reopen a result the person has deliberately left.
+                        history_detail_open = false;
+                        if let Some(task) = history_detail_fetch.take() { task.abort(); }
+                        let rows = serde_json::to_string(&history_rows).unwrap_or_else(|_| "[]".into());
+                        let _ = webview.evaluate_script(&format!(
+                            "window.showSharedHistory({rows},{history_index},false,null)"));
+                    } else {
+                        // A second ← leaves History entirely and restores the
+                        // live capture/working surface without changing the
+                        // current batch or Council job.
+                        history_open = false;
+                        mac_shortcuts::set_history_visible(false);
+                        let _ = webview.evaluate_script("window.closeSharedHistory()");
+                        let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                    }
+                }
+                if !history_detail_open && mac_shortcuts::take_history_previous() {
                     history_index = history_index.saturating_sub(1);
                     let _ = webview.evaluate_script(&format!(
                         "window.selectSharedHistoryRow({history_index})"));
                 }
-                if mac_shortcuts::take_history_next() {
+                if !history_detail_open && mac_shortcuts::take_history_next() {
                     history_index = (history_index + 1).min(history_rows.len().saturating_sub(1));
                     let _ = webview.evaluate_script(&format!(
                         "window.selectSharedHistoryRow({history_index})"));
                 }
-                if mac_shortcuts::take_history_open()
+                if !history_detail_open && mac_shortcuts::take_history_open()
                     && history_detail_fetch.as_ref().is_none_or(|task| task.is_finished())
                 {
                     if let Some(row) = history_rows.get(history_index).cloned() {
-                        history_detail_fetch = Some(rt.spawn(fetch_history_detail(row)));
+                        let title = row.get("title").and_then(Value::as_str).unwrap_or("Saved result").to_string();
+                        history_detail_open = true;
+                        history_detail_fetch = Some(rt.spawn(async move {
+                            let mut detail = fetch_history_detail(row).await?;
+                            if let Some(state) = detail.get_mut("state").and_then(Value::as_object_mut) {
+                                state.insert("historyTitle".into(), Value::String(title));
+                            }
+                            Ok(detail)
+                        }));
                         let _ = webview.evaluate_script("window.showSharedHistoryDetail({loading:true});");
                     }
                 }
@@ -1032,6 +1073,7 @@ fn run() -> Result<(), String> {
                 let _ = mac_shortcuts::take_history_previous();
                 let _ = mac_shortcuts::take_history_next();
                 let _ = mac_shortcuts::take_history_open();
+                let _ = mac_shortcuts::take_history_back();
             }
             // HH and arrow-only History doesn't change the active solving task.
             mac_shortcuts::set_history_visible(history_open && overlay_visible);
@@ -2975,6 +3017,7 @@ fn overlay_html() -> &'static str {
             .agent-header{box-sizing:border-box;width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:2px}
             .agent-header .title{font-size:11px}.agent-summary{color:var(--muted);font-size:10px;white-space:nowrap}
             .overlay-progress,.overlay-diagnostics{box-sizing:border-box;width:100%;padding:9px 10px;border:1px solid rgba(114,159,255,.34);border-radius:9px;background:rgba(67,112,199,.12);color:rgba(231,240,255,.86);font-size:10px;line-height:1.35}
+            .overlay-history-context{box-sizing:border-box;width:100%;padding:8px 10px;border:1px solid rgba(245,216,59,.45);border-radius:9px;background:rgba(245,216,59,.10);color:rgba(255,246,188,.96);font-size:10px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
             .overlay-diagnostics{border-color:rgba(255,107,107,.48);background:rgba(255,107,107,.1);color:rgba(255,226,226,.94)}
             .overlay-diagnostics b{display:block;margin-bottom:2px;color:#ffd7d7}
 	            .solution-editor{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:650px;display:flex;flex-direction:column;border:1px solid var(--panel-line);border-radius:9px;background:var(--editor-bg);overflow:hidden}
@@ -3294,6 +3337,13 @@ fn overlay_html() -> &'static str {
               const failures=selected.filter((agent)=>agent.error).map((agent)=>(agent.label||agent.id||'Council agent')+': '+agent.error);
               if(failures.length||state.phase==='error'){const diagnostic=document.createElement('div');diagnostic.className='overlay-diagnostics';const label=document.createElement('b');label.textContent='Run diagnostics';const message=document.createElement('span');message.textContent=failures.join(' · ')||'The Council run reported an issue. The captured images and any available answer remain available.';diagnostic.append(label,message);progress.after(diagnostic);}
             }
+            function renderHistoryContext(state){
+              const old=document.getElementById('overlay-history-context');if(old)old.remove();
+              const title=state&&String(state.historyTitle||'').trim();if(!title)return;
+              const pane=document.querySelector('.pictures-pane');if(!pane)return;
+              const context=document.createElement('div');context.id='overlay-history-context';context.className='overlay-history-context';context.textContent='History result · '+title;
+              const progress=pane.querySelector('.overlay-progress');if(progress)progress.after(context);else{const agents=document.getElementById('agents');if(agents)agents.after(context);}
+            }
             function renderVerifiedPorts(state){
               const primary=state&&state.solution;
               const ports=Array.isArray(state&&state.ports)?state.ports.filter((port)=>port&&port.status==='verified'&&String(port.code||'').trim()):[];
@@ -3306,7 +3356,7 @@ fn overlay_html() -> &'static str {
               const list=document.createElement('div');list.className='case-list';
               choices.forEach((choice,index)=>{const button=document.createElement('button');button.type='button';button.className='case';button.textContent=(choice.primary?'Primary · ':'')+String(choice.language||'Code')+(choice.primary?'':' · E2B verified');button.addEventListener('click',()=>{const code=document.getElementById('solution-code');const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');if(!code)return;window.__overlayDiffHidden=true;renderCodeLines(code,String(choice.code||''),String(choice.language||''));if(title)title.textContent='solution.'+String(choice.language||'code').toLowerCase();if(source)source.textContent=choice.primary?'Council verified':'Verified language port · E2B passed';list.querySelectorAll('button').forEach((item,i)=>item.dataset.selected=i===index?'true':'false');});button.dataset.selected=index===0?'true':'false';list.append(button);});section.append(list);editor.after(section);
             }
-            window.updateOverlayState=function(state){baseUpdateOverlayState(state);window.setOverlayControls(state&&(state.kind==='mcq'||state.mcq)?'mcq':'coding');if(!state||state.kind!=='mcq'){renderStoryAgents(state||{});renderVerifiedPorts(state||{});}};
+            window.updateOverlayState=function(state){baseUpdateOverlayState(state);window.setOverlayControls(state&&(state.kind==='mcq'||state.mcq)?'mcq':'coding');if(!state||state.kind!=='mcq'){renderStoryAgents(state||{});renderHistoryContext(state||{});renderVerifiedPorts(state||{});}};
     </script></body></html>"#
 }
 
