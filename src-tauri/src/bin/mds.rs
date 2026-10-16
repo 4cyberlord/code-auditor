@@ -2304,6 +2304,24 @@ fn coding_solution_from_report(body: &Value, winner: &str, candidates: &[Value])
 }
 
 fn coding_tests_from_report(body: &Value) -> Vec<Value> {
+    // A provisional result has real E2B verification but no finalized Council
+    // evidence rows yet. Report the measured passed count, never invented cases.
+    if body.get("stage").and_then(Value::as_str) == Some("provisional") {
+        if let Some(early) = body.get("provisional") {
+            let passed = early.get("passed").and_then(Value::as_u64).unwrap_or(0);
+            let failed = early.get("failed").and_then(Value::as_u64).unwrap_or(1);
+            if passed > 0 && failed == 0 {
+                let letter = early.get("letter").and_then(Value::as_str).unwrap_or("?");
+                return vec![serde_json::json!({
+                    "name": format!("Candidate {letter} · preliminary E2B"),
+                    "input": early.get("language").and_then(Value::as_str).unwrap_or(""),
+                    "expected": format!("{passed} executed test cases"),
+                    "actual": format!("{passed} passed, 0 failed; Council review pending"),
+                    "status": "passed"
+                })];
+            }
+        }
+    }
     // One row per candidate, carrying what its run did. The harness rows this
     // falls back to say "From cloud report" five times, which is a pane that
     // reports nothing at all.
@@ -2807,7 +2825,7 @@ mod tests {
         for (prefix, shape, command) in expected {
             assert_eq!(number_pair_command(prefix, shape), Some(command));
         }
-        for invalid in [(1, 5), (2, 0), (3, 0), (4, 1)] {
+        for invalid in [(1, 5), (2, 6), (3, 0), (4, 1)] {
             assert_eq!(number_pair_command(invalid.0, invalid.1), None);
         }
     }
@@ -2969,6 +2987,7 @@ mod tests {
         let state = coding_overlay_state(&job);
         assert_eq!(state["solution"]["status"],"provisional");
         assert_eq!(state["solution"]["code"],"print(1)");
+        assert_eq!(state["tests"][0]["status"],"passed");
         assert_eq!(state["phase"],"running");
         assert!(is_usable_cloud_report(&serde_json::json!({"report":{
             "stage":"provisional","provisional":{"status":"provisional",
