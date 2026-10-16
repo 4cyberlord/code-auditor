@@ -2673,6 +2673,67 @@ fn overlay_html() -> &'static str {
 	            .thought-space{box-sizing:border-box;width:100%;height:62px;border:1px solid var(--panel-line);border-radius:7px;background:var(--box-fill);overflow:hidden}
 	            .function-notes{height:96px;padding:8px 10px;color:var(--muted);font-size:11px;line-height:1.35}
 	            .function-notes div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            /* RIGHT THOUGHT COLUMN ONLY. No left editor, HUD, MCQ or overlay state changes.
+               Trade boxed answers for an editorial insight rail with a single compact
+               accent, proper hierarchy and subtle separators; keep the same eight slots. */
+            .thought-pane .thought-list{
+              counter-reset:insight-step;gap:0;min-height:0;overflow-x:hidden;overflow-y:auto;
+              padding:0 5px 4px 0;scrollbar-width:thin;
+              scrollbar-color:rgba(255,255,255,.22) transparent;
+            }
+            .thought-pane .thought-item{
+              --insight-accent:#f5d83b;
+              counter-increment:insight-step;
+              position:relative;box-sizing:border-box;flex:0 0 auto;width:100%;
+              display:grid;grid-template-columns:3px minmax(0,1fr);grid-template-rows:auto auto;
+              align-items:start;column-gap:13px;row-gap:6px;
+              padding:12px 10px 13px 2px;margin:0;
+              border:0;border-bottom:1px solid rgba(255,255,255,.12);
+              background:linear-gradient(90deg,color-mix(in srgb,var(--insight-accent) 7%,transparent),transparent 72%);
+            }
+            .thought-pane .thought-item:first-child{padding-top:8px}
+            .thought-pane .thought-item:last-child{border-bottom:0}
+            .thought-pane .thought-item::before{
+              content:"";grid-column:1;grid-row:1/3;align-self:stretch;min-height:34px;
+              width:3px;border-radius:999px;
+              background:linear-gradient(180deg,var(--insight-accent),color-mix(in srgb,var(--insight-accent) 25%,transparent));
+              box-shadow:0 0 13px color-mix(in srgb,var(--insight-accent) 20%,transparent);
+            }
+            .thought-pane .thought-heading{
+              grid-column:2;grid-row:1;display:flex;align-items:center;gap:10px;min-width:0;
+              font-size:11px;line-height:1.3;font-weight:800;letter-spacing:.035em;
+              color:var(--text);text-shadow:none;
+            }
+            .thought-pane .thought-heading::before{
+              content:counter(insight-step,decimal-leading-zero);
+              color:var(--insight-accent);font:800 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+              letter-spacing:0;opacity:.95;
+            }
+            .thought-pane .thought-space{
+              box-sizing:border-box;grid-column:2;grid-row:2;width:100%;
+              height:auto;min-height:19px;max-height:76px;overflow-x:hidden;overflow-y:auto;
+              padding:0;border:0;border-radius:0;background:transparent;
+              color:var(--muted);font-size:11.5px;font-weight:500;line-height:1.5;
+              white-space:pre-wrap;overflow-wrap:anywhere;
+              scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.18) transparent;
+            }
+            .thought-pane .thought-item:first-child .thought-space{font-weight:600;color:var(--text)}
+            .thought-pane .function-notes{height:auto;max-height:96px;padding:0}
+            .thought-pane .function-notes div{white-space:normal;overflow-wrap:anywhere;overflow:visible;text-overflow:clip}
+            .thought-pane .thought-item:nth-child(2){--insight-accent:#c2a8ff}
+            .thought-pane .thought-item:nth-child(3){--insight-accent:#67dccb}
+            .thought-pane .thought-item:nth-child(4){--insight-accent:#67e0a5}
+            .thought-pane .thought-item:nth-child(5){--insight-accent:#8bb8ff}
+            .thought-pane .thought-item:nth-child(6){--insight-accent:#f3b874}
+            .thought-pane .thought-item:nth-child(7){--insight-accent:#65d8ed}
+            .thought-pane .thought-item:nth-child(8){--insight-accent:#d5a1ff}
+            .thought-pane .thought-item:nth-child(4) .thought-space,
+            .thought-pane .thought-item:nth-child(5) .thought-space{
+              color:var(--text);font:650 12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+            }
+            @media (prefers-reduced-motion:no-preference){
+              .thought-pane .thought-item{transition:background-color .2s ease}
+            }
               .mcq-box{box-sizing:border-box;width:100%;border:1px solid var(--panel-line);border-radius:9px;background:var(--editor-bg);padding:12px;color:var(--text);line-height:1.45;overflow:auto}
               .mcq-question{min-height:150px;max-height:270px;font-size:15px}
               .mcq-answer{min-height:180px;font-size:16px}
