@@ -24,6 +24,7 @@ import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
 import {createSandboxCapacity, hobbyWorkerLimit} from "./lib/e2bCapacity.mjs";
 import {createE2BWarmPool} from "./lib/e2bWarmPool.mjs";
+import {selectedCppStandard} from "./lib/e2bRuntimeProfile.mjs";
 import {assessHarnessTrust, buildE2BEvidenceSummary, requireTrustedHarness} from "./lib/e2bEvidence.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
 import { fetchAuthoritativeLanguageContext, inferDocumentationLanguage } from "./lib/authoritativeLanguageDocs.mjs";
@@ -943,7 +944,7 @@ case "$lang" in
   bash|sh|shell) file=main.sh; cp code.txt "$file"; command='bash main.sh'; runtime='${providerLabel} bash' ;;
   ruby|rb) file=main.rb; cp code.txt "$file"; command='ruby main.rb'; runtime='${providerLabel} ruby' ;;
   php) file=main.php; cp code.txt "$file"; command='php main.php'; runtime='${providerLabel} php' ;;
-  cpp|c++|cc|cxx) file=main.cpp; cp code.txt "$file"; command='c++ -std=c++20 -O2 main.cpp -o prog && ./prog'; runtime='${providerLabel} c++ -O2' ;;
+  cpp|c++|cc|cxx) file=main.cpp; cp code.txt "$file"; command='c++ -std=${selectedCppStandard(process.env.CODE_AUDITOR_CPP_STANDARD)} -O2 main.cpp -o prog && ./prog'; runtime='${providerLabel} c++ -O2' ;;
   java) file=Main.java; cp code.txt "$file"; command='javac Main.java && java Main'; runtime='${providerLabel} javac + java' ;;
   go|golang) file=main.go; cp code.txt "$file"; command='go run main.go'; runtime='${providerLabel} go' ;;
   rust|rs) file=main.rs; cp code.txt "$file"; command='rustc -O main.rs -o prog 2>&1 && ./prog'; runtime='${providerLabel} rustc -O' ;;
