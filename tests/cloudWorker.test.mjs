@@ -666,7 +666,10 @@ check("the job completed on the shipped bench", patches.some((p) => p.status ===
 
 // --- a route with no reasoning mode is not a broken route -------------------
 console.log("\n5. a model that cannot reason is asked again without it");
-REJECTS_REASONING = "moonshotai/kimi-k3";
+// Use a fresh, approved model ID. The gateway's no-reasoning cache is
+// intentionally process-scoped, and preceding scenarios can have learned
+// that Kimi does not accept reasoning before this case starts.
+REJECTS_REASONING = "anthropic/claude-fable-5.1";
 events.length = 0;
 patches.length = 0;
 reports.length = 0;
@@ -682,7 +685,7 @@ await runCouncilJob({
     gatewayBaseUrl: "https://api.tokenrouter.com/v1",
     councilModels: [
       { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
-      { id: "moonshotai/kimi-k3", endpoint: "chat" },
+      { id: "anthropic/claude-fable-5.1", endpoint: "chat" },
     ],
     councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
