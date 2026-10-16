@@ -4,6 +4,8 @@ on:
     branches:
       - main
       - feat/cloud-thin-client-phase1
+      # CI for the stacked Hobby E2B PR, without changing its parent/merge base.
+      - perf/parallel-language-harness-20261016
   workflow_dispatch:
 concurrency:
   group: security-macos-${{ github.event.pull_request.number || github.ref }}
