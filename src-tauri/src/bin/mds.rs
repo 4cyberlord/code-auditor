@@ -675,6 +675,7 @@ fn run() -> Result<(), String> {
     let mut history_detail_fetch: Option<tokio::task::JoinHandle<Result<Value,String>>> = None;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
+    let mut last_history_refresh = Instant::now() - Duration::from_secs(60);
     let mut last_heartbeat = Instant::now();
     let mut last_capture_cleanup = Instant::now() - Duration::from_secs(3600);
     #[cfg(target_os = "macos")]
@@ -821,6 +822,16 @@ fn run() -> Result<(), String> {
                 }
             }
         }
+        // History is an account-scoped live view. Refresh its single server
+        // snapshot once per second while the list is visible; never replace an
+        // opened result underneath the person reading it.
+        if history_open && !history_detail_open
+            && history_fetch.as_ref().is_none_or(|task| task.is_finished())
+            && last_history_refresh.elapsed() >= Duration::from_secs(1)
+        {
+            last_history_refresh = Instant::now();
+            history_fetch = Some(rt.spawn(fetch_unified_history()));
+        }
         if last_capture_cleanup.elapsed() >= Duration::from_secs(3600) {
             if let Err(error) = clean_expired_capture_dirs() {
                 log(&format!("Capture cleanup skipped: {error}"));
@@ -899,14 +910,16 @@ fn run() -> Result<(), String> {
                             overlay_visible = false;
                             let _ = show_overlay(&overlay, false);
                         } else {
-                            // Show cached/local rows immediately while the
-                            // authenticated main+overlay history loads off-thread.
-                            history_rows = archived_helper_history().unwrap_or_default();
+                            // The list is server-authoritative. Start empty
+                            // rather than showing a stale helper cache while
+                            // the first shared snapshot arrives.
+                            history_rows.clear();
                             history_index = 0;
                             history_open = true;
                             history_detail_open = false;
                             mac_shortcuts::set_history_visible(true);
                             let rows = serde_json::to_string(&history_rows).unwrap_or_else(|_| "[]".into());
+                            last_history_refresh = Instant::now();
                             history_fetch = Some(rt.spawn(fetch_unified_history()));
                             overlay_visible = true;
                             event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
@@ -1259,68 +1272,6 @@ fn history_row(id: &str, origin: &str, kind: &str, title: &str, subtitle: &str,
     })
 }
 
-fn archived_helper_history() -> Result<Vec<Value>, String> {
-    let mut rows = Vec::new();
-    for view in ["coding", "mcq"] {
-        if let Some(job) = read_submitted_job_for(view)? {
-            rows.push(history_row(&format!("job:{}",job.id),"Overlay",
-                if job.mode=="mcq"{"MCQ"}else{"Coding"},
-                if job.mode=="mcq"{"MCQ screenshot task"}else{"Coding screenshot task"},
-                &job.id, &job.status, &job.submitted_at));
-        }
-    }
-    let dir = cache_dir()?.join("job-history");
-    if let Ok(entries) = fs::read_dir(dir) {
-        // Keep opening History bounded; older cloud rows remain available via
-        // the account-scoped API below.
-        for entry in entries.flatten().take(200) {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") { continue; }
-            let Ok(raw) = fs::read_to_string(path) else { continue; };
-            let Ok(job) = serde_json::from_str::<SubmittedJob>(&raw) else { continue; };
-            rows.push(history_row(&format!("job:{}",job.id),"Overlay",
-                if job.mode=="mcq"{"MCQ"}else{"Coding"},
-                if job.mode=="mcq"{"MCQ screenshot task"}else{"Coding screenshot task"},
-                &job.id,&job.status,&job.submitted_at));
-        }
-    }
-    normalize_history(rows)
-}
-
-/// A report saved while a job is still provisional is useful for live overlay
-/// progress, but it is not the durable finished result a person expects when
-/// opening History. Keep the instant local path for completed reports and
-/// otherwise continue to the account-scoped report endpoint below.
-fn is_final_history_report(report: &Value) -> bool {
-    let body = report.get("report").unwrap_or(report);
-    body.get("stage").and_then(Value::as_str) != Some("provisional")
-}
-
-/// A completed overlay report is saved locally by the helper.  History should
-/// open that durable, account-scoped snapshot immediately instead of making a
-/// person wait for the network merely to view a result they have already
-/// received.  The cloud API remains the fallback for another device or an
-/// older result which is no longer in this cache.
-fn cached_history_job(job_id: &str) -> Result<Option<SubmittedJob>, String> {
-    for view in ["coding", "mcq"] {
-        if let Some(job) = read_submitted_job_for(view)? {
-            if job.id == job_id && job.report.as_ref().is_some_and(is_final_history_report) {
-                return Ok(Some(job));
-            }
-        }
-    }
-
-    let path = cache_dir()?.join("job-history").join(format!("{job_id}.json"));
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = fs::read_to_string(&path)
-        .map_err(|error| format!("Could not read saved overlay result: {error}"))?;
-    let job = serde_json::from_str::<SubmittedJob>(&raw)
-        .map_err(|error| format!("Could not parse saved overlay result: {error}"))?;
-    Ok((job.id == job_id && job.report.as_ref().is_some_and(is_final_history_report)).then_some(job))
-}
-
 fn normalize_history(rows: Vec<Value>) -> Result<Vec<Value>, String> {
     let mut map = std::collections::HashMap::<String,Value>::new();
     for row in rows {
@@ -1347,41 +1298,21 @@ fn normalize_history(rows: Vec<Value>) -> Result<Vec<Value>, String> {
 /// sessions; fetch cloud queued-job history separately; fold local snapshots
 /// in for items no longer in the API's most-recent-job page.
 async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> {
-    use futures_util::future::join_all;
-    let mut rows = archived_helper_history()?;
-    let (jobs,active,archived)=tokio::join!(
-        api("jobs.list",serde_json::json!({"status":"all"})),
-        api("sessions.list",serde_json::json!({"status":"active"})),
-        api("sessions.list",serde_json::json!({"status":"archived"})),
-    );
-    let mut errors=Vec::new();
-    let job_items = match jobs {
-        Ok(payload) => payload.as_array().cloned()
-            .or_else(|| payload.get("items").and_then(Value::as_array).cloned())
-            .unwrap_or_default(),
-        Err(_) => { errors.push("cloud jobs"); Vec::new() }
-    };
+    // `history.list` is a single, account-scoped, server-authoritative read.
+    // The overlay calls it while History is visible, so this list never depends
+    // on local cache files or on a separate overlay-only history database.
+    let payload = api("history.list", serde_json::json!({})).await?;
+    let mut rows = Vec::new();
     let mut sessions=std::collections::HashMap::<String, Value>::new();
-    for response in [active,archived] {
-        match response {
-            Ok(payload) => {
-                for item in payload.as_array().or_else(||payload.get("items").and_then(Value::as_array))
-                    .into_iter().flatten() {
-                    if let Some(id)=item.get("id").and_then(Value::as_str) {
-                        sessions.insert(id.to_owned(),item.clone());
-                    }
-                }
-            }
-            Err(_) => errors.push("main sessions"),
+    for item in payload.get("sessions").and_then(Value::as_array).into_iter().flatten() {
+        if let Some(id)=item.get("id").and_then(Value::as_str) {
+            sessions.insert(id.to_owned(),item.clone());
         }
     }
-    // The API exposes main run history per session, not as one flat list.
-    // Bounded concurrency keeps older accounts usable without overwhelming
-    // the API or bringing synchronous network work onto the macOS event loop.
     // Jobs and runs are both owned by a session. The worker renames the same
     // session after it understands the captured problem, so use that one title
     // for both history surfaces instead of maintaining a second overlay name.
-    for item in job_items {
+    for item in payload.get("jobs").and_then(Value::as_array).into_iter().flatten() {
         let id=item.get("id").and_then(Value::as_str).unwrap_or("");
         if id.is_empty(){continue;}
         let mode=item.get("mode").and_then(Value::as_str).unwrap_or("council");
@@ -1398,46 +1329,26 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
             item.get("status").and_then(Value::as_str).unwrap_or("unknown"),
             item.get("createdAt").and_then(Value::as_str).unwrap_or("")));
     }
-    let mut sessions: Vec<(String,Value)> = sessions.into_iter().collect();
-    sessions.sort_by(|a,b| b.1.get("updatedAt").and_then(Value::as_str).unwrap_or("")
-        .cmp(a.1.get("updatedAt").and_then(Value::as_str).unwrap_or("")));
-    sessions.truncate(30);
-    for chunk in sessions.chunks(6) {
-        let responses=join_all(chunk.iter().map(|(id,_)|
-            api("runs.list",serde_json::json!({"sessionId":id})))).await;
-        for ((_,session),answer) in chunk.iter().zip(responses) {
-            match answer {
-                Ok(payload) => for item in payload.as_array().or_else(||payload.get("items").and_then(Value::as_array))
-                    .into_iter().flatten().take(20) {
-                    let id=item.get("id").and_then(Value::as_str).unwrap_or("");
-                    if id.is_empty(){continue;}
-                    let mode=item.get("mode").and_then(Value::as_str).unwrap_or("auto");
-                    let at=item.get("startedAt").and_then(Value::as_str).unwrap_or("");
-                    let status=if item.get("finishedAt").and_then(Value::as_str).is_some_and(|s|!s.is_empty())
-                        {"completed"}else{"running"};
-                    let title=item.get("asked").and_then(Value::as_str)
-                        .filter(|s|!s.trim().is_empty())
-                        .or_else(||session.get("title").and_then(Value::as_str))
-                        .unwrap_or("Saved main-app run");
-                    rows.push(history_row(&format!("main:{id}"),"Main app",
-                        if mode=="mcq"{"MCQ"}else if mode=="coding"||mode=="code"{"Coding"}else{"Run"},
-                        title,
-                        session.get("title").and_then(Value::as_str).unwrap_or(""),
-                        status,at));
-                },
-                Err(_) => errors.push("main runs"),
-            }
-        }
+    for item in payload.get("runs").and_then(Value::as_array).into_iter().flatten() {
+        let id=item.get("id").and_then(Value::as_str).unwrap_or("");
+        if id.is_empty(){continue;}
+        let mode=item.get("mode").and_then(Value::as_str).unwrap_or("auto");
+        let at=item.get("startedAt").and_then(Value::as_str).unwrap_or("");
+        let status=if item.get("finishedAt").and_then(Value::as_str).is_some_and(|s|!s.is_empty())
+            {"completed"}else{"running"};
+        let session = item.get("sessionId").and_then(Value::as_str).and_then(|id| sessions.get(id));
+        let title=item.get("asked").and_then(Value::as_str)
+            .filter(|s|!s.trim().is_empty())
+            .or_else(||session.and_then(|value| value.get("title").and_then(Value::as_str)))
+            .unwrap_or("Saved main-app run");
+        rows.push(history_row(&format!("main:{id}"),"Main app",
+            if mode=="mcq"{"MCQ"}else if mode=="coding"||mode=="code"{"Coding"}else{"Run"},
+            title,
+            session.and_then(|value| value.get("title").and_then(Value::as_str)).unwrap_or(""),
+            status,at));
     }
     let rows=normalize_history(rows)?;
-    if rows.is_empty() && !errors.is_empty() {
-        return Err(format!("Could not load {}. Check the background helper authorization.",errors.join(", ")));
-    }
-    let notice=if errors.is_empty() { None } else {
-        errors.sort_unstable();errors.dedup();
-        Some(format!("Some cloud history is unavailable: {}",errors.join(", ")))
-    };
-    Ok((rows,notice))
+    Ok((rows,None))
 }
 
 /// Main-app runs persist the live desktop Council state as
@@ -1529,15 +1440,8 @@ fn main_council_history_report(council: &Value) -> Value {
 async fn fetch_history_detail(row: Value) -> Result<Value, String> {
     let id = row.get("id").and_then(Value::as_str).unwrap_or("");
     if let Some(job_id) = id.strip_prefix("job:") {
-        if let Some(job) = cached_history_job(job_id)? {
-            // This is the same saved Council report shown when the job first
-            // completed.  Rendering it locally makes arrow-open feel instant
-            // and cannot mix it with a different job's result.
-            if let Some(report) = job.report.as_ref() {
-                let body = report.get("report").unwrap_or(report);
-                return Ok(serde_json::json!({"state": history_coding_state(job_id, body)}));
-            }
-        }
+        // History is deliberately server-authoritative: do not allow an old
+        // local helper snapshot to hide a newer completed Council report.
         let report = api("reports.get", serde_json::json!({"jobId": job_id})).await?;
         let body = report.get("report").unwrap_or(&report);
         return Ok(serde_json::json!({"state": history_coding_state(job_id, body)}));
@@ -3629,14 +3533,6 @@ mod tests {
         assert_eq!(state["solution"]["code"],"print(2)");
         assert_eq!(state["upgrade"]["changed"],true);
         assert_eq!(state["solutionHistory"].as_array().map(Vec::len),Some(2));
-    }
-
-    #[test]
-    fn history_cache_never_masks_a_final_report_with_a_provisional_snapshot() {
-        assert!(!is_final_history_report(&serde_json::json!({"report": {"stage": "provisional"}})));
-        assert!(is_final_history_report(&serde_json::json!({"report": {"stage": "final"}})));
-        // Older completed reports had no stage marker and remain valid history.
-        assert!(is_final_history_report(&serde_json::json!({"report": {"presentation": {"code": "print(1)"}}})));
     }
 
     #[test]

@@ -692,6 +692,46 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
   },
 
   /**
+   * One account-scoped snapshot for the overlay's shared History sheet.
+   * Keeping this server-side avoids a burst of per-session requests every
+   * time the overlay refreshes, while retaining the exact same source records
+   * used by the main application.
+   */
+  "history.list": async ({ admin, principal }) => {
+    const [sessionResult, runResult, jobResult] = await Promise.all([
+      admin.from("sessions")
+        .select("*, screenshots(count), runs(count)")
+        .eq("owner_id", principal.userId)
+        .order("updated_at", { ascending: false })
+        .limit(500),
+      admin.from("runs")
+        .select(
+          "id, session_id, mode, asked, started_at, finished_at, " +
+            "agent_responses(count), verdicts(verdict, reliability, created_at)"
+        )
+        .eq("owner_id", principal.userId)
+        .order("started_at", { ascending: false })
+        .limit(500),
+      admin.from("solve_jobs")
+        .select("*")
+        .eq("owner_id", principal.userId)
+        .order("created_at", { ascending: false })
+        .limit(500),
+    ]);
+    // deno-lint-ignore no-explicit-any
+    const sessions = ok(sessionResult, "read shared history sessions") as any[];
+    // deno-lint-ignore no-explicit-any
+    const runs = ok(runResult, "read shared history runs") as any[];
+    // deno-lint-ignore no-explicit-any
+    const jobs = ok(jobResult, "read shared history jobs") as any[];
+    return {
+      sessions: sessions.map(sessionRow),
+      runs: runs.map((row) => runSummary(row, Number(row.agent_responses?.[0]?.count ?? 0))),
+      jobs: jobs.map(solveJobRow),
+    };
+  },
+
+  /**
    * Save a finished run: the run, its answers and its verdict, atomically.
    *
    * A Postgres function rather than three inserts, because three inserts over
