@@ -26,6 +26,7 @@ import {createSandboxCapacity, hobbyWorkerLimit, standbyBudget} from "./lib/e2bC
 import {createE2BWarmPool} from "./lib/e2bWarmPool.mjs";
 import {selectedCppStandard} from "./lib/e2bRuntimeProfile.mjs";
 import {compareDifferentialTraces,sharedDifferentialFixtures} from "./lib/e2bDifferential.mjs";
+import {canRepairPort,portRepairPrompt,portRepairSystem} from "./lib/portRecovery.mjs";
 import {assessHarnessTrust, buildE2BEvidenceSummary, buildAlgorithmEvidence, requireTrustedHarness} from "./lib/e2bEvidence.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
 import { fetchAuthoritativeLanguageContext, inferDocumentationLanguage } from "./lib/authoritativeLanguageDocs.mjs";
@@ -1948,12 +1949,14 @@ async function updateSavedCouncilReport(job,report){
  * prepared, preflight-checked language-native E2B harness.
  */
 async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
-  source,sourceLetter,target,knowledge,bench,semanticBlueprint,portWarmPool=null){
+  source,sourceLetter,target,knowledge,bench,semanticBlueprint,portWarmPool=null,sourceSolverModel=""){
   let translated="";
   let translator="";
   const portStartedAt = Date.now();
   let translationMs = null;
   let earlyHarnessMs = null;
+  let lastRun = null;
+  let repair = null;
   try{
     // Resolve the translator before speculative harness retries can affect the
     // job-local model bench. The same configured provider is used throughout.
@@ -2045,6 +2048,7 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
     if(!suite)throw new Error("No validated E2B harness for "+target);
     let runs=await executeField(job,settings,[suite],candidates,{warmPool:portWarmPool,warmSeat:target});
     let run=runs.P;
+    lastRun = run;
     // Spec-only generation can infer a different callable interface for the
     // target language. On a compile/integration error (never a failed test
     // assertion), regenerate once with the actual port's signature and rerun.
@@ -2059,18 +2063,61 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
       if(!suite)throw new Error("No candidate-aware E2B harness for "+target);
       runs=await executeField(job,settings,[suite],candidates);
       run=runs.P;
+      lastRun = run;
+    }
+    let acceptedFinal=final;
+    let acceptedCandidates=candidates;
+    // A failed port may be repaired once by the SAME model that authored the
+    // verified source. The accepted reference harness remains unchanged.
+    if (!isVerified(run) && canRepairPort(run,target,sourceSolverModel,
+          process.env.CODE_AUDITOR_E2B_PORT_REPAIR !== "0")) {
+      repair={attempted:true,model:sourceSolverModel,status:"failed"};
+      await addEvent(job.id,"info","port_source_solver_repair",
+        "Asking original verified source solver to repair the "+target+" translation.",
+        {target,sourceLetter,model:sourceSolverModel});
+      try {
+        const response=await tokenRouterGenerate({
+          settings,baseUrl,model:sourceSolverModel,
+          system:portRepairSystem(target),
+          user:portRepairPrompt({question,sourceLanguage:candidateLanguage(source),
+            sourceCode:source.code,targetLanguage:target,failedCode:final.code,
+            stderr:run?.stderr,note:run?.note,blueprint:semanticBlueprint?.brief}),
+          maxTokens:Math.max(Number(settings.maxTokens||4096),8192),
+        });
+        const proposed=parseFinal(response);
+        if(!proposed || proposed.kind!=="code" ||
+            candidateLanguage(proposed)!==target || !proposed.code?.trim())
+          throw new Error("Original solver returned no valid "+target+" repair");
+        const candidate=[{letter:"P",model:sourceSolverModel,final:proposed,text:response,error:null}];
+        const verified=await executeField(job,settings,[suite],candidate);
+        lastRun=verified.P;
+        if(isVerified(lastRun)){
+          run=lastRun;
+          acceptedFinal=proposed;
+          acceptedCandidates=candidate;
+          repair.status="verified";
+        } else {
+          repair.error=String(lastRun?.note || lastRun?.stderr || "failed after one retest").slice(0,250);
+        }
+      } catch (error) {
+        repair.error=String(error instanceof Error?error.message:error).slice(0,250);
+      }
+      await addEvent(job.id,repair.status==="verified"?"info":"warn",
+        "port_source_solver_repair_result",
+        target+" original-solver repair "+repair.status,
+        {target,sourceLetter,...repair});
     }
     if(!isVerified(run))
       throw new Error("E2B rejected "+target+" port: "+
         (run?.note||String(run?.stderr||"tests failed")).slice(0,250));
-    const oracle=await runMutationOracle(job,settings,[suite],candidates,runs);
+    const oracle=await runMutationOracle(job,settings,[suite],acceptedCandidates,{P:run});
     if(oracle.some(item=>item.survived))
       throw new Error("Generated "+target+" harness missed a deliberate mutation");
-    return {language:target,sourceLetter,model:translator,code:final.code,
-      status:"verified",run};
+    return {language:target,sourceLetter,model:repair?.status==="verified"?sourceSolverModel:translator,
+      code:acceptedFinal.code,status:"verified",run,repair};
   }catch(err){
     return {language:target,sourceLetter,model:translator,code:"",
-      status:"failed",error:String(err instanceof Error?err.message:err).slice(0,380)};
+      status:"failed",run:lastRun,repair,error:String(err instanceof Error?err.message:err).slice(0,380)};
   }
 }
 
@@ -3500,7 +3547,8 @@ export async function runCouncilJob(job) {
     let reportWrite=Promise.resolve();
     await parallelMap(targets,2,async language=>{
       const port=await verifiedLanguagePort(job,settings,baseUrl,models,judges,
-        portProblem,verifiedSource,decision.winner,language,knowledge,bench,semanticBlueprint,portWarmPool);
+        portProblem,verifiedSource,decision.winner,language,knowledge,bench,semanticBlueprint,portWarmPool,
+        field3.find(candidate=>candidate.letter===decision.winner)?.model||"");
       if (process.env.CODE_AUDITOR_E2B_DIFFERENTIAL === "1" && port.status === "verified") {
         port.differential=compareDifferentialTraces(
           gateRuns[decision.winner]?.stdout, port.run?.stdout);
