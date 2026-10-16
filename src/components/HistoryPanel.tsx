@@ -2,15 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { modelPerformance, type CouncilReport, type ModelPerformance } from "@/lib/council";
-import { getCouncilReport, listSessions, listSolveJobImages, listSolveJobs, type CouncilReportSummary, type RunSummary, type SolveJob } from "@/lib/sessions";
-import { signedUrl } from "@/lib/bridge";
-import Markdown from "@/components/Markdown";
+import { getCouncilReport, listSolveJobs } from "@/lib/sessions";
 import { formatWhen } from "@/lib/when";
 import { useStore } from "@/lib/store";
-
-type TimelineItem =
-  | { kind: "run"; at: string; run: RunSummary }
-  | { kind: "job"; at: string; job: SolveJob };
 
 /**
  * Dedicated History Panel in the rail.
@@ -34,80 +28,9 @@ export default function HistoryPanel() {
   const toggleRail = useStore((s) => s.toggleRailPanel);
   const [performance, setPerformance] = useState<ModelPerformance[]>([]);
   const [performanceLoading, setPerformanceLoading] = useState(false);
-  const [remoteJobs, setRemoteJobs] = useState<SolveJob[]>([]);
-  const [remoteSelectedId, setRemoteSelectedId] = useState<string | null>(null);
-  const [remoteReport, setRemoteReport] = useState<CouncilReportSummary | null>(null);
-  const [remotePreviews, setRemotePreviews] = useState<Array<{ id: string; url: string }>>([]);
-  const [remoteError, setRemoteError] = useState<string | null>(null);
-  const [remoteLoading, setRemoteLoading] = useState(false);
-  const [sessionTitles, setSessionTitles] = useState<Record<string, string>>({});
-  const remoteSelected = remoteJobs.find((job) => job.id === remoteSelectedId) ?? null;
-  const selectedRemoteJobId = remoteSelected?.id;
-  const selectedRemoteJobUpdatedAt = remoteSelected?.updatedAt;
-  const timeline: TimelineItem[] = [
-    ...history.map((run) => ({ kind: "run" as const, at: run.startedAt, run })),
-    ...remoteJobs.map((job) => ({ kind: "job" as const, at: job.createdAt, job })),
-  ].sort((left, right) => right.at.localeCompare(left.at));
-
-  // Main-app runs and overlay submissions share the same account-scoped
-  // history. They are separate persistence records, but one timeline for the
-  // person using the app—not two competing histories.
-  useEffect(() => {
-    if (!open) return;
-    let live = true;
-    const refresh = async () => {
-      try {
-        const [jobs, activeSessions, archivedSessions] = await Promise.all([
-          listSolveJobs("all"),
-          listSessions("active"),
-          listSessions("archived"),
-        ]);
-        if (live) {
-          setRemoteJobs(jobs);
-          setSessionTitles(Object.fromEntries(
-            [...activeSessions, ...archivedSessions].map((session) => [session.id, session.title])
-          ));
-          setRemoteError(null);
-        }
-      } catch (err) {
-        if (live) setRemoteError(String(err));
-      }
-    };
-    void refresh();
-    const timer = window.setInterval(() => { if (!document.hidden) void refresh(); }, 15_000);
-    return () => { live = false; window.clearInterval(timer); };
-  }, [open]);
-
-  useEffect(() => {
-    if (!selectedRemoteJobId) return;
-    let live = true;
-    const load = async () => {
-      setRemoteLoading(true);
-      setRemoteError(null);
-      try {
-        const [report, images] = await Promise.all([
-          getCouncilReport(selectedRemoteJobId),
-          listSolveJobImages(selectedRemoteJobId),
-        ]);
-        const previews = await Promise.all(images.map(async (image) => {
-          try {
-            const url = await signedUrl(image.storagePath, 900, image.storageBucket);
-            return { id: image.id, url };
-          } catch { return null; }
-        }));
-        if (live) {
-          setRemoteReport(report);
-          setRemotePreviews(previews.filter((p): p is { id: string; url: string } => p !== null));
-        }
-      } catch (err) {
-        if (live) setRemoteError(String(err));
-      } finally {
-        if (live) setRemoteLoading(false);
-      }
-    };
-    void load();
-    return () => { live = false; };
-  }, [selectedRemoteJobId, selectedRemoteJobUpdatedAt]);
+  // Desktop history shows desktop runs only. Overlay jobs live exclusively
+  // in the helper's independent HH history. No records are deleted.
+  const timeline = [...history].sort((a, b) => b.startedAt.localeCompare(a.startedAt));
 
   useEffect(() => {
     void loadHistory();
@@ -211,11 +134,10 @@ export default function HistoryPanel() {
           )}
 
           {historyError && <div className="pane-error">{historyError}</div>}
-          {remoteError && <div className="pane-error">{remoteError}</div>}
 
           {!historyLoading && !timeline.length && !historyError && (
             <div className="empty" style={{ padding: 20 }}>
-              No saved work yet. Completed main-app and overlay work appears here together.
+              No saved main-app runs yet. The overlay maintains its own History.
             </div>
           )}
 
@@ -227,10 +149,9 @@ export default function HistoryPanel() {
 
           {timeline.length > 0 && (
             <div className="history-list">
-              {timeline.map((item) => item.kind === "run" ? (() => {
-                const r = item.run;
+              {timeline.map((r) => {
                 const isCurrent = r.id === viewingRunId;
-                return <button key={`run:${r.id}`} className="history-row" data-current={isCurrent}
+                return <button key={r.id} className="history-row" data-current={isCurrent}
                   disabled={running} title={running ? "Finish the current run first" : "Show this run in the panes"}
                   onClick={() => void openRun(r.id)}>
                   <div className="history-asked" title={r.asked.trim() || undefined}>{r.title || "Captured question"}</div>
@@ -240,24 +161,10 @@ export default function HistoryPanel() {
                     {r.verdict && <><span>·</span><span className="history-verdict">{r.verdict}</span></>}
                   </div>
                 </button>;
-              })() : (() => {
-                const job = item.job;
-                return <button key={`job:${job.id}`} className="history-row" data-current={remoteSelectedId === job.id}
-                  onClick={() => { setRemoteSelectedId(remoteSelectedId === job.id ? null : job.id); setRemoteReport(null); setRemotePreviews([]); }}>
-                  <div className="history-asked">Overlay · {sessionTitles[job.sessionId] || job.resultSummary || "Captured question"}</div>
-                  <div className="history-meta"><span>{formatWhen(job.createdAt, zone, "relative")}</span><span>·</span><span>{job.status.replaceAll("_", " ")}</span></div>
-                </button>;
-              })())}
+              })}
             </div>
           )}
-          {remoteSelected && (
-            <div className="job-detail" aria-label="Overlay solution detail">
-              <div className="job-detail-head"><strong>Overlay Council report</strong><button className="btn tiny ghost" onClick={() => setRemoteSelectedId(null)}>Close</button></div>
-              {remoteLoading && <div className="hint">Loading saved report…</div>}
-              {remotePreviews.length > 0 && <div className="job-images">{remotePreviews.map((image, index) => <img key={image.id} src={image.url} alt={`Captured screenshot ${index + 1}`} />)}</div>}
-              {remoteReport?.markdown ? <div className="job-report"><Markdown text={remoteReport.markdown} /></div> : !remoteLoading && <p className="hint">{remoteSelected.error || "The complete report will appear once the cloud worker finishes."}</p>}
-            </div>
-          )}
+
         </div>
       )}
     </aside>
