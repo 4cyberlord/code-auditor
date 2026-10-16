@@ -1855,6 +1855,12 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
   let translationMs = null;
   let earlyHarnessMs = null;
   try{
+    // Resolve the translator before speculative harness retries can affect the
+    // job-local model bench. The same configured provider is used throughout.
+    const translatorOptions=[...new Set([settings.synthesisModel,...judges.map(j=>j.model),...models.map(m=>m.id)])]
+      .filter(id=>id&&!bench.has(id));
+    if(!translatorOptions.length)throw new Error("No available translation model");
+    translator=translatorOptions[0];
     // The source's known callable contract permits a reference-only harness.
     // Generate it alongside the translation; unknown interfaces keep the
     // original candidate-aware path. Neither path skips independent E2B checks.
@@ -1883,10 +1889,6 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
             }),
           }),
         ]);
-        const options=[...new Set([settings.synthesisModel,...judges.map(j=>j.model),...models.map(m=>m.id)])]
-          .filter(id=>id&&!bench.has(id));
-        if(!options.length)throw new Error("No available translation model");
-        translator=options[0];
         const system=[
           "Translate an ALREADY E2B-VERIFIED programming solution into "+target+".",
           "Preserve input/output behavior, error handling, constraints, function signature and asymptotic properties.",
@@ -1928,7 +1930,7 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
         prepareProblemHarnesses(job,settings,baseUrl,models,judges,
           question,candidates,[target],knowledge,bench),
     });
-    const {candidates}=preparation.translation;
+    const {candidates,final}=preparation.translation;
     const suites=preparation.suites;
     if(preparation.earlyFailure)await addEvent(job.id,"warn","port_early_harness_fallback",
       "Spec-only "+target+" harness failed; candidate-aware generation recovered or retried.",
