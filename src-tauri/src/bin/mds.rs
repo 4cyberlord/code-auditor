@@ -142,6 +142,7 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_B: u32 = 0x05;
     const HID_USAGE_KEYBOARD_C: u32 = 0x06;
     const HID_USAGE_KEYBOARD_M: u32 = 0x10;
+    const HID_USAGE_KEYBOARD_H: u32 = 0x0B;
     const HID_USAGE_KEYBOARD_L: u32 = 0x0F;
     const HID_USAGE_KEYBOARD_P: u32 = 0x13;
     const HID_USAGE_KEYBOARD_R: u32 = 0x15;
@@ -176,8 +177,6 @@ mod mac_shortcuts {
     pub static CAPTURE_LEFT: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE_RIGHT: AtomicBool = AtomicBool::new(false);
     pub static SUBMIT: AtomicBool = AtomicBool::new(false);
-    pub static TOGGLE_OVERLAY: AtomicBool = AtomicBool::new(false);
-    pub static SWITCH_MCQ: AtomicBool = AtomicBool::new(false);
     pub static MOVE_LEFT: AtomicBool = AtomicBool::new(false);
     pub static MOVE_RIGHT: AtomicBool = AtomicBool::new(false);
     pub static MOVE_UP: AtomicBool = AtomicBool::new(false);
@@ -186,11 +185,16 @@ mod mac_shortcuts {
     pub static SCROLL_DOWN: AtomicBool = AtomicBool::new(false);
     static FADE_DOWN: AtomicBool = AtomicBool::new(false);
     static FADE_UP: AtomicBool = AtomicBool::new(false);
-    static HISTORY_TOGGLE: AtomicBool = AtomicBool::new(false);
     static HISTORY_PREVIOUS: AtomicBool = AtomicBool::new(false);
     static HISTORY_NEXT: AtomicBool = AtomicBool::new(false);
-    static HISTORY_OPEN_RESULT: AtomicBool = AtomicBool::new(false);
+    static HISTORY_OPEN: AtomicBool = AtomicBool::new(false);
     static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
+    static HISTORY_VISIBLE: AtomicBool = AtomicBool::new(false);
+    // 1 coding, 2 multiple-choice, 3 shared cloud history.
+    static PANEL_COMMAND: AtomicU8 = AtomicU8::new(0);
+    // Suppress hardware key-repeat; require two distinct keydown edges.
+    static PANEL_KEY_HELD: AtomicU8 = AtomicU8::new(0);
+    static LAST_PANEL_KEY: Mutex<Option<(u8, Instant)>> = Mutex::new(None);
     // Encoded pairs: 00 and 10-13 route to the main app, 21-25 are coding
     // overlay controls, and 31-35 are MCQ overlay controls.
     static NUMBER_COMMAND: AtomicU8 = AtomicU8::new(0);
@@ -248,6 +252,39 @@ mod mac_shortcuts {
         let usage = unsafe { IOHIDElementGetUsage(element) };
         let pressed = unsafe { IOHIDValueGetIntegerValue(value) } != 0;
 
+        // Case-insensitive CC/MM/HH via physical HID codes. A double press
+        // must have a key release between taps. The callback does not store
+        // keystrokes or interfere with the underlying app's input stream.
+        let panel_key = match usage {
+            HID_USAGE_KEYBOARD_C => Some((1_u8, 1_u8)),
+            HID_USAGE_KEYBOARD_M => Some((2_u8, 2_u8)),
+            HID_USAGE_KEYBOARD_H => Some((3_u8, 4_u8)),
+            _ => None,
+        };
+        if let Some((command, bit)) = panel_key {
+            if !pressed {
+                PANEL_KEY_HELD.fetch_and(!bit, Ordering::SeqCst);
+            } else if !CONTROL_DOWN.load(Ordering::SeqCst)
+                && !OPTION_DOWN.load(Ordering::SeqCst)
+                && PANEL_KEY_HELD.fetch_or(bit, Ordering::SeqCst) & bit == 0
+            {
+                if let Ok(mut previous) = LAST_PANEL_KEY.lock() {
+                    if super::double_tap_panel(&mut previous, command, Instant::now()).is_some() {
+                        PANEL_COMMAND.store(command, Ordering::SeqCst);
+                    }
+                }
+            }
+        } else if pressed && usage < HID_USAGE_KEYBOARD_LEFT_CONTROL {
+            if let Ok(mut previous) = LAST_PANEL_KEY.lock() { *previous = None; }
+        }
+        if pressed && (usage == HID_USAGE_KEYBOARD_LEFT_CONTROL
+            || usage == HID_USAGE_KEYBOARD_RIGHT_CONTROL
+            || usage == HID_USAGE_KEYBOARD_LEFT_ALT
+            || usage == HID_USAGE_KEYBOARD_RIGHT_ALT)
+        {
+            if let Ok(mut previous) = LAST_PANEL_KEY.lock() { *previous = None; }
+        }
+
         // Number pairs route into three independent destinations. The first
         // digit selects the workflow; the second selects its capture mode.
         if pressed && !CONTROL_DOWN.load(Ordering::SeqCst)
@@ -281,15 +318,14 @@ mod mac_shortcuts {
 
         // These controls are deliberately active only while the coding overlay
         // is visible, so ordinary typing elsewhere is unaffected.
-        if pressed && CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst)
+        if pressed && (CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) || HISTORY_VISIBLE.load(Ordering::SeqCst))
             && !CONTROL_DOWN.load(Ordering::SeqCst)
             && !OPTION_DOWN.load(Ordering::SeqCst)
         {
             match (usage, SHIFT_DOWN.load(Ordering::SeqCst)) {
-                (HID_USAGE_KEYBOARD_LEFT_BRACKET, true) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_RIGHT_BRACKET, true) => HISTORY_NEXT.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_MINUS, true) => HISTORY_TOGGLE.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_BACKSLASH, true) => HISTORY_OPEN_RESULT.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_UP_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_DOWN_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_NEXT.store(true, Ordering::SeqCst),
+                (HID_USAGE_KEYBOARD_BACKSLASH, true) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_OPEN.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_MINUS, false) => FADE_DOWN.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_EQUAL, false) => FADE_UP.store(true, Ordering::SeqCst),
                 _ => {}
@@ -342,8 +378,6 @@ mod mac_shortcuts {
                 }
             }
             HID_USAGE_KEYBOARD_B
-            | HID_USAGE_KEYBOARD_C
-            | HID_USAGE_KEYBOARD_M
             | HID_USAGE_KEYBOARD_P
             | HID_USAGE_KEYBOARD_R
             | HID_USAGE_KEYBOARD_S
@@ -354,8 +388,6 @@ mod mac_shortcuts {
             {
                 match usage {
                     HID_USAGE_KEYBOARD_B => START_BATCH.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_C => TOGGLE_OVERLAY.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_M => SWITCH_MCQ.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_P | HID_USAGE_KEYBOARD_S => CAPTURE.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_R => CAPTURE_REGION.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_RETURN => SUBMIT.store(true, Ordering::SeqCst),
@@ -403,12 +435,8 @@ mod mac_shortcuts {
     pub fn take_submit() -> bool {
         SUBMIT.swap(false, Ordering::SeqCst)
     }
-    pub fn take_toggle_overlay() -> bool {
-        TOGGLE_OVERLAY.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_switch_mcq() -> bool {
-        SWITCH_MCQ.swap(false, Ordering::SeqCst)
-    }
+    pub fn take_panel_command() -> u8 { PANEL_COMMAND.swap(0, Ordering::SeqCst) }
+    pub fn set_history_visible(value: bool) { HISTORY_VISIBLE.store(value, Ordering::SeqCst); }
     pub fn take_move_left() -> bool {
         MOVE_LEFT.swap(false, Ordering::SeqCst)
     }
@@ -431,10 +459,9 @@ mod mac_shortcuts {
     pub fn set_coding_overlay_visible(value: bool) { CODING_OVERLAY_VISIBLE.store(value, Ordering::SeqCst); }
     pub fn take_fade_down() -> bool { FADE_DOWN.swap(false, Ordering::SeqCst) }
     pub fn take_fade_up() -> bool { FADE_UP.swap(false, Ordering::SeqCst) }
-    pub fn take_history_toggle() -> bool { HISTORY_TOGGLE.swap(false, Ordering::SeqCst) }
     pub fn take_history_previous() -> bool { HISTORY_PREVIOUS.swap(false, Ordering::SeqCst) }
     pub fn take_history_next() -> bool { HISTORY_NEXT.swap(false, Ordering::SeqCst) }
-    pub fn take_history_open_result() -> bool { HISTORY_OPEN_RESULT.swap(false, Ordering::SeqCst) }
+    pub fn take_history_open() -> bool { HISTORY_OPEN.swap(false, Ordering::SeqCst) }
 }
 
 async fn space_api_calls() {
@@ -628,9 +655,11 @@ fn run() -> Result<(), String> {
     update_overlay(&webview, &active_view, &mut overlay_refresh)?;
     let mut overlay_visible = false;
     let mut overlay_alpha = 0.46_f64;
-    let mut coding_history_open = false;
-    let mut coding_history_rows: Vec<SubmittedJob> = Vec::new();
-    let mut coding_history_index = 0_usize;
+    let mut history_open = false;
+    let mut history_rows: Vec<Value> = Vec::new();
+    let mut history_index = 0_usize;
+    let mut history_fetch: Option<tokio::task::JoinHandle<Result<(Vec<Value>,Option<String>),String>>> = None;
+    let mut history_detail_fetch: Option<tokio::task::JoinHandle<Result<Value,String>>> = None;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
     let mut last_heartbeat = Instant::now();
@@ -695,13 +724,13 @@ fn run() -> Result<(), String> {
                         let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                     }
                 }
-                22 | 23 | 31..=34 => {
+                20 | 22 | 23 | 31..=34 => {
                     let target_view = if command < 30 { "coding" } else { "mcq" };
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("screenshot capture already in progress");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("screenshot capture unavailable during cloud submission");
-                    } else if let Some(mode) = helper_capture_mode(if command < 30 { command - 20 } else { command % 10 }) {
+                    } else if let Some(mode) = helper_capture_mode(if command == 20 { 1 } else if command < 30 { command - 20 } else { command % 10 }) {
                         active_view = target_view.to_string();
                         capture_active_view = Some(active_view.clone());
                         // Background-route captures open their own coding/MCQ
@@ -739,6 +768,42 @@ fn run() -> Result<(), String> {
                     }
                 }
                 _ => {}
+            }
+        }
+        if history_fetch.as_ref().is_some_and(|task| task.is_finished()) {
+            if let Some(task)=history_fetch.take() {
+                match rt.block_on(task) {
+                    Ok(Ok((rows,warning))) if history_open => {
+                        history_rows=rows;
+                        history_index=history_index.min(history_rows.len().saturating_sub(1));
+                        let payload=serde_json::to_string(&history_rows)
+                            .unwrap_or_else(|_| "[]".into());
+                        let notice=serde_json::to_string(&warning).unwrap_or_else(|_| "null".into());
+                        let _ = webview.evaluate_script(&format!(
+                            "window.showSharedHistory({payload},{history_index},false,{notice})"));
+                    }
+                    Ok(Err(error)) if history_open => {
+                        let safe=serde_json::to_string(&error).unwrap_or_else(|_| "\"History unavailable\"".into());
+                        let _ = webview.evaluate_script(&format!(
+                            "window.showSharedHistory(null,{history_index},false,{safe})"));
+                    }
+                    Err(error) if history_open => {
+                        let safe=serde_json::to_string(&error.to_string()).unwrap_or_else(|_| "\"History unavailable\"".into());
+                        let _ = webview.evaluate_script(&format!(
+                            "window.showSharedHistory(null,{history_index},false,{safe})"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if history_detail_fetch.as_ref().is_some_and(|task| task.is_finished()) {
+            if let Some(task) = history_detail_fetch.take() {
+                let script = match rt.block_on(task) {
+                    Ok(Ok(detail)) => format!("window.showSharedHistoryDetail({});", serde_json::to_string(&detail).unwrap_or_else(|_| "{}".into())),
+                    Ok(Err(error)) => format!("window.showSharedHistoryDetail({});", serde_json::json!({"error": error})),
+                    Err(error) => format!("window.showSharedHistoryDetail({});", serde_json::json!({"error": error.to_string()})),
+                };
+                let _ = webview.evaluate_script(&script);
             }
         }
         if last_capture_cleanup.elapsed() >= Duration::from_secs(3600) {
@@ -790,7 +855,7 @@ fn run() -> Result<(), String> {
             }));
         }
 
-        if overlay_visible && last_overlay_refresh.elapsed() >= Duration::from_millis(500) {
+        if overlay_visible && !history_open && last_overlay_refresh.elapsed() >= Duration::from_millis(500) {
             last_overlay_refresh = Instant::now();
             let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
         }
@@ -798,39 +863,41 @@ fn run() -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
             mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
-            if mac_shortcuts::take_toggle_overlay()
-                && capture_task.as_ref().is_none_or(|task| task.is_finished())
-            {
-                if active_view != "coding" {
-                    active_view = "coding".to_string();
-                    overlay_visible = true;
-                } else {
-                    overlay_visible = !overlay_visible;
+            // HH is its own surface; unlike the two task views it must not
+            // change which batch is active. CC/MM switch surfaces in-place
+            // without opening the main app, stealing application focus, or
+            // changing the cloud solving engine.
+            match mac_shortcuts::take_panel_command() {
+                command @ (1 | 2 | 3)
+                    if capture_task.as_ref().is_none_or(|task| task.is_finished()) =>
+                {
+                    if command == 3 {
+                        // Show cached/local rows immediately while the
+                        // authenticated main+overlay history loads off-thread.
+                        history_rows = archived_helper_history().unwrap_or_default();
+                        history_index = 0;
+                        history_open = true;
+                        mac_shortcuts::set_history_visible(true);
+                        let rows = serde_json::to_string(&history_rows).unwrap_or_else(|_| "[]".into());
+                        history_fetch = Some(rt.spawn(fetch_unified_history()));
+                        overlay_visible = true;
+                        event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                        let _ = show_overlay(&overlay, true);
+                        let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                        let _ = webview.evaluate_script(&format!(
+                            "window.showSharedHistory({rows},0,true,null)"));
+                    } else {
+                        history_open = false;
+                        mac_shortcuts::set_history_visible(false);
+                        let _ = webview.evaluate_script("window.closeSharedHistory()");
+                        active_view = if command == 1 { "coding" } else { "mcq" }.to_string();
+                        overlay_visible = true;
+                        event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                        let _ = show_overlay(&overlay, true);
+                        let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                    }
                 }
-                event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
-                    ActivationPolicy::Accessory
-                } else {
-                    ActivationPolicy::Prohibited
-                });
-                let _ = show_overlay(&overlay, overlay_visible);
-                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
-            }
-            if mac_shortcuts::take_switch_mcq()
-                && capture_task.as_ref().is_none_or(|task| task.is_finished())
-            {
-                if active_view != "mcq" {
-                    active_view = "mcq".to_string();
-                    overlay_visible = true;
-                } else {
-                    overlay_visible = !overlay_visible;
-                }
-                event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
-                    ActivationPolicy::Accessory
-                } else {
-                    ActivationPolicy::Prohibited
-                });
-                let _ = show_overlay(&overlay, overlay_visible);
-                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                _ => {}
             }
             if mac_shortcuts::take_start_batch() {
                 if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -914,43 +981,34 @@ fn run() -> Result<(), String> {
                 overlay_alpha = (overlay_alpha + 0.07).min(0.95);
                 let _ = set_ghost_opacity(&overlay, overlay_alpha);
             }
-            if overlay_visible && active_view == "coding" {
-                if mac_shortcuts::take_history_toggle() {
-                    if coding_history_open {
-                        coding_history_open = false;
-                        let _ = webview.evaluate_script("window.closeCodingHistory()");
-                    } else {
-                        coding_history_rows = load_coding_history().unwrap_or_default();
-                        coding_history_index = 0;
-                        let headers: Vec<Value> = coding_history_rows.iter().map(|job| serde_json::json!({
-                            "id": job.id, "submittedAt": job.submitted_at, "status": job.status,
-                        })).collect();
-                        let rows = serde_json::to_string(&headers).unwrap_or_else(|_| "[]".into());
-                        let _ = webview.evaluate_script(&format!("window.showCodingHistory({rows},0)"));
-                        coding_history_open = true;
-                    }
-                }
+            // Arrows navigate only while HH history is visible. They are
+            // observed by IOHID and do not capture normal application keys.
+            if history_open && overlay_visible {
                 if mac_shortcuts::take_history_previous() {
-                    if coding_history_open {
-                        coding_history_index = coding_history_index.saturating_sub(1);
-                        let _ = webview.evaluate_script(&format!("window.selectCodingHistoryRow({coding_history_index})"));
-                    } else { let _ = webview.evaluate_script("window.scrollSolutionBy(-260)"); }
+                    history_index = history_index.saturating_sub(1);
+                    let _ = webview.evaluate_script(&format!(
+                        "window.selectSharedHistoryRow({history_index})"));
                 }
                 if mac_shortcuts::take_history_next() {
-                    if coding_history_open {
-                        coding_history_index = (coding_history_index + 1).min(coding_history_rows.len().saturating_sub(1));
-                        let _ = webview.evaluate_script(&format!("window.selectCodingHistoryRow({coding_history_index})"));
-                    } else { let _ = webview.evaluate_script("window.scrollSolutionBy(260)"); }
+                    history_index = (history_index + 1).min(history_rows.len().saturating_sub(1));
+                    let _ = webview.evaluate_script(&format!(
+                        "window.selectSharedHistoryRow({history_index})"));
                 }
-                if mac_shortcuts::take_history_open_result() && coding_history_open {
-                    if let Some(job) = coding_history_rows.get(coding_history_index) {
-                        if let Ok(state) = serde_json::to_string(&coding_overlay_state(job)) {
-                            let _ = webview.evaluate_script(&format!("window.openCodingHistoryResult({state})"));
-                        }
-                        coding_history_open = false;
+                if mac_shortcuts::take_history_open()
+                    && history_detail_fetch.as_ref().is_none_or(|task| task.is_finished())
+                {
+                    if let Some(row) = history_rows.get(history_index).cloned() {
+                        history_detail_fetch = Some(rt.spawn(fetch_history_detail(row)));
+                        let _ = webview.evaluate_script("window.showSharedHistoryDetail({loading:true});");
                     }
                 }
+            } else {
+                let _ = mac_shortcuts::take_history_previous();
+                let _ = mac_shortcuts::take_history_next();
+                let _ = mac_shortcuts::take_history_open();
             }
+            // HH and arrow-only History doesn't change the active solving task.
+            mac_shortcuts::set_history_visible(history_open && overlay_visible);
             mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
         }
     });
@@ -1122,24 +1180,190 @@ fn last_good_settings_path() -> Result<PathBuf, String> {
     Ok(cache_dir()?.join("last-good-settings.json"))
 }
 
-fn load_coding_history() -> Result<Vec<SubmittedJob>, String> {
+/// One history schema shared by both overlay surfaces and main-app runs.
+/// IDs are namespaced because a session's run and a queued cloud job are
+/// distinct artifacts even if the UI assigns them the same title.
+fn history_row(id: &str, origin: &str, kind: &str, title: &str, subtitle: &str,
+               status: &str, at: &str) -> Value {
+    serde_json::json!({
+        "id": id, "origin": origin, "kind": kind, "title": title,
+        "subtitle": subtitle, "status": status, "submittedAt": at
+    })
+}
+
+fn archived_helper_history() -> Result<Vec<Value>, String> {
     let mut rows = Vec::new();
-    if let Some(current) = read_submitted_job_for("coding")? {
-        if current.mode == "council" { rows.push(current); }
+    for view in ["coding", "mcq"] {
+        if let Some(job) = read_submitted_job_for(view)? {
+            rows.push(history_row(&format!("job:{}",job.id),"Overlay",
+                if job.mode=="mcq"{"MCQ"}else{"Coding"},
+                if job.mode=="mcq"{"MCQ screenshot task"}else{"Coding screenshot task"},
+                &job.id, &job.status, &job.submitted_at));
+        }
     }
     let dir = cache_dir()?.join("job-history");
     if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten().take(500) {
+        // Keep opening History bounded; older cloud rows remain available via
+        // the account-scoped API below.
+        for entry in entries.flatten().take(200) {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") { continue; }
             let Ok(raw) = fs::read_to_string(path) else { continue; };
             let Ok(job) = serde_json::from_str::<SubmittedJob>(&raw) else { continue; };
-            if job.mode == "council" && !rows.iter().any(|known| known.id == job.id) { rows.push(job); }
+            rows.push(history_row(&format!("job:{}",job.id),"Overlay",
+                if job.mode=="mcq"{"MCQ"}else{"Coding"},
+                if job.mode=="mcq"{"MCQ screenshot task"}else{"Coding screenshot task"},
+                &job.id,&job.status,&job.submitted_at));
         }
     }
-    rows.sort_by(|a, b| b.submitted_at.cmp(&a.submitted_at));
-    rows.truncate(100);
-    Ok(rows)
+    normalize_history(rows)
+}
+
+fn normalize_history(rows: Vec<Value>) -> Result<Vec<Value>, String> {
+    let mut map = std::collections::HashMap::<String,Value>::new();
+    for row in rows {
+        let Some(id)=row.get("id").and_then(Value::as_str).map(str::to_owned) else { continue; };
+        if let Some(old) = map.get(&id) {
+            let a=old.get("origin").and_then(Value::as_str).unwrap_or("");
+            let b=row.get("origin").and_then(Value::as_str).unwrap_or("");
+            if a=="Overlay" && b=="Overlay" && old.get("status").and_then(Value::as_str)==Some("completed") {
+                // A saved completed result should not be replaced by an
+                // older, queued snapshot with the same job ID.
+                continue;
+            }
+        }
+        map.insert(id,row);
+    }
+    let mut results: Vec<Value> = map.into_values().collect();
+    results.sort_by(|a,b| b.get("submittedAt").and_then(Value::as_str).unwrap_or("")
+        .cmp(a.get("submittedAt").and_then(Value::as_str).unwrap_or("")));
+    Ok(results)
+}
+
+/// Uses only existing, account-scoped API operations. No new schema or
+/// privileged keys on macOS. Fetch main-app runs from BOTH active and archived
+/// sessions; fetch cloud queued-job history separately; fold local snapshots
+/// in for items no longer in the API's most-recent-job page.
+async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> {
+    use futures_util::future::join_all;
+    let mut rows = archived_helper_history()?;
+    let (jobs,active,archived)=tokio::join!(
+        api("jobs.list",serde_json::json!({"status":"all"})),
+        api("sessions.list",serde_json::json!({"status":"active"})),
+        api("sessions.list",serde_json::json!({"status":"archived"})),
+    );
+    let mut errors=Vec::new();
+    if let Ok(payload)=jobs {
+        for item in payload.as_array().or_else(||payload.get("items").and_then(Value::as_array))
+            .into_iter().flatten() {
+            let id=item.get("id").and_then(Value::as_str).unwrap_or("");
+            if id.is_empty(){continue;}
+            let mode=item.get("mode").and_then(Value::as_str).unwrap_or("council");
+            rows.push(history_row(&format!("job:{id}"),"Overlay",
+                if mode=="mcq"{"MCQ"}else{"Coding"},
+                if mode=="mcq"{"MCQ screenshot task"}else{"Coding screenshot task"},
+                item.get("resultSummary").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).unwrap_or(id),
+                item.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+                item.get("createdAt").and_then(Value::as_str).unwrap_or("")));
+        }
+    } else { errors.push("cloud jobs"); }
+    let mut sessions=std::collections::HashMap::<String, Value>::new();
+    for response in [active,archived] {
+        match response {
+            Ok(payload) => {
+                for item in payload.as_array().or_else(||payload.get("items").and_then(Value::as_array))
+                    .into_iter().flatten() {
+                    if let Some(id)=item.get("id").and_then(Value::as_str) {
+                        sessions.insert(id.to_owned(),item.clone());
+                    }
+                }
+            }
+            Err(_) => errors.push("main sessions"),
+        }
+    }
+    // The API exposes main run history per session, not as one flat list.
+    // Bounded concurrency keeps older accounts usable without overwhelming
+    // the API or bringing synchronous network work onto the macOS event loop.
+    let mut sessions: Vec<(String,Value)> = sessions.into_iter().collect();
+    sessions.sort_by(|a,b| b.1.get("updatedAt").and_then(Value::as_str).unwrap_or("")
+        .cmp(a.1.get("updatedAt").and_then(Value::as_str).unwrap_or("")));
+    sessions.truncate(30);
+    for chunk in sessions.chunks(6) {
+        let responses=join_all(chunk.iter().map(|(id,_)|
+            api("runs.list",serde_json::json!({"sessionId":id})))).await;
+        for ((_,session),answer) in chunk.iter().zip(responses) {
+            match answer {
+                Ok(payload) => for item in payload.as_array().or_else(||payload.get("items").and_then(Value::as_array))
+                    .into_iter().flatten().take(20) {
+                    let id=item.get("id").and_then(Value::as_str).unwrap_or("");
+                    if id.is_empty(){continue;}
+                    let mode=item.get("mode").and_then(Value::as_str).unwrap_or("auto");
+                    let at=item.get("startedAt").and_then(Value::as_str).unwrap_or("");
+                    let status=if item.get("finishedAt").and_then(Value::as_str).is_some_and(|s|!s.is_empty())
+                        {"completed"}else{"running"};
+                    let title=item.get("asked").and_then(Value::as_str)
+                        .filter(|s|!s.trim().is_empty())
+                        .or_else(||session.get("title").and_then(Value::as_str))
+                        .unwrap_or("Saved main-app run");
+                    rows.push(history_row(&format!("main:{id}"),"Main app",
+                        if mode=="mcq"{"MCQ"}else if mode=="coding"||mode=="code"{"Coding"}else{"Run"},
+                        title,
+                        session.get("title").and_then(Value::as_str).unwrap_or(""),
+                        status,at));
+                },
+                Err(_) => errors.push("main runs"),
+            }
+        }
+    }
+    let rows=normalize_history(rows)?;
+    if rows.is_empty() && !errors.is_empty() {
+        return Err(format!("Could not load {}. Check the background helper authorization.",errors.join(", ")));
+    }
+    let notice=if errors.is_empty() { None } else {
+        errors.sort_unstable();errors.dedup();
+        Some(format!("Some cloud history is unavailable: {}",errors.join(", ")))
+    };
+    Ok((rows,notice))
+}
+
+/// Fetch a saved result only after the person opens it from History. The list
+/// itself stays metadata-only and every detail read remains account-scoped.
+async fn fetch_history_detail(row: Value) -> Result<Value, String> {
+    let id = row.get("id").and_then(Value::as_str).unwrap_or("");
+    if let Some(job_id) = id.strip_prefix("job:") {
+        let report = api("reports.get", serde_json::json!({"jobId": job_id})).await?;
+        let body = report.get("report").unwrap_or(&report);
+        let candidates = body.get("candidates").and_then(Value::as_array).cloned().unwrap_or_default();
+        let winner = body.get("winner").and_then(Value::as_str).unwrap_or("");
+        return Ok(serde_json::json!({
+            "title": row.get("title").and_then(Value::as_str).unwrap_or("Overlay result"),
+            "origin": "Overlay", "status": row.get("status").and_then(Value::as_str).unwrap_or(""),
+            "summary": body.pointer("/presentation/summary").and_then(Value::as_str)
+                .or_else(|| body.pointer("/presentation/approach").and_then(Value::as_str)).unwrap_or("No saved summary."),
+            "solution": coding_solution_from_report(body, winner, &candidates),
+        }));
+    }
+    if let Some(run_id) = id.strip_prefix("main:") {
+        let payload = api("runs.get", serde_json::json!({"runId": run_id})).await?;
+        let responses = payload.get("responses").and_then(Value::as_array).cloned().unwrap_or_default();
+        let picked = responses.iter().find(|response| response.get("finalCode").and_then(Value::as_str)
+            .is_some_and(|code| !code.trim().is_empty()));
+        let summary = payload.pointer("/verdict/detail").and_then(Value::as_str)
+            .or_else(|| payload.pointer("/verdict/headline").and_then(Value::as_str))
+            .or_else(|| picked.and_then(|response| response.get("finalAnswer").and_then(Value::as_str)))
+            .unwrap_or("No saved verdict detail.");
+        let solution = picked.and_then(|response| response.get("finalCode").and_then(Value::as_str)
+            .filter(|code| !code.trim().is_empty()).map(|code| serde_json::json!({
+                "language": picked.and_then(|response| response.get("finalLanguage").and_then(Value::as_str)).unwrap_or(""),
+                "code": code,
+            })));
+        return Ok(serde_json::json!({
+            "title": row.get("title").and_then(Value::as_str).unwrap_or("Main-app result"),
+            "origin": "Main app", "status": row.get("status").and_then(Value::as_str).unwrap_or(""),
+            "summary": summary, "solution": solution,
+        }));
+    }
+    Err("The selected history item has no supported source identifier.".into())
 }
 
 fn clean_expired_capture_dirs() -> Result<(), String> {
@@ -1370,11 +1594,22 @@ fn helper_capture_mode(digit: u8) -> Option<CaptureMode> {
     }
 }
 
+/// Commands for the three overlay surfaces. This records only C, M or H,
+/// never text typed into applications. The OS HID callback uses physical
+/// key usages, making caps lock and shift equivalent for this command.
+fn double_tap_panel(previous: &mut Option<(u8, Instant)>, key: u8, at: Instant) -> Option<u8> {
+    let matched = previous.as_ref().is_some_and(|(last, time)|
+        *last == key && at.saturating_duration_since(*time) <= Duration::from_millis(650)
+    );
+    *previous = if matched { None } else { Some((key, at)) };
+    if matched { Some(key) } else { None }
+}
+
 fn number_pair_command(first: u8, second: u8) -> Option<u8> {
     match first {
         0 if second == 0 => Some(6),
         1 if second <= 4 => Some(10 + second),
-        2 if (1..=5).contains(&second) => Some(20 + second),
+        2 if second <= 5 => Some(20 + second),
         3 if (1..=5).contains(&second) => Some(30 + second),
         _ => None,
     }
@@ -1522,7 +1757,7 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
     batch.owner_id = Some(owner_id.clone());
     save_pending_for(active_view, &batch)?;
 
-    let user_settings = if let Some(snapshot) = batch.settings_snapshot.clone() {
+    let mut user_settings = if let Some(snapshot) = batch.settings_snapshot.clone() {
         snapshot
     } else {
         let loaded = api("settings.load", serde_json::json!({ "key": SETTINGS_KEY })).await;
@@ -1558,6 +1793,13 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
             "mcq".to_string()
         } else { "council".to_string() }
     });
+    // The helper uses the SAME cloud Council job pipeline as the main app.
+    // A Coding overlay submission must not be auto-routed into MCQ merely
+    // because the desktop's saved overlay preference was "auto".
+    // This override affects this one job snapshot, not account settings.
+    user_settings["overlayMode"] = Value::String(
+        if active_view == "mcq" { "mcq" } else { "code" }.to_string()
+    );
     batch.mode = Some(mode.clone());
     save_pending_for(active_view, &batch)?;
     let mcq_model = if mode == "mcq" {
@@ -1678,6 +1920,15 @@ fn is_usable_cloud_report(report: &Value, expected_id: &str) -> bool {
             .and_then(Value::as_str);
         if report_id.is_some_and(|id| id != expected_id) { return false; }
     }
+    if body.get("stage").and_then(Value::as_str) == Some("provisional") {
+        let item = body.get("provisional");
+        return item.is_some_and(|p|
+            p.get("status").and_then(Value::as_str) == Some("provisional")
+            && p.get("code").and_then(Value::as_str).is_some_and(|code| !code.trim().is_empty())
+            && p.get("passed").and_then(Value::as_u64).unwrap_or(0) > 0
+            && p.get("failed").and_then(Value::as_u64).unwrap_or(1) == 0
+        );
+    }
     if body.get("kind").and_then(Value::as_str) == Some("mcq") {
         return body.pointer("/answer/label").and_then(Value::as_str)
             .is_some_and(|label| !label.trim().is_empty())
@@ -1753,7 +2004,10 @@ async fn refresh_one_job(mut tracked: SubmittedJob) -> Result<SubmittedJob, Stri
     if matches!(
         tracked.status.as_str(),
         "completed" | "failed" | "needs_attention" | "cancelled"
-    ) && (tracked.report.is_some() || tracked.status != "completed")
+    ) && (tracked.status != "completed" || tracked.report.as_ref().is_some_and(|report| {
+        let body = report.get("report").unwrap_or(report);
+        body.get("stage").and_then(Value::as_str) != Some("provisional")
+    }))
     {
         return Ok(tracked);
     }
@@ -1801,9 +2055,14 @@ async fn refresh_one_job(mut tracked: SubmittedJob) -> Result<SubmittedJob, Stri
     }
     space_api_calls().await;
 
-    // Only a terminal success is a final report. Intermediate report rows may
-    // be partial and must not become the permanently cached answer.
-    if tracked.status == "completed" {
+    // The cloud worker persists a verified preliminary solution before the
+    // judges finish. Fetch that same account-bound report in-flight; never
+    // treat an intermediate row as terminal or switch job identity.
+    let live_ready = tracked.events.iter().any(|event| matches!(
+        event.get("phase").and_then(Value::as_str),
+        Some("provisional_solution_ready" | "primary_solution_ready" | "provisional_upgraded" | "port_verified")
+    ));
+    if tracked.status == "completed" || (tracked.status == "running" && live_ready) {
     let retry_path = cache_dir()?.join(format!("report-retry-{}.json", tracked.id));
     let retry: Value = fs::read_to_string(&retry_path).ok()
        .and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or(Value::Null);
@@ -1828,7 +2087,10 @@ async fn refresh_one_job(mut tracked: SubmittedJob) -> Result<SubmittedJob, Stri
             }
         }
     }
-    if tracked.report.is_none() {
+    if tracked.status == "completed" && tracked.report.as_ref().is_none_or(|report| {
+        report.get("report").unwrap_or(report).get("stage")
+            .and_then(Value::as_str) == Some("provisional")
+    }) {
         let attempts = retry["attempts"].as_u64().unwrap_or(0).saturating_add(1).min(20);
         let delay = (5_u64.saturating_mul(1_u64 << attempts.min(6))).min(300);
         let value = serde_json::json!({
@@ -2125,119 +2387,47 @@ fn coding_pending_state(batch: &PendingBatch) -> Value {
 
 fn coding_overlay_state(job: &SubmittedJob) -> Value {
     let progress = job_progress_message(job);
-    let Some(report) = job.report.as_ref() else {
-        let phase = match job.status.as_str() {
-            "failed" | "needs_attention" | "cancelled" => "error",
-            "completed" => "done",
-            _ => "running",
-        };
-        return serde_json::json!({
-            "runId": job.id,
-            "updatedAt": now(),
-            "phase": phase,
-            "agents": coding_agents_from_events(job),
-            "solution": {
-                "title": "solution",
-                "language": "",
-                "code": if job.error.as_deref().unwrap_or("").is_empty() {
-                    progress
-                } else {
-                    job.error.clone().unwrap_or(progress)
-                },
-                "source": "helper",
-                "status": "candidate",
-            },
-            "tests": [],
-        });
+    let phase = match job.status.as_str() {
+        "failed" | "needs_attention" | "cancelled" => "error",
+        "completed" => "done",
+        _ => "running",
     };
-
-    let body = report.get("report").unwrap_or(report);
-    let candidates = body
-        .get("candidates")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let winner = body
-        .get("winner")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let agents: Vec<Value> = candidates
-        .iter()
-        .take(4)
-        .map(|candidate| {
-            let letter = candidate
-                .get("letter")
-                .and_then(Value::as_str)
-                .unwrap_or("?");
-            let model = candidate
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let error = candidate
-                .get("error")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string());
-            let has_code = candidate
-                .pointer("/final/code")
-                .and_then(Value::as_str)
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-            let status = if error.is_some() {
-                "error"
-            } else if !winner.is_empty() && letter.eq_ignore_ascii_case(&winner) {
-                "done"
-            } else if has_code {
-                "done"
-            } else {
-                "pending"
-            };
+    let body = job.report.as_ref().map(|r| r.get("report").unwrap_or(r));
+    let candidates: Vec<Value> = body.and_then(|b| b.get("candidates"))
+        .and_then(Value::as_array).cloned().unwrap_or_default();
+    let winner = body.and_then(|b| b.get("winner")).and_then(Value::as_str)
+        .unwrap_or("").trim();
+    let agents = if candidates.is_empty() {
+        coding_agents_from_events(job)
+    } else {
+        candidates.iter().take(4).map(|candidate| {
+            let letter = candidate.get("letter").and_then(Value::as_str).unwrap_or("?");
+            let model = candidate.get("model").and_then(Value::as_str).unwrap_or("");
+            let error = candidate.get("error").and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            let has_code = candidate.pointer("/final/code").and_then(Value::as_str)
+                .is_some_and(|code| !code.trim().is_empty());
+            let status = if error.is_some() { "error" }
+                else if has_code { "done" } else { "pending" };
             serde_json::json!({
-                "id": letter,
-                "label": letter,
-                "model": model,
-                "status": status,
-                "error": error,
-                "detail": if has_code { "Answer ready" } else { "Awaiting candidate answer" },
+                "id": letter, "label": model.rsplit('/').next().unwrap_or(model),
+                "model": model, "status": status, "error": error,
+                "detail": if !winner.is_empty() && letter.eq_ignore_ascii_case(winner)
+                    { "Council selection" } else if has_code { "Candidate ready" }
+                    else { "Awaiting candidate answer" }
             })
-        })
-        .collect();
-
-    let solution = coding_solution_from_report(body, &winner, &candidates)
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "title": "solution",
-                "language": "",
-                "code": if progress.is_empty() {
-                    "Council finished, but no code was returned.".to_string()
-                } else {
-                    progress
-                },
-                "source": "helper",
-                "status": "candidate",
-            })
-        });
-
-    let tests = coding_tests_from_report(body);
-
+        }).collect()
+    };
+    let solution = body.and_then(|b| coding_solution_from_report(b, winner, &candidates));
+    let tests = body.map(coding_tests_from_report).unwrap_or_default();
     serde_json::json!({
-        "runId": job.id,
-        "updatedAt": now(),
-        "phase": match job.status.as_str() {
-            "failed" | "needs_attention" | "cancelled" => "error",
-            "completed" => "done",
-            _ => "running",
-        },
-        "agents": agents,
-        "solution": solution,
-        "tests": tests,
-        // Standing, approach, per-candidate evidence and the bench's dissent,
-        // already computed on the report. The thought-process panes had nothing
-        // to render because nothing was sending them anything.
-        "presentation": body.get("presentation").cloned().unwrap_or(Value::Null),
+        "runId": job.id, "updatedAt": now(), "kind": "coding",
+        "phase": phase, "status": job.status,
+        "progress": progress, "error": job.error,
+        "agents": agents, "solution": solution, "tests": tests,
+        "presentation": body.and_then(|b| b.get("presentation")).cloned(),
+        "upgrade": body.and_then(|b| b.get("upgrade")).cloned(),
+        "solutionHistory": body.and_then(|b| b.get("solutionHistory")).cloned()
     })
 }
 
@@ -2292,113 +2482,81 @@ fn coding_agents_from_events(job: &SubmittedJob) -> Vec<Value> {
     }).collect()
 }
 
-fn coding_solution_from_report(
-    body: &Value,
-    winner: &str,
-    candidates: &[Value],
-) -> Option<Value> {
-    // What the council shipped, when it shipped something. The presentation
-    // carries the synthesis' assembled answer — reviewed, revised, executed and
-    // gated — which is a better thing to put in front of a user than whichever
-    // candidate happens to sit first in the array.
-    if let Some(code) = body
-        .pointer("/presentation/code")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|code| !code.is_empty())
-    {
-        let language = body
-            .pointer("/presentation/language")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let source = body
-            .pointer("/presentation/provenance")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("council")
-            .to_string();
-        let standing = body
-            .pointer("/presentation/standing")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let title = if language.is_empty() {
-            "solution".to_string()
-        } else {
-            format!("solution.{language}")
-        };
-        let status = if standing == "verified" { "reviewed" } else { "candidate" };
+fn coding_solution_from_report(body: &Value, winner: &str, candidates: &[Value]) -> Option<Value> {
+    // Early code may appear ONLY after the shared E2B gate approved it.
+    if body.get("stage").and_then(Value::as_str) == Some("provisional") {
+        let early = body.get("provisional")?;
+        let code = early.get("code").and_then(Value::as_str)?.trim();
+        if code.is_empty()
+            || early.get("status").and_then(Value::as_str) != Some("provisional")
+            || early.get("passed").and_then(Value::as_u64).unwrap_or(0) == 0
+            || early.get("failed").and_then(Value::as_u64).unwrap_or(1) > 0
+        { return None; }
+        let lang = early.get("language").and_then(Value::as_str).unwrap_or("");
+        let letter = early.get("letter").and_then(Value::as_str).unwrap_or("?");
         return Some(serde_json::json!({
-            "title": title,
-            "language": language,
-            "code": code,
-            "source": source,
-            "status": status,
+            "title": format!("solution.{lang}"), "language": lang, "code": code,
+            "source": format!("Candidate {letter} · E2B verified"), "status": "provisional"
         }));
     }
-
-    let pick = if !winner.is_empty() {
-        candidates.iter().find(|candidate| {
-            candidate
-                .get("letter")
-                .and_then(Value::as_str)
-                .map(|letter| letter.eq_ignore_ascii_case(winner))
-                .unwrap_or(false)
-        })
-    } else {
-        None
+    // The cloud Council and desktop share the deterministic winner gates.
+    // The synthesis' prose or an arbitrary candidate is never accepted as code.
+    if body.pointer("/presentation/standing").and_then(Value::as_str) == Some("verified") {
+        if let Some(code) = body.pointer("/presentation/code").and_then(Value::as_str)
+            .map(str::trim).filter(|code| !code.is_empty()) {
+            let lang = body.pointer("/presentation/language").and_then(Value::as_str).unwrap_or("");
+            let source = body.pointer("/presentation/provenance").and_then(Value::as_str).unwrap_or("Council");
+            return Some(serde_json::json!({
+                "title": format!("solution.{lang}"), "language": lang, "code": code,
+                "source": source, "status": "reviewed"
+            }));
+        }
     }
-    .or_else(|| {
-        candidates.iter().find(|candidate| {
-            candidate
-                .pointer("/final/code")
-                .and_then(Value::as_str)
-                .map(|code| !code.trim().is_empty())
-                .unwrap_or(false)
-        })
-    })?;
-
-    let code = pick
-        .pointer("/final/code")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|code| !code.is_empty())
-        .or_else(|| {
-            pick.get("text")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-        })?;
-    let language = pick
-        .pointer("/final/language")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let letter = pick
-        .get("letter")
-        .and_then(Value::as_str)
-        .unwrap_or("solution");
-    let model = pick.get("model").and_then(Value::as_str).unwrap_or("");
-    let title = if language.is_empty() {
-        format!("solution.{letter}")
-    } else {
-        format!("solution.{language}")
-    };
-    let source = if model.is_empty() {
-        letter.to_string()
-    } else {
-        format!("{letter} · {model}")
-    };
+    // Legacy cloud reports without presentation still require actual matching
+    // benchmark proof for the winner. Do not fall back to candidate A or logs.
+    let chosen = candidates.iter().find(|candidate|
+        candidate.get("letter").and_then(Value::as_str)
+            .is_some_and(|letter| !winner.is_empty() && letter.eq_ignore_ascii_case(winner))
+    )?;
+    let revised = chosen.pointer("/revised/code").and_then(Value::as_str)
+        .is_some_and(|code| !code.trim().is_empty());
+    let runs = if revised { "revisedRuns" } else { "runs" };
+    let evidence = body.get(runs)?.get(winner)?;
+    if evidence.get("ran").and_then(Value::as_bool) != Some(true)
+        || evidence.get("ok").and_then(Value::as_bool) != Some(true)
+        || evidence.get("passed").and_then(Value::as_u64).unwrap_or(0) == 0
+        || evidence.get("failed").and_then(Value::as_u64).unwrap_or(1) != 0
+    { return None; }
+    let final_code = if revised { chosen.get("revised") } else { chosen.get("final") }?;
+    let code = final_code.get("code").and_then(Value::as_str)?.trim();
+    if code.is_empty() { return None; }
+    let lang = final_code.get("language").and_then(Value::as_str).unwrap_or("");
     Some(serde_json::json!({
-        "title": title,
-        "language": language,
-        "code": code,
-        "source": source,
-        "status": if winner.is_empty() { "candidate" } else { "reviewed" },
+        "title": format!("solution.{lang}"), "language": lang, "code": code,
+        "source": chosen.get("model").and_then(Value::as_str).unwrap_or("Council"),
+        "status": "reviewed"
     }))
 }
 
 fn coding_tests_from_report(body: &Value) -> Vec<Value> {
+    // A provisional result has real E2B verification but no finalized Council
+    // evidence rows yet. Report the measured passed count, never invented cases.
+    if body.get("stage").and_then(Value::as_str) == Some("provisional") {
+        if let Some(early) = body.get("provisional") {
+            let passed = early.get("passed").and_then(Value::as_u64).unwrap_or(0);
+            let failed = early.get("failed").and_then(Value::as_u64).unwrap_or(1);
+            if passed > 0 && failed == 0 {
+                let letter = early.get("letter").and_then(Value::as_str).unwrap_or("?");
+                return vec![serde_json::json!({
+                    "name": format!("Candidate {letter} · preliminary E2B"),
+                    "input": early.get("language").and_then(Value::as_str).unwrap_or(""),
+                    "expected": format!("{passed} executed test cases"),
+                    "actual": format!("{passed} passed, 0 failed; Council review pending"),
+                    "status": "passed"
+                })];
+            }
+        }
+    }
     // One row per candidate, carrying what its run did. The harness rows this
     // falls back to say "From cloud report" five times, which is a pane that
     // reports nothing at all.
@@ -2673,6 +2831,67 @@ fn overlay_html() -> &'static str {
 	            .thought-space{box-sizing:border-box;width:100%;height:62px;border:1px solid var(--panel-line);border-radius:7px;background:var(--box-fill);overflow:hidden}
 	            .function-notes{height:96px;padding:8px 10px;color:var(--muted);font-size:11px;line-height:1.35}
 	            .function-notes div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+            /* RIGHT THOUGHT COLUMN ONLY. No left editor, HUD, MCQ or overlay state changes.
+               Trade boxed answers for an editorial insight rail with a single compact
+               accent, proper hierarchy and subtle separators; keep the same eight slots. */
+            .thought-pane .thought-list{
+              counter-reset:insight-step;gap:0;min-height:0;overflow-x:hidden;overflow-y:auto;
+              padding:0 5px 4px 0;scrollbar-width:thin;
+              scrollbar-color:rgba(255,255,255,.22) transparent;
+            }
+            .thought-pane .thought-item{
+              --insight-accent:#f5d83b;
+              counter-increment:insight-step;
+              position:relative;box-sizing:border-box;flex:0 0 auto;width:100%;
+              display:grid;grid-template-columns:3px minmax(0,1fr);grid-template-rows:auto auto;
+              align-items:start;column-gap:13px;row-gap:6px;
+              padding:12px 10px 13px 2px;margin:0;
+              border:0;border-bottom:1px solid rgba(255,255,255,.12);
+              background:linear-gradient(90deg,color-mix(in srgb,var(--insight-accent) 7%,transparent),transparent 72%);
+            }
+            .thought-pane .thought-item:first-child{padding-top:8px}
+            .thought-pane .thought-item:last-child{border-bottom:0}
+            .thought-pane .thought-item::before{
+              content:"";grid-column:1;grid-row:1/3;align-self:stretch;min-height:34px;
+              width:3px;border-radius:999px;
+              background:linear-gradient(180deg,var(--insight-accent),color-mix(in srgb,var(--insight-accent) 25%,transparent));
+              box-shadow:0 0 13px color-mix(in srgb,var(--insight-accent) 20%,transparent);
+            }
+            .thought-pane .thought-heading{
+              grid-column:2;grid-row:1;display:flex;align-items:center;gap:10px;min-width:0;
+              font-size:11px;line-height:1.3;font-weight:800;letter-spacing:.035em;
+              color:var(--text);text-shadow:none;
+            }
+            .thought-pane .thought-heading::before{
+              content:counter(insight-step,decimal-leading-zero);
+              color:var(--insight-accent);font:800 10px/1 ui-monospace,SFMono-Regular,Menlo,monospace;
+              letter-spacing:0;opacity:.95;
+            }
+            .thought-pane .thought-space{
+              box-sizing:border-box;grid-column:2;grid-row:2;width:100%;
+              height:auto;min-height:19px;max-height:76px;overflow-x:hidden;overflow-y:auto;
+              padding:0;border:0;border-radius:0;background:transparent;
+              color:var(--muted);font-size:11.5px;font-weight:500;line-height:1.5;
+              white-space:pre-wrap;overflow-wrap:anywhere;
+              scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.18) transparent;
+            }
+            .thought-pane .thought-item:first-child .thought-space{font-weight:600;color:var(--text)}
+            .thought-pane .function-notes{height:auto;max-height:96px;padding:0}
+            .thought-pane .function-notes div{white-space:normal;overflow-wrap:anywhere;overflow:visible;text-overflow:clip}
+            .thought-pane .thought-item:nth-child(2){--insight-accent:#c2a8ff}
+            .thought-pane .thought-item:nth-child(3){--insight-accent:#67dccb}
+            .thought-pane .thought-item:nth-child(4){--insight-accent:#67e0a5}
+            .thought-pane .thought-item:nth-child(5){--insight-accent:#8bb8ff}
+            .thought-pane .thought-item:nth-child(6){--insight-accent:#f3b874}
+            .thought-pane .thought-item:nth-child(7){--insight-accent:#65d8ed}
+            .thought-pane .thought-item:nth-child(8){--insight-accent:#d5a1ff}
+            .thought-pane .thought-item:nth-child(4) .thought-space,
+            .thought-pane .thought-item:nth-child(5) .thought-space{
+              color:var(--text);font:650 12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+            }
+            @media (prefers-reduced-motion:no-preference){
+              .thought-pane .thought-item{transition:background-color .2s ease}
+            }
               .mcq-box{box-sizing:border-box;width:100%;border:1px solid var(--panel-line);border-radius:9px;background:var(--editor-bg);padding:12px;color:var(--text);line-height:1.45;overflow:auto}
               .mcq-question{min-height:150px;max-height:270px;font-size:15px}
               .mcq-answer{min-height:180px;font-size:16px}
@@ -2693,29 +2912,193 @@ fn overlay_html() -> &'static str {
 	              .mcq-model-pill[data-enabled="false"]{border-color:rgba(255,107,107,.48);background:rgba(255,107,107,.1)}
 	              .mcq-model-pill[data-enabled="false"]::before{background:#ff6b6b;box-shadow:0 0 10px rgba(255,107,107,.82),0 0 0 3px rgba(255,107,107,.16)}
 		      .empty{opacity:.72;font-size:12px;font-weight:600;padding:4px;white-space:nowrap;text-shadow:0 1px 2px var(--title-shadow)}
-	        </style></head><body><div class="hudbar"><span class="hud-logo">CA</span><span class="hud-pause">||</span><span class="hud-meter"><i></i><i></i><i></i></span><span class="hud-action">Start</span><span class="hud-key">⌃⌥ B</span><span class="hud-action">Capture</span><span class="hud-key">⌃⌥ P</span><span class="hud-action">Submit</span><span class="hud-key">⌃⌥ ↵</span><span class="hud-action">Coding</span><span class="hud-key">⌃⌥ C</span><span class="hud-action">MCQ</span><span class="hud-key">⌃⌥ M</span></div><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span id="solution-source">waiting</span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><script>
-	            const esc=(s)=>String(s||'').replace(/[&<>]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+	            #panel{position:relative}
+            .history-sheet{position:absolute;z-index:30;inset:0;box-sizing:border-box;display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden;padding:27px 32px 22px;background:linear-gradient(135deg,rgba(13,18,25,.95),rgba(18,24,32,.96));backdrop-filter:blur(24px) saturate(1.3);color:#f5f7fa}
+            .history-sheet[hidden]{display:none}
+            .history-heading{display:flex;align-items:start;justify-content:space-between;gap:15px;flex-wrap:wrap;padding-bottom:15px;border-bottom:1px solid rgba(255,255,255,.18)}
+            .history-eyebrow{color:#f5d83b;font-size:10px;font-weight:850;letter-spacing:.16em;text-transform:uppercase}
+            .history-title{font-size:25px;font-weight:800;letter-spacing:-.035em;margin:5px 0 4px}
+            .history-description{font-size:12px;font-weight:500;color:rgba(245,247,250,.58)}
+            .history-counter{font:700 11px SFMono-Regular,Menlo,monospace;color:rgba(245,247,250,.66);padding:10px 12px;border:1px solid rgba(255,255,255,.16);border-radius:10px}
+            .history-list{overflow-x:hidden;overflow-y:auto;min-height:0;flex:1;padding:8px 0;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.25) transparent}
+            .history-row{display:flex;align-items:center;gap:16px;min-height:66px;padding:13px 14px 13px 10px;border-bottom:1px solid rgba(255,255,255,.1);border-left:3px solid transparent;box-sizing:border-box;transition:background .16s,border .16s}
+            .history-row[data-selected="true"]{border-left-color:#f5d83b;background:linear-gradient(90deg,rgba(245,216,59,.16),rgba(245,216,59,.025))}
+            .history-number{width:37px;flex:0 0 37px;text-align:center;font:700 12px SFMono-Regular,Menlo,monospace;color:rgba(255,255,255,.45)}
+            .history-row[data-selected="true"] .history-number{color:#f5d83b}
+            .history-info{flex:1;min-width:0}
+            .history-row-title{font-size:13px;color:white;font-weight:720;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+            .history-row-subtitle{font-size:11px;font-weight:500;color:rgba(245,247,250,.55);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:5px}
+            .history-meta{display:flex;flex-direction:column;align-items:flex-end;gap:6px;font-size:10px;white-space:nowrap;color:rgba(255,255,255,.65)}
+            .history-kind{padding:3px 7px;border-radius:7px;background:rgba(245,216,59,.12);color:#f5d83b;font-weight:800;letter-spacing:.02em}
+            .history-empty{padding:44px 16px;font-size:13px;font-weight:500;text-align:center;color:rgba(255,255,255,.66)}
+            .history-footer{border-top:1px solid rgba(255,255,255,.15);padding-top:13px;display:flex;justify-content:space-between;gap:12px;font-size:11px;color:rgba(255,255,255,.6);font-weight:600}
+            .hud-shortcuts{display:flex;align-items:center;flex-wrap:wrap;gap:5px 9px;min-width:0}
+            .hud-shortcuts .hud-action{margin-left:1px}
+            .hud-shortcuts .hud-key{padding:0 7px;min-width:auto;height:24px}
+            .solution-toolbar{display:inline-flex;align-items:center;gap:8px}
+            .overlay-diff-toggle{background:rgba(245,216,59,.12);border:1px solid rgba(245,216,59,.45);color:var(--text);padding:4px 8px;border-radius:7px;font:inherit;cursor:pointer}
+            .code-lines li[data-change="remove"]{background:rgba(240,83,83,.18);border-left:3px solid rgba(240,83,83,.7)}
+            .code-lines li[data-change="add"]{background:rgba(65,200,120,.16);border-left:3px solid rgba(65,200,120,.7)}
+            .code-lines li[data-change="same"]{border-left:3px solid transparent}
+            .code-lines li[data-change] code{overflow-wrap:anywhere}
+        </style></head><body><div class="hudbar" id="hudbar"><span class="hud-logo">CA</span><span class="hud-pause">||</span><span class="hud-meter"><i></i><i></i><i></i></span><span id="hud-shortcuts" class="hud-shortcuts"></span></div><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><script>
+	            // HUD labels come from the numeric command table handled by mac_shortcuts.
+            // Keep the overlay's real capture controls, not generic demo shortcuts.
+            window.setOverlayControls=function(view){
+              const host=document.getElementById('hud-shortcuts');if(!host)return;
+              const controls=view==='history'
+                ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
+                : view==='mcq'
+                ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31'],['Left','32'],['Right','33'],['Region','34'],['Submit','35']]
+                : [['Coding','cc'],['MCQ','mm'],['History','hh'],['Full','20'],['New','21'],['Left','22'],['Right','23'],['Submit','24'],['Undo','25']];
+              const fingerprint=controls.map(([name,key])=>name+key).join('|');
+              if(host.dataset.shortcutSet===fingerprint)return;
+              host.dataset.shortcutSet=fingerprint;host.replaceChildren();
+              controls.forEach(([name,key])=>{
+                const label=document.createElement('span');label.className='hud-action';label.textContent=name;
+                const badge=document.createElement('span');badge.className='hud-key';badge.textContent=key;
+                host.append(label,badge);
+              });
+            };
+            const esc=(s)=>String(s||'').replace(/[&<>]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 	            window.scrollSolutionBy=function(delta){const el=document.getElementById('solution-code');if(el)el.scrollTop+=delta;};
             function highlight(code,lang){let h=esc(code);if(/py|python/i.test(lang||'')){h=h.replace(/([=+\-*\/])/g,'<span class="op">$1</span>').replace(/\b(\d+)\b/g,'<span class="num">$1</span>').replace(/\b(def|for|in|if|return|class|else|elif|while|try|except|with|as|from|import)\b/g,'<span class="kw">$1</span>').replace(/\b(enumerate|range|len|print|set|dict|list)\b/g,'<span class="built">$1</span>');}return h;}
 		            function stateTone(status){if(status==='done')return'done';if(status==='streaming'||status==='reviewing'||status==='running')return'working';if(status==='error')return'error';if(status==='cancelled')return'cancelled';return'pending';}
-		            function codeWithReferenceComment(code,lang){const text=String(code||'');const t=text.trimStart();if(t.startsWith('#')||t.startsWith('//')||t.startsWith('/*'))return text;const mark=/js|ts|java|c|swift|go|rust/i.test(lang||'')?'//':'#';return mark+' Reference: solution displayed in the capture overlay\n'+text;}
+            function codeWithReferenceComment(code,lang){return String(code||'');}
 		            function renderCodeLines(target,code,lang){target.innerHTML='';codeWithReferenceComment(code,lang).split('\n').forEach((line)=>{const li=document.createElement('li');const c=document.createElement('code');c.innerHTML=highlight(line||' ',lang);li.appendChild(c);target.appendChild(li);});}
 		            function detectedFunctionNames(code){const found=[];String(code||'').replace(/\b([A-Za-z_]\w*)\s*\(/g,(_,name)=>{if(!found.includes(name)&&!['if','for','while','switch','return','def','function'].includes(name))found.push(name);return _;});return found;}
 		            function renderFunctionNotes(code){const target=document.getElementById('function-notes');if(!target)return;const meanings={set:'stores unique values for quick membership checks',sum:'adds numeric values together',max:'returns the largest value',min:'returns the smallest value',len:'counts items',range:'creates a numeric loop sequence',enumerate:'loops with index and value',append:'adds an item to a list',sort:'orders a list in place',sorted:'returns ordered values',print:'writes debug output',useState:'stores React component state',useEffect:'runs React side effects',fetch:'requests network data',map:'transforms each item',filter:'keeps matching items',reduce:'combines items into one result'};const found=detectedFunctionNames(code);target.innerHTML='';found.slice(0,5).forEach((name)=>{const row=document.createElement('div');row.textContent=name+': '+(meanings[name]||'function call used by the solution');target.appendChild(row);});if(!target.children.length){const row=document.createElement('div');row.textContent='No function calls detected yet.';target.appendChild(row);}}
 		            function functionExample(name){const examples={sum:'sum([18, 9]) -> 27',set:'set([18, 9, 18]) -> {18, 9}',max:'max([18, 9]) -> 18',min:'min([18, 9]) -> 9',len:'len([18, 9]) -> 2',range:'range(0, 5) -> 0..4',enumerate:'enumerate(items) -> index + value',append:'outliers.append(18) -> adds 18',sort:'values.sort() -> in-place order',sorted:'sorted(values) -> ordered copy',print:'print(result) -> console output',useState:'useState(false) -> state + setter',useEffect:'useEffect(fn, []) -> run side effect',fetch:'fetch(url) -> request data',map:'items.map(fn) -> transformed items',filter:'items.filter(fn) -> matching items',reduce:'items.reduce(fn, seed) -> one value'};return examples[name]||name+'(exampleInput) -> expected output';}
 		            function renderSmartTests(target,count,code,stateTests){target.innerHTML='';const cases=Array.isArray(stateTests)?stateTests:[];count.textContent=cases.length?cases.length+' evidence row'+(cases.length===1?'':'s'):'no execution evidence';if(!cases.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No verified execution evidence available yet.';target.appendChild(empty);return;}cases.slice(0,8).forEach((item)=>{const card=document.createElement('div');card.className='case';const name=document.createElement('b');name.textContent=item.name||'Execution result';const detail=document.createElement('code');detail.textContent=[item.status,item.expected!==undefined?'expected: '+String(item.expected):'',item.actual!==undefined?'actual: '+String(item.actual):'',item.input!==undefined?'input: '+String(item.input):''].filter(Boolean).join(' · ');card.appendChild(name);card.appendChild(detail);target.appendChild(card);});}
+            // Show the Council worker's exact E2B-tested candidate first. When
+            // the deterministic judges publish a changed final winner, render
+            // an actual red/green line diff in the EXISTING code window.
+            function overlayDiffRows(before,after){
+              const a=String(before||'').split('\n'),b=String(after||'').split('\n'),out=[];
+              if(a.length*b.length>90000||String(before||'').length+String(after||'').length>98304)
+                return [['summary','The provisional and final solutions differ. This diff is too large to render safely; use Show final to view the verified code.']];
+              const dp=Array.from({length:a.length+1},()=>new Uint16Array(b.length+1));
+              for(let i=a.length-1;i>=0;i--)for(let j=b.length-1;j>=0;j--)
+                dp[i][j]=a[i]===b[j]?dp[i+1][j+1]+1:Math.max(dp[i+1][j],dp[i][j+1]);
+              let i=0,j=0;
+              while(i<a.length||j<b.length){
+                if(i<a.length&&j<b.length&&a[i]===b[j]){out.push(['same',a[i]]);i++;j++;}
+                else if(i<a.length&&(j===b.length||dp[i+1][j]>=dp[i][j+1]))out.push(['remove',a[i++]]);
+                else out.push(['add',b[j++]]);
+              }
+              return out;
+            }
+            function renderOverlayCodeResult(target,state){
+              const current=state.solution||{},history=Array.isArray(state.solutionHistory)?state.solutionHistory:[];
+              const previous=history.find(entry=>entry.version==='provisional');
+              const final=history.find(entry=>entry.version==='final');
+              const changed=state.upgrade&&state.upgrade.changed===true&&
+                current.status==='reviewed'&&previous&&final&&
+                previous.code&&final.code&&previous.language===final.language&&
+                previous.code!==final.code;
+              if(window.__overlayDiffRunId!==state.runId){window.__overlayDiffRunId=state.runId;window.__overlayDiffHidden=false;}
+              const button=document.getElementById('overlay-diff-toggle');
+              if(button){button.hidden=!changed;button.textContent=window.__overlayDiffHidden?'View changes':'Show final';}
+              if(!changed||window.__overlayDiffHidden){renderCodeLines(target,current.code,current.language);return;}
+              target.replaceChildren();
+              overlayDiffRows(previous.code,final.code).forEach(([change,line])=>{
+                const li=document.createElement('li');li.dataset.change=change;
+                const code=document.createElement('code');code.textContent=(change==='remove'?'- ':change==='add'?'+ ':'  ')+line;
+                li.append(code);target.append(li);
+              });
+            }
+            window.toggleOverlayCodeDiff=function(){
+              const state=window.__overlayCurrentState;
+              if(!state||!state.solution)return;
+              window.__overlayDiffHidden=!window.__overlayDiffHidden;
+              renderOverlayCodeResult(document.getElementById('solution-code'),state);
+            };
+            document.addEventListener('click',function(event){
+              if(event.target&&event.target.id==='overlay-diff-toggle')window.toggleOverlayCodeDiff();
+            });
             function renderCouncilInsights(presentation){const p=presentation||{};const root=document.querySelector('.thought-list');if(!root)return;const items=root.querySelectorAll('.thought-item');const set=(index,value)=>{const el=items[index]&&items[index].querySelector('.thought-space');if(el)el.textContent=value||'Not reported by Council.';};set(0,p.approach);set(2,p.dataStructures);const complexity=String(p.complexity||'');const timeMatch=complexity.match(/(?:time|runtime)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);const spaceMatch=complexity.match(/(?:space|memory)\s*(?:complexity)?\s*[:=\-]\s*([^\n;]+)/i);set(3,p.timeComplexity||(timeMatch&&timeMatch[1])||complexity);set(4,p.spaceComplexity||(spaceMatch&&spaceMatch[1]));set(5,Array.isArray(p.dissent)?p.dissent.join('\n'):p.dissent);set(6,Array.isArray(p.evidence)?p.evidence.map(e=>[e.letter,e.gate,e.passed!==undefined?'passed: '+e.passed:'',e.failed!==undefined?'failed: '+e.failed:'',Number.isFinite(e.elapsedMs)?'elapsed: '+e.elapsedMs+' ms':'',Number.isFinite(e.peakMemoryKb)?'peak memory: '+e.peakMemoryKb+' KB':'',e.runtime||''].filter(Boolean).join(' · ')).join('\n'):'');set(7,Array.isArray(p.rejected)?p.rejected.join('\n'):p.rejected);}
                         window.updatePreviews=function(images){window.__lastPreviews=images||[];const pictures=document.getElementById('pictures');if(!pictures)return;if(pictures.__sources&&pictures.__sources.length===images.length&&images.every((src,i)=>src===pictures.__sources[i]))return;pictures.__sources=images.slice();pictures.innerHTML='';if(!images.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Captured images will appear here';pictures.appendChild(empty);return;}images.forEach((src,i)=>{const pill=document.createElement('div');pill.className='picture-pill';const img=document.createElement('img');img.src=src;img.alt='Capture '+(i+1);const count=document.createElement('span');count.className='picture-count';count.textContent=(i+1)+'/10';pill.appendChild(img);pill.appendChild(count);pictures.appendChild(pill);});};
                 function renderMcq(state){const savedPictures=document.getElementById('pictures');const left=document.querySelector('.pictures-pane');const right=document.querySelector('.thought-pane');const m=state.mcq||{};const picked=(m.answer&&m.answer.label)||'';const found=Array.isArray(m.options)?m.options:[];const position=found.findIndex((o)=>o.label===picked);const ordinal=(n)=>n%100>=11&&n%100<=13?'th':n%10===1?'st':n%10===2?'nd':n%10===3?'rd':'th';const formatted=m.answerVerified===true&&position>=0?'✅ '+picked+' ('+(position+1)+ordinal(position+1)+' Option) - '+String((m.answer&&m.answer.text)||found[position].text||''):'';const displayAnswer=formatted||String(m.displayAnswer||'');const selectedModel=(m.model&&String(m.model).trim())?String(m.model).trim():'none';const hasModel=selectedModel.toLowerCase()!=='none';left.innerHTML='<div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title-row"><div class="title">Question</div><div class="mcq-model-pill" data-enabled="'+(hasModel?'true':'false')+'">'+esc(hasModel?selectedModel:'No Model')+'</div></div><div class="mcq-box mcq-question"></div><div class="title">Answer</div><div class="mcq-box mcq-answer"></div>';if(savedPictures)document.getElementById('pictures').replaceWith(savedPictures);right.innerHTML='<div class="title">Question history</div><div class="mcq-history"></div>';document.querySelector('.mcq-question').textContent=m.question||state.progress||'Reading the captured question...';document.querySelector('.mcq-answer').innerHTML='<b>'+esc(displayAnswer||(picked||'Answer'))+'</b>'+(displayAnswer?'':(m.answer&&m.answer.text?' — '+esc(m.answer.text):''))+'<br><br>'+esc(m.reason||state.error||state.progress||'Waiting for the MCQ worker result...');const hist=document.querySelector('.mcq-history');const add=(title,body,level,meta)=>{const row=document.createElement('div');row.className='mcq-history-row';row.dataset.level=level||'info';const h=document.createElement('b');h.textContent=title;const p=document.createElement('div');p.textContent=body||'';row.appendChild(h);row.appendChild(p);if(meta&&meta.length){const mrow=document.createElement('div');mrow.className='mcq-history-meta';meta.forEach((x)=>{const s=document.createElement('span');s.textContent=x;mrow.appendChild(s);});row.appendChild(mrow);}hist.appendChild(row);};add('AI selected',selectedModel,'info',[state.status||'',state.phase||''].filter(Boolean));add('Captured question',m.question||'Waiting for the screenshot reading.',state.error?'error':'info',[state.status||'',state.phase||''].filter(Boolean));if(m.options&&m.options.length){add('Choices found',(m.options||[]).map((o)=>(o.label?o.label+'. ':'')+(o.text||'')).join('\\n'),'info',[]);}if(m.knowledgeUsed!==undefined){add('Local knowledge check',m.knowledgeUsed?'A local knowledge match or guidance was included before the model answer.':'The local knowledge pack was checked before the model answer, but no direct match was used.','info',[selectedModel]);}if(picked||m.reason){add('Selected answer',(picked?picked+': ':'')+(m.answer&&m.answer.text?m.answer.text:'')+'\\n'+(m.reason||''),'info',[selectedModel]);}(m.whyNot||[]).forEach((x)=>add('Rejected choice '+(x.label||''),x.reason||'Not selected.','info',[]));(state.history||[]).forEach((e)=>add(e.phase||'worker event',e.message||'',e.level||'info',[e.createdAt||''].filter(Boolean)));if(!hist.children.length)add('Waiting','The helper is waiting for the worker history.','info',[]);window.updatePreviews(window.__lastPreviews||[]);}
-			            function restoreCodingShell(){if(document.getElementById('agents'))return;document.getElementById('panel').innerHTML='<div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span id="solution-source">waiting</span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div>';window.updatePreviews(window.__lastPreviews||[]);}
-			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'reviewed':('candidate · '+(state.solution.source||''));renderCodeLines(code,state.solution.code,state.solution.language);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation);}};
+			            function restoreCodingShell(){if(document.getElementById('agents'))return;document.getElementById('panel').innerHTML='<div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-status" id="agents"></div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div>';window.updatePreviews(window.__lastPreviews||[]);}
+			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};window.__overlayCurrentState=state;if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'Council verified':state.solution.status==='provisional'?'E2B passed · Council reviewing':('candidate · '+(state.solution.source||''));renderOverlayCodeResult(code,state);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation);}};
             // Keep the existing capture and result renderer intact, then give
             // its agent output the same clear, glassy Council presentation as
             // the Story workspace. This is intentionally display-only.
-            window.showCodingHistory=function(rows,selected){const panel=document.getElementById('panel');let root=document.getElementById('coding-history');if(!root){root=document.createElement('div');root.id='coding-history';root.style.cssText='position:absolute;inset:16px;z-index:20;display:flex;flex-direction:column;gap:14px;padding:20px;border:1px solid rgba(255,255,255,.22);border-radius:14px;background:rgba(19,23,32,.96);color:white;overflow:hidden';panel.appendChild(root);}root.hidden=false;root.innerHTML='';const title=document.createElement('h3');title.textContent='Coding history · { / } navigate · | open · _ close';root.appendChild(title);const list=document.createElement('div');list.style.cssText='flex:1;overflow:auto;display:flex;flex-direction:column;gap:7px';(rows||[]).forEach((item,index)=>{const row=document.createElement('div');row.className='coding-history-row';row.dataset.index=String(index);row.style.cssText='padding:11px 13px;border:1px solid rgba(255,255,255,.18);border-radius:9px;color:rgba(255,255,255,.78);font-size:12px';row.textContent=(index+1)+'. '+(item.submittedAt||'')+' · '+(item.status||'')+' · '+String(item.id||'').slice(0,12);list.appendChild(row);});if(!list.children.length){const empty=document.createElement('div');empty.textContent='No coding history yet.';list.appendChild(empty);}root.appendChild(list);window.selectCodingHistoryRow(selected||0);};
-            window.selectCodingHistoryRow=function(selected){const root=document.getElementById('coding-history');if(!root)return;root.querySelectorAll('.coding-history-row').forEach((row,index)=>{const active=index===selected;row.style.background=active?'rgba(245,216,59,.17)':'transparent';row.style.borderColor=active?'rgba(245,216,59,.84)':'rgba(255,255,255,.18)';if(active)row.scrollIntoView({block:'nearest'});});};
-            window.closeCodingHistory=function(){const root=document.getElementById('coding-history');if(root)root.hidden=true;};
-            window.openCodingHistoryResult=function(state){window.closeCodingHistory();window.updateOverlayState(state);};
+            // Shared account history is read-only. Neither opening HH nor
+            // navigating it mutates the live Coding/MCQ batch or runs a solver.
+            window.showSharedHistory=function(rows,selected,loading,error){
+              const panel=document.getElementById('panel');if(!panel)return;
+              let root=document.getElementById('shared-history-sheet');
+              if(!root){
+                root=document.createElement('section');
+                root.id='shared-history-sheet';root.className='history-sheet';
+                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Archive</div><div class="history-title">History</div><div class="history-description">Main app and overlay · Coding, MCQ and saved runs</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate · Shift + | Open result</span><span>cc Coding · mm MCQ · hh History</span></footer>';
+                panel.appendChild(root);
+              }
+              root.hidden=false;
+              if(Array.isArray(rows))root.__rows=rows;
+              root.__rows=root.__rows||[];
+              window.__historyLoading=Boolean(loading);
+              window.__historyError=error||'';
+              const list=root.querySelector('#history-list');
+              list.replaceChildren();
+              root.__rows.forEach((item,i)=>{
+                const row=document.createElement('div');row.className='history-row';row.dataset.index=String(i);
+                const n=document.createElement('span');n.className='history-number';n.textContent=String(i+1).padStart(2,'0');
+                const info=document.createElement('div');info.className='history-info';
+                const title=document.createElement('div');title.className='history-row-title';title.textContent=item.title||'Saved task';
+                const subtitle=document.createElement('div');subtitle.className='history-row-subtitle';subtitle.textContent=[item.origin||'',item.subtitle||''].filter(Boolean).join(' · ').slice(0,240);
+                const meta=document.createElement('div');meta.className='history-meta';
+                const kind=document.createElement('span');kind.className='history-kind';kind.textContent=item.kind||'Run';
+                const stamp=document.createElement('span');
+                const date=new Date(item.submittedAt||'');stamp.textContent=Number.isFinite(date.getTime())?date.toLocaleString():String(item.submittedAt||'');
+                const status=document.createElement('span');status.textContent=item.status||'';
+                info.append(title,subtitle);meta.append(kind,stamp,status);row.append(n,info,meta);list.appendChild(row);
+              });
+              if(!list.children.length){
+                const empty=document.createElement('div');empty.className='history-empty';
+                empty.textContent=error?'Could not load cloud history: '+error:loading?'Loading saved account history…':'No saved runs yet. Your next main-app or overlay task will appear here.';
+                list.appendChild(empty);
+              }else if(error){
+                const warning=document.createElement('div');warning.className='history-empty';
+                warning.textContent='Showing cached history. Cloud sync: '+error;
+                list.prepend(warning);
+              }
+              const counter=root.querySelector('#history-counter');
+              counter.textContent=root.__rows.length+' saved'+(loading?' · syncing':'');
+              window.selectSharedHistoryRow(selected||0);
+              window.setOverlayControls('history');
+            };
+            window.selectSharedHistoryRow=function(selected){
+              const root=document.getElementById('shared-history-sheet');
+              if(!root||root.hidden)return;
+              root.querySelectorAll('.history-row').forEach((row,i)=>{
+                const yes=i===selected;
+                row.dataset.selected=yes?'true':'false';
+                if(yes)row.scrollIntoView({block:'nearest'});
+              });
+            };
+            window.closeSharedHistory=function(){
+              const root=document.getElementById('shared-history-sheet');if(root)root.hidden=true;
+              const detail=document.getElementById('shared-history-detail');if(detail)detail.hidden=true;
+              window.setOverlayControls(window.__overlayCurrentState&&(window.__overlayCurrentState.kind==='mcq'||window.__overlayCurrentState.mcq)?'mcq':'coding');
+            };
+            window.showSharedHistoryDetail=function(detail){
+              const panel=document.getElementById('panel');if(!panel)return;
+              let root=document.getElementById('shared-history-detail');
+              if(!root){root=document.createElement('section');root.id='shared-history-detail';root.className='history-sheet';panel.appendChild(root);}
+              root.hidden=false;root.replaceChildren();
+              const header=document.createElement('header');header.className='history-heading';
+              const head=document.createElement('div');const eyebrow=document.createElement('div');eyebrow.className='history-eyebrow';eyebrow.textContent='Council Editor / Saved result';
+              const title=document.createElement('div');title.className='history-title';title.textContent=detail&&detail.loading?'Loading result…':(detail&&detail.title)||'Saved result';
+              const meta=document.createElement('div');meta.className='history-description';meta.textContent=[detail&&detail.origin,detail&&detail.status].filter(Boolean).join(' · ');
+              head.append(eyebrow,title,meta);header.append(head);root.append(header);
+              const body=document.createElement('div');body.className='history-list';
+              if(detail&&detail.loading){const loading=document.createElement('div');loading.className='history-empty';loading.textContent='Loading the selected account-scoped result…';body.append(loading);}
+              else if(detail&&detail.error){const error=document.createElement('div');error.className='history-empty';error.textContent='Could not open this saved result: '+detail.error;body.append(error);}
+              else {const summary=document.createElement('pre');summary.className='history-row';summary.style.whiteSpace='pre-wrap';summary.textContent=(detail&&detail.summary)||'No saved summary.';body.append(summary);const solution=detail&&detail.solution;if(solution&&solution.code){const code=document.createElement('pre');code.className='history-row';code.style.whiteSpace='pre';code.style.overflow='auto';code.textContent=(solution.language?solution.language+'\n\n':'')+solution.code;body.append(code);}}
+              root.append(body);const footer=document.createElement('footer');footer.className='history-footer';footer.textContent='hh returns to History · cc Coding · mm MCQ';root.append(footer);
+            };
             const baseUpdateOverlayState=window.updateOverlayState;
             function agentStatusText(agent){
               if(agent.error)return String(agent.error);
@@ -2739,12 +3122,12 @@ fn overlay_html() -> &'static str {
               const oldTitle=agents.previousElementSibling;if(oldTitle&&oldTitle.classList.contains('title'))oldTitle.replaceWith(header);else pane.insertBefore(header,agents);
               agents.innerHTML='';
               if(!selected.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='The selected Council agents will appear here.';agents.appendChild(empty);}else{selected.forEach((agent)=>{const card=document.createElement('div');card.className='model-chip';card.dataset.state=stateTone(agent.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=agent.label||agent.id||'Council agent';const model=document.createElement('span');model.className='agent-model';model.textContent=agent.model||'Council';const detail=document.createElement('span');detail.textContent=agentStatusText(agent);card.title=[agent.model,agent.error].filter(Boolean).join(' — ');card.append(dot,name,model,detail);agents.appendChild(card);});}
-              const progress=document.createElement('div');progress.className='overlay-progress';const waiting=state.phase==='idle'?'Capture screenshots to begin.':(state.solution&&state.solution.code)||'Council is selecting eligible agents.';progress.textContent=state.phase==='done'?'Council completed this run. Review the verified solution below.':(state.phase==='error'?'Council needs attention. See the diagnostic below.':(selected.find((agent)=>agent.detail)?.detail||waiting));
+              const progress=document.createElement('div');progress.className='overlay-progress';const waiting=state.phase==='idle'?'Capture screenshots to begin.':state.progress||'Council is selecting eligible agents.';progress.textContent=state.phase==='done'?'Council completed this run. Review the verified solution below.':(state.phase==='error'?'Council needs attention. See the diagnostic below.':(selected.find((agent)=>agent.detail)?.detail||waiting));
               agents.after(progress);
               const failures=selected.filter((agent)=>agent.error).map((agent)=>(agent.label||agent.id||'Council agent')+': '+agent.error);
               if(failures.length||state.phase==='error'){const diagnostic=document.createElement('div');diagnostic.className='overlay-diagnostics';const label=document.createElement('b');label.textContent='Run diagnostics';const message=document.createElement('span');message.textContent=failures.join(' · ')||'The Council run reported an issue. The captured images and any available answer remain available.';diagnostic.append(label,message);progress.after(diagnostic);}
             }
-            window.updateOverlayState=function(state){baseUpdateOverlayState(state);if(!state||state.kind!=='mcq')renderStoryAgents(state||{});};
+            window.updateOverlayState=function(state){baseUpdateOverlayState(state);window.setOverlayControls(state&&(state.kind==='mcq'||state.mcq)?'mcq':'coding');if(!state||state.kind!=='mcq')renderStoryAgents(state||{});};
     </script></body></html>"#
 }
 
@@ -2753,17 +3136,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_distinct_quick_letter_double_taps_open_panels() {
+        let start = Instant::now();
+        let mut last = None;
+        assert_eq!(double_tap_panel(&mut last, 1, start), None);
+        assert_eq!(double_tap_panel(&mut last, 1, start + Duration::from_millis(230)), Some(1));
+        // A completed pair resets; holding a key is filtered at the HID edge.
+        assert_eq!(double_tap_panel(&mut last, 1, start + Duration::from_millis(400)), None);
+        assert_eq!(double_tap_panel(&mut last, 2, start + Duration::from_millis(475)), None);
+        assert_eq!(double_tap_panel(&mut last, 2, start + Duration::from_millis(900)), Some(2));
+        assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(1000)), None);
+        assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(1701)), None);
+        assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(1710)), Some(3));
+    }
+
+    #[test]
+    fn combined_history_keeps_main_runs_and_both_overlay_job_types() {
+        let old=history_row("job:123","Overlay","Coding","Code","local","completed",
+            "2026-10-15T12:00:00Z");
+        let current=history_row("job:123","Overlay","Coding","Code","cloud","completed",
+            "2026-10-15T12:00:00Z");
+        let mcq=history_row("job:456","Overlay","MCQ","Question","remote","completed",
+            "2026-10-15T14:00:00Z");
+        let main=history_row("main:123","Main app","Run","Previous main result","",
+            "completed","2026-10-15T13:00:00Z");
+        let rows=normalize_history(vec![old,current,mcq,main]).unwrap();
+        assert_eq!(rows.len(),3);
+        assert_eq!(rows[0]["id"],"job:456");
+        assert_eq!(rows[1]["id"],"main:123");
+        assert_eq!(rows[2]["id"],"job:123");
+    }
+
+    #[test]
     fn number_pairs_route_to_the_requested_workflow_and_capture_shape() {
         let expected = [
             (0, 0, 6),
             (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13),
-            (2, 1, 21), (2, 2, 22), (2, 3, 23), (2, 4, 24), (2, 5, 25),
+            (2, 0, 20), (2, 1, 21), (2, 2, 22), (2, 3, 23), (2, 4, 24), (2, 5, 25),
             (3, 1, 31), (3, 2, 32), (3, 3, 33), (3, 4, 34), (3, 5, 35),
         ];
         for (prefix, shape, command) in expected {
             assert_eq!(number_pair_command(prefix, shape), Some(command));
         }
-        for invalid in [(1, 5), (2, 0), (3, 0), (4, 1)] {
+        for invalid in [(1, 5), (2, 6), (3, 0), (4, 1)] {
             assert_eq!(number_pair_command(invalid.0, invalid.1), None);
         }
     }
@@ -2845,7 +3260,7 @@ mod tests {
                             "error": null
                         }
                     ],
-                    "suites": [{ "language": "python" }]
+                    "suites": [{ "language": "python" }], "presentation": {"standing":"verified", "code":"def solve():\n    return 42", "language":"py","provenance":"Candidate B"}
                 }
             })),
             events: vec![],
@@ -2881,7 +3296,7 @@ mod tests {
         };
         let state = coding_overlay_state(&job);
         assert_eq!(state["phase"], "running");
-        assert_eq!(state["solution"]["code"], "print(42)");
+        assert!(state["solution"].is_null(), "an unverified early candidate cannot appear in the code editor");
     }
 
     #[test]
@@ -2904,10 +3319,58 @@ mod tests {
         };
         let state = coding_overlay_state(&job);
         assert_eq!(state["phase"], "running");
-        assert!(state["solution"]["code"]
-            .as_str()
-            .unwrap_or("")
-            .contains("Asking models"));
+        assert!(state["solution"].is_null(), "worker progress must not masquerade as generated code");
+        assert!(state["progress"].as_str().unwrap_or("").contains("Asking models"));
+    }
+
+    #[test]
+    fn coding_overlay_presents_verified_early_code_and_upgrade_diff_history() {
+        let report = serde_json::json!({"job_id":"early-1","report":{
+            "stage":"provisional","winner":null,
+            "provisional":{"status":"provisional","letter":"A","code":"print(1)",
+                "language":"python","passed":3,"failed":0},
+            "solutionHistory":[{"version":"provisional","code":"print(1)","language":"python"}]
+        }});
+        assert!(is_usable_cloud_report(&report,"early-1"));
+        let job = SubmittedJob {
+            id:"early-1".into(), mode:"council".into(), mcq_model:None,
+            status:"running".into(), progress_phase:"reviewing".into(), submitted_at:now(),
+            previews:vec![], error:None, report:Some(report), events:vec![]
+        };
+        let state = coding_overlay_state(&job);
+        assert_eq!(state["solution"]["status"],"provisional");
+        assert_eq!(state["solution"]["code"],"print(1)");
+        assert_eq!(state["tests"][0]["status"],"passed");
+        assert_eq!(state["phase"],"running");
+        assert!(is_usable_cloud_report(&serde_json::json!({"report":{
+            "stage":"provisional","provisional":{"status":"provisional",
+            "code":"print(1)","passed":1,"failed":0}
+        }}),"early-1"));
+        assert!(!is_usable_cloud_report(&serde_json::json!({"report":{
+            "stage":"provisional","provisional":{"status":"provisional",
+            "code":"print(1)","passed":0,"failed":0}
+        }}),"early-1"));
+    }
+
+    #[test]
+    fn finalized_upgrade_shows_tested_winner_and_preserves_both_versions() {
+        let job = SubmittedJob {
+            id:"upgrade".into(),mode:"council".into(),mcq_model:None,
+            status:"completed".into(),progress_phase:"completed".into(),submitted_at:now(),
+            previews:vec![],error:None,events:vec![],
+            report:Some(serde_json::json!({"report":{
+                "stage":"final","winner":"B",
+                "presentation":{"standing":"verified","code":"print(2)","language":"python"},
+                "solutionHistory":[
+                    {"version":"provisional","code":"print(1)","language":"python"},
+                    {"version":"final","code":"print(2)","language":"python"}
+                ],"upgrade":{"changed":true,"from":"A","to":"B"}
+            }}))
+        };
+        let state = coding_overlay_state(&job);
+        assert_eq!(state["solution"]["code"],"print(2)");
+        assert_eq!(state["upgrade"]["changed"],true);
+        assert_eq!(state["solutionHistory"].as_array().map(Vec::len),Some(2));
     }
 
     #[test]
