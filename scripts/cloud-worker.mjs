@@ -34,7 +34,8 @@ import { screenProvisionalCandidate, createProvisionalRecord, buildSolutionHisto
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { isPrimaryModel, listedPrimaryRoute, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "../src/lib/primaryModels.ts";
+import { PRIMARY_MODEL_IDS, isPrimaryModel, listedPrimaryRoute, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "../src/lib/primaryModels.ts";
+import { coordinateAndVerify } from "../src/lib/visionCoordinator.ts";
 import {
   captureWorkerException,
   closeObservability,
@@ -484,6 +485,54 @@ function chatModels(settings) {
     // deliberately configured would be silently discarding their roster.
     .filter((model) => model?.id)
     .slice(0, Math.min(4, Math.max(1, Number(process.env.CODE_AUDITOR_WORKER_SOLVERS || 4))));
+}
+
+/**
+ * The desktop's adaptive run starts with the approved ten-model pool, then a
+ * coordinator which can see the actual submission assigns up to four seats.
+ * Overlay jobs must use that same contract. `councilModels` is a saved Council
+ * configuration (and remains useful for judges and endpoint preferences), not
+ * a list of solvers to pre-assign before the problem has been read.
+ */
+const AGENT_FOR_PRIMARY_MODEL = Object.freeze({
+  "claude-opus-5.5": "anthropic",
+  "claude-fable-5.1": "fable",
+  "gpt-5.6-sol": "openai",
+  "gemini-3.1-pro": "gemini",
+  "grok-4.6": "grok",
+  "gpt-5.6-terra": "terra",
+  "qwen3.8-max": "qwen",
+  "kimi-k3": "moonshot",
+  "glm-5.3": "glm",
+  "seed-2.1-pro": "seed",
+});
+
+function approvedSolverPool(settings) {
+  // The live gateway catalogue supplies the exact wire spelling. If it is
+  // temporarily unavailable, retain the same approved identities the desktop
+  // will attempt, rather than reducing the overlay to a stale saved roster.
+  const listed = primaryCatalog(settings?.availableModels || []);
+  const routes = listed.length
+    ? listed
+    : PRIMARY_MODEL_IDS.map((id) => preferredPrimaryRoute(id, gatewayId(settings)));
+  const hasEnablement = settings?.enabled && typeof settings.enabled === "object";
+  // Snapshots created before adaptive panels had no enablement map. Preserve
+  // their explicit Council roster rather than surprising an old client by
+  // widening it to ten routes. Current desktop and overlay snapshots always
+  // carry `enabled`, so they take the adaptive ten-model path below.
+  if (!hasEnablement) return chatModels(settings);
+  const enabled = settings.enabled;
+  return routes.flatMap((route) => {
+    const id = primaryModelId(route);
+    const agent = id ? AGENT_FOR_PRIMARY_MODEL[id] : null;
+    // Missing legacy flags mean enabled, exactly as the desktop's default
+    // settings do. An explicit false remains authoritative.
+    return id && agent && enabled[agent] !== false ? [{ id: route }] : [];
+  });
+}
+
+function hasAdaptiveSolverSelection(settings) {
+  return Boolean(settings?.enabled && typeof settings.enabled === "object");
 }
 
 function chatJudges(settings) {
@@ -2293,7 +2342,11 @@ export async function runCouncilJob(job) {
 
   const baseUrl = gatewayBaseUrl(settings);
   await discoverWorkerCatalog(settings);
-  const models = chatModels(settings);
+  // Do not decide solver seats from the stored Council roster.  Main and
+  // overlay both begin with every enabled approved model; a coordinator reads
+  // this job's original screenshots and chooses the four independent solvers.
+  const useAdaptiveSolverSelection = hasAdaptiveSolverSelection(settings);
+  let models = approvedSolverPool(settings);
   const judges = chatJudges(settings);
 
   // A seat the key has no access to is not worth a request to discover. The
@@ -2302,10 +2355,6 @@ export async function runCouncilJob(job) {
   // shrinks is how a four-solver Council becomes a two-solver Council without
   // anyone noticing.
   const missing = [
-    ...unreachableCouncilSeatIds(
-      Array.isArray(settings.councilModels) ? settings.councilModels : COUNCIL_DEFAULT_MODELS,
-      (m) => m?.id, settings.availableModels
-    ),
     ...unreachableCouncilSeatIds(
       Array.isArray(settings.councilJudges) ? settings.councilJudges : COUNCIL_DEFAULT_JUDGES,
       (j) => j?.model, settings.availableModels
@@ -2323,9 +2372,9 @@ export async function runCouncilJob(job) {
   if (models.length < 2) {
     throw new Error(
       missing.length
-        ? `Cloud Council needs at least two reachable models, and this key cannot reach ${missing.join(", ")}. ` +
-          "Refresh the model list in Settings, or put reachable ids in the roster."
-        : "Cloud Council needs at least two chat-compatible TokenRouter models."
+        ? `Cloud Council needs at least two reachable approved models, and this key cannot reach judge route(s): ${missing.join(", ")}. ` +
+          "Refresh the model list in Settings."
+        : "Cloud Council needs at least two enabled approved models."
     );
   }
 
@@ -2470,6 +2519,74 @@ export async function runCouncilJob(job) {
   const solveImages = showPicture ? images : [];
   if (showPicture && !solving.length) {
     throw new Error("No reachable vision-capable solver is available for this screenshot. Verify the selected model roster and image-capability probes.");
+  }
+
+  // Match the desktop's adaptive panel selection.  The coordinator is allowed
+  // to inspect the submitted screenshots only to classify the work and select
+  // specialists. Every selected solver still receives the original immutable
+  // image manifest and solves independently; no coordinator transcription is
+  // treated as the problem statement.
+  const selectionCandidates = solving.map((seat) => ({
+    id: seat.id,
+    model: seat.id,
+    canSeeImages: true,
+  }));
+  const selection = useAdaptiveSolverSelection ? await coordinateAndVerify({
+    candidates: selectionCandidates,
+    catalogue: settings.availableModels || [],
+    note: [reading.context, reading.markdown].filter(Boolean).join("\n\n").slice(0, 2800),
+    screenshotCount: solveImages.length,
+    fallbackOrder: selectionCandidates.map((seat) => seat.id),
+    probe: async (routes, needsVision) => {
+      // A fresh Clean API catalogue is already an entitlement and capability
+      // check. The first actual selected-solver call carries this job's direct
+      // Azure image URLs, which is the meaningful end-to-end validation.
+      const catalogued = new Set(settings.availableModels || []);
+      return routes.map((model) => ({
+        model,
+        ok: !catalogued.size || catalogued.has(model),
+        ms: 0,
+        error: !catalogued.size || catalogued.has(model) ? null : "not listed by the current gateway credential",
+        vision: needsVision ? true : null,
+        visionNote: needsVision
+          ? "Approved route; the independent solver receives this job's direct image links."
+          : null,
+      }));
+    },
+    ask: (model, prompt) => tokenRouterGenerate({
+      settings,
+      baseUrl,
+      model,
+      system: prompt.systemPrompt,
+      user: prompt.userText,
+      images: solveImages,
+      maxTokens: 360,
+      reasoning: "off",
+    }),
+  }) : null;
+  if (selection) {
+    const selectedIds = new Set(selection.routes.map((route) => route.id));
+    solving = solving.filter((seat) => selectedIds.has(seat.id));
+    if (!solving.length) {
+      throw new Error("The coordinator could not validate an eligible solver route for this submission. Refresh the live model list and try again.");
+    }
+    // All later candidate, harness, revision, and Council phases operate on
+    // the same selected four rather than silently reverting to a configured
+    // roster.
+    models = solving;
+    await addEvent(
+      job.id,
+      "info",
+      "solvers_selected",
+      `Coordinator selected ${solving.map((seat) => seat.id).join(", ")} after reading the submission.`,
+      {
+        models: solving.map((seat) => seat.id),
+        coordinator: selection.coordinator,
+        family: selection.family,
+        reason: selection.reason,
+        rejected: selection.rejected,
+      }
+    );
   }
 
   await patchJob(job.id, { progress_phase: "solving" });
