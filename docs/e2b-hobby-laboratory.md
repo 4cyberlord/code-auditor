@@ -158,3 +158,64 @@ problem-specific test harnesses.
   semantically correct ports, Big-O proofs or valid expected results.
 - The existing main-app and overlay dimensions, UI state machine, secrets,
   sign-in behavior and production database schema are untouched.
+
+## New E2B Build System 2.0 template and source-agent recovery (Oct 16)
+
+`scripts/build-e2b-template.mjs` now uses E2B's **code-defined Build
+System 2.0**, including `Template().fromTemplate(...).aptInstall(...)`,
+`pipInstall(PINNED_PYTHON_VALIDATORS)`, and `setEnvs` for an explicit
+revision. The build alias defaults to **`council-validators-v2`**, deliberately
+different from any existing production runner alias. Extended validators are
+included by default **only when this dedicated build script is explicitly run**;
+set `CODE_AUDITOR_E2B_EXTENDED_VALIDATORS=0` to omit them. Template builds
+and deployment are not triggered by the GitHub branch. After a successful
+private smoke check, the worker may opt in using
+`CODE_AUDITOR_E2B_TEMPLATE=council-validators-v2`, together with a matching
+`CODE_AUDITOR_E2B_TEMPLATE_REVISION`.
+
+Template installation supplies the compilers, Python packages and diagnostic
+tools, but it does NOT turn E2B itself into a language model. The original
+verified source solver remains a model running through the authenticated
+Council gateway; E2B remains the isolated execution backend with internet
+egress denied and no model API keys injected into the VM.
+
+If Rust or C++ fails with candidate-code compilation or assertion failures,
+the same model that authored the verified primary solution can attempt
+**one correction per failed target language**. The two target ports are
+processed concurrently by the existing bounded `parallelMap(targets,2)`,
+so the model may receive two independent repair requests in parallel.
+The failed source, original verified source, original problem and E2B
+diagnostics are presented as evidence; **the original independently
+validated harness and expected results are never altered**. The corrected
+code must pass E2B again and its mutation check before publication. A
+sandbox outage, canceled task, missing harness or timeout does not trigger
+an expensive semantic repair request.
+
+`CODE_AUDITOR_E2B_PORT_REPAIR` enables or disables bounded source-agent
+recovery; during rollout, use `0` to return to the original translation path.
+`report.ports[].repair` records the attempt and success/failure without
+overwriting original evidence.
+
+`report.ports[].analysis` contains algorithm and data-structure clues,
+the model's separate time/space complexity claims where the answer supplies
+them, and measured harness runtime/RSS. The values are *explicitly labelled
+as model claims*, not independently proven Big-O. Compiler-inclusive time
+and harness-process timing remain distinct. Measured RSS is never presented
+as asymptotic space complexity.
+
+E2B's newer pause/resume and filesystem snapshot APIs may help truly
+long-lived interactive agent sessions, but are deliberately **not** used for
+these short untrusted verification runs on Hobby. Stateless template-backed,
+one-use sandboxes reduce state leakage and simplify cleanup. Revisit snapshots
+only with verified billing, timeout, security and recovery semantics.
+
+### CLI cancellation triage
+
+GitHub Actions reports canceled jobs when its `cancel-in-progress`
+concurrency group is superseded by a new commit or PR base update. This is
+not the same as an E2B execution, compiler failure, or failing `npm test`.
+Do not label the message `The operation was canceled` a code defect without
+a job ID or diagnostic log. Re-run the current commit after branch writes
+settle; preserve the exact workflow run link and failed step. The stacked PR
+workflow can run directly against PR #40's branch without temporarily
+retargeting it to main.
