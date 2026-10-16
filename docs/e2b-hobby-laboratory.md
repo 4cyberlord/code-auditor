@@ -191,8 +191,9 @@ code must pass E2B again and its mutation check before publication. A
 sandbox outage, canceled task, missing harness or timeout does not trigger
 an expensive semantic repair request.
 
-`CODE_AUDITOR_E2B_PORT_REPAIR` enables or disables bounded source-agent
-recovery; during rollout, use `0` to return to the original translation path.
+`CODE_AUDITOR_E2B_PORT_REPAIR=1` opt-in enables bounded source-agent
+recovery; by default it is off pending a real E2B integration canary. Set
+`0` to return to the original translation path.
 `report.ports[].repair` records the attempt and success/failure without
 overwriting original evidence.
 
