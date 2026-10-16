@@ -204,6 +204,10 @@ export function isPlaceholder(title: string): boolean {
     // the question is. They are scaffolding, not decisions, and leaving them in
     // place is how a history list fills up with "Batch — lc4".
     /^Batch — /.test(t) ||
+    // Legacy overlay batches used this implementation-detail name. They were
+    // never a person's chosen title, so let the common worker title flow
+    // replace them after it understands the captured problem.
+    /^Background capture batch\b/.test(t) ||
     /^Cloud smoke\b/.test(t) ||
     /^Council batch\b/.test(t)
   );

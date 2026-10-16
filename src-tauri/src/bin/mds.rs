@@ -2018,7 +2018,10 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
         id
     } else {
         let session = api("sessions.create", serde_json::json!({
-            "title": format!("Background capture batch {}", batch.id)
+            // Match the main app's replaceable session placeholder. The cloud
+            // worker will rename it from the readers' problem understanding
+            // once it has something meaningful to call this task.
+            "title": format!("Session — {}", chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"))
         })).await?;
         let id = session["id"].as_str().ok_or("Missing session ID")?.to_string();
         batch.session_id = Some(id.clone());
