@@ -1900,11 +1900,11 @@ function CaptureCard() {
           <span className="spacer" />
           <span className="vendor">{helper?.installed ? "installed" : "not installed"}</span>
         </div>
-        <p className="hint" style={{ marginTop: 0 }}>
-          Keeps the background workflows available from any app. The first digit routes the
-          screenshot, and the second picks its shape. It needs Input Monitoring; the helper needs
-          Screen Recording permission.
-        </p>
+        <p className="settings-form-caption">Manage background captures without opening the main window.</p>
+        <details className="settings-inline-help">
+          <summary>Permissions and capture sequence</summary>
+          <p>The first digit chooses the workflow and the second the screenshot shape. The helper requires macOS Input Monitoring and Screen Recording permissions.</p>
+        </details>
         <div className="row">
           <label>State</label>
           {/* "Installed" used to mean a file existed. It now means launchd has
@@ -1975,10 +1975,10 @@ function CaptureCard() {
             </button>
           ))}
         </div>
-        <p className="hint" style={{ marginTop: 0 }}>
-          Auto lets the background worker switch to MCQ when the captured text has answer choices.
-          Force MCQ when you want the helper to treat the next batch as a multiple-choice question.
-        </p>
+        <details className="settings-inline-help">
+          <summary>How automatic overlay mode works</summary>
+          <p>Auto switches to MCQ when the captured text contains answer choices. Force MCQ to handle the next capture as a multiple-choice question.</p>
+        </details>
         <div className="row">
           <label htmlFor="mcq-model">MCQ Model</label>
           <select
@@ -2018,10 +2018,8 @@ function CaptureCard() {
             onClick={() => patch({ raiseOnCapture: !raise })}
           />
         </div>
-        <p className="hint" style={{ marginTop: 0 }}>
-          {raise
-            ? "The window comes to the front as soon as a capture lands."
-            : "The window stays where it is. The capture is waiting in the app when you next open it \u2014 which is the point of a global shortcut: you do not have to leave what you were looking at."}
+        <p className="settings-form-caption">
+          {raise ? "Bring the application forward after capturing." : "Keep the application in the background after capturing."}
         </p>
       </div>
 
@@ -2042,12 +2040,10 @@ function CaptureCard() {
             onChange={(e) => patch({ maxImages: Number(e.target.value) })}
           />
         </div>
-        <p className="hint">
-          Each image goes to every enabled agent: {maxImages} {maxImages === 1 ? "image" : "images"}{" "}
-          means up to {maxImages * 5} uploads. Captures are also saved to{" "}
-          <span style={{ fontFamily: "var(--font-mono)" }}>~/Library/Application Support/.com.apple.mds/cache/captures</span>{" "}
-          regardless, so lowering this never loses a grab.
-        </p>
+        <details className="settings-inline-help">
+          <summary>Image limits and saved captures</summary>
+          <p>Each image goes to enabled agents: {maxImages} {maxImages === 1 ? "image" : "images"} may mean up to {maxImages * 5} uploads. Captures also remain in <code>~/Library/Application Support/.com.apple.mds/cache/captures</code>; lowering the limit never deletes them.</p>
+        </details>
       </div>
 
       <div className="provider-card">
@@ -2077,16 +2073,10 @@ function CaptureCard() {
             <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{route.route}</span>
           </div>
         ))}
-        <p className="hint">
-          Enter each two-digit code quickly. Capture codes stage an image in that workflow; 13, 25,
-          and 35 send that workflow’s staged images for processing. These work when the window is closed
-          because the Rust helper owns them. To change a regular shortcut,
-          set its environment variable before launch, for example{" "}
-          <span style={{ fontFamily: "var(--font-mono)" }}>
-            CODE_AUDITOR_SOLVE_KEY=&quot;Control+Alt+J&quot;
-          </span>
-          . If one stops working, another app may use the same combination.
-        </p>
+        <details className="settings-inline-help">
+          <summary>Using and customizing shortcuts</summary>
+          <p>Enter two-digit codes quickly. Capture codes stage images; 13, 25 and 35 submit staged images. The Rust helper works with the app closed. Configure regular shortcut environment variables before launch, such as <code>CODE_AUDITOR_SOLVE_KEY="Control+Alt+J"</code>. Conflicts with other apps can prevent a shortcut from working.</p>
+        </details>
       </div>
     </>
   );
