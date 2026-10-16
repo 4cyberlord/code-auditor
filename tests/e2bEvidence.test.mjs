@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {assessHarnessTrust,buildE2BEvidenceSummary,requireTrustedHarness} from "../scripts/lib/e2bEvidence.mjs";
+import {assessHarnessTrust,buildE2BEvidenceSummary,buildAlgorithmEvidence,requireTrustedHarness} from "../scripts/lib/e2bEvidence.mjs";
 const suite=[{language:"python",referenceCode:"def solve(x): return x"}];
 const caught=[{kind:"mutation",letter:"A",ran:true,survived:false}];
 const trust=assessHarnessTrust(suite,caught);
@@ -29,3 +29,15 @@ assert.equal(report.ports[0].status,"failed");
 assert.equal(report.ports[0].execution.status,"untested");
 assert.ok(!JSON.stringify(report).includes("sourceCode"));
 console.log("PASS: independent harness trust, strict canary policy and reproducible structured E2B evidence");
+
+const analysis=buildAlgorithmEvidence({
+ explanation:"Use a hashmap for complement lookup",
+ complexityClaim:"O(n)",
+ structure:{dataStructures:["dictionaries / hash maps"],controlFlow:["for-loops"]},
+},{ran:true,stdout:"PASS empty\nPASS duplicates\nPASS negatives\n",passed:3,failed:0,remoteElapsedMs:12,peakMemoryKb:1440});
+assert.deepEqual(analysis.testedCaseNames,["empty","duplicates","negatives"]);
+assert.equal(analysis.complexityIndependentlyProved,false);
+assert.equal(analysis.dataStructures[0],"dictionaries / hash maps");
+assert.equal(analysis.measuredRuntimeMs,12);
+assert.equal(buildAlgorithmEvidence(null,{ran:true}),null);
+console.log("PASS: algorithm evidence distinguishes source explanation from actual verified test cases");
