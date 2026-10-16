@@ -1337,9 +1337,11 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
         let status=if item.get("finishedAt").and_then(Value::as_str).is_some_and(|s|!s.is_empty())
             {"completed"}else{"running"};
         let session = item.get("sessionId").and_then(Value::as_str).and_then(|id| sessions.get(id));
-        let title=item.get("asked").and_then(Value::as_str)
+        let title=item.get("title").and_then(Value::as_str)
             .filter(|s|!s.trim().is_empty())
-            .or_else(||session.and_then(|value| value.get("title").and_then(Value::as_str)))
+            .or_else(||item.get("asked").and_then(Value::as_str)
+            .filter(|s|!s.trim().is_empty())
+            .or_else(||session.and_then(|value| value.get("title").and_then(Value::as_str))))
             .unwrap_or("Saved main-app run");
         rows.push(history_row(&format!("main:{id}"),"Main app",
             if mode=="mcq"{"MCQ"}else if mode=="coding"||mode=="code"{"Coding"}else{"Run"},

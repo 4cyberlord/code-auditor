@@ -170,6 +170,28 @@ function runSummary(r: any, answered: number) {
   };
 }
 
+// The main desktop History derives a useful title for screenshot-only runs
+// from the saved Council answer.  The shared overlay history must use that
+// same durable source instead of falling back to the temporary batch name.
+// deno-lint-ignore no-explicit-any
+function historyRunTitle(r: any, sessionTitle: string): string {
+  const placeholder = !sessionTitle.trim() || /^(?:Session — |New session$|Untitled session$|Batch — |Background capture batch\b|Cloud smoke\b|Council batch\b)/i.test(sessionTitle.trim());
+  const council = r.report?.council;
+  const candidates = Array.isArray(council?.candidates) ? council.candidates : [];
+  const winner = candidates.find((candidate: any) => candidate?.letter === council?.winner);
+  const answer = winner?.revised?.answer ?? winner?.final?.answer ??
+    r.agent_responses?.find((response: any) => typeof response?.final_answer === "string")?.final_answer ?? "";
+  const first = String(answer).replace(/\s+/g, " ").trim().split(/[.!?](?:\s|$)/)[0]?.trim() ?? "";
+  if (first.length >= 8) {
+    const limit = 52;
+    if (first.length <= limit) return first;
+    const cut = first.slice(0, limit + 1);
+    const space = cut.lastIndexOf(" ");
+    return (space > limit * 0.5 ? cut.slice(0, space) : first.slice(0, limit)).trim();
+  }
+  return placeholder ? "Captured question" : sessionTitle;
+}
+
 // deno-lint-ignore no-explicit-any
 function storedResponse(r: any) {
   return {
@@ -706,8 +728,8 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
         .limit(500),
       admin.from("runs")
         .select(
-          "id, session_id, mode, asked, started_at, finished_at, " +
-            "agent_responses(count), verdicts(verdict, reliability, created_at)"
+          "id, session_id, mode, asked, started_at, finished_at, report, " +
+            "agent_responses(final_answer), verdicts(verdict, reliability, created_at)"
         )
         .eq("owner_id", principal.userId)
         .order("started_at", { ascending: false })
@@ -724,9 +746,13 @@ export const OPS: Record<string, (ctx: Ctx, args: Args) => Promise<unknown>> = {
     const runs = ok(runResult, "read shared history runs") as any[];
     // deno-lint-ignore no-explicit-any
     const jobs = ok(jobResult, "read shared history jobs") as any[];
+    const sessionTitles = new Map(sessions.map((session) => [session.id, String(session.title ?? "")]));
     return {
       sessions: sessions.map(sessionRow),
-      runs: runs.map((row) => runSummary(row, Number(row.agent_responses?.[0]?.count ?? 0))),
+      runs: runs.map((row) => ({
+        ...runSummary(row, Array.isArray(row.agent_responses) ? row.agent_responses.length : 0),
+        title: historyRunTitle(row, sessionTitles.get(row.session_id) ?? ""),
+      })),
       jobs: jobs.map(solveJobRow),
     };
   },
