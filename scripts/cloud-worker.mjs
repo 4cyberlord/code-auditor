@@ -24,6 +24,7 @@ import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
 import {createSandboxCapacity, hobbyWorkerLimit} from "./lib/e2bCapacity.mjs";
 import {createE2BWarmPool} from "./lib/e2bWarmPool.mjs";
+import {assessHarnessTrust, buildE2BEvidenceSummary, requireTrustedHarness} from "./lib/e2bEvidence.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
 import { fetchAuthoritativeLanguageContext, inferDocumentationLanguage } from "./lib/authoritativeLanguageDocs.mjs";
 import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/externalLanguageSources.mjs";
@@ -2940,6 +2941,15 @@ export async function runCouncilJob(job) {
   }
 
   const oracles = benchmark.oracles || [];
+  const harnessTrust = assessHarnessTrust(benchmark.suites, oracles);
+  await addEvent(job.id, harnessTrust.risks.length ? "warn" : "info",
+    "harness_trust_summary", harnessTrust.risks.length
+      ? "Harness risks require independent review." : "No identified independent harness risks.",
+    harnessTrust);
+  // Strict mode is opt-in until representative Hobby E2B integration runs
+  // prove the harness generators meet all independent reference requirements.
+  if (isCoding) requireTrustedHarness(harnessTrust,
+    process.env.CODE_AUDITOR_E2B_STRICT_ORACLE === "1");
   const suspectHarness = [harnessIsSuspect(benchmark.runs), oracleSuspicion(oracles)].filter(Boolean).join("\n\n");
   if (suspectHarness) {
     await addEvent(job.id, "warn", "harness_suspect", suspectHarness, { runs: benchmark.runs });
@@ -3351,6 +3361,9 @@ export async function runCouncilJob(job) {
     gateOverruleReason: ruling.overruledReason,
     harnessSuspect: suspectHarness,
     oracles,
+    e2bEvidence: buildE2BEvidenceSummary({
+      runs:gateRuns, suites:benchmark.suites, oracles, ports:[],
+    }),
     reading: {
       readers: reading.readers,
       agree: reading.agreement?.agree ?? null,
@@ -3439,6 +3452,9 @@ export async function runCouncilJob(job) {
       // overwrite each other's new verified code or failure status.
       reportWrite=reportWrite.catch(()=>{}).then(async()=>{
         report.ports=report.ports.map(item=>item.language===language?port:item);
+        report.e2bEvidence=buildE2BEvidenceSummary({
+          runs:gateRuns, suites:benchmark.suites, oracles, ports:report.ports,
+        });
         try{
           await updateSavedCouncilReport(job,report);
         }catch(error){
