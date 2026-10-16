@@ -876,29 +876,48 @@ fn run() -> Result<(), String> {
                     if capture_task.as_ref().is_none_or(|task| task.is_finished()) =>
                 {
                     if command == 3 {
-                        // Show cached/local rows immediately while the
-                        // authenticated main+overlay history loads off-thread.
-                        history_rows = archived_helper_history().unwrap_or_default();
-                        history_index = 0;
-                        history_open = true;
-                        mac_shortcuts::set_history_visible(true);
-                        let rows = serde_json::to_string(&history_rows).unwrap_or_else(|_| "[]".into());
-                        history_fetch = Some(rt.spawn(fetch_unified_history()));
-                        overlay_visible = true;
-                        event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
-                        let _ = show_overlay(&overlay, true);
-                        let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
-                        let _ = webview.evaluate_script(&format!(
-                            "window.showSharedHistory({rows},0,true,null)"));
+                        // HH is a true toggle. Repeating it closes the whole
+                        // overlay rather than leaving a hidden history sheet
+                        // over the previous task view.
+                        if overlay_visible && history_open {
+                            history_open = false;
+                            mac_shortcuts::set_history_visible(false);
+                            let _ = webview.evaluate_script("window.closeSharedHistory()");
+                            overlay_visible = false;
+                            let _ = show_overlay(&overlay, false);
+                        } else {
+                            // Show cached/local rows immediately while the
+                            // authenticated main+overlay history loads off-thread.
+                            history_rows = archived_helper_history().unwrap_or_default();
+                            history_index = 0;
+                            history_open = true;
+                            mac_shortcuts::set_history_visible(true);
+                            let rows = serde_json::to_string(&history_rows).unwrap_or_else(|_| "[]".into());
+                            history_fetch = Some(rt.spawn(fetch_unified_history()));
+                            overlay_visible = true;
+                            event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                            let _ = show_overlay(&overlay, true);
+                            let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                            let _ = webview.evaluate_script(&format!(
+                                "window.showSharedHistory({rows},0,true,null)"));
+                        }
                     } else {
-                        history_open = false;
-                        mac_shortcuts::set_history_visible(false);
-                        let _ = webview.evaluate_script("window.closeSharedHistory()");
-                        active_view = if command == 1 { "coding" } else { "mcq" }.to_string();
-                        overlay_visible = true;
-                        event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
-                        let _ = show_overlay(&overlay, true);
-                        let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                        let target_view = if command == 1 { "coding" } else { "mcq" };
+                        // CC/MM close their own open surface, while a command
+                        // for the other surface switches without hiding.
+                        if overlay_visible && !history_open && active_view == target_view {
+                            overlay_visible = false;
+                            let _ = show_overlay(&overlay, false);
+                        } else {
+                            history_open = false;
+                            mac_shortcuts::set_history_visible(false);
+                            let _ = webview.evaluate_script("window.closeSharedHistory()");
+                            active_view = target_view.to_string();
+                            overlay_visible = true;
+                            event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                            let _ = show_overlay(&overlay, true);
+                            let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                        }
                     }
                 }
                 _ => {}
