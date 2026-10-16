@@ -1,0 +1,19 @@
+import assert from "node:assert/strict";
+import {canRepairPort,portRepairPrompt,portRepairSystem} from "../scripts/lib/portRecovery.mjs";
+const failure={ran:true,ok:false,failed:2,passed:0,exitCode:1,note:"exit 1"};
+assert.equal(canRepairPort(failure,"rust","solver-a"),true);
+assert.equal(canRepairPort(failure,"cpp","solver-a"),true);
+assert.equal(canRepairPort(failure,"python","solver-a"),false);
+assert.equal(canRepairPort(failure,"rust","",true),false);
+assert.equal(canRepairPort({...failure,timedOut:true},"rust","agent"),false);
+assert.equal(canRepairPort({...failure,ran:false},"rust","agent"),false);
+assert.equal(canRepairPort({...failure,note:"sandbox unavailable"},"cpp","agent"),false);
+assert.equal(canRepairPort({...failure,failed:0,exitCode:0,note:""},"rust","agent"),false);
+assert.equal(canRepairPort({...failure,ok:true},"rust","agent"),false);
+assert.equal(canRepairPort(failure,"rust","solver-a",false),false);
+const prompt=portRepairPrompt({question:"find pair",sourceLanguage:"python",sourceCode:"return 1",
+ targetLanguage:"rust",failedCode:"fn main() {}",stderr:"error[E0308]",note:"exit 1"});
+assert.match(prompt,/error\[E0308\]/);
+assert.match(prompt,/unchanged/);
+assert.match(portRepairSystem("cpp"),/Never modify or redefine tests/);
+console.log("PASS: bounded source-solver Rust/C++ repair eligibility and invariant-preserving prompt");

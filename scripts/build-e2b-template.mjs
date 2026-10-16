@@ -7,6 +7,7 @@ import "./lib/config.mjs";
 import { Template, defaultBuildLogger } from "e2b";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import {extendedValidatorBuildCommands, PINNED_PYTHON_VALIDATORS} from "./lib/e2bRuntimeProfile.mjs";
 
 function loadDotEnv(file) {
   if (!existsSync(file)) return;
@@ -34,10 +35,15 @@ if (!process.env.E2B_API_KEY?.trim()) {
   process.exit(2);
 }
 
-const alias = process.env.CODE_AUDITOR_E2B_TEMPLATE || "code-editor-runners";
+// Build a separate versioned alias; do not accidentally overwrite an existing
+// production template. Point CODE_AUDITOR_E2B_TEMPLATE to this name ONLY after smoke tests.
+const alias = process.env.CODE_AUDITOR_E2B_TEMPLATE || "council-validators-v2";
+const revision = process.env.CODE_AUDITOR_E2B_TEMPLATE_REVISION || "council-lab-v2";
+const shellQuote = (value) => "'" + String(value).replaceAll("'", "'\\\"'\\\"'") + "'";
 
-const template = Template()
+let template = Template()
   .fromTemplate("code-interpreter-v1")
+  .setEnvs({ COUNCIL_LAB_TEMPLATE_REVISION: revision })
   .aptInstall(["time", "curl", "ca-certificates", "build-essential", "pkg-config", "golang-go"], {
     noInstallRecommends: true,
   })
@@ -51,6 +57,8 @@ const template = Template()
       "CARGO_HOME=/opt/rust/cargo RUSTUP_HOME=/opt/rust/rustup /opt/rust/cargo/bin/cargo --version",
       "go version",
       "/usr/bin/time --version | head -1",
+      `printf '%s\\n' ${shellQuote(revision)} > /etc/council-template-revision`,
+      "chmod 0644 /etc/council-template-revision",
     ],
     { user: "root" }
   )
@@ -64,8 +72,18 @@ const template = Template()
     { user: "root" }
   );
 
-console.log(`Building E2B template "${alias}"...`);
-const info = await Template.build(template, alias, {
+// Build System 2.0: install tools into the IMAGE (not per agent execution).
+// This enhanced template is opt-out, but the build itself is explicit and will
+// not change production jobs unless an operator configures its alias.
+if (process.env.CODE_AUDITOR_E2B_EXTENDED_VALIDATORS !== "0") {
+  template = template.aptInstall(["clang-tidy", "clang-format"], {
+    noInstallRecommends: true,
+  }).pipInstall([...PINNED_PYTHON_VALIDATORS])
+    .runCmd(extendedValidatorBuildCommands(), {user:"root"});
+}
+console.log(`Building E2B Build System 2.0 template "${alias}" revision "${revision}"...`);
+const info = await Template.build(template, {
+  alias,
   onBuildLogs: defaultBuildLogger(),
 });
 console.log(JSON.stringify(info, null, 2));

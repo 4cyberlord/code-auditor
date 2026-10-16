@@ -22,6 +22,13 @@ import { createHmac, createSign } from "node:crypto";
 import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
+import {createSandboxCapacity, hobbyWorkerLimit, standbyBudget} from "./lib/e2bCapacity.mjs";
+import {createE2BWarmPool} from "./lib/e2bWarmPool.mjs";
+import {selectedCppStandard} from "./lib/e2bRuntimeProfile.mjs";
+import {compareDifferentialTraces,sharedDifferentialFixtures} from "./lib/e2bDifferential.mjs";
+import {canRepairPort,portRepairPrompt,portRepairSystem} from "./lib/portRecovery.mjs";
+import {analyzePortSource} from "./lib/e2bPortAnalysis.mjs";
+import {assessHarnessTrust, buildE2BEvidenceSummary, buildAlgorithmEvidence, requireTrustedHarness} from "./lib/e2bEvidence.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
 import { fetchAuthoritativeLanguageContext, inferDocumentationLanguage } from "./lib/authoritativeLanguageDocs.mjs";
 import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/externalLanguageSources.mjs";
@@ -230,6 +237,14 @@ const {
 
 const MAX_OUTPUT = 64 * 1024;
 const REMOTE_RUN_TIMEOUT_MS = 120_000;
+// Process-local guard includes idle prewarmed microVMs and active execution.
+// A distributed quota gate is still required before multi-replica rollouts.
+const E2B_CAPACITY = createSandboxCapacity(
+  hobbyWorkerLimit(process.env.CODE_AUDITOR_E2B_WORKER_CAP, 8)
+);
+const E2B_WARM_IDLE_MS = Math.trunc(Math.max(1_000, Math.min(180_000,
+  Number(process.env.CODE_AUDITOR_E2B_WARM_IDLE_MS) || 75_000
+)));
 const E2B_TIMEOUT_ATTEMPTS = Math.max(1, Number(process.env.CODE_AUDITOR_E2B_TIMEOUT_ATTEMPTS || 2));
 const TOKENROUTER_MIN_DELAY_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_MIN_DELAY_MS || 13_000);
 const TOKENROUTER_JITTER_MS = Number(process.env.CODE_AUDITOR_TOKENROUTER_JITTER_MS || 1_500);
@@ -981,10 +996,10 @@ case "$lang" in
   bash|sh|shell) file=main.sh; cp code.txt "$file"; command='bash main.sh'; runtime='${providerLabel} bash' ;;
   ruby|rb) file=main.rb; cp code.txt "$file"; command='ruby main.rb'; runtime='${providerLabel} ruby' ;;
   php) file=main.php; cp code.txt "$file"; command='php main.php'; runtime='${providerLabel} php' ;;
-  cpp|c++|cc|cxx) file=main.cpp; cp code.txt "$file"; command='c++ -std=c++20 -O2 main.cpp -o prog && ./prog'; runtime='${providerLabel} c++ -O2' ;;
+  cpp|c++|cc|cxx) file=main.cpp; cp code.txt "$file"; command='c++ -std=${selectedCppStandard(process.env.CODE_AUDITOR_CPP_STANDARD)} -O2 main.cpp -o prog && if [ -x /usr/bin/time ]; then /usr/bin/time -f "CA_PROGRAM_METRICS elapsed_s=%e maxrss_kb=%M" ./prog; else ./prog; fi'; runtime='${providerLabel} c++ -O2' ;;
   java) file=Main.java; cp code.txt "$file"; command='javac Main.java && java Main'; runtime='${providerLabel} javac + java' ;;
   go|golang) file=main.go; cp code.txt "$file"; command='go run main.go'; runtime='${providerLabel} go' ;;
-  rust|rs) file=main.rs; cp code.txt "$file"; command='rustc -O main.rs -o prog 2>&1 && ./prog'; runtime='${providerLabel} rustc -O' ;;
+  rust|rs) file=main.rs; cp code.txt "$file"; command='rustc -O main.rs -o prog 2>&1 && if [ -x /usr/bin/time ]; then /usr/bin/time -f "CA_PROGRAM_METRICS elapsed_s=%e maxrss_kb=%M" ./prog; else ./prog; fi'; runtime='${providerLabel} rustc -O' ;;
   *) echo "Unsupported remote benchmark language: $lang" >&2; exit 97 ;;
 esac
 status=0
@@ -1023,30 +1038,48 @@ export function repoFor(env = process.env) {
   return String(env.GITHUB_REPOSITORY || env.CODE_AUDITOR_GITHUB_REPOSITORY || "").trim();
 }
 
+/** E2B microVMs share the same isolated template, not filesystem state.
+ * Capacity permits are held for the FULL lifetime (including standby).
+ */
+async function createE2BLease({executionId, timeoutMs, purpose="benchmark", slot="", jobId=""}) {
+  const release = await E2B_CAPACITY.acquire();
+  try {
+    const { Sandbox } = await import("@e2b/code-interpreter");
+    const bootStarted = Date.now();
+    const template = String(process.env.CODE_AUDITOR_E2B_TEMPLATE || "").trim();
+    const opts = {
+      apiKey: secret("E2B_API_KEY"),
+      timeoutMs,
+      allowInternetAccess: false,
+      metadata: {
+        executionId, app: "code-editor", workerId: WORKER_ID, purpose,
+        ...(slot ? {solverSeat:slot} : {}),
+        ...(jobId ? {jobId} : {}),
+        template: template || "code-interpreter-v1",
+      },
+    };
+    const sandbox = template ? await Sandbox.create(template, opts) : await Sandbox.create(opts);
+    return {sandbox, release, bootMs: Date.now() - bootStarted};
+  } catch (error) {
+    release();
+    throw error;
+  }
+}
+
 async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, options = {}) {
   const policy = validateExecution(language, code, timeoutMs);
   const id = options.executionId || executionId();
   const started = Date.now();
-  const { Sandbox } = await import("@e2b/code-interpreter");
-  const bootStarted = Date.now();
-  const template = String(process.env.CODE_AUDITOR_E2B_TEMPLATE || "").trim();
-  const opts = {
-    apiKey: secret("E2B_API_KEY"),
-    timeoutMs: Math.max(policy.timeoutMs + 30_000, 90_000),
-    // E2B microVM egress is denied unless a future explicitly approved
-    // network policy is implemented and tested.
-    allowInternetAccess: false,
-    metadata: {
-      executionId: id,
-      app: "code-editor",
-      workerId: WORKER_ID,
-      purpose: "benchmark",
-      template: template || "code-interpreter-v1",
-    },
-  };
-  const sandbox = template ? await Sandbox.create(template, opts) : await Sandbox.create(opts);
-  const bootMs = Date.now() - bootStarted;
-  return withSandboxLifecycle(sandbox,
+  // Solver A/B/C/D may already own a separate E2B microVM from the
+  // same immutable template. Consume it only once; other passes are cold.
+  const standby = options.warmPool && options.candidateLetter
+    ? await options.warmPool.take(options.candidateLetter) : null;
+  const lease = standby || await createE2BLease({
+    executionId: id, timeoutMs: Math.max(policy.timeoutMs + 30_000, 90_000)
+  });
+  const {sandbox, bootMs} = lease;
+  try {
+  return await withSandboxLifecycle(sandbox,
     () => options.onState?.("running", { executionId: id, sandboxId: sandbox.sandboxId, bootMs }),
     async () => {
     let result;
@@ -1076,6 +1109,8 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
       durationMs: Date.now() - started,
       remoteElapsedMs: parsed.remoteElapsedMs,
       peakMemoryKb: parsed.peakMemoryKb,
+      totalElapsedMs: parsed.totalElapsedMs,
+      totalPeakMemoryKb: parsed.totalPeakMemoryKb,
       timedOut: false,
       truncated: out.truncated || err.truncated,
       executionId: id,
@@ -1085,6 +1120,8 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
       provider: "e2b",
       sandboxId: sandbox.sandboxId,
       bootMs,
+      prewarmed: Boolean(standby),
+      warmIdleMs: standby?.warmIdleMs ?? null,
     };
     },
     async (error) => {
@@ -1092,6 +1129,10 @@ async function runE2BCode(language, code, timeoutMs = REMOTE_RUN_TIMEOUT_MS, opt
       await options.onState?.(state, { executionId: id, sandboxId: sandbox.sandboxId, reason: String(error).slice(0, 200) });
     }
   );
+  } finally {
+    // The sandbox lifecycle has already called kill(), including on failure.
+    lease.release();
+  }
 }
 
 function executionProvider(settings) {
@@ -1119,7 +1160,8 @@ async function runVerification(settings, suite, program, options = {}) {
   let last;
   for (let attempt = 1; attempt <= E2B_TIMEOUT_ATTEMPTS; attempt += 1) {
     try {
-      const result = await runE2BCode(suite.language, program, timeoutMs, options);
+      const result = await runE2BCode(suite.language, program, timeoutMs,
+        attempt === 1 ? options : {...options, warmPool: null});
       if (!result.timedOut || attempt === E2B_TIMEOUT_ATTEMPTS) return result;
       last = new Error(`E2B execution timed out (attempt ${attempt})`);
     } catch (error) {
@@ -1174,6 +1216,8 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
     try {
       const local = await runVerification(settings, suite, program, {
         executionId: id,
+        warmPool: !revised && (opts.warmSeat || lang === "python") ? opts.warmPool : null,
+        candidateLetter: opts.warmSeat || candidate.letter,
         onState: (state, meta) => addEvent(job.id, "info", "execution_state",
           `Candidate ${candidate.letter}${tag}: ${state}.`,
           { ...meta, letter: candidate.letter, state }).catch(() => {}),
@@ -1257,6 +1301,8 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
         // second run on Actions looked necessary at all.
         remoteElapsedMs: local.remoteElapsedMs ?? null,
         peakMemoryKb: local.peakMemoryKb ?? null,
+        totalElapsedMs: local.totalElapsedMs ?? null,
+        totalPeakMemoryKb: local.totalPeakMemoryKb ?? null,
         provider: local.provider || executionProvider(settings),
         executionId: local.executionId || id,
         sandboxId: local.sandboxId || null,
@@ -1265,6 +1311,8 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
         timedOut: Boolean(local.timedOut),
         truncated: Boolean(local.truncated),
         bootMs: local.bootMs ?? null,
+        prewarmed: Boolean(local.prewarmed),
+        warmIdleMs: local.warmIdleMs ?? null,
         network: local.network || "unknown",
         stderr: diagnostic,
         stdout: String(local.stdout || "").slice(0, 4096),
@@ -1405,7 +1453,12 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
     for (const model of specModels.filter(candidate => !bench.has(candidate)).slice(0, 3)) {
       try {
         const specText = await tokenRouterGenerate({
-          settings, baseUrl, model, system: testSpecSystemPrompt(),
+          settings, baseUrl, model, system: testSpecSystemPrompt() +
+             (process.env.CODE_AUDITOR_E2B_DIFFERENTIAL === "1"
+               ? "\\nOPTIONAL TRACE: For up to eight deterministic, JSON-compatible test inputs," +
+                 " print CA_DIFF_CASE followed by a space and a JSON object with fields id, input, actual." +
+                 " These must be the actual candidate outputs; retain all required PASS/FAIL assertions." +
+                 " Use stable case IDs and fixtures from the problem; omit non-JSON or multi-answer cases." : ""),
           user: testSpecUserPrompt({
             question: String(question || "").slice(0, 8_000),
             docket: (candidateDocket(candidates) || "No candidate code exists yet. Derive the test cases, outputs and API signature only from the problem specification.").slice(0, 7_000),
@@ -1428,7 +1481,13 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
         if (suite.referenceCode) {
           const referenceProgram=spliceSuite(suite,suite.referenceCode);
           if (!referenceProgram) throw new Error("Reference could not be inserted.");
-          const version = pack.version + ":" + (process.env.CODE_AUDITOR_E2B_TEMPLATE || "default");
+          const version = [
+             pack.version,
+             process.env.CODE_AUDITOR_E2B_TEMPLATE || "default",
+             process.env.CODE_AUDITOR_E2B_TEMPLATE_REVISION || "unspecified",
+             selectedCppStandard(process.env.CODE_AUDITOR_CPP_STANDARD),
+             job.owner_id || "legacy",
+           ].join(":");
           const key=referenceKey(language,suite.harness,suite.referenceCode,version);
           if (!isReferenceValidated(key)) {
             const outcome=await runVerification(settings,suite,referenceProgram);
@@ -1493,7 +1552,7 @@ async function benchmarkCandidates(job, settings, baseUrl, models, judges, quest
   }));
   const completed=Object.fromEntries(eagerEntries.filter(([,run])=>run));
   const stillPending=candidates.filter(candidate=>!completed[candidate.letter]);
-  const remaining=stillPending.length?await executeField(job,settings,suites,stillPending):{};
+  const remaining=stillPending.length?await executeField(job,settings,suites,stillPending,{warmPool:options.warmPool}):{};
   const runs={...completed,...remaining};
   const oracles=await runMutationOracle(job, settings, suites, candidates, runs);
   return { suites, runs, oracles };
@@ -1940,12 +1999,14 @@ async function updateSavedCouncilReport(job,report){
  * prepared, preflight-checked language-native E2B harness.
  */
 async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
-  source,sourceLetter,target,knowledge,bench,semanticBlueprint){
+  source,sourceLetter,target,knowledge,bench,semanticBlueprint,portWarmPool=null,sourceSolverModel=""){
   let translated="";
   let translator="";
   const portStartedAt = Date.now();
   let translationMs = null;
   let earlyHarnessMs = null;
+  let lastRun = null;
+  let repair = null;
   try{
     // Resolve the translator before speculative harness retries can affect the
     // job-local model bench. The same configured provider is used throughout.
@@ -2035,8 +2096,9 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
         translationMs,earlyHarnessMs,preparedEarly:preparation.preparedEarly});
     let suite=suites.find(item=>item.language===target);
     if(!suite)throw new Error("No validated E2B harness for "+target);
-    let runs=await executeField(job,settings,[suite],candidates);
+    let runs=await executeField(job,settings,[suite],candidates,{warmPool:portWarmPool,warmSeat:target});
     let run=runs.P;
+    lastRun = run;
     // Spec-only generation can infer a different callable interface for the
     // target language. On a compile/integration error (never a failed test
     // assertion), regenerate once with the actual port's signature and rerun.
@@ -2051,18 +2113,62 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
       if(!suite)throw new Error("No candidate-aware E2B harness for "+target);
       runs=await executeField(job,settings,[suite],candidates);
       run=runs.P;
+      lastRun = run;
+    }
+    let acceptedFinal=final;
+    let acceptedCandidates=candidates;
+    // A failed port may be repaired once by the SAME model that authored the
+    // verified source. The accepted reference harness remains unchanged.
+    if (!isVerified(run) && canRepairPort(run,target,sourceSolverModel,
+          process.env.CODE_AUDITOR_E2B_PORT_REPAIR === "1")) {
+      repair={attempted:true,model:sourceSolverModel,status:"failed"};
+      await addEvent(job.id,"info","port_source_solver_repair",
+        "Asking original verified source solver to repair the "+target+" translation.",
+        {target,sourceLetter,model:sourceSolverModel});
+      try {
+        const response=await tokenRouterGenerate({
+          settings,baseUrl,model:sourceSolverModel,
+          system:portRepairSystem(target),
+          user:portRepairPrompt({question,sourceLanguage:candidateLanguage(source),
+            sourceCode:source.code,targetLanguage:target,failedCode:final.code,
+            stderr:run?.stderr,note:run?.note,blueprint:semanticBlueprint?.brief}),
+          maxTokens:Math.max(Number(settings.maxTokens||4096),8192),
+        });
+        const proposed=parseFinal(response);
+        if(!proposed || proposed.kind!=="code" ||
+            candidateLanguage(proposed)!==target || !proposed.code?.trim())
+          throw new Error("Original solver returned no valid "+target+" repair");
+        const candidate=[{letter:"P",model:sourceSolverModel,final:proposed,text:response,error:null}];
+        const verified=await executeField(job,settings,[suite],candidate);
+        lastRun=verified.P;
+        if(isVerified(lastRun)){
+          run=lastRun;
+          acceptedFinal=proposed;
+          acceptedCandidates=candidate;
+          repair.status="verified";
+        } else {
+          repair.error=String(lastRun?.note || lastRun?.stderr || "failed after one retest").slice(0,250);
+        }
+      } catch (error) {
+        repair.error=String(error instanceof Error?error.message:error).slice(0,250);
+      }
+      await addEvent(job.id,repair.status==="verified"?"info":"warn",
+        "port_source_solver_repair_result",
+        target+" original-solver repair "+repair.status,
+        {target,sourceLetter,...repair});
     }
     if(!isVerified(run))
       throw new Error("E2B rejected "+target+" port: "+
         (run?.note||String(run?.stderr||"tests failed")).slice(0,250));
-    const oracle=await runMutationOracle(job,settings,[suite],candidates,runs);
+    const oracle=await runMutationOracle(job,settings,[suite],acceptedCandidates,{P:run});
     if(oracle.some(item=>item.survived))
       throw new Error("Generated "+target+" harness missed a deliberate mutation");
-    return {language:target,sourceLetter,model:translator,code:final.code,
-      status:"verified",run};
+    return {language:target,sourceLetter,model:repair?.status==="verified"?sourceSolverModel:translator,
+      code:acceptedFinal.code,status:"verified",run,repair,
+      analysis:analyzePortSource(acceptedFinal,run,semanticBlueprint)};
   }catch(err){
     return {language:target,sourceLetter,model:translator,code:"",
-      status:"failed",error:String(err instanceof Error?err.message:err).slice(0,380)};
+      status:"failed",run:lastRun,repair,error:String(err instanceof Error?err.message:err).slice(0,380)};
   }
 }
 
@@ -2358,6 +2464,8 @@ async function claim(job) {
 }
 
 export async function runCouncilJob(job) {
+  let warmPool = null;
+  try {
   if (job.mode === "mcq") {
     await runMcqJob(job);
     return;
@@ -2826,6 +2934,34 @@ export async function runCouncilJob(job) {
     await provisionalState.writing;
   };
 
+  // Opt-in canary: four independent E2B copies are created while the solver
+  // models reason, ready for their first Python E2B candidate runs. Never warm
+  // MCQ jobs, absent E2B credentials, or an unsupported primary language.
+  const pythonStandbyCount=standbyBudget(E2B_CAPACITY.snapshot(),Math.min(4,solving.length));
+  if (process.env.CODE_AUDITOR_E2B_PREWARM === "1" &&
+      inferredKind === "code" && primaryLanguage === "python" &&
+      pythonStandbyCount > 0 && secret("E2B_API_KEY")) {
+    warmPool = createE2BWarmPool({
+      idleMs: E2B_WARM_IDLE_MS,
+      create: letter => createE2BLease({
+        executionId: executionId(), purpose: "standby-python",
+        slot: letter, jobId: job.id,
+        timeoutMs: Math.max(REMOTE_RUN_TIMEOUT_MS + E2B_WARM_IDLE_MS + 60_000, 180_000),
+      }),
+      destroy: async lease => {
+        try { await lease.sandbox.kill(); }
+        finally { lease.release(); }
+      },
+      onEvent: (name, meta) => addEvent(job.id, name === "failed" ? "warn" : "info",
+        "e2b_prewarm_" + name, "Standby Python sandbox " + name + " for " + meta.letter,
+        meta).catch(() => {}),
+    });
+    warmPool.prewarm(solving.slice(0,pythonStandbyCount).map((_, index) => letterFor(index)));
+    await addEvent(job.id,"info","e2b_prewarm_requested",
+      "Requested up to four isolated standby Python sandboxes; idle sandboxes expire automatically.",
+      {seats:pythonStandbyCount,idleMs:E2B_WARM_IDLE_MS,
+       capacity:E2B_CAPACITY.snapshot()});
+  }
   timer.enter("solving");
   await bench.announce("solving", models.filter((m) => bench.has(m.id)).map((m) => m.id));
   await addEvent(
@@ -2857,7 +2993,7 @@ export async function runCouncilJob(job) {
             const ready=await preparedSuites;
             const suite=ready.find(item=>item.language===candidateLanguage(final));
             if(!suite)return null;
-            const output=await executeField(job,settings,[suite],[candidates[index]]);
+            const output=await executeField(job,settings,[suite],[candidates[index]],{warmPool});
             const run=output[letter]||null;
             if(run) await publishProvisional(candidates[index],run);
             return run;
@@ -2952,7 +3088,11 @@ export async function runCouncilJob(job) {
   const councilKnowledge = [initialReference.prompt,knowledge].filter(Boolean).join("\n\n");
 
   timer.enter("benchmark");
-  const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field, knowledge, bench, {preparedSuites,eagerRuns});
+  const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field, knowledge, bench, {preparedSuites,eagerRuns,warmPool});
+  // All original candidates have finished. Do not pay for standby capacity
+  // throughout later reviews, judges or language porting.
+  await warmPool?.close();
+  warmPool = null;
   // When the contract lacked an explicit interface, testing followed the
   // candidate-aware path; still publish a provisional verified result before
   // starting the separate Council review/judging stages.
@@ -2987,6 +3127,15 @@ export async function runCouncilJob(job) {
   }
 
   const oracles = benchmark.oracles || [];
+  const harnessTrust = assessHarnessTrust(benchmark.suites, oracles);
+  await addEvent(job.id, harnessTrust.risks.length ? "warn" : "info",
+    "harness_trust_summary", harnessTrust.risks.length
+      ? "Harness risks require independent review." : "No identified independent harness risks.",
+    harnessTrust);
+  // Strict mode is opt-in until representative Hobby E2B integration runs
+  // prove the harness generators meet all independent reference requirements.
+  if (isCoding) requireTrustedHarness(harnessTrust,
+    process.env.CODE_AUDITOR_E2B_STRICT_ORACLE === "1");
   const suspectHarness = [harnessIsSuspect(benchmark.runs), oracleSuspicion(oracles)].filter(Boolean).join("\n\n");
   if (suspectHarness) {
     await addEvent(job.id, "warn", "harness_suspect", suspectHarness, { runs: benchmark.runs });
@@ -3398,6 +3547,9 @@ export async function runCouncilJob(job) {
     gateOverruleReason: ruling.overruledReason,
     harnessSuspect: suspectHarness,
     oracles,
+    e2bEvidence: buildE2BEvidenceSummary({
+      runs:gateRuns, suites:benchmark.suites, oracles, ports:[],
+    }),
     reading: {
       readers: reading.readers,
       agree: reading.agreement?.agree ?? null,
@@ -3428,7 +3580,7 @@ export async function runCouncilJob(job) {
   // One reusable, readable translation brief for ALL target languages.
   // This uses the winning agent's existing explanation and extracts source
   // structure without a second model call or executing untrusted code.
-  const semanticBlueprint=targets.length
+  const semanticBlueprint=isCoding && verifiedSource?.code && isVerified(gateRuns[decision.winner])
     ? buildVerifiedSemanticBlueprint({
         source:verifiedSource,
         sourceLanguage:candidateLanguage(verifiedSource),
@@ -3437,7 +3589,11 @@ export async function runCouncilJob(job) {
         passedTests:gateRuns[decision.winner]?.passed||0,
       })
     : null;
-  if(semanticBlueprint)report.semanticBlueprint=semanticBlueprint;
+  if(semanticBlueprint){
+    report.semanticBlueprint=semanticBlueprint;
+    report.algorithmEvidence=buildAlgorithmEvidence(
+      semanticBlueprint,gateRuns[decision.winner]);
+  }
   report.ports=targets.map(language=>({
     language,sourceLetter:decision.winner,model:"",code:"",status:"preparing"
   }));
@@ -3478,14 +3634,61 @@ export async function runCouncilJob(job) {
   }
   if(targets.length){
     await patchJob(job.id,{progress_phase:"porting"});
+    // Only after the verified primary winner is available: reserve one
+    // isolated Rust and one isolated C++ slot during port translation/harness
+    // generation. Never allocate these before the primary result is saved.
+    const caseFixtures = process.env.CODE_AUDITOR_E2B_DIFFERENTIAL === "1"
+      ? sharedDifferentialFixtures(gateRuns[decision.winner]?.stdout) : [];
+    const portProblem = caseFixtures.length
+      ? question + "\\n\\nAdditional tested Python input fixtures for target-language cross-checking (not an authority for expected outputs): " +
+        JSON.stringify(caseFixtures).slice(0,1800) : question;
+    let portWarmPool = null;
+    const portStandbyCount=standbyBudget(E2B_CAPACITY.snapshot(),targets.length);
+    if (process.env.CODE_AUDITOR_E2B_PREWARM_PORTS === "1" &&
+        portStandbyCount > 0 && secret("E2B_API_KEY")) {
+      portWarmPool = createE2BWarmPool({
+        idleMs:E2B_WARM_IDLE_MS,
+        create: language => createE2BLease({
+          executionId:executionId(), purpose:"standby-port-"+language,
+          slot:language,jobId:job.id,
+          timeoutMs:Math.max(REMOTE_RUN_TIMEOUT_MS + E2B_WARM_IDLE_MS + 60_000,180_000),
+        }),
+        destroy:async lease => {
+          try { await lease.sandbox.kill(); }
+          finally { lease.release(); }
+        },
+        onEvent:(name,meta) => addEvent(job.id,name==="failed"?"warn":"info",
+          "e2b_port_prewarm_"+name,"Port sandbox "+name+" for "+meta.letter,meta).catch(()=>{}),
+      });
+      portWarmPool.prewarm(targets.slice(0,portStandbyCount));
+    }
+    try {
     let reportWrite=Promise.resolve();
     await parallelMap(targets,2,async language=>{
       const port=await verifiedLanguagePort(job,settings,baseUrl,models,judges,
-        question,verifiedSource,decision.winner,language,knowledge,bench,semanticBlueprint);
+        portProblem,verifiedSource,decision.winner,language,knowledge,bench,semanticBlueprint,portWarmPool,
+        field3.find(candidate=>candidate.letter===decision.winner)?.model||"");
+      if (process.env.CODE_AUDITOR_E2B_DIFFERENTIAL === "1" && port.status === "verified") {
+        port.differential=compareDifferentialTraces(
+          gateRuns[decision.winner]?.stdout, port.run?.stdout);
+        if (port.differential.status === "disagreement") {
+          await addEvent(job.id,"warn","port_differential_disagreement",
+            "Matching fixture inputs produced different outputs in "+language+".",
+            {language,caseIds:port.differential.mismatches}).catch(()=>{});
+          if (process.env.CODE_AUDITOR_E2B_DIFFERENTIAL_STRICT === "1") {
+            port.status="failed";
+            port.error="Cross-language differential disagreement on common fixtures";
+            port.code="";
+          }
+        }
+      }
       // Serialize JSONB report writes: concurrent port workers must not
       // overwrite each other's new verified code or failure status.
       reportWrite=reportWrite.catch(()=>{}).then(async()=>{
         report.ports=report.ports.map(item=>item.language===language?port:item);
+        report.e2bEvidence=buildE2BEvidenceSummary({
+          runs:gateRuns, suites:benchmark.suites, oracles, ports:report.ports,
+        });
         try{
           await updateSavedCouncilReport(job,report);
         }catch(error){
@@ -3503,6 +3706,9 @@ export async function runCouncilJob(job) {
       });
       await reportWrite;
     });
+    } finally {
+      await portWarmPool?.close();
+    }
   }
   await sessionNaming;
 
@@ -3524,6 +3730,10 @@ export async function runCouncilJob(job) {
       jobId: job.id,
       phase: "completed",
     }).catch(() => {});
+  }
+  } finally {
+    // Also disposes late-arriving E2B creates after a failed/cancelled job.
+    await warmPool?.close();
   }
 }
 
