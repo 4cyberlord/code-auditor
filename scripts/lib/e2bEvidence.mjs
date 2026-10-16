@@ -42,6 +42,7 @@ export function buildE2BEvidenceSummary({runs={},suites=[],oracles=[],ports=[]}=
       language:port.language, status:port.status,
       sourceLetter:port.sourceLetter || null, execution:compactRun(port.run),
       differential:port.differential || {status:"unavailable",sharedCases:0,mismatches:[]},
+      analysis:port.analysis || null,
     })),
   };
 }
