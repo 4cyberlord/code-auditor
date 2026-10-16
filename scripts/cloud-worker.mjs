@@ -26,7 +26,7 @@ import {createSandboxCapacity, hobbyWorkerLimit} from "./lib/e2bCapacity.mjs";
 import {createE2BWarmPool} from "./lib/e2bWarmPool.mjs";
 import {selectedCppStandard} from "./lib/e2bRuntimeProfile.mjs";
 import {compareDifferentialTraces,sharedDifferentialFixtures} from "./lib/e2bDifferential.mjs";
-import {assessHarnessTrust, buildE2BEvidenceSummary, requireTrustedHarness} from "./lib/e2bEvidence.mjs";
+import {assessHarnessTrust, buildE2BEvidenceSummary, buildAlgorithmEvidence, requireTrustedHarness} from "./lib/e2bEvidence.mjs";
 import { loadLanguagePack, languagePrompt } from "./lib/languageRegistry.mjs";
 import { fetchAuthoritativeLanguageContext, inferDocumentationLanguage } from "./lib/authoritativeLanguageDocs.mjs";
 import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/externalLanguageSources.mjs";
@@ -3409,7 +3409,7 @@ export async function runCouncilJob(job) {
   // One reusable, readable translation brief for ALL target languages.
   // This uses the winning agent's existing explanation and extracts source
   // structure without a second model call or executing untrusted code.
-  const semanticBlueprint=targets.length
+  const semanticBlueprint=isCoding && verifiedSource?.code && isVerified(gateRuns[decision.winner])
     ? buildVerifiedSemanticBlueprint({
         source:verifiedSource,
         sourceLanguage:candidateLanguage(verifiedSource),
@@ -3418,7 +3418,11 @@ export async function runCouncilJob(job) {
         passedTests:gateRuns[decision.winner]?.passed||0,
       })
     : null;
-  if(semanticBlueprint)report.semanticBlueprint=semanticBlueprint;
+  if(semanticBlueprint){
+    report.semanticBlueprint=semanticBlueprint;
+    report.algorithmEvidence=buildAlgorithmEvidence(
+      semanticBlueprint,gateRuns[decision.winner]);
+  }
   report.ports=targets.map(language=>({
     language,sourceLetter:decision.winner,model:"",code:"",status:"preparing"
   }));
