@@ -1,8 +1,12 @@
 /** Auditable labels are model claims and static clues, not E2B proofs. */
 function claimFor(label,text) {
   const pattern=new RegExp("\\b"+label+"(?:\\s+complexity)?\\s*[:=]\\s*(O\\s*\\([^\\n;]+?\\))","i");
-  const match=pattern.exec(String(text||""));
-  return match ? match[1].replace(/\s+/g," ").slice(0,90) : null;
+  const description=String(text||"");
+  const match=pattern.exec(description);
+  // The Council also emits "O(n) time, O(1) space"; parse that style without
+  // guessing missing claims from timing or memory measurements.
+  const alternate=new RegExp("(O\\\\s*\\\\([^)]{1,90}\\\\))\\\\s*"+label+"(?:\\\\s+complexity)?\\\\b","i").exec(description);
+  return (match?.[1] || alternate?.[1] || "").replace(/\\s+/g," ").slice(0,90) || null;
 }
 export function analyzePortSource(final,run,sourceBlueprint) {
   const code=String(final?.code||"").slice(0,30000);
