@@ -22,6 +22,7 @@ import {
   contractQuery,
   reviseUserPrompt,
   buildPresentation,
+  splitComplexityClaim,
   modelPerformance,
   mutateCode,
   oracleSuspicion,
@@ -332,6 +333,12 @@ console.log("\n12. a harness that passes a broken program is suspect");
 }
 
 console.log("\n13. the presentation explains the answer without another model call");
+{
+  const parsed = splitComplexityClaim("Time O(n + output) = O(n * maxWidth) worst-case; Auxiliary space O(maxWidth) besides output O(L * maxWidth).");
+  check("complexity claims are split into compact time and auxiliary-space fields", parsed.time === "O(n + output)" && parsed.space === "O(maxWidth)", JSON.stringify(parsed));
+  const postfix = splitComplexityClaim("O(n log n) time, O(n) space");
+  check("postfix complexity claims are split too", postfix.time === "O(n log n)" && postfix.space === "O(n)", JSON.stringify(postfix));
+}
 {
   const field: Candidate[] = [
     { ...cand("A", FINAL("count them", "def solve(xs): return len(xs)")), revised: FINAL("count them, fixed", "def solve(xs): return len(xs)") },

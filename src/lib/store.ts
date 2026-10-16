@@ -5514,6 +5514,11 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     // language ports are deliberately downstream work and must never keep the
     // user waiting for code that already passed the shared E2B suite.
     set(st => ({ council: { ...st.council, phase: "porting", synthesis, winner, dossier, ports: [] } }));
+    // The technical report is also downstream work. Start it alongside the
+    // optional language ports so time/space, suggested bounds, functions, and
+    // style are ready with the primary verified answer instead of remaining
+    // "Pending review" until every translation has finished.
+    void get().runReview();
     ports = await generateVerifiedPorts(get, set, runId, winnerCandidate, problem, knowledge, settings, suites);
   }
 

@@ -6,7 +6,7 @@ import { describeCodeLanguage } from "@/lib/solutionLanguage";
 import { agentSpec, gatewayPreset } from "@/lib/models";
 import { primaryModelLabel } from "@/lib/primaryModels";
 import { useStore } from "@/lib/store";
-import { agreedComplexityAudits, COUNCIL_SIZE, gateFor } from "@/lib/council";
+import { agreedComplexityAudits, COUNCIL_SIZE, gateFor, splitComplexityClaim } from "@/lib/council";
 import { PORT_LABELS, PORT_LANGUAGES } from "@/lib/review";
 import { councilStageText, modelLamp } from "@/lib/storyProgress";
 import { extractFunctionSignatures, selectVerifiedStorySolution } from "@/lib/storySolution";
@@ -60,6 +60,16 @@ export default function StoryResultWorkspace() {
   const complexityAudit = (councilPhase === "done" || councilPhase === "porting") && council.winner
     ? agreedComplexityAudits(council.dossier?.judges ?? [])[council.winner]
     : undefined;
+  const reportedComplexity = splitComplexityClaim(report?.complexity || "");
+  const displayedTime = complexityAudit?.time || reviewData?.efficiency.currentTime || reportedComplexity.time || "—";
+  const displayedSpace = complexityAudit?.space || reviewData?.efficiency.currentSpace || reportedComplexity.space || "—";
+  // Once a tested winner is available, no card should remain permanently
+  // "Pending" merely because the optional technical reviewer has not replied.
+  // We do not invent a lower bound: the fallback says that none is verified.
+  const suggestedTime = reviewData?.efficiency.suggestedTime ||
+    (displayedTime !== "—" ? `No lower verified bound (${displayedTime})` : reviewRunning ? "Reviewing" : report ? "Not separately reviewed" : "Pending review");
+  const suggestedSpace = reviewData?.efficiency.suggestedSpace ||
+    (displayedSpace !== "—" ? `No lower verified bound (${displayedSpace})` : reviewRunning ? "Reviewing" : report ? "Not separately reviewed" : "Pending review");
   const gate = run ? gateFor(run) : "untested";
   const benchmarkNote = chosenPort?.run?.ran
     ? `${chosenPort.run.passed} passed / ${chosenPort.run.failed} failed for this ${chosenPort.language} implementation in E2B.`
@@ -222,12 +232,12 @@ export default function StoryResultWorkspace() {
         <section className="story-report-card">
           <div className="story-report-heading">Efficiency <span>{complexityAudit ? "Two-judge code audit" : reviewData ? "Reviewed estimate" : "Analysis"}</span></div>
           <div className="story-report-metrics">
-            <div><small>TIME COMPLEXITY</small><strong>{complexityAudit?.time || reviewData?.efficiency.currentTime || report?.complexity || "—"}</strong></div>
-            <div><small>SPACE COMPLEXITY</small><strong>{complexityAudit?.space || reviewData?.efficiency.currentSpace || "—"}</strong></div>
+            <div><small>TIME COMPLEXITY</small><strong>{displayedTime}</strong></div>
+            <div><small>SPACE COMPLEXITY</small><strong>{displayedSpace}</strong></div>
           </div>
           {complexityAudit && <p className="story-muted">Audit basis: {complexityAudit.basis}</p>}
-          <div className="story-compare"><span>Suggested time</span><b>{reviewData?.efficiency.suggestedTime || "Pending review"}</b></div>
-          <div className="story-compare"><span>Suggested space</span><b>{reviewData?.efficiency.suggestedSpace || "Pending review"}</b></div>
+          <div className="story-compare"><span>Suggested time</span><b>{suggestedTime}</b></div>
+          <div className="story-compare"><span>Suggested space</span><b>{suggestedSpace}</b></div>
           {reviewData?.efficiency.note && <p>{reviewData.efficiency.note}</p>}
         </section>
         <section className="story-report-card">

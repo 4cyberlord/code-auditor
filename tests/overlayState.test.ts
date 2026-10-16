@@ -148,6 +148,8 @@ console.log("\n4. a finished council outranks the panel, and fills the evidence 
       winnerSource: "judges",
       provenance: "Candidate B — z-ai/glm-5.3",
       approach: "one pass with a hash map",
+      timeComplexity: "O(n)",
+      spaceComplexity: "O(n)",
       complexity: "O(n) time",
       evidence: [
         {

@@ -2113,6 +2113,10 @@ export interface Presentation {
   /** "Candidate B — z-ai/glm-5.3". Naming the model is safe after the gate. */
   provenance: string;
   approach: string;
+  /** Compact, independently audited when possible, never a prose dump. */
+  timeComplexity: string;
+  /** Auxiliary algorithm space; measured RSS belongs in benchmark evidence. */
+  spaceComplexity: string;
   complexity: string;
   evidence: EvidenceRow[];
   /** Where the bench did not agree, in one line each. */
@@ -2133,6 +2137,32 @@ const bullets = (body: string): string[] =>
     .split("\n")
     .map((line) => line.replace(/^\s*[-*]\s*/, "").trim())
     .filter(Boolean);
+
+/**
+ * Pull the two displayable Big-O claims out of a solver's free-form COMPLEXITY
+ * field. The field remains in the saved source answer, but a narrow report card
+ * must not receive a paragraph containing constraints, benchmark notes, and
+ * both dimensions. This is presentation-only: an agreed judge audit still
+ * takes precedence and no unparsable claim becomes a fact.
+ */
+export function splitComplexityClaim(claim: string): { time: string; space: string } {
+  const text = String(claim || "").replace(/\s+/g, " ").slice(0, 4_000);
+  const bound = (value: string | undefined): string => {
+    const match = /\bO\s*\(\s*[^)\r\n]{1,120}\)/i.exec(value || "");
+    return match ? match[0].replace(/\s+/g, " ") : "";
+  };
+  const after = (label: string): string =>
+    bound(new RegExp(`\\b(?:${label})\\s*(?:complexity)?\\s*[:=\\-]?\\s*([\\s\\S]{0,500}?)(?=\\b(?:auxiliary\\s+)?space\\s*(?:complexity)?\\b|$)`, "i").exec(text)?.[1]);
+  const before = (label: string): string =>
+    bound(new RegExp(`(O\\s*\\([^)]{1,120}\\))\\s*(?:${label})(?:\\s+complexity)?\\b`, "i").exec(text)?.[1]);
+  // Accept both "Time O(n)" and "O(n) time"; the latter must prefer the
+  // bound immediately before its label rather than a later space claim.
+  const time = before("time|runtime") || after("time|runtime");
+  // Prefer "auxiliary space" so output storage is not presented as working
+  // memory. A plain-space claim is still useful when it is all we have.
+  const space = after("auxiliary\\s+space") || after("space") || before("auxiliary\\s+space") || before("space");
+  return { time, space };
+}
 
 export function buildPresentation(report: CouncilReport): Presentation {
   // A revised candidate is represented by its revision everywhere: that is the
@@ -2186,6 +2216,7 @@ export function buildPresentation(report: CouncilReport): Presentation {
   const winnerCandidate = report.candidates.find((c) => c.letter === report.winner);
   const winnerFinal = winnerCandidate?.revised ?? winnerCandidate?.final ?? null;
   const winnerAudit = agreedComplexityAudits(report.dossier?.judges ?? [])[report.winner];
+  const claimedComplexity = splitComplexityClaim(winnerFinal?.complexity || "");
   const synth = report.dossier?.synthesis;
   return {
     standing: standing.standing,
@@ -2194,6 +2225,8 @@ export function buildPresentation(report: CouncilReport): Presentation {
     winnerSource: report.dossier?.winnerSource ?? (report.winner ? "synthesis" : "none"),
     provenance: winnerCandidate ? `Candidate ${winnerCandidate.letter} — ${winnerCandidate.model}` : "",
     approach: synth?.approach || "",
+    timeComplexity: winnerAudit?.time || claimedComplexity.time,
+    spaceComplexity: winnerAudit?.space || claimedComplexity.space,
     complexity: winnerAudit
       ? `Time ${winnerAudit.time}, auxiliary space ${winnerAudit.space} (independent code audits)`
       : winnerFinal?.complexity || "",
