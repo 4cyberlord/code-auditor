@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 /** Explicit E2B Hobby smoke test. Never runs during normal CI/PR processing. */
 import { Sandbox } from "e2b";
-import "./lib/config.mjs";
 const key = String(process.env.E2B_API_KEY || "").trim();
 const alias = String(process.env.CODE_AUDITOR_E2B_TEMPLATE || "").trim();
 if (!key || !alias) {
@@ -24,7 +23,8 @@ if (!key || !alias) {
       "test \"$(command -v python3)\" != ''",
       "if [ \"$COUNCIL_LAB_TEMPLATE_REVISION\" = '' ]; then exit 49; fi",
     ].join("; ");
-    const result=await sandbox.commands.run("bash -lc " + JSON.stringify(cmd),{timeoutMs:60_000});
+    const quote = value => "\'" + String(value).replaceAll("\'", "\'\\\"\'\\\"\'") + "\'";
+    const result=await sandbox.commands.run("bash -lc " + quote(cmd),{timeoutMs:60_000});
     if (result.exitCode !== 0)throw new Error("Template smoke failed with exit "+result.exitCode+
       ": "+String(result.stderr||"").slice(0,600));
     console.log("PASS: template "+alias+" executed isolated Python, C++, Rust and required tools.");
