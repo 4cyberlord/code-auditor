@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {createSandboxCapacity, hobbyWorkerLimit} from "../scripts/lib/e2bCapacity.mjs";
+import {createSandboxCapacity, hobbyWorkerLimit, standbyBudget} from "../scripts/lib/e2bCapacity.mjs";
 import {createE2BWarmPool} from "../scripts/lib/e2bWarmPool.mjs";
 
 assert.equal(hobbyWorkerLimit("99"),8);
@@ -58,3 +58,10 @@ await closing;
 assert.equal(lateKills,1);
 assert.equal(await late.take("A"),null);
 console.log("PASS: bounded Hobby capacity; four independent warm slots; reuse once; cleanup on failure");
+
+assert.equal(standbyBudget({active:0,limit:8},4),4);
+assert.equal(standbyBudget({active:0,limit:4},4),2);
+assert.equal(standbyBudget({active:0,limit:2},4),0);
+assert.equal(standbyBudget({active:1,limit:3},4),0);
+assert.equal(standbyBudget({active:5,limit:8},4),1);
+console.log("PASS: standby never occupies the last two verification slots");
