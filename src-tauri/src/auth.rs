@@ -273,7 +273,13 @@ async fn restore_saved_session(db: &Db) {
                 "The server returned an account id this app does not understand.".to_string()
             })
     }) {
-        Ok((username, user_id)) => sign_in(Principal { user_id, username }),
+        Ok((username, user_id)) => {
+            sign_in(Principal { user_id, username });
+            // The background helper has an intentionally separate scoped
+            // token. Keep it valid when a saved desktop session is restored,
+            // without making an offline launch look like a failed sign-in.
+            let _ = crate::helper_auth::ensure_authorized(db).await;
+        }
         Err(_) => {
             hold_token(None);
         }
@@ -390,6 +396,12 @@ pub async fn auth_login(
             user_id,
             username: signed.username,
         });
+
+        // The helper can run while this process is closed, so it cannot use
+        // this in-memory desktop token directly. Ensure its own scoped token
+        // exists now, rather than discovering the problem only after the user
+        // has captured a batch and presses Submit in the overlay.
+        let _ = crate::helper_auth::ensure_authorized(db.inner()).await;
 
         // Kept for compatibility with existing webview bundles. Sessions are
         // always saved because this desktop is the user's chosen device.

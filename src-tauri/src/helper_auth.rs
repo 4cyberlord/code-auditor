@@ -41,12 +41,39 @@ struct Minted {
     expires_at: String,
 }
 
+/// Make the independent LaunchAgent credential usable whenever the desktop
+/// session is usable. The helper cannot borrow the desktop token because it
+/// continues running after the main process exits, so it keeps its own scoped
+/// session in the macOS Keychain. We only mint a replacement when either the
+/// server says the prior helper session is no longer valid or this Mac no
+/// longer has its matching local token.
+///
+/// This is deliberately best-effort at sign-in call sites: a transient network
+/// error must not turn a successfully verified desktop login into a failed one.
+pub async fn ensure_authorized(db: &Db) -> Result<(), String> {
+    let locally_present = read_token()
+        .ok()
+        .is_some_and(|token| !token.trim().is_empty());
+    let remote: HelperAuth =
+        crate::server_api::call(db, "auth.helperStatus", serde_json::json!({})).await?;
+
+    if locally_present && remote.authorised {
+        return Ok(());
+    }
+
+    let minted: Minted =
+        crate::server_api::call(db, "auth.helperToken", serde_json::json!({})).await?;
+    store_token(&minted.token)
+        .map_err(|e| format!("Could not save the helper's authorisation: {e}"))
+}
+
 #[tauri::command]
 pub async fn helper_authorize(db: tauri::State<'_, Db>) -> Result<HelperAuth, String> {
     crate::auth::require()?;
+    // An explicit Settings action is a requested credential rotation, unlike
+    // `ensure_authorized`, so always mint a fresh helper session here.
     let minted: Minted =
         crate::server_api::call(db.inner(), "auth.helperToken", serde_json::json!({})).await?;
-
     store_token(&minted.token)
         .map_err(|e| format!("Could not save the helper's authorisation: {e}"))?;
     Ok(HelperAuth {
