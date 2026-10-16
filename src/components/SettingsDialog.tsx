@@ -1593,17 +1593,18 @@ function CouncilCard() {
   const working = councilModelsInUse.filter((m) => probes[m]?.ok).length;
 
   return (
-    <div className="provider-card">
+    <div className="provider-card settings-council-card">
       <div className="top">
         <span className="dot" style={{ background: "var(--accent)" }} />
         <span className="name">Engineering council</span>
-        <span className="vendor">solve · execute · review · revise · judge · synthesize</span>
+        <span className="vendor">Solvers · judges · synthesis</span>
         <span className="spacer" />
         <span className="badge" data-tone={enabled ? (reachable ? "good" : "warn") : undefined}>
           {enabled ? (reachable ? "armed" : "needs the gateway") : "off"}
         </span>
       </div>
 
+      <div className="settings-form-section-heading"><span>Run preferences</span><small>Choose how Council responds</small></div>
       <div className="row">
         <label htmlFor="council-on">Convene on Run</label>
         <div className="segmented" style={{ flex: 1 }}>
@@ -1619,11 +1620,7 @@ function CouncilCard() {
           ))}
         </div>
       </div>
-      <p className="hint">
-        The council re-solves the problem, tests each code candidate, reviews the results, and
-        produces a final recommendation. Failed tests cannot win. Expect about 36 extra requests
-        per run, so low gateway limits make council runs slower.
-      </p>
+      <details className="settings-inline-help"><summary>How Council mode works</summary><p>The council re-solves the problem, tests each code candidate, reviews the results, and produces a final recommendation. Failed tests cannot win. Expect about 36 extra requests per run, so low gateway limits make council runs slower.</p></details>
 
       <div className="row">
         <label htmlFor="default-solution-language">Default solution language</label>
@@ -1638,10 +1635,7 @@ function CouncilCard() {
           <option value="Rust">Rust</option>
         </select>
       </div>
-      <p className="hint">
-        This chooses the primary solution shown first. The other two languages remain available as
-        independently E2B-tested ports after the primary solution is verified.
-      </p>
+      <p className="settings-form-caption">This is the first solution shown. Other languages remain available as separately tested ports.</p>
 
       <div className="row">
         <label htmlFor="memory-target">Memory goal</label>
@@ -1651,7 +1645,7 @@ function CouncilCard() {
           style={{ flex: 1 }} />
         <span className="vendor">MB (soft target)</span>
       </div>
-      <p className="hint">Correctness and Big-O complexity come first. A 0 ms display is rounded timing, and interpreter or platform overhead may exceed this memory goal.</p>
+      <details className="settings-inline-help"><summary>Memory goal details</summary><p>Correctness and Big-O complexity come first. A 0 ms display is rounded timing, and interpreter or platform overhead may exceed this memory goal.</p></details>
 
       <div className="row">
         <label htmlFor="council-include">Panel Answers Are Candidates</label>
@@ -1674,6 +1668,7 @@ function CouncilCard() {
         </div>
       </div>
 
+      <div className="settings-form-section-heading"><span>Execution</span><small>Isolated sandbox testing</small></div>
       <div className="row">
         <label htmlFor="execution-provider">Program Tests</label>
         <span className="chip">E2B Cloud only</span>
@@ -1696,21 +1691,18 @@ function CouncilCard() {
             />
             <span className="vendor">seconds</span>
           </div>
-          <p className="hint">
-            Runs candidate tests in isolated E2B Linux sandboxes. The worker needs{" "}
-            <span className="mono">E2B_API_KEY</span>. Only output, timing, memory, and the
-            sandbox ID are saved.
-          </p>
+          <details className="settings-inline-help"><summary>E2B sandbox requirements</summary><p>Candidate tests run in isolated E2B Linux sandboxes. The worker requires an <code>E2B_API_KEY</code>. Only output, timing, memory, and sandbox ID are saved.</p></details>
         </>
       )}
-      <div className="row" style={{ alignItems: "start" }}>
+      <div className="settings-form-section-heading"><span>Model roster</span><small>One model per line · changes save when you leave a field</small></div>
+      <div className="row settings-roster-row">
         <label htmlFor="council-solvers" style={{ paddingTop: 6 }}>
           Solvers
         </label>
         <textarea
           id="council-solvers"
           className="field mono"
-          rows={10}
+          rows={5}
           spellCheck={false}
           value={
             solversDraft ??
@@ -1723,19 +1715,16 @@ function CouncilCard() {
           style={{ flex: 1, resize: "vertical" }}
         />
       </div>
-      <p className="hint">
-        Enter 2–4 approved gateway model IDs, one per line. Add <span className="mono">/responses</span>{" "}
-        for Responses API models such as Codex. Panel models are not requested twice.
-      </p>
+      <p className="settings-form-caption">2–10 model IDs · add <code>/responses</code> for Responses API.</p>
 
-      <div className="row" style={{ alignItems: "start" }}>
+      <div className="row settings-roster-row">
         <label htmlFor="council-judges" style={{ paddingTop: 6 }}>
           Judges
         </label>
         <textarea
           id="council-judges"
           className="field mono"
-          rows={5}
+          rows={4}
           spellCheck={false}
           value={
             judgesDraft ?? settings.councilJudges.map((j) => `${j.model}/${j.emphasis}`).join("\n")
@@ -1745,10 +1734,7 @@ function CouncilCard() {
           style={{ flex: 1, resize: "vertical" }}
         />
       </div>
-      <p className="hint">
-        Enter one <span className="mono">model/emphasis</span> per line. Each judge reviews the
-        full record, with extra focus on its emphasis. Use 1–7 seats.
-      </p>
+      <p className="settings-form-caption">1–5 judge seats · <code>model/emphasis</code> per line.</p>
 
       <div className="row">
         <label htmlFor="council-synth">Synthesizer</label>
@@ -1763,12 +1749,11 @@ function CouncilCard() {
             <option key={model} value={model}>{model}</option>)}
         </select>
       </div>
-      <p className="hint">
-        Also writes the test harness. Its exact route must be available on the selected gateway.
-      </p>
+      <details className="settings-inline-help"><summary>Model roster format</summary><p>Panel models are not requested twice. A solver may use <code>/responses</code> or <code>/chat</code>. Judges emphasize algorithms, correctness, performance, engineering or security. The synthesizer also writes the test harness and must be available on the selected gateway.</p></details>
 
       {reachable && (
         <>
+          <div className="settings-form-section-heading"><span>Roster health</span><small>Gateway availability and live model probes</small></div>
           <div className="section-label" style={{ margin: "10px 0 6px", display: "flex", gap: 8, alignItems: "center" }}>
             <span>Roster health</span>
             <span className="spacer" />
@@ -1821,7 +1806,7 @@ function CouncilCard() {
               synthesis === m ? "synthesis" : null,
             ].filter(Boolean);
             return (
-              <div className="row" key={m} style={{ gridTemplateColumns: "1fr auto auto auto", gap: 6 }}>
+              <div className="row settings-model-health-row" key={m}>
                 <span className="field mono" style={{ opacity: 0.75, overflow: "hidden", textOverflow: "ellipsis" }}>
                   {m}
                 </span>
@@ -1837,10 +1822,7 @@ function CouncilCard() {
               </div>
             );
           })}
-          <p className="hint">
-            This list shows what your key can reach. A <b>Not on key</b> model must be enabled at
-            TokenRouter or corrected here before it can answer.
-          </p>
+          <details className="settings-inline-help"><summary>Understanding probe results</summary><p>“Not on key” means the router did not list the model. Enable it for this gateway, or correct its ID before running Council. Probe errors may instead mean timeouts or rate limits; inspect the exact badge reason.</p></details>
         </>
       )}
     </div>
