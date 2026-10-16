@@ -660,9 +660,10 @@ fn run() -> Result<(), String> {
     update_overlay(&webview, &active_view, &mut overlay_refresh)?;
     let mut overlay_visible = false;
     let mut overlay_alpha = 0.46_f64;
-    let mut coding_history_open = false;
-    let mut coding_history_rows: Vec<SubmittedJob> = Vec::new();
-    let mut coding_history_index = 0_usize;
+    let mut history_open = false;
+    let mut history_rows: Vec<Value> = Vec::new();
+    let mut history_index = 0_usize;
+    let mut history_fetch: Option<tokio::task::JoinHandle<Result<Vec<Value>,String>>> = None;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
     let mut last_heartbeat = Instant::now();
@@ -773,6 +774,31 @@ fn run() -> Result<(), String> {
                 _ => {}
             }
         }
+        if history_fetch.as_ref().is_some_and(|task| task.is_finished()) {
+            if let Some(task)=history_fetch.take() {
+                match rt.block_on(task) {
+                    Ok(Ok(rows)) if history_open => {
+                        history_rows=rows;
+                        history_index=history_index.min(history_rows.len().saturating_sub(1));
+                        let payload=serde_json::to_string(&history_rows)
+                            .unwrap_or_else(|_| "[]".into());
+                        let _ = webview.evaluate_script(&format!(
+                            "window.showSharedHistory({payload},{history_index},false,null)"));
+                    }
+                    Ok(Err(error)) if history_open => {
+                        let safe=serde_json::to_string(&error).unwrap_or_else(|_| "\"History unavailable\"".into());
+                        let _ = webview.evaluate_script(&format!(
+                            "window.showSharedHistory(null,{history_index},false,{safe})"));
+                    }
+                    Err(error) if history_open => {
+                        let safe=serde_json::to_string(&error.to_string()).unwrap_or_else(|_| "\"History unavailable\"".into());
+                        let _ = webview.evaluate_script(&format!(
+                            "window.showSharedHistory(null,{history_index},false,{safe})"));
+                    }
+                    _ => {}
+                }
+            }
+        }
         if last_capture_cleanup.elapsed() >= Duration::from_secs(3600) {
             if let Err(error) = clean_expired_capture_dirs() {
                 log(&format!("Capture cleanup skipped: {error}"));
@@ -822,7 +848,7 @@ fn run() -> Result<(), String> {
             }));
         }
 
-        if overlay_visible && last_overlay_refresh.elapsed() >= Duration::from_millis(500) {
+        if overlay_visible && !history_open && last_overlay_refresh.elapsed() >= Duration::from_millis(500) {
             last_overlay_refresh = Instant::now();
             let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
         }
@@ -830,39 +856,41 @@ fn run() -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
             mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
-            if mac_shortcuts::take_toggle_overlay()
-                && capture_task.as_ref().is_none_or(|task| task.is_finished())
-            {
-                if active_view != "coding" {
-                    active_view = "coding".to_string();
-                    overlay_visible = true;
-                } else {
-                    overlay_visible = !overlay_visible;
+            // HH is its own surface; unlike the two task views it must not
+            // change which batch is active. CC/MM switch surfaces in-place
+            // without opening the main app, stealing application focus, or
+            // changing the cloud solving engine.
+            match mac_shortcuts::take_panel_command() {
+                command @ (1 | 2 | 3)
+                    if capture_task.as_ref().is_none_or(|task| task.is_finished()) =>
+                {
+                    if command == 3 {
+                        // Show cached/local rows immediately while the
+                        // authenticated main+overlay history loads off-thread.
+                        history_rows = archived_helper_history().unwrap_or_default();
+                        history_index = 0;
+                        history_open = true;
+                        mac_shortcuts::set_history_visible(true);
+                        let rows = serde_json::to_string(&history_rows).unwrap_or_else(|_| "[]".into());
+                        history_fetch = Some(rt.spawn(fetch_unified_history()));
+                        overlay_visible = true;
+                        event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                        let _ = show_overlay(&overlay, true);
+                        let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                        let _ = webview.evaluate_script(&format!(
+                            "window.showSharedHistory({rows},0,true,null)"));
+                    } else {
+                        history_open = false;
+                        mac_shortcuts::set_history_visible(false);
+                        let _ = webview.evaluate_script("window.closeSharedHistory()");
+                        active_view = if command == 1 { "coding" } else { "mcq" }.to_string();
+                        overlay_visible = true;
+                        event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                        let _ = show_overlay(&overlay, true);
+                        let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                    }
                 }
-                event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
-                    ActivationPolicy::Accessory
-                } else {
-                    ActivationPolicy::Prohibited
-                });
-                let _ = show_overlay(&overlay, overlay_visible);
-                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
-            }
-            if mac_shortcuts::take_switch_mcq()
-                && capture_task.as_ref().is_none_or(|task| task.is_finished())
-            {
-                if active_view != "mcq" {
-                    active_view = "mcq".to_string();
-                    overlay_visible = true;
-                } else {
-                    overlay_visible = !overlay_visible;
-                }
-                event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
-                    ActivationPolicy::Accessory
-                } else {
-                    ActivationPolicy::Prohibited
-                });
-                let _ = show_overlay(&overlay, overlay_visible);
-                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                _ => {}
             }
             if mac_shortcuts::take_start_batch() {
                 if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -946,43 +974,29 @@ fn run() -> Result<(), String> {
                 overlay_alpha = (overlay_alpha + 0.07).min(0.95);
                 let _ = set_ghost_opacity(&overlay, overlay_alpha);
             }
-            if overlay_visible && active_view == "coding" {
-                if mac_shortcuts::take_history_toggle() {
-                    if coding_history_open {
-                        coding_history_open = false;
-                        let _ = webview.evaluate_script("window.closeCodingHistory()");
-                    } else {
-                        coding_history_rows = load_coding_history().unwrap_or_default();
-                        coding_history_index = 0;
-                        let headers: Vec<Value> = coding_history_rows.iter().map(|job| serde_json::json!({
-                            "id": job.id, "submittedAt": job.submitted_at, "status": job.status,
-                        })).collect();
-                        let rows = serde_json::to_string(&headers).unwrap_or_else(|_| "[]".into());
-                        let _ = webview.evaluate_script(&format!("window.showCodingHistory({rows},0)"));
-                        coding_history_open = true;
-                    }
-                }
+            // Arrows navigate only while HH history is visible. They are
+            // observed by IOHID and do not capture normal application keys.
+            if history_open && overlay_visible {
                 if mac_shortcuts::take_history_previous() {
-                    if coding_history_open {
-                        coding_history_index = coding_history_index.saturating_sub(1);
-                        let _ = webview.evaluate_script(&format!("window.selectCodingHistoryRow({coding_history_index})"));
-                    } else { let _ = webview.evaluate_script("window.scrollSolutionBy(-260)"); }
+                    history_index = history_index.saturating_sub(1);
+                    let _ = webview.evaluate_script(&format!(
+                        "window.selectSharedHistoryRow({history_index})"));
                 }
                 if mac_shortcuts::take_history_next() {
-                    if coding_history_open {
-                        coding_history_index = (coding_history_index + 1).min(coding_history_rows.len().saturating_sub(1));
-                        let _ = webview.evaluate_script(&format!("window.selectCodingHistoryRow({coding_history_index})"));
-                    } else { let _ = webview.evaluate_script("window.scrollSolutionBy(260)"); }
+                    history_index = (history_index + 1).min(history_rows.len().saturating_sub(1));
+                    let _ = webview.evaluate_script(&format!(
+                        "window.selectSharedHistoryRow({history_index})"));
                 }
-                if mac_shortcuts::take_history_open_result() && coding_history_open {
-                    if let Some(job) = coding_history_rows.get(coding_history_index) {
-                        if let Ok(state) = serde_json::to_string(&coding_overlay_state(job)) {
-                            let _ = webview.evaluate_script(&format!("window.openCodingHistoryResult({state})"));
-                        }
-                        coding_history_open = false;
-                    }
-                }
+            } else {
+                let _ = mac_shortcuts::take_history_previous();
+                let _ = mac_shortcuts::take_history_next();
             }
+            // Ignore old specialty-key history actions; history is now opened
+            // by HH, not a punctuation key combination. Do not load results
+            // into the active Coding or MCQ task when browsing the list.
+            let _ = mac_shortcuts::take_history_toggle();
+            let _ = mac_shortcuts::take_history_open_result();
+            mac_shortcuts::set_history_visible(history_open && overlay_visible);
             mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
         }
     });
