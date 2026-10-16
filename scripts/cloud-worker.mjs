@@ -2071,7 +2071,7 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
     // A failed port may be repaired once by the SAME model that authored the
     // verified source. The accepted reference harness remains unchanged.
     if (!isVerified(run) && canRepairPort(run,target,sourceSolverModel,
-          process.env.CODE_AUDITOR_E2B_PORT_REPAIR !== "0")) {
+          process.env.CODE_AUDITOR_E2B_PORT_REPAIR === "1")) {
       repair={attempted:true,model:sourceSolverModel,status:"failed"};
       await addEvent(job.id,"info","port_source_solver_repair",
         "Asking original verified source solver to repair the "+target+" translation.",
