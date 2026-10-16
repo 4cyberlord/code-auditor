@@ -1,0 +1,11 @@
+import assert from "node:assert/strict";
+import {selectedCppStandard,PINNED_PYTHON_VALIDATORS,extendedValidatorBuildCommands} from "../scripts/lib/e2bRuntimeProfile.mjs";
+assert.equal(selectedCppStandard(undefined),"c++20");
+assert.equal(selectedCppStandard("c++23"),"c++23");
+assert.equal(selectedCppStandard("c++2b"),"c++20");
+assert.equal(PINNED_PYTHON_VALIDATORS.length,5);
+assert.ok(PINNED_PYTHON_VALIDATORS.every(s=>/^[a-z0-9-]+==[0-9][a-z0-9.]+$/.test(s)));
+const cmds=extendedValidatorBuildCommands();
+assert.ok(cmds[0].includes("hypothesis=="));
+assert.ok(cmds.some(s=>s.includes("clang-tidy --version")));
+console.log("PASS: opt-in C++23 and pinned template validators are deterministic");
