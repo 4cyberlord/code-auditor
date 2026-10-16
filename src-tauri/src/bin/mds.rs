@@ -2538,6 +2538,71 @@ fn coding_pending_state(batch: &PendingBatch) -> Value {
     })
 }
 
+// Project only source-backed, read-only sidebar evidence. A listed harness
+// assertion is not invented evidence: it comes from the stored reference test.
+fn coding_sidebar_evidence(body:&Value)->Value {
+    let p=body.get("presentation").unwrap_or(&Value::Null);
+    let blueprint=body.get("semanticBlueprint").unwrap_or(&Value::Null);
+    let structure=blueprint.get("structure").unwrap_or(&Value::Null);
+    let summary=blueprint.get("explanation").and_then(Value::as_str).unwrap_or("");
+    let approach=p.get("approach").and_then(Value::as_str)
+        .filter(|s|!s.trim().is_empty()).unwrap_or(summary);
+    let structures:Vec<String>=structure.get("dataStructures")
+        .and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str)
+        .take(6).map(|name|{
+            let why=match name {
+                "dictionaries / hash maps"=>"keyed lookup or counting",
+                "sets"=>"membership and uniqueness checks",
+                "lists / dynamic arrays"=>"ordered storage and traversal",
+                "heaps / priority queues"=>"priority-based extraction",
+                "binary search"=>"reducing a sorted search space",
+                "sorting"=>"ordering values for comparison",
+                _=>"operation found in source",
+            };
+            format!("{name} — {why} (inferred from code)")
+        }).collect();
+    let control=structure.get("controlFlow").and_then(Value::as_array)
+        .into_iter().flatten().filter_map(Value::as_str).take(4)
+        .collect::<Vec<_>>().join(", ");
+    let language=p.get("language").and_then(Value::as_str).unwrap_or("");
+    let verified=p.get("standing").and_then(Value::as_str)==Some("verified");
+    let mut cases=Vec::<String>::new();
+    if verified {
+        for suite in body.get("suites").and_then(Value::as_array).into_iter().flatten(){
+            if !language.is_empty() && suite.get("language").and_then(Value::as_str)!=Some(language) {continue;}
+            if let Some(harness)=suite.get("harness").and_then(Value::as_str){
+                for line in harness.lines(){
+                    let line=line.trim();
+                    if line.len()>9 && line.len()<170
+                        && (line.starts_with("assert ") || line.starts_with("assert(")
+                            || line.starts_with("assert_eq!") || line.starts_with("assert_eq(")
+                            || line.starts_with("assertEqual("))
+                        && !cases.iter().any(|existing|existing==line)
+                    {
+                        cases.push(line.to_owned());
+                        if cases.len()>=4 {break;}
+                    }
+                }
+            }
+            if cases.len()>=4 {break;}
+        }
+    }
+    let tests=p.get("evidence").and_then(Value::as_array)
+        .into_iter().flatten().filter(|row|
+            row.get("gate").and_then(Value::as_str)==Some("pass"))
+        .map(|row|format!("Candidate {} · {} passed / {} failed in E2B",
+            row.get("letter").and_then(Value::as_str).unwrap_or("?"),
+            row.get("passed").and_then(Value::as_u64).unwrap_or(0),
+            row.get("failed").and_then(Value::as_u64).unwrap_or(0)))
+        .take(4).collect::<Vec<_>>().join("\n");
+    serde_json::json!({
+        "summary":summary.chars().take(480).collect::<String>(),
+        "approach":approach.chars().take(800).collect::<String>(),
+        "structures":structures,"controlFlow":control,"edgeCases":cases,
+        "testing":tests,"edgeCoverageKnown":!cases.is_empty()
+    })
+}
+
 fn coding_overlay_state(job: &SubmittedJob) -> Value {
     let progress = job_progress_message(job);
     let phase = match job.status.as_str() {
@@ -2560,14 +2625,22 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
                 .filter(|s| !s.is_empty());
             let has_code = candidate.pointer("/final/code").and_then(Value::as_str)
                 .is_some_and(|code| !code.trim().is_empty());
+            let gate = body.and_then(|b|b.pointer("/presentation/evidence"))
+                .and_then(Value::as_array).into_iter().flatten()
+                .find(|row|row.get("letter").and_then(Value::as_str)==Some(letter))
+                .and_then(|row|row.get("gate").and_then(Value::as_str)).unwrap_or("untested");
             let status = if error.is_some() { "error" }
                 else if has_code { "done" } else { "pending" };
+            let detail = if error.is_some() { "Solver failed" }
+                else if gate=="pass" && letter.eq_ignore_ascii_case(winner) {"Council winner · E2B passed"}
+                else if gate=="pass" {"E2B tests passed · Council reviewed"}
+                else if gate=="fail" {"Answer generated · E2B failed"}
+                else if has_code {"Answer generated · validation pending"}
+                else {"Awaiting model answer"};
             serde_json::json!({
                 "id": letter, "label": model.rsplit('/').next().unwrap_or(model),
                 "model": model, "status": status, "error": error,
-                "detail": if !winner.is_empty() && letter.eq_ignore_ascii_case(winner)
-                    { "Council selection" } else if has_code { "Candidate ready" }
-                    else { "Awaiting candidate answer" }
+                "detail": detail, "gate": gate
             })
         }).collect()
     };
@@ -2579,6 +2652,9 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
         "progress": progress, "error": job.error,
         "agents": agents, "solution": solution, "tests": tests,
         "presentation": body.and_then(|b| b.get("presentation")).cloned(),
+        "insights": body.map(coding_sidebar_evidence),
+        "ports": body.and_then(|b|b.get("ports")).cloned().unwrap_or_else(||Value::Array(Vec::new())),
+        "progressPhase": job.progress_phase,
         "upgrade": body.and_then(|b| b.get("upgrade")).cloned(),
         "solutionHistory": body.and_then(|b| b.get("solutionHistory")).cloned()
     })
