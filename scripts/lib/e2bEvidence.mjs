@@ -25,6 +25,7 @@ function compactRun(run) {
     runtimeMs:finite(run.remoteElapsedMs),
     peakMemoryKb:finite(run.peakMemoryKb), sandboxBootMs:finite(run.bootMs),
     prewarmed:run.prewarmed === true,
+    warmIdleMs:finite(run.warmIdleMs),
     // This is a measured run; Big-O claims require independent analysis.
   };
 }
