@@ -85,7 +85,21 @@ pub async fn helper_authorize(db: tauri::State<'_, Db>) -> Result<HelperAuth, St
 #[tauri::command]
 pub async fn helper_auth_status(db: tauri::State<'_, Db>) -> Result<HelperAuth, String> {
     crate::auth::require()?;
-    crate::server_api::call(db.inner(), "auth.helperStatus", serde_json::json!({})).await
+    let remote: HelperAuth =
+        crate::server_api::call(db.inner(), "auth.helperStatus", serde_json::json!({})).await?;
+    // A still-live server session is not useful if this Mac no longer has its
+    // matching scoped token (for example, after a Keychain reset). Report the
+    // actual submission-ready state so Settings never claims the overlay is
+    // authenticated when it would fail at Submit.
+    let locally_present = read_token()
+        .ok()
+        .is_some_and(|token| !token.trim().is_empty());
+    Ok(HelperAuth {
+        authorised: remote.authorised && locally_present,
+        expires_at: (remote.authorised && locally_present)
+            .then_some(remote.expires_at)
+            .flatten(),
+    })
 }
 
 #[tauri::command]

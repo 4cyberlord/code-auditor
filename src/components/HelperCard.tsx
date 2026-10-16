@@ -85,6 +85,7 @@ export default function HelperCard() {
     ? Math.ceil((new Date(auth.expiresAt).getTime() - now) / 86_400_000)
     : null;
   const expiringSoon = daysLeft !== null && daysLeft <= 7 && daysLeft > 0;
+  const authenticated = auth?.authorised === true;
 
   return (
     <div className="provider-card">
@@ -99,26 +100,39 @@ export default function HelperCard() {
               : "var(--line)",
           }}
         />
-        <span className="name">Background capture</span>
+        <span className="name">Background helper</span>
         <span className="vendor">
-          {auth?.authorised
+          {auth === null
+            ? "checking authentication…"
+            : authenticated
             ? expiringSoon
               ? `expires in ${daysLeft} day${daysLeft === 1 ? "" : "s"}`
               : `authorised until ${expires}`
-            : "not authorised"}
+            : "not authenticated"}
         </span>
         <span className="spacer" />
-        {auth?.authorised && (
+        {authenticated && (
           <button className="btn tiny ghost" disabled={busy} onClick={() => void revoke()}>
             Remove
           </button>
         )}
+        <button className="btn tiny ghost" disabled={busy} onClick={() => void refresh()}>
+          Check status
+        </button>
         <button className="btn tiny" disabled={busy} onClick={() => void authorise()}>
-          {busy ? "Working…" : auth?.authorised ? "Renew" : "Authorise"}
+          {busy ? "Working…" : authenticated ? "Renew" : "Authorise"}
         </button>
       </div>
 
       <p className="hint" style={{ margin: "8px 0 0" }}>
+        {auth === null
+          ? "Checking whether the Coding overlay can submit jobs…"
+          : authenticated
+            ? "Authenticated — the Coding overlay is ready to submit captures."
+            : "Not authenticated — select Authorise before submitting captures from the Coding overlay."}
+      </p>
+
+      <p className="hint" style={{ margin: "6px 0 0" }}>
         The capture hotkeys work while Council Editor is closed, so the helper needs a sign-in of
         its own. It is a thirty-day session stored in the macOS Keychain — the only thing this app
         keeps on your Mac. Renewing replaces it; removing it here stops this machine, and revoking
