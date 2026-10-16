@@ -37,6 +37,7 @@ export function buildE2BEvidenceSummary({runs={},suites=[],oracles=[],ports=[]}=
     ports:(ports||[]).map(port=>({
       language:port.language, status:port.status,
       sourceLetter:port.sourceLetter || null, execution:compactRun(port.run),
+      differential:port.differential || {status:"unavailable",sharedCases:0,mismatches:[]},
     })),
   };
 }
