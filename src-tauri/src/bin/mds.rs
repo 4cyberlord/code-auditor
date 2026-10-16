@@ -2637,7 +2637,7 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
                 .and_then(Value::as_array).into_iter().flatten()
                 .find(|row|row.get("letter").and_then(Value::as_str)==Some(letter))
                 .and_then(|row|row.get("gate").and_then(Value::as_str)).unwrap_or("untested");
-            let status = if error.is_some() { "error" }
+            let status = if error.is_some() || gate=="fail" { "error" }
                 else if has_code { "done" } else { "pending" };
             let detail = if error.is_some() { "Solver failed" }
                 else if gate=="pass" && letter.eq_ignore_ascii_case(winner) {"Council winner · E2B passed"}
@@ -3555,6 +3555,48 @@ mod tests {
         assert_eq!(rows[0]["id"],"job:456");
         assert_eq!(rows[1]["id"],"main:123");
         assert_eq!(rows[2]["id"],"job:123");
+    }
+
+    #[test]
+    fn coding_projection_preserves_verified_port_and_real_edge_evidence() {
+        let job=SubmittedJob {
+            id:Uuid::new_v4().to_string(),mode:"coding".into(),mcq_model:None,
+            status:"completed".into(),progress_phase:"completed".into(),
+            submitted_at:now(),previews:vec![],error:None,
+            events:vec![],
+            report:Some(serde_json::json!({"report":{
+                "winner":"A",
+                "candidates":[{"letter":"A","model":"model-coding",
+                    "final":{"code":"def solve(x):\n    return x","language":"python"}}],
+                "presentation":{
+                    "standing":"verified","code":"def solve(x):\n    return x",
+                    "language":"python","approach":"Return the input",
+                    "evidence":[{"letter":"A","gate":"pass","passed":3,"failed":0}]
+                },
+                "semanticBlueprint":{
+                    "explanation":"Return the given value unchanged.",
+                    "structure":{"dataStructures":["lists / dynamic arrays"],
+                        "controlFlow":["explicit return values"]}
+                },
+                "suites":[{"language":"python","harness":
+                    "assert solve([]) == []\nassert solve([1]) == [1]\nassert solve([1,1]) == [1,1]"}],
+                "ports":[{"language":"rust","status":"verified","code":"fn main() {}"}]
+            }})),
+        };
+        let projected=coding_overlay_state(&job);
+        assert_eq!(projected["agents"][0]["status"],"done");
+        assert_eq!(projected["agents"][0]["gate"],"pass");
+        assert_eq!(projected["ports"][0]["language"],"rust");
+        assert_eq!(projected["insights"]["edgeCases"].as_array().map(Vec::len),Some(3));
+        assert_eq!(projected["insights"]["summary"],"Return the given value unchanged.");
+        let mut no_evidence=job.clone();
+        no_evidence.report=Some(serde_json::json!({"report":{
+            "presentation":{"standing":"unverified","language":"python"},
+            "suites":[{"language":"python","harness":"assert solve([]) == []"}]
+        }}));
+        let unseen=coding_overlay_state(&no_evidence);
+        assert_eq!(unseen["insights"]["edgeCases"].as_array().map(Vec::len),Some(0),
+            "Never present proposed harness assertions as tested without Council standing");
     }
 
     #[test]
