@@ -1245,6 +1245,31 @@ fn archived_helper_history() -> Result<Vec<Value>, String> {
     normalize_history(rows)
 }
 
+/// A completed overlay report is saved locally by the helper.  History should
+/// open that durable, account-scoped snapshot immediately instead of making a
+/// person wait for the network merely to view a result they have already
+/// received.  The cloud API remains the fallback for another device or an
+/// older result which is no longer in this cache.
+fn cached_history_job(job_id: &str) -> Result<Option<SubmittedJob>, String> {
+    for view in ["coding", "mcq"] {
+        if let Some(job) = read_submitted_job_for(view)? {
+            if job.id == job_id && job.report.is_some() {
+                return Ok(Some(job));
+            }
+        }
+    }
+
+    let path = cache_dir()?.join("job-history").join(format!("{job_id}.json"));
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| format!("Could not read saved overlay result: {error}"))?;
+    let job = serde_json::from_str::<SubmittedJob>(&raw)
+        .map_err(|error| format!("Could not parse saved overlay result: {error}"))?;
+    Ok((job.id == job_id && job.report.is_some()).then_some(job))
+}
+
 fn normalize_history(rows: Vec<Value>) -> Result<Vec<Value>, String> {
     let mut map = std::collections::HashMap::<String,Value>::new();
     for row in rows {
@@ -1357,6 +1382,15 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
 async fn fetch_history_detail(row: Value) -> Result<Value, String> {
     let id = row.get("id").and_then(Value::as_str).unwrap_or("");
     if let Some(job_id) = id.strip_prefix("job:") {
+        if let Some(job) = cached_history_job(job_id)? {
+            // This is the same saved Council report shown when the job first
+            // completed.  Rendering it locally makes arrow-open feel instant
+            // and cannot mix it with a different job's result.
+            if let Some(report) = job.report.as_ref() {
+                let body = report.get("report").unwrap_or(report);
+                return Ok(serde_json::json!({"state": history_coding_state(job_id, body)}));
+            }
+        }
         let report = api("reports.get", serde_json::json!({"jobId": job_id})).await?;
         let body = report.get("report").unwrap_or(&report);
         return Ok(serde_json::json!({"state": history_coding_state(job_id, body)}));
