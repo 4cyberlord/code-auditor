@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import {
  preferredLanguages,requiredProblemLanguage,contractSupportsEarlyHarness,
- evidenceStatus,isVerified,rankedPortTiming,createBoundedExecutor
+ evidenceStatus,isVerified,rankedPortTiming,createBoundedExecutor,
+ preparePortConcurrently,portHarnessNeedsCandidateRetry
 } from "../scripts/lib/specFirstDelivery.mjs";
 
 assert.deepEqual(preferredLanguages(["Python","Rust","C++"]),["python","rust","cpp"]);
@@ -49,3 +50,82 @@ assert.equal(maximum,2);
 await assert.rejects(enqueue(()=>{throw Error("intentional")}),/intentional/);
 assert.equal(await enqueue(()=>13),13);
 console.log("PASS: spec-first preparation, verified-only delivery, no false cross-language fastest claims and bounded E2B queue");
+
+
+// Spec-only preparation and translation must start together, not serially.
+const startedTasks = [];
+let finishTranslation, finishHarness;
+let fallbackCalls = 0;
+const overlapping = preparePortConcurrently({
+ earlyEligible: true,
+ translate: () => {
+   startedTasks.push("translation");
+   return new Promise(resolve => { finishTranslation = () => resolve({candidates: [{letter:"P"}]}); });
+ },
+ prepareEarly: () => {
+   startedTasks.push("reference harness");
+   return new Promise(resolve => { finishHarness = () => resolve([{language:"rust"}]); });
+ },
+ prepareAfterTranslation: async () => {fallbackCalls++; return [{language:"cpp"}];},
+});
+await Promise.resolve();
+assert.deepEqual(startedTasks, ["translation","reference harness"]);
+finishHarness();
+finishTranslation();
+const fastPort = await overlapping;
+assert.equal(fastPort.preparedEarly,true);
+assert.deepEqual(fastPort.suites,[{language:"rust"}]);
+assert.equal(fallbackCalls,0);
+
+// Invalid speculative harnesses must use the pre-existing candidate-aware
+// generation path, never be silently assumed to be verified.
+const rescuedPort = await preparePortConcurrently({
+ earlyEligible:true,
+ translate:async()=>({candidates:[{letter:"P",final:{code:"fn solve() {}"}}]}),
+ prepareEarly:async()=>{throw Error("independent reference preflight failed");},
+ prepareAfterTranslation:async translation=>{
+   fallbackCalls++;
+   assert.equal(translation.candidates[0].letter,"P");
+   return [{language:"rust",referenceCode:"fn solve() {}"}];
+ },
+});
+assert.equal(rescuedPort.preparedEarly,false);
+assert.match(rescuedPort.earlyFailure,/independent reference preflight failed/);
+assert.equal(fallbackCalls,1);
+assert.equal(rescuedPort.suites[0].language,"rust");
+
+const serialStages = [];
+const noSignature = await preparePortConcurrently({
+ earlyEligible:false,
+ translate:async()=>{serialStages.push("translated");return {candidates:[]};},
+ prepareEarly:async()=>{throw Error("never start an unsupported spec-only harness");},
+ prepareAfterTranslation:async()=>{serialStages.push("candidate harness");return [{language:"cpp"}];},
+});
+assert.deepEqual(serialStages,["translated","candidate harness"]);
+assert.equal(noSignature.preparedEarly,false);
+
+const settle = [];
+await assert.rejects(preparePortConcurrently({
+ earlyEligible:true,
+ translate:async()=>{throw Error("port translation unavailable");},
+ prepareEarly:async()=>{settle.push("spec completed");return [{language:"cpp"}];},
+ prepareAfterTranslation:async()=>{throw Error("fallback must not run");},
+}),/port translation unavailable/);
+assert.deepEqual(settle,["spec completed"]);
+
+assert.equal(portHarnessNeedsCandidateRetry({
+ ran:true,passed:0,failed:0,note:"candidate/harness integration or compilation failed; inspect stderr",
+}),true);
+assert.equal(portHarnessNeedsCandidateRetry({
+ ran:false,passed:0,failed:0,note:"harness has no splice marker",
+}),true);
+assert.equal(portHarnessNeedsCandidateRetry({
+ ran:true,ok:false,passed:0,failed:2,note:"exit 1",
+}),false);
+assert.equal(portHarnessNeedsCandidateRetry({
+ ran:true,ok:true,passed:2,failed:0,note:"",
+}),false);
+assert.equal(portHarnessNeedsCandidateRetry({
+ ran:false,passed:0,failed:0,note:"sandbox unavailable",
+}),false);
+console.log("PASS: independent port harness overlaps translation, falls back safely, joins failures and retries only integration errors");
