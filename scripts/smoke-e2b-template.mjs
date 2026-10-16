@@ -23,7 +23,7 @@ if (!key || !alias) {
       "test \"$(command -v python3)\" != ''",
       "if [ \"$COUNCIL_LAB_TEMPLATE_REVISION\" = '' ]; then exit 49; fi",
     ].join("; ");
-    const quote = value => "\'" + String(value).replaceAll("\'", "\'\\\"\'\\\"\'") + "\'";
+    const quote = value => "'" + String(value).replaceAll("'", String.raw`'"'"'`) + "'";
     const result=await sandbox.commands.run("bash -lc " + quote(cmd),{timeoutMs:60_000});
     if (result.exitCode !== 0)throw new Error("Template smoke failed with exit "+result.exitCode+
       ": "+String(result.stderr||"").slice(0,600));
