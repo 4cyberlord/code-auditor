@@ -2244,6 +2244,16 @@ fn tracked_job_row<'a>(data: &'a Value, expected_id: &str) -> Option<&'a Value> 
         .and_then(|items| items.iter().find(|item| item.get("id").and_then(Value::as_str) == Some(expected_id)))
 }
 
+/// A final primary result is not the whole cloud report until its target
+/// language ports have reached their own terminal verification states.
+fn report_has_preparing_ports(report: &Value) -> bool {
+    report.get("report").unwrap_or(report).get("ports")
+        .and_then(Value::as_array)
+        .is_some_and(|ports| ports.iter().any(|port|
+            matches!(port.get("status").and_then(Value::as_str),
+                Some("preparing" | "pending" | "running"))))
+}
+
 async fn refresh_job() -> Result<(), String> {
     for view in ["coding", "mcq"] {
         if let Some(job) = read_submitted_job_for(view)? {
@@ -2268,7 +2278,8 @@ async fn refresh_job() -> Result<(), String> {
             let Ok(raw) = fs::read_to_string(&path) else { continue; };
             let Ok(job) = serde_json::from_str::<SubmittedJob>(&raw) else { continue; };
             if matches!(job.status.as_str(), "failed" | "needs_attention" | "cancelled")
-                || (job.status == "completed" && job.report.is_some()) { continue; }
+                || (job.status == "completed" && job.report.as_ref()
+                    .is_some_and(|report| !report_has_preparing_ports(report))) { continue; }
             let result = refresh_one_job(job).await?;
             write_private(&path, serde_json::to_vec(&result).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
@@ -2287,6 +2298,7 @@ async fn refresh_one_job(mut tracked: SubmittedJob) -> Result<SubmittedJob, Stri
     ) && (tracked.status != "completed" || tracked.report.as_ref().is_some_and(|report| {
         let body = report.get("report").unwrap_or(report);
         body.get("stage").and_then(Value::as_str) != Some("provisional")
+            && !report_has_preparing_ports(report)
     }))
     {
         return Ok(tracked);
