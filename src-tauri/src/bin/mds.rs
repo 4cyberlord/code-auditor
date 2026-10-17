@@ -17,7 +17,7 @@ use tao::platform::macos::{
     ActivationPolicy, EventLoopExtMacOS, EventLoopWindowTargetExtMacOS, WindowExtMacOS,
 };
 use tao::{
-    dpi::{LogicalPosition, LogicalSize},
+    dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
     window::{Window, WindowBuilder},
 };
 use uuid::Uuid;
@@ -33,7 +33,11 @@ const BUCKET: &str = "azure:council-images";
 const AZURE_STORAGE_VERSION: &str = "2023-11-03";
 const MAX_IMAGES: usize = 10;
 const OVERLAY_WIDTH: f64 = 1320.0;
-const OVERLAY_HEIGHT: f64 = 950.0;
+// The normal capture workspace deliberately has more vertical room than the
+// original HUD: screenshots, the solution, and the thought pane should not
+// compete for a short window. Code-focus uses the monitor's full physical
+// work area independently of this normal size.
+const OVERLAY_HEIGHT: f64 = 1_060.0;
 const INSTANCE_LOCK: &str = ".mds_daemon.lock";
 const HELPER_USER_AGENT: &str =
  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
@@ -1322,25 +1326,26 @@ fn code_focus_geometry<T>(
     window: &Window,
     event_loop: &tao::event_loop::EventLoopWindowTarget<T>,
     mode: u8,
-) -> Option<(LogicalPosition<f64>, LogicalSize<f64>)> {
+) -> Option<(PhysicalPosition<i32>, PhysicalSize<u32>)> {
     let monitor = window.current_monitor().or_else(|| event_loop.primary_monitor())?;
-    let scale = monitor.scale_factor();
     let location = monitor.position();
     let extent = monitor.size();
-    let width = extent.width as f64 / scale;
-    let height = extent.height as f64 / scale;
-    let origin_x = location.x as f64 / scale;
-    let origin_y = location.y as f64 / scale;
-    let half = (width / 2.0).floor();
-    let inset = 8.0;
+    // Monitor positions are already physical pixels. Passing them through a
+    // LogicalPosition applies a window scale factor again on Retina/mixed-DPI
+    // displays, which is why SL/SR could land in the wrong place. Keep this
+    // complete path physical from monitor discovery through window placement.
+    let half = extent.width / 2;
+    let inset = 8_u32;
     let (x, available_width) = match mode {
-        2 => (origin_x, half),
-        3 => (origin_x + half, width - half),
-        _ => (origin_x, width),
+        2 => (location.x, half),
+        3 => (location.x.saturating_add(half as i32), extent.width - half),
+        _ => (location.x, extent.width),
     };
+    let inner_width = available_width.saturating_sub(inset * 2).max(260);
+    let inner_height = extent.height.saturating_sub(inset * 2).max(260);
     Some((
-        LogicalPosition::new(x + inset, origin_y + inset),
-        LogicalSize::new((available_width - inset * 2.0).max(260.0), (height - inset * 2.0).max(260.0)),
+        PhysicalPosition::new(x.saturating_add(inset as i32), location.y.saturating_add(inset as i32)),
+        PhysicalSize::new(inner_width, inner_height),
     ))
 }
 
@@ -3447,18 +3452,19 @@ fn overlay_html() -> &'static str {
             .code-lines li[data-change="add"]{background:rgba(65,200,120,.16);border-left:3px solid rgba(65,200,120,.7)}
             .code-lines li[data-change="same"]{border-left:3px solid transparent}
             .code-lines li[data-change] code{overflow-wrap:anywhere}
-            /* Preserve the original HUD and overlay dimensions. Code-only
-               sheets are different display modes of the SAME protected window. */
-            body[data-code-focus="full"],body[data-code-focus="left"],body[data-code-focus="right"]{padding:10px 12px;gap:0}
+            /* SS is a standalone reader, not a squeezed version of the
+               capture HUD. SL/SR use that same reader in a monitor-anchored
+               half-screen window. */
+            body[data-code-focus="full"],body[data-code-focus="left"],body[data-code-focus="right"]{padding:0;gap:0}
             body[data-code-focus]:not([data-code-focus="normal"]) #hudbar{display:none}
             body[data-code-focus]:not([data-code-focus="normal"]) #panel{
               width:100%;height:100%;min-height:0;grid-template-columns:minmax(0,1fr);
-              border-radius:14px;background:linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base)}
+              border:0;border-radius:0;background:rgba(2,7,13,.92)}
             body[data-code-focus]:not([data-code-focus="normal"]) .pictures-pane{
-              box-sizing:border-box;width:100%;height:100%;min-height:0;padding:14px}
+              box-sizing:border-box;width:100%;height:100%;min-height:0;padding:0}
             body[data-code-focus]:not([data-code-focus="normal"]) .pictures-pane > :not(.solution-editor){display:none!important}
             body[data-code-focus]:not([data-code-focus="normal"]) .thought-pane{display:none!important}
-            body[data-code-focus]:not([data-code-focus="normal"]) .solution-editor{flex:1;width:100%;height:100%;min-height:0;border-radius:12px}
+            body[data-code-focus]:not([data-code-focus="normal"]) .solution-editor{flex:1;width:100%;height:100%;min-height:0;border:0;border-radius:0}
             body[data-code-focus]:not([data-code-focus="normal"]) .editor-head{display:none!important}
             body[data-code-focus]:not([data-code-focus="normal"]) .code-lines{font-size:17px;line-height:1.7;padding:19px 0}
             body[data-code-focus]:not([data-code-focus="normal"]) .code-lines li{grid-template-columns:minmax(0,1fr);min-height:29px;padding-left:16px}
