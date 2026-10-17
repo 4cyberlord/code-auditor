@@ -3326,7 +3326,22 @@ fn overlay_html() -> &'static str {
 	            // HUD labels come from the numeric command table handled by mac_shortcuts.
             // Keep the overlay's real capture controls, not generic demo shortcuts.
             window.setCodeFocusMode=function(mode){
-              document.body.dataset.codeFocus=['full','left','right'].includes(mode)?mode:'normal';
+              const previous=document.body.dataset.codeFocus||'normal';
+              const next=['full','left','right'].includes(mode)?mode:'normal';
+              if(previous==='normal'&&next!=='normal'){
+                window.__overlayDiffBeforeCodeFocus=window.__overlayDiffHidden===true;
+                // Code-only must show the clean verified code, never diff marks.
+                window.__overlayDiffHidden=true;
+              }else if(previous!=='normal'&&next==='normal'){
+                window.__overlayDiffHidden=window.__overlayDiffBeforeCodeFocus===true;
+              }
+              document.body.dataset.codeFocus=next;
+              const current=window.__overlayCurrentState;
+              const target=document.getElementById('solution-code');
+              if(current&&current.solution&&target){
+                renderOverlayCodeResult(target,current);
+                if(typeof renderVerifiedPorts==='function')renderVerifiedPorts(current);
+              }
             };
             window.setOverlayControls=function(view){
               const host=document.getElementById('hud-shortcuts');if(!host)return;
