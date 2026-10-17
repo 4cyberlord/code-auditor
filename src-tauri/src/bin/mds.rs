@@ -4022,7 +4022,7 @@ CA_CASE {"id":"statement example","input":{"n":4},"expected":6,"actual":6,"statu
                     "stdout": r#"CA_CASE {"id":"primary","input":{"n":2},"expected":2,"actual":2}"#}},
                 "ports": [{
                     "language": "Rust", "status": "verified", "code": "fn solve(n:i32)->i32{n}",
-                    "run": {"ran": true, "ok": true,
+                    "run": {"ran": true, "ok": true, "failed": 0,
                         "stdout": r#"CA_CASE {"id":"port","input":{"n":8},"expected":8,"actual":8}"#}
                 }]
             }})),
