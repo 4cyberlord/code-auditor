@@ -3570,6 +3570,7 @@ fn overlay_html() -> &'static str {
             .overlay-port-chip{padding:4px 8px;border-radius:8px;border:1px solid rgba(255,255,255,.22);background:rgba(255,255,255,.06);font-size:10px;color:rgba(255,255,255,.74)}
             .overlay-port-chip[data-selected="true"]{border-color:rgba(184,224,245,.7);background:rgba(184,224,245,.17);color:#fff}
             .overlay-port-chip[data-available="false"]{opacity:.44}
+            .overlay-port-dock-hint{padding:0 8px 8px;color:rgba(218,238,255,.76);font-size:10px;font-weight:700;letter-spacing:.02em}
 
             .overlay-diff-toggle{background:rgba(201,228,245,.12);border:1px solid rgba(201,228,245,.45);color:var(--text);padding:4px 8px;border-radius:7px;font:inherit;cursor:pointer}
             .code-lines li[data-change="remove"]{background:rgba(240,83,83,.18);border-left:3px solid rgba(240,83,83,.7)}
@@ -4004,6 +4005,9 @@ fn overlay_html() -> &'static str {
                 list.append(chip);
               }
               section.append(list);editor.after(section);
+              const dockHint=document.createElement('div');dockHint.className='overlay-port-dock-hint';
+              dockHint.textContent='Dock selected verified solution: SL left · SR right';
+              section.append(dockHint);
               if(!desired)return;
               const chosen=primaryLang===desired?primary:
                 validated.find(port=>canonicalPortLanguage(port.language)===desired);
