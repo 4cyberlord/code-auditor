@@ -319,8 +319,16 @@ mod mac_shortcuts {
                         _=>0,
                     };
                     if choice!=0 {
-                        if choice<=3 { LANGUAGE_COMMAND.store(choice,Ordering::SeqCst); }
-                        else { CODE_FOCUS_COMMAND.store(choice-3,Ordering::SeqCst); }
+                        // Preserve prior behavior: RR/CP/PY are active only
+                        // while the Coding overlay is visible. Only SS/SL/SR
+                        // may open the verified code sheet from another app.
+                        if choice<=3 {
+                            if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) {
+                                LANGUAGE_COMMAND.store(choice,Ordering::SeqCst);
+                            }
+                        } else {
+                            CODE_FOCUS_COMMAND.store(choice-3,Ordering::SeqCst);
+                        }
                         *previous=None;
                     }
                 }
