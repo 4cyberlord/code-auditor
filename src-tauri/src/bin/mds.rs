@@ -708,6 +708,8 @@ fn run() -> Result<(), String> {
     update_overlay(&webview, &active_view, &mut overlay_refresh)?;
     let mut overlay_visible = false;
     let mut overlay_alpha = 0.46_f64;
+    // 0 = normal Council overlay, 1 = code full, 2 = left, 3 = right.
+    let mut code_focus_mode = 0_u8;
     let mut history_open = false;
     let mut history_rows: Vec<Value> = Vec::new();
     let mut history_index = 0_usize;
@@ -942,6 +944,12 @@ fn run() -> Result<(), String> {
                 command @ (1 | 2 | 3)
                     if capture_task.as_ref().is_none_or(|task| task.is_finished()) =>
                 {
+                    if code_focus_mode != 0 {
+                        code_focus_mode = 0;
+                        overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
+                        overlay.set_outer_position(overlay_position);
+                        let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
+                    }
                     if command == 3 {
                         // HH is a true toggle. Repeating it closes the whole
                         // overlay rather than leaving a hidden history sheet
@@ -1144,6 +1152,44 @@ fn run() -> Result<(), String> {
                 let _ = mac_shortcuts::take_history_open();
                 let _ = mac_shortcuts::take_history_back();
             }
+            // Code-only mode shares this exact capture-protected click-through window.
+            // Never show unverified code or move the main app into focus.
+            let focus_command=mac_shortcuts::take_code_focus_command();
+            if focus_command != 0 && !history_open {
+                let available = read_submitted_job_for("coding").ok().flatten()
+                    .and_then(|job| coding_overlay_state(&job).pointer("/solution/code")
+                        .and_then(Value::as_str).map(|text| !text.trim().is_empty()))
+                    .unwrap_or(false);
+                if available {
+                    // SS is an actual toggle. SL and SR select/dock their side;
+                    // repeated SL/SR also return to the original normal pane.
+                    let next = if focus_command == 1 {
+                        if code_focus_mode == 0 { 1 } else { 0 }
+                    } else if focus_command == code_focus_mode { 0 } else { focus_command };
+                    code_focus_mode = next;
+                    if next == 0 {
+                        overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
+                        overlay.set_outer_position(overlay_position);
+                    } else if let Some((point,size)) = code_focus_geometry(&overlay, event_loop_target, next) {
+                        overlay.set_inner_size(size);
+                        overlay.set_outer_position(point);
+                    }
+                    active_view = "coding".to_string();
+                    history_open = false;
+                    history_detail_open = false;
+                    mac_shortcuts::set_history_visible(false);
+                    let _ = webview.evaluate_script("window.closeSharedHistory()");
+                    let mode = match next { 1 => "full", 2 => "left", 3 => "right", _ => "normal" };
+                    let _ = webview.evaluate_script(&format!("window.setCodeFocusMode('{}')",mode));
+                    overlay_visible = true;
+                    event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                    let _ = show_overlay(&overlay, true);
+                    overlay_refresh.sent_state = None;
+                    let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                } else {
+                    eprintln!("code-focus unavailable: no E2B-verified coding solution yet");
+                }
+            }
             let requested_language=mac_shortcuts::take_language_command();
             if overlay_visible&&!history_open&&active_view=="coding"&&requested_language!=0 {
                 let language=match requested_language {1=>"rust",2=>"cpp",3=>"python",_=>""};
@@ -1173,6 +1219,34 @@ fn overlay_position<T>(event_loop: &tao::event_loop::EventLoop<T>) -> LogicalPos
         return LogicalPosition::new(x.max(0.0), y.max(0.0));
     }
     LogicalPosition::new(320.0, 100.0)
+}
+
+/// Coordinates use the monitor holding the helper overlay, not a hard-coded
+/// primary display. Geometry is logical (Tao compensates for Retina scaling).
+fn code_focus_geometry<T>(
+    window: &Window,
+    event_loop: &tao::event_loop::EventLoopWindowTarget<T>,
+    mode: u8,
+) -> Option<(LogicalPosition<f64>, LogicalSize<f64>)> {
+    let monitor = window.current_monitor().or_else(|| event_loop.primary_monitor())?;
+    let scale = monitor.scale_factor();
+    let location = monitor.position();
+    let extent = monitor.size();
+    let width = extent.width as f64 / scale;
+    let height = extent.height as f64 / scale;
+    let origin_x = location.x as f64 / scale;
+    let origin_y = location.y as f64 / scale;
+    let half = (width / 2.0).floor();
+    let inset = 8.0;
+    let (x, available_width) = match mode {
+        2 => (origin_x, half),
+        3 => (origin_x + half, width - half),
+        _ => (origin_x, width),
+    };
+    Some((
+        LogicalPosition::new(x + inset, origin_y + inset),
+        LogicalSize::new((available_width - inset * 2.0).max(260.0), (height - inset * 2.0).max(260.0)),
+    ))
 }
 
 fn overlay_window<T>(
