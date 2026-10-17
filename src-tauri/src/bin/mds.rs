@@ -3641,7 +3641,7 @@ fn overlay_html() -> &'static str {
                 .map(port=>canonicalPortLanguage(port.language)==='cpp'?'C++':
                   canonicalPortLanguage(port.language)==='rust'?'Rust':'Python'):[];
               progress.textContent=state.phase==='done'
-                ? (verifiedNames.length?'Council completed. Primary verified; independently tested ports: '+verifiedNames.join(', ')+'.':'Council completed. Only the verified primary is available; requested ports did not pass verification.'): 
+                ? (verifiedNames.length?'Council completed. Primary verified; independently tested ports: '+verifiedNames.join(', ')+'.':'Council completed. Only the verified primary is available; requested ports did not pass verification.'):
                 state.phase==='error'?'Council needs attention. See the diagnostic below.':
                 stage+(state.progress&&stage!==state.progress?' · '+String(state.progress).slice(0,145):'');
               agents.after(progress);
