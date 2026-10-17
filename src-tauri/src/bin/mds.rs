@@ -756,6 +756,12 @@ fn run() -> Result<(), String> {
                 12 => send_capture_to_council("right"),
                 13 => send_process_to_council(),
                 6 => {
+                        if code_focus_mode != 0 {
+                            code_focus_mode = 0;
+                            overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
+                            overlay.set_outer_position(overlay_position);
+                            let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
+                        }
                     // 00 starts a new Coding overlay workspace. Previous
                     // finished jobs remain archived; main-app runs are untouched.
                     active_view = "coding".to_string();
@@ -784,6 +790,12 @@ fn run() -> Result<(), String> {
                 }
                 20 | 22 | 23 | 31..=34 => {
                     let target_view = if command < 30 { "coding" } else { "mcq" };
+                        if code_focus_mode != 0 {
+                            code_focus_mode = 0;
+                            overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
+                            overlay.set_outer_position(overlay_position);
+                            let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
+                        }
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("screenshot capture already in progress");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -807,6 +819,14 @@ fn run() -> Result<(), String> {
                 }
                 24 | 35 => {
                     let target_view = if command == 24 { "coding" } else { "mcq" };
+                    if command == 35 {
+                        if code_focus_mode != 0 {
+                            code_focus_mode = 0;
+                            overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
+                            overlay.set_outer_position(overlay_position);
+                            let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
+                        }
+                    }
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("finish the screenshot selection before submitting");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -1156,7 +1176,8 @@ fn run() -> Result<(), String> {
             // Never show unverified code or move the main app into focus.
             let focus_command=mac_shortcuts::take_code_focus_command();
             if focus_command != 0 && !history_open {
-                let available = read_submitted_job_for("coding").ok().flatten()
+                let pending_new_batch = read_pending_for("coding").ok().flatten().is_some();
+                let available = !pending_new_batch && read_submitted_job_for("coding").ok().flatten()
                     .and_then(|job| coding_overlay_state(&job).pointer("/solution/code")
                         .and_then(Value::as_str).map(|text| !text.trim().is_empty()))
                     .unwrap_or(false);
