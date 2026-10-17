@@ -2813,7 +2813,9 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
         .filter(|port| port.get("status").and_then(Value::as_str) == Some("verified")
             && port.get("code").and_then(Value::as_str)
                 .is_some_and(|code| !code.trim().is_empty())
-            && port.pointer("/run/ran").and_then(Value::as_bool) == Some(true))
+            && port.pointer("/run/ran").and_then(Value::as_bool) == Some(true)
+            && port.pointer("/run/ok").and_then(Value::as_bool) == Some(true)
+            && port.pointer("/run/failed").and_then(Value::as_u64) == Some(0))
         .map(|port| serde_json::json!({
             "language": port.get("language"),
             "tests": actual_case_rows(port.pointer("/run/stdout")
@@ -2975,8 +2977,11 @@ fn coding_tests_from_report(body: &Value, winner: &str) -> Vec<Value> {
     // For a revised winner, only the rerun is authoritative.
     let revised = body.get("revisedRuns").and_then(|runs| runs.get(winner));
     let normal = body.get("runs").and_then(|runs| runs.get(winner));
-    let run = revised.filter(|run| run.get("ran").and_then(Value::as_bool) == Some(true))
-        .or(normal.filter(|run| run.get("ran").and_then(Value::as_bool) == Some(true)));
+    // A present revised candidate supersedes its original run. In that
+    // situation, never substitute old pre-repair cases as verification for
+    // the revised code shown to the user.
+    let selected = revised.or(normal);
+    let run = selected.filter(|run| run.get("ran").and_then(Value::as_bool) == Some(true));
     if let Some(stdout) = run.and_then(|run| run.get("stdout")).and_then(Value::as_str) {
         let rows = actual_case_rows(stdout);
         if !rows.is_empty() {
@@ -3320,7 +3325,8 @@ fn overlay_html() -> &'static str {
             body[data-code-focus]:not([data-code-focus="normal"]) .solution-editor{flex:1;width:100%;height:100%;min-height:0;border-radius:12px}
             body[data-code-focus]:not([data-code-focus="normal"]) .editor-head{display:none!important}
             body[data-code-focus]:not([data-code-focus="normal"]) .code-lines{font-size:17px;line-height:1.7;padding:19px 0}
-            body[data-code-focus]:not([data-code-focus="normal"]) .code-lines li{grid-template-columns:52px minmax(0,1fr);min-height:29px}
+            body[data-code-focus]:not([data-code-focus="normal"]) .code-lines li{grid-template-columns:minmax(0,1fr);min-height:29px;padding-left:16px}
+            body[data-code-focus]:not([data-code-focus="normal"]) .code-lines li::before{display:none}
             @media(prefers-reduced-motion:reduce){body[data-code-focus] #panel{transition:none}}
         </style></head><body><div class="hudbar" id="hudbar"><span class="hud-logo">CA</span><span class="hud-pause">||</span><span class="hud-meter"><i></i><i></i><i></i></span><span id="hud-shortcuts" class="hud-shortcuts"></span></div><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><script>
 	            // HUD labels come from the numeric command table handled by mac_shortcuts.
