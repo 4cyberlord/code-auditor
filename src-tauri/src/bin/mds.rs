@@ -3456,23 +3456,29 @@ fn overlay_html() -> &'static str {
                capture HUD. SL/SR use that same reader in a monitor-anchored
                half-screen window. */
             body[data-code-focus="full"],body[data-code-focus="left"],body[data-code-focus="right"]{padding:0;gap:0}
-            body[data-code-focus]:not([data-code-focus="normal"]) #hudbar{display:none}
-            body[data-code-focus]:not([data-code-focus="normal"]) #panel{
-              width:100%;height:100%;min-height:0;grid-template-columns:minmax(0,1fr);
-              border:0;border-radius:0;background:rgba(2,7,13,.92)}
-            body[data-code-focus]:not([data-code-focus="normal"]) .pictures-pane{
-              box-sizing:border-box;width:100%;height:100%;min-height:0;padding:0}
-            body[data-code-focus]:not([data-code-focus="normal"]) .pictures-pane > :not(.solution-editor){display:none!important}
-            body[data-code-focus]:not([data-code-focus="normal"]) .thought-pane{display:none!important}
-            body[data-code-focus]:not([data-code-focus="normal"]) .solution-editor{flex:1;width:100%;height:100%;min-height:0;border:0;border-radius:0}
-            body[data-code-focus]:not([data-code-focus="normal"]) .editor-head{display:none!important}
-            body[data-code-focus]:not([data-code-focus="normal"]) .code-lines{font-size:17px;line-height:1.7;padding:19px 0}
-            body[data-code-focus]:not([data-code-focus="normal"]) .code-lines li{grid-template-columns:minmax(0,1fr);min-height:29px;padding-left:16px}
-            body[data-code-focus]:not([data-code-focus="normal"]) .code-lines li::before{display:none}
+            body[data-code-focus]:not([data-code-focus="normal"]) #hudbar,
+            body[data-code-focus]:not([data-code-focus="normal"]) #panel{display:none!important}
+            #code-focus-sheet{position:fixed;inset:0;box-sizing:border-box;display:flex;min-width:0;min-height:0;background:rgba(2,7,13,.92);overflow:hidden}
+            #code-focus-sheet[hidden]{display:none}
+            #code-focus-code{box-sizing:border-box;flex:1;min-width:0;min-height:0;margin:0;padding:24px 26px;color:var(--code-text);font:530 17px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line}
+            #code-focus-code li{display:grid;grid-template-columns:minmax(0,1fr);min-height:29px;padding:0 16px;list-style:none;counter-increment:code-line}
+            #code-focus-code li::before{display:none}
             @media(prefers-reduced-motion:reduce){body[data-code-focus] #panel{transition:none}}
-        </style></head><body><div class="hudbar" id="hudbar"><span class="hud-logo">CA</span><span class="hud-pause">||</span><span class="hud-meter"><i></i><i></i><i></i></span><span id="hud-shortcuts" class="hud-shortcuts"></span></div><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><script>
+        </style></head><body><div class="hudbar" id="hudbar"><span class="hud-logo">CA</span><span class="hud-pause">||</span><span class="hud-meter"><i></i><i></i><i></i></span><span id="hud-shortcuts" class="hud-shortcuts"></span></div><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><section id="code-focus-sheet" hidden><ol id="code-focus-code"></ol></section><script>
 	            // HUD labels come from the numeric command table handled by mac_shortcuts.
             // Keep the overlay's real capture controls, not generic demo shortcuts.
+            window.renderCodeFocusSheet=function(){
+              const target=document.getElementById('code-focus-code');
+              const current=window.__overlayCurrentState;
+              if(!target)return;
+              const solution=current&&current.solution;
+              if(solution&&String(solution.code||'').trim()){
+                renderCodeLines(target,String(solution.code),String(solution.language||''));
+                target.scrollTop=0;
+              }else{
+                renderCodeLines(target,'Verified code is not available.','');
+              }
+            };
             window.setCodeFocusMode=function(mode){
               const previous=document.body.dataset.codeFocus||'normal';
               const next=['full','left','right'].includes(mode)?mode:'normal';
@@ -3484,12 +3490,9 @@ fn overlay_html() -> &'static str {
                 window.__overlayDiffHidden=window.__overlayDiffBeforeCodeFocus===true;
               }
               document.body.dataset.codeFocus=next;
-              const current=window.__overlayCurrentState;
-              const target=document.getElementById('solution-code');
-              if(current&&current.solution&&target){
-                renderOverlayCodeResult(target,current);
-                if(typeof renderVerifiedPorts==='function')renderVerifiedPorts(current);
-              }
+              const sheet=document.getElementById('code-focus-sheet');
+              if(sheet)sheet.hidden=next==='normal';
+              if(next!=='normal')window.renderCodeFocusSheet();
             };
             window.setOverlayControls=function(view){
               const host=document.getElementById('hud-shortcuts');if(!host)return;
@@ -3869,7 +3872,7 @@ fn overlay_html() -> &'static str {
               // Editing one version or importing from a live report never alters
               // the saved original code or the cloud report.
             }
-            window.updateOverlayState=function(state){baseUpdateOverlayState(state);window.setOverlayControls(state&&(state.kind==='mcq'||state.mcq)?'mcq':'coding');if(!state||state.kind!=='mcq'){renderStoryAgents(state||{});renderHistoryContext(state||{});renderVerifiedPorts(state||{});}};
+            window.updateOverlayState=function(state){baseUpdateOverlayState(state);window.setOverlayControls(state&&(state.kind==='mcq'||state.mcq)?'mcq':'coding');if(!state||state.kind!=='mcq'){renderStoryAgents(state||{});renderHistoryContext(state||{});renderVerifiedPorts(state||{});}if(document.body.dataset.codeFocus&&document.body.dataset.codeFocus!=='normal'){window.renderCodeFocusSheet();}};
     </script></body></html>"#
 }
 
