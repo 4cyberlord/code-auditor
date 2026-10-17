@@ -240,6 +240,28 @@ mod mac_shortcuts {
         fn CFRunLoopGetMain() -> CFRunLoopRef;
     }
 
+    // Physical HID usages are the same for 's'/'S', 'l'/'L' and
+    // 'r'/'R'. Shift affects character output, not this command mapping.
+    fn dock_pair_command(first: u32, second: u32) -> u8 {
+        match (first,second) {
+            (HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_L)=>5,
+            (HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_R)=>6,
+            _=>0,
+        }
+    }
+
+    #[cfg(test)]
+    mod dock_tests {
+        use super::*;
+        #[test]
+        fn sl_sr_use_case_independent_physical_key_usages() {
+            assert_eq!(dock_pair_command(HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_L),5);
+            assert_eq!(dock_pair_command(HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_R),6);
+            assert_eq!(dock_pair_command(HID_USAGE_KEYBOARD_L,HID_USAGE_KEYBOARD_S),0);
+            assert_eq!(dock_pair_command(HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_S),0);
+        }
+    }
+
     extern "C" fn input_value_callback(
         _context: *mut c_void,
         _result: IOReturn,
@@ -317,8 +339,7 @@ mod mac_shortcuts {
                         Some((HID_USAGE_KEYBOARD_R,HID_USAGE_KEYBOARD_R))=>1,
                         Some((HID_USAGE_KEYBOARD_C,HID_USAGE_KEYBOARD_P))=>2,
                         Some((HID_USAGE_KEYBOARD_P,HID_USAGE_KEYBOARD_Y))=>3,
-                        Some((HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_L))=>5,
-                        Some((HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_R))=>6,
+                        Some((first,second))=>dock_pair_command(first,second),
                         _=>0,
                     };
                     if choice!=0 {
@@ -3982,6 +4003,18 @@ fn overlay_html() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_reader_uses_verified_current_state_and_preserves_click_through() {
+        let html=overlay_html();
+        assert!(html.contains("window.setCodeFocusSolution=function(state,followLive)"));
+        assert!(html.contains("String(state.runId||'')===watched"));
+        assert!(html.contains("port.status==='verified'") || html.contains("item.status==='verified'"));
+        assert!(html.contains("#code-focus-sheet[hidden]{display:none}"));
+        assert!(html.contains("window.renderCodeFocusSheet=function()"));
+        assert!(html.contains("target.dataset.renderedCode===fingerprint"));
+        assert!(html.contains("next=['left','right'].includes(mode)"));
+    }
 
     #[test]
     fn coding_overlay_places_council_monitor_above_thought_process() {
