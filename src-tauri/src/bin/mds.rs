@@ -3910,6 +3910,48 @@ mod tests {
         assert!(state["progress"].as_str().unwrap_or("").contains("Asking models"));
     }
 
+
+    #[test]
+    fn overlay_case_rows_show_only_real_executed_inputs_expected_and_actual() {
+        let trace = [
+            "PASS example one",
+            r#"CA_CASE {"id":"example 1","input":{"n":4},"expected":6,"actual":6,"status":"passed"}"#,
+            r#"CA_CASE {"id":"example 2","input":{"n":9},"expected":12,"actual":154,"status":"passed"}"#,
+            "PASS summary without I/O",
+            "CA_CASE not valid json",
+        ].join("\n");
+        let report = serde_json::json!({
+            "winner": "B",
+            "runs": {"A":{"ran":true,"stdout":r#"CA_CASE {"input":0,"expected":0,"actual":0}"#},
+                     "B":{"ran":true,"stdout": trace}},
+        });
+        let rows = coding_tests_from_report(&report, "B");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["input"]["n"], 4);
+        assert_eq!(rows[0]["expected"], 6);
+        assert_eq!(rows[0]["actual"], 6);
+        assert_eq!(rows[0]["status"], "passed");
+        // An incorrect status claimed by a generator cannot hide a mismatch.
+        assert_eq!(rows[1]["status"], "failed");
+        assert_eq!(rows[1]["actual"], 154);
+        assert_eq!(rows[1]["expected"], 12);
+        assert!(coding_tests_from_report(&report, "A").is_empty() == false);
+        assert!(coding_tests_from_report(&report, "C").is_empty());
+    }
+
+    #[test]
+    fn completed_cloud_reports_with_preparing_ports_still_require_refresh() {
+        assert!(report_has_preparing_ports(&serde_json::json!({
+            "report":{"stage":"final","ports":[{"language":"rust","status":"preparing"}]}
+        })));
+        assert!(!report_has_preparing_ports(&serde_json::json!({
+            "report":{"stage":"final","ports":[
+                {"language":"rust","status":"verified","code":"fn main() {}"},
+                {"language":"c++","status":"failed"}
+            ]}
+        })));
+    }
+
     #[test]
     fn coding_overlay_presents_verified_early_code_and_upgrade_diff_history() {
         let report = serde_json::json!({"job_id":"early-1","report":{
@@ -3927,7 +3969,8 @@ mod tests {
         let state = coding_overlay_state(&job);
         assert_eq!(state["solution"]["status"],"provisional");
         assert_eq!(state["solution"]["code"],"print(1)");
-        assert_eq!(state["tests"][0]["status"],"passed");
+        assert!(state["tests"].as_array().unwrap().is_empty(),
+            "Aggregate provisional totals must not masquerade as executed case I/O");
         assert_eq!(state["phase"],"running");
         assert!(is_usable_cloud_report(&serde_json::json!({"report":{
             "stage":"provisional","provisional":{"status":"provisional",
@@ -3979,7 +4022,8 @@ mod tests {
         let state = history_coding_state("saved-main-run", &report);
         assert_eq!(state["solution"]["code"], "print(42)");
         assert_eq!(state["presentation"]["approach"], "Scan the input once.");
-        assert_eq!(state["tests"][0]["status"], "passed");
+        assert!(state["tests"].as_array().unwrap().is_empty(),
+            "Legacy candidate pass totals are not individual case evidence");
         assert_eq!(state["ports"][0]["language"], "rust");
     }
 
