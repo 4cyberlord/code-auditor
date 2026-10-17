@@ -2805,11 +2805,27 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
     };
     let solution = body.and_then(|b| coding_solution_from_report(b, winner, &candidates));
     let tests = body.map(|body| coding_tests_from_report(body, winner)).unwrap_or_default();
+    // Every selected port owns its own independent test evidence. Do not
+    // present Python cases as if a Rust/C++ translation had run them.
+    let port_cases: Vec<Value> = body.and_then(|body| body.get("ports"))
+        .and_then(Value::as_array)
+        .into_iter().flatten()
+        .filter(|port| port.get("status").and_then(Value::as_str) == Some("verified")
+            && port.get("code").and_then(Value::as_str)
+                .is_some_and(|code| !code.trim().is_empty())
+            && port.pointer("/run/ran").and_then(Value::as_bool) == Some(true))
+        .map(|port| serde_json::json!({
+            "language": port.get("language"),
+            "tests": actual_case_rows(port.pointer("/run/stdout")
+                .and_then(Value::as_str).unwrap_or(""))
+        }))
+        .collect();
     serde_json::json!({
         "runId": job.id, "updatedAt": now(), "kind": "coding",
         "phase": phase, "status": job.status,
         "progress": progress, "error": job.error,
         "agents": agents, "solution": solution, "tests": tests,
+        "portCases": port_cases,
         "presentation": body.and_then(|b| b.get("presentation")).cloned(),
         "insights": body.map(coding_sidebar_evidence),
         "ports": body.and_then(|b|b.get("ports")).cloned().unwrap_or_else(||Value::Array(Vec::new())),
@@ -3680,6 +3696,10 @@ fn overlay_html() -> &'static str {
               }
               if(title)title.textContent='solution.'+(desired==='cpp'?'cpp':desired==='python'?'py':'rs');
               if(source)source.textContent=chosen===primary?'Council-verified primary':'Independently E2B-verified port';
+              const cases=chosen===primary?state.tests:
+                (Array.isArray(state.portCases)?state.portCases.find(entry=>canonicalPortLanguage(entry.language)===desired)?.tests:[]);
+              const caseTarget=document.getElementById('tests'),caseCount=document.getElementById('tests-count');
+              if(caseTarget&&caseCount)renderSmartTests(caseTarget,caseCount,String(chosen.code||''),cases);
               // Editing one version or importing from a live report never alters
               // the saved original code or the cloud report.
             }
