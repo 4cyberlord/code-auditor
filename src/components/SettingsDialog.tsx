@@ -1593,17 +1593,18 @@ function CouncilCard() {
   const working = councilModelsInUse.filter((m) => probes[m]?.ok).length;
 
   return (
-    <div className="provider-card">
+    <div className="provider-card settings-council-card">
       <div className="top">
         <span className="dot" style={{ background: "var(--accent)" }} />
         <span className="name">Engineering council</span>
-        <span className="vendor">solve · execute · review · revise · judge · synthesize</span>
+        <span className="vendor">Solvers · judges · synthesis</span>
         <span className="spacer" />
         <span className="badge" data-tone={enabled ? (reachable ? "good" : "warn") : undefined}>
           {enabled ? (reachable ? "armed" : "needs the gateway") : "off"}
         </span>
       </div>
 
+      <div className="settings-form-section-heading"><span>Run preferences</span><small>Choose how Council responds</small></div>
       <div className="row">
         <label htmlFor="council-on">Convene on Run</label>
         <div className="segmented" style={{ flex: 1 }}>
@@ -1619,11 +1620,7 @@ function CouncilCard() {
           ))}
         </div>
       </div>
-      <p className="hint">
-        The council re-solves the problem, tests each code candidate, reviews the results, and
-        produces a final recommendation. Failed tests cannot win. Expect about 36 extra requests
-        per run, so low gateway limits make council runs slower.
-      </p>
+      <details className="settings-inline-help"><summary>How Council mode works</summary><p>The council re-solves the problem, tests each code candidate, reviews the results, and produces a final recommendation. Failed tests cannot win. Expect about 36 extra requests per run, so low gateway limits make council runs slower.</p></details>
 
       <div className="row">
         <label htmlFor="default-solution-language">Default solution language</label>
@@ -1638,10 +1635,7 @@ function CouncilCard() {
           <option value="Rust">Rust</option>
         </select>
       </div>
-      <p className="hint">
-        This chooses the primary solution shown first. The other two languages remain available as
-        independently E2B-tested ports after the primary solution is verified.
-      </p>
+      <p className="settings-form-caption">This is the first solution shown. Other languages remain available as separately tested ports.</p>
 
       <div className="row">
         <label htmlFor="memory-target">Memory goal</label>
@@ -1651,7 +1645,7 @@ function CouncilCard() {
           style={{ flex: 1 }} />
         <span className="vendor">MB (soft target)</span>
       </div>
-      <p className="hint">Correctness and Big-O complexity come first. A 0 ms display is rounded timing, and interpreter or platform overhead may exceed this memory goal.</p>
+      <details className="settings-inline-help"><summary>Memory goal details</summary><p>Correctness and Big-O complexity come first. A 0 ms display is rounded timing, and interpreter or platform overhead may exceed this memory goal.</p></details>
 
       <div className="row">
         <label htmlFor="council-include">Panel Answers Are Candidates</label>
@@ -1674,6 +1668,7 @@ function CouncilCard() {
         </div>
       </div>
 
+      <div className="settings-form-section-heading"><span>Execution</span><small>Isolated sandbox testing</small></div>
       <div className="row">
         <label htmlFor="execution-provider">Program Tests</label>
         <span className="chip">E2B Cloud only</span>
@@ -1696,21 +1691,18 @@ function CouncilCard() {
             />
             <span className="vendor">seconds</span>
           </div>
-          <p className="hint">
-            Runs candidate tests in isolated E2B Linux sandboxes. The worker needs{" "}
-            <span className="mono">E2B_API_KEY</span>. Only output, timing, memory, and the
-            sandbox ID are saved.
-          </p>
+          <details className="settings-inline-help"><summary>E2B sandbox requirements</summary><p>Candidate tests run in isolated E2B Linux sandboxes. The worker requires an <code>E2B_API_KEY</code>. Only output, timing, memory, and sandbox ID are saved.</p></details>
         </>
       )}
-      <div className="row" style={{ alignItems: "start" }}>
+      <div className="settings-form-section-heading"><span>Model roster</span><small>One model per line · changes save when you leave a field</small></div>
+      <div className="row settings-roster-row">
         <label htmlFor="council-solvers" style={{ paddingTop: 6 }}>
           Solvers
         </label>
         <textarea
           id="council-solvers"
           className="field mono"
-          rows={10}
+          rows={5}
           spellCheck={false}
           value={
             solversDraft ??
@@ -1723,19 +1715,16 @@ function CouncilCard() {
           style={{ flex: 1, resize: "vertical" }}
         />
       </div>
-      <p className="hint">
-        Enter 2–4 approved gateway model IDs, one per line. Add <span className="mono">/responses</span>{" "}
-        for Responses API models such as Codex. Panel models are not requested twice.
-      </p>
+      <p className="settings-form-caption">2–10 model IDs · add <code>/responses</code> for Responses API.</p>
 
-      <div className="row" style={{ alignItems: "start" }}>
+      <div className="row settings-roster-row">
         <label htmlFor="council-judges" style={{ paddingTop: 6 }}>
           Judges
         </label>
         <textarea
           id="council-judges"
           className="field mono"
-          rows={5}
+          rows={4}
           spellCheck={false}
           value={
             judgesDraft ?? settings.councilJudges.map((j) => `${j.model}/${j.emphasis}`).join("\n")
@@ -1745,10 +1734,7 @@ function CouncilCard() {
           style={{ flex: 1, resize: "vertical" }}
         />
       </div>
-      <p className="hint">
-        Enter one <span className="mono">model/emphasis</span> per line. Each judge reviews the
-        full record, with extra focus on its emphasis. Use 1–7 seats.
-      </p>
+      <p className="settings-form-caption">1–5 judge seats · <code>model/emphasis</code> per line.</p>
 
       <div className="row">
         <label htmlFor="council-synth">Synthesizer</label>
@@ -1763,12 +1749,11 @@ function CouncilCard() {
             <option key={model} value={model}>{model}</option>)}
         </select>
       </div>
-      <p className="hint">
-        Also writes the test harness. Its exact route must be available on the selected gateway.
-      </p>
+      <details className="settings-inline-help"><summary>Model roster format</summary><p>Panel models are not requested twice. A solver may use <code>/responses</code> or <code>/chat</code>. Judges emphasize algorithms, correctness, performance, engineering or security. The synthesizer also writes the test harness and must be available on the selected gateway.</p></details>
 
       {reachable && (
         <>
+          <div className="settings-form-section-heading"><span>Roster health</span><small>Gateway availability and live model probes</small></div>
           <div className="section-label" style={{ margin: "10px 0 6px", display: "flex", gap: 8, alignItems: "center" }}>
             <span>Roster health</span>
             <span className="spacer" />
@@ -1821,7 +1806,7 @@ function CouncilCard() {
               synthesis === m ? "synthesis" : null,
             ].filter(Boolean);
             return (
-              <div className="row" key={m} style={{ gridTemplateColumns: "1fr auto auto auto", gap: 6 }}>
+              <div className="row settings-model-health-row" key={m}>
                 <span className="field mono" style={{ opacity: 0.75, overflow: "hidden", textOverflow: "ellipsis" }}>
                   {m}
                 </span>
@@ -1837,10 +1822,7 @@ function CouncilCard() {
               </div>
             );
           })}
-          <p className="hint">
-            This list shows what your key can reach. A <b>Not on key</b> model must be enabled at
-            TokenRouter or corrected here before it can answer.
-          </p>
+          <details className="settings-inline-help"><summary>Understanding probe results</summary><p>“Not on key” means the router did not list the model. Enable it for this gateway, or correct its ID before running Council. Probe errors may instead mean timeouts or rate limits; inspect the exact badge reason.</p></details>
         </>
       )}
     </div>
@@ -1918,11 +1900,11 @@ function CaptureCard() {
           <span className="spacer" />
           <span className="vendor">{helper?.installed ? "installed" : "not installed"}</span>
         </div>
-        <p className="hint" style={{ marginTop: 0 }}>
-          Keeps the background workflows available from any app. The first digit routes the
-          screenshot, and the second picks its shape. It needs Input Monitoring; the helper needs
-          Screen Recording permission.
-        </p>
+        <p className="settings-form-caption">Manage background captures without opening the main window.</p>
+        <details className="settings-inline-help">
+          <summary>Permissions and capture sequence</summary>
+          <p>The first digit chooses the workflow and the second the screenshot shape. The helper requires macOS Input Monitoring and Screen Recording permissions.</p>
+        </details>
         <div className="row">
           <label>State</label>
           {/* "Installed" used to mean a file existed. It now means launchd has
@@ -1993,10 +1975,10 @@ function CaptureCard() {
             </button>
           ))}
         </div>
-        <p className="hint" style={{ marginTop: 0 }}>
-          Auto lets the background worker switch to MCQ when the captured text has answer choices.
-          Force MCQ when you want the helper to treat the next batch as a multiple-choice question.
-        </p>
+        <details className="settings-inline-help">
+          <summary>How automatic overlay mode works</summary>
+          <p>Auto switches to MCQ when the captured text contains answer choices. Force MCQ to handle the next capture as a multiple-choice question.</p>
+        </details>
         <div className="row">
           <label htmlFor="mcq-model">MCQ Model</label>
           <select
@@ -2036,10 +2018,8 @@ function CaptureCard() {
             onClick={() => patch({ raiseOnCapture: !raise })}
           />
         </div>
-        <p className="hint" style={{ marginTop: 0 }}>
-          {raise
-            ? "The window comes to the front as soon as a capture lands."
-            : "The window stays where it is. The capture is waiting in the app when you next open it \u2014 which is the point of a global shortcut: you do not have to leave what you were looking at."}
+        <p className="settings-form-caption">
+          {raise ? "Bring the application forward after capturing." : "Keep the application in the background after capturing."}
         </p>
       </div>
 
@@ -2060,12 +2040,10 @@ function CaptureCard() {
             onChange={(e) => patch({ maxImages: Number(e.target.value) })}
           />
         </div>
-        <p className="hint">
-          Each image goes to every enabled agent: {maxImages} {maxImages === 1 ? "image" : "images"}{" "}
-          means up to {maxImages * 5} uploads. Captures are also saved to{" "}
-          <span style={{ fontFamily: "var(--font-mono)" }}>~/Library/Application Support/.com.apple.mds/cache/captures</span>{" "}
-          regardless, so lowering this never loses a grab.
-        </p>
+        <details className="settings-inline-help">
+          <summary>Image limits and saved captures</summary>
+          <p>Each image goes to enabled agents: {maxImages} {maxImages === 1 ? "image" : "images"} may mean up to {maxImages * 5} uploads. Captures also remain in <code>~/Library/Application Support/.com.apple.mds/cache/captures</code>; lowering the limit never deletes them.</p>
+        </details>
       </div>
 
       <div className="provider-card">
@@ -2095,16 +2073,10 @@ function CaptureCard() {
             <span style={{ fontSize: 12, color: "var(--text-dim)" }}>{route.route}</span>
           </div>
         ))}
-        <p className="hint">
-          Enter each two-digit code quickly. Capture codes stage an image in that workflow; 13, 25,
-          and 35 send that workflow’s staged images for processing. These work when the window is closed
-          because the Rust helper owns them. To change a regular shortcut,
-          set its environment variable before launch, for example{" "}
-          <span style={{ fontFamily: "var(--font-mono)" }}>
-            CODE_AUDITOR_SOLVE_KEY=&quot;Control+Alt+J&quot;
-          </span>
-          . If one stops working, another app may use the same combination.
-        </p>
+        <details className="settings-inline-help">
+          <summary>Using and customizing shortcuts</summary>
+          <p>Enter two-digit codes quickly. Capture codes stage images; 13, 25 and 35 submit staged images. The Rust helper works with the app closed. Configure regular shortcut environment variables before launch, such as <code>CODE_AUDITOR_SOLVE_KEY="Control+Alt+J"</code>. Conflicts with other apps can prevent a shortcut from working.</p>
+        </details>
       </div>
     </>
   );
