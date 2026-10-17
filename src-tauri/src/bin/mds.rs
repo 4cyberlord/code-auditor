@@ -188,6 +188,8 @@ mod mac_shortcuts {
     static HISTORY_OPEN: AtomicBool = AtomicBool::new(false);
     static HISTORY_BACK: AtomicBool = AtomicBool::new(false);
     static LANGUAGE_COMMAND: AtomicU8 = AtomicU8::new(0);
+    // SS toggles code-only view; SL/SR dock it left or right.
+    static CODE_FOCUS_COMMAND: AtomicU8 = AtomicU8::new(0);
     static LANGUAGE_KEY_HELD: AtomicU8 = AtomicU8::new(0);
     static LAST_LANGUAGE_KEY: Mutex<Option<(u32, Instant)>> = Mutex::new(None);
     static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
@@ -292,12 +294,12 @@ mod mac_shortcuts {
         let lang_key=match usage {
             HID_USAGE_KEYBOARD_R=>Some(1_u8), HID_USAGE_KEYBOARD_C=>Some(2_u8),
             HID_USAGE_KEYBOARD_P=>Some(4_u8), HID_USAGE_KEYBOARD_Y=>Some(8_u8),
+            HID_USAGE_KEYBOARD_S=>Some(16_u8), HID_USAGE_KEYBOARD_L=>Some(32_u8),
             _=>None,
         };
         if let Some(bit)=lang_key {
             if !pressed {LANGUAGE_KEY_HELD.fetch_and(!bit,Ordering::SeqCst);}
-            else if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst)
-                && !HISTORY_VISIBLE.load(Ordering::SeqCst)
+            else if !HISTORY_VISIBLE.load(Ordering::SeqCst)
                 && !CONTROL_DOWN.load(Ordering::SeqCst)
                 && !OPTION_DOWN.load(Ordering::SeqCst)
                 && !SHIFT_DOWN.load(Ordering::SeqCst)
@@ -311,9 +313,16 @@ mod mac_shortcuts {
                         Some((HID_USAGE_KEYBOARD_R,HID_USAGE_KEYBOARD_R))=>1,
                         Some((HID_USAGE_KEYBOARD_C,HID_USAGE_KEYBOARD_P))=>2,
                         Some((HID_USAGE_KEYBOARD_P,HID_USAGE_KEYBOARD_Y))=>3,
+                        Some((HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_S))=>4,
+                        Some((HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_L))=>5,
+                        Some((HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_R))=>6,
                         _=>0,
                     };
-                    if choice!=0 {LANGUAGE_COMMAND.store(choice,Ordering::SeqCst);*previous=None;}
+                    if choice!=0 {
+                        if choice<=3 { LANGUAGE_COMMAND.store(choice,Ordering::SeqCst); }
+                        else { CODE_FOCUS_COMMAND.store(choice-3,Ordering::SeqCst); }
+                        *previous=None;
+                    }
                 }
             }
         }else if pressed&&usage<HID_USAGE_KEYBOARD_LEFT_CONTROL{
@@ -498,6 +507,7 @@ mod mac_shortcuts {
     }
     pub fn take_number_command() -> u8 { NUMBER_COMMAND.swap(0, Ordering::SeqCst) }
     pub fn set_coding_overlay_visible(value: bool) { CODING_OVERLAY_VISIBLE.store(value, Ordering::SeqCst); }
+    pub fn take_code_focus_command() -> u8 { CODE_FOCUS_COMMAND.swap(0, Ordering::SeqCst) }
     pub fn take_fade_down() -> bool { FADE_DOWN.swap(false, Ordering::SeqCst) }
     pub fn take_fade_up() -> bool { FADE_UP.swap(false, Ordering::SeqCst) }
     pub fn take_history_previous() -> bool { HISTORY_PREVIOUS.swap(false, Ordering::SeqCst) }
