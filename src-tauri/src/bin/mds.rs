@@ -750,6 +750,7 @@ fn run() -> Result<(), String> {
     // A history reader stays on that specifically opened result while docking
     // from left to right. A live reader follows only the current Coding run.
     let mut code_focus_from_history = false;
+    let mut code_focus_live_run_id: Option<String> = None;
     let mut history_open = false;
     let mut history_rows: Vec<Value> = Vec::new();
     let mut history_index = 0_usize;
@@ -1020,6 +1021,24 @@ fn run() -> Result<(), String> {
 
         if overlay_visible && !history_open && last_overlay_refresh.elapsed() >= Duration::from_millis(500) {
             last_overlay_refresh = Instant::now();
+            // The main app can begin a new Coding question without one of the
+            // helper's numeric capture commands. A code-only reader for the
+            // previous run must then return to the normal Coding surface,
+            // instead of keeping an empty dock that needs two more shortcuts.
+            if code_focus_mode != 0 && !code_focus_from_history {
+                let no_pending = matches!(read_pending_for("coding"), Ok(None));
+                let job = read_submitted_job_for("coding").ok().flatten();
+                let current = code_focus_live_run_id.as_deref().is_some_and(|id|
+                    job.as_ref().is_some_and(|job| job.id == id && code_focus_eligible(Some(job), no_pending)));
+                if !current {
+                    code_focus_mode = 0;
+                    code_focus_live_run_id = None;
+                    overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
+                    overlay.set_outer_position(overlay_position);
+                    let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
+                    let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
+                }
+            }
             let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
         }
 
@@ -1038,6 +1057,7 @@ fn run() -> Result<(), String> {
                     if was_code_reader {
                         code_focus_mode = 0;
                         code_focus_from_history = false;
+                        code_focus_live_run_id = None;
                         overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
                         overlay.set_outer_position(overlay_position);
                         let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
@@ -1338,6 +1358,9 @@ fn run() -> Result<(), String> {
                         // this same run; opened History results remain frozen.
                         let follow_live = !selected_history;
                         code_focus_from_history = selected_history;
+                        code_focus_live_run_id = if follow_live {
+                            code_state_id(chosen_state.as_ref().expect("verified reader source"))
+                        } else { None };
                         let _ = webview.evaluate_script(&format!(
                             "window.setCodeFocusSolution({},{});",
                             serde_json::to_string(chosen_state.as_ref().expect("verified reader source"))
@@ -1348,6 +1371,7 @@ fn run() -> Result<(), String> {
                         let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
                         history_code_focus_state = None;
                         code_focus_from_history = false;
+                        code_focus_live_run_id = None;
                     }
                     let _ = webview.evaluate_script(&format!("window.setCodeFocusMode('{}')",mode));
                     overlay_visible = true;
@@ -3098,6 +3122,11 @@ fn code_focus_eligible(job: Option<&SubmittedJob>, no_pending_batch: bool) -> bo
 /// The reader accepts only the exact normalized coding state which already
 /// passed the E2B-backed solution gate. This is also used for a result opened
 /// from the Coding overlay's history, never for an unselected history row.
+fn code_state_id(state: &Value) -> Option<String> {
+    state.get("runId").and_then(Value::as_str).filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
 fn code_focus_state_eligible(state: &Value) -> bool {
     let verified = matches!(state.pointer("/solution/status").and_then(Value::as_str),
         Some("provisional" | "reviewed"));
