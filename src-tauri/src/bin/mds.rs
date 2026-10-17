@@ -726,6 +726,9 @@ fn run() -> Result<(), String> {
     let mut overlay_alpha = 0.46_f64;
     // 0 = normal Council overlay, 2 = code reader left, 3 = code reader right.
     let mut code_focus_mode = 0_u8;
+    // A history reader stays on that specifically opened result while docking
+    // from left to right. A live reader follows only the current Coding run.
+    let mut code_focus_from_history = false;
     let mut history_open = false;
     let mut history_rows: Vec<Value> = Vec::new();
     let mut history_index = 0_usize;
@@ -1013,6 +1016,7 @@ fn run() -> Result<(), String> {
                     let was_code_reader = code_focus_mode != 0;
                     if was_code_reader {
                         code_focus_mode = 0;
+                        code_focus_from_history = false;
                         overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
                         overlay.set_outer_position(overlay_position);
                         let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
@@ -1276,18 +1280,20 @@ fn run() -> Result<(), String> {
                 // unreadable fresh capture must never unlock an older answer.
                 let no_pending_batch = matches!(read_pending_for("coding"), Ok(None));
                 let current_job = read_submitted_job_for("coding").ok().flatten();
-                let opened_history = history_detail_open
-                    .then(|| history_code_focus_state.clone())
-                    .flatten();
+                let selected_history = history_detail_open
+                    || (code_focus_mode != 0 && code_focus_from_history);
+                let opened_history = selected_history.then(|| history_code_focus_state.clone()).flatten();
                 let live_state = current_job.as_ref()
                     .filter(|job| code_focus_eligible(Some(job), no_pending_batch))
                     .map(coding_overlay_state);
-                // When an explicitly opened HH result is selected, do not
-                // silently substitute a different live question.
-                let chosen_state = if history_detail_open {
+                // A selected History result takes priority, not an unrelated
+                // live batch. The same dock shortcut always lets us leave the
+                // reader even if the underlying job later becomes unavailable.
+                let chosen_state = if selected_history {
                     opened_history.filter(code_focus_state_eligible)
                 } else { live_state };
-                if let Some(code_state) = chosen_state {
+                let returning_to_coding = code_focus_mode != 0 && focus_command == code_focus_mode;
+                if returning_to_coding || chosen_state.is_some() {
                     // SL/SR select their side; repeating the same dock pair
                     // returns to the normal capture pane.
                     let next = if focus_command == code_focus_mode { 0 } else { focus_command };
@@ -1309,15 +1315,18 @@ fn run() -> Result<(), String> {
                         // Pin the exact verified solution before the screen
                         // changes. Live jobs follow newer verified revisions of
                         // this same run; opened History results remain frozen.
-                        let follow_live = !history_detail_open;
+                        let follow_live = !selected_history;
+                        code_focus_from_history = selected_history;
                         let _ = webview.evaluate_script(&format!(
                             "window.setCodeFocusSolution({},{});",
-                            serde_json::to_string(&code_state).unwrap_or_else(|_| "null".into()),
+                            serde_json::to_string(chosen_state.as_ref().expect("verified reader source"))
+                                .unwrap_or_else(|_| "null".into()),
                             follow_live
                         ));
                     } else {
                         let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
                         history_code_focus_state = None;
+                        code_focus_from_history = false;
                     }
                     let _ = webview.evaluate_script(&format!("window.setCodeFocusMode('{}')",mode));
                     overlay_visible = true;
@@ -3503,7 +3512,7 @@ fn overlay_html() -> &'static str {
             body[data-code-focus="left"],body[data-code-focus="right"]{padding:0;gap:0}
             body[data-code-focus]:not([data-code-focus="normal"]) #hudbar,
             body[data-code-focus]:not([data-code-focus="normal"]) #panel{display:none!important}
-            #code-focus-sheet{position:fixed;inset:0;box-sizing:border-box;display:flex;min-width:0;min-height:0;background:rgba(2,7,13,.92);overflow:hidden}
+            #code-focus-sheet{position:fixed;inset:0;box-sizing:border-box;display:flex;min-width:0;min-height:0;background:rgba(2,7,13,.73);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);overflow:hidden}
             #code-focus-sheet[hidden]{display:none}
             #code-focus-code{box-sizing:border-box;flex:1;min-width:0;min-height:0;margin:0;padding:24px 26px;color:var(--code-text);font:530 17px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line}
             #code-focus-code li{display:grid;grid-template-columns:minmax(0,1fr);min-height:29px;padding:0 16px;list-style:none;counter-increment:code-line}
