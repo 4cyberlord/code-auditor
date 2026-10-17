@@ -936,12 +936,12 @@ fn run() -> Result<(), String> {
         }
     }
     #[cfg(target_os = "macos")]
-    let quiet_desktop_tap = match mac_shortcuts::register_quiet_desktop_filter() {
-        Ok(tap) => Some(tap),
+    let (mut quiet_desktop_tap, mut quiet_desktop_problem) = match mac_shortcuts::register_quiet_desktop_filter() {
+        Ok(tap) => (Some(tap), None),
         Err(error) => {
             eprintln!("{error}");
             write_helper_status(mac_shortcuts::hotkeys_ready(), Some(&error));
-            None
+            (None, Some(error))
         }
     };
     #[cfg(not(target_os = "macos"))]
@@ -985,6 +985,8 @@ fn run() -> Result<(), String> {
     let mut last_overlay_refresh = Instant::now();
     let mut last_history_refresh = Instant::now() - Duration::from_secs(60);
     let mut last_heartbeat = Instant::now();
+    #[cfg(target_os = "macos")]
+    let mut last_quiet_retry = Instant::now();
     let mut last_capture_cleanup = Instant::now() - Duration::from_secs(3600);
     #[cfg(target_os = "macos")]
     let helper_hotkeys_ready = mac_shortcuts::hotkeys_ready();
@@ -1005,9 +1007,6 @@ fn run() -> Result<(), String> {
     let mut capture_active_view: Option<String> = None;
 
     event_loop.run(move |_event, event_loop_target, control_flow| {
-        // Keep the event tap alive for this run loop's full lifetime.
-        #[cfg(target_os = "macos")]
-        let _ = &quiet_desktop_tap;
         // Global capture hotkeys do not wake Tao's event loop themselves.
         // Keep this short so the helper begins screencapture and restores the
         // click-through overlay promptly, without ever showing the overlay in
@@ -1201,7 +1200,31 @@ fn run() -> Result<(), String> {
         }
         if last_heartbeat.elapsed() >= Duration::from_secs(4) {
             #[cfg(target_os = "macos")]
-            write_helper_status(helper_hotkeys_ready, if helper_hotkeys_ready { None } else { Some("Input Monitoring permission unavailable") });
+            {
+                if quiet_desktop_tap.is_none()
+                    && last_quiet_retry.elapsed() >= Duration::from_secs(10)
+                {
+                    last_quiet_retry = Instant::now();
+                    match mac_shortcuts::register_quiet_desktop_filter() {
+                        Ok(tap) => {
+                            quiet_desktop_tap = Some(tap);
+                            quiet_desktop_problem = None;
+                        }
+                        Err(error) => quiet_desktop_problem = Some(error),
+                    }
+                }
+                if let Some(tap) = &quiet_desktop_tap {
+                    tap.enable();
+                }
+                write_helper_status(
+                    helper_hotkeys_ready,
+                    if helper_hotkeys_ready {
+                        quiet_desktop_problem.as_deref()
+                    } else {
+                        Some("Input Monitoring permission unavailable")
+                    },
+                );
+            }
             last_heartbeat = Instant::now();
         }
 
