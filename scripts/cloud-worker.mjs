@@ -2199,7 +2199,7 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
     // A failed port may be repaired once by the SAME model that authored the
     // verified source. The accepted reference harness remains unchanged.
     if (!isVerified(run) && canRepairPort(run,target,sourceSolverModel,
-          process.env.CODE_AUDITOR_E2B_PORT_REPAIR === "1")) {
+          process.env.CODE_AUDITOR_E2B_PORT_REPAIR !== "0")) {
       repair={attempted:true,model:sourceSolverModel,status:"failed"};
       await addEvent(job.id,"info","port_source_solver_repair",
         "Asking original verified source solver to repair the "+target+" translation.",
@@ -3761,9 +3761,17 @@ export async function runCouncilJob(job) {
     try {
     let reportWrite=Promise.resolve();
     await parallelMap(targets,2,async language=>{
-      const port=await verifiedLanguagePort(job,settings,baseUrl,models,judges,
-        portProblem,verifiedSource,decision.winner,language,knowledge,bench,semanticBlueprint,portWarmPool,
-        field3.find(candidate=>candidate.letter===decision.winner)?.model||"");
+      // A single port's unexpected transport/compiler exception must not
+      // prevent the other language from being verified and saved.
+      let port;
+      try {
+        port=await verifiedLanguagePort(job,settings,baseUrl,models,judges,
+          portProblem,verifiedSource,decision.winner,language,knowledge,bench,semanticBlueprint,portWarmPool,
+          field3.find(candidate=>candidate.letter===decision.winner)?.model||"");
+      } catch(error) {
+        port={language,sourceLetter:decision.winner,model:"",code:"",
+          status:"failed",error:String(error instanceof Error?error.message:error).slice(0,380)};
+      }
       if (process.env.CODE_AUDITOR_E2B_DIFFERENTIAL === "1" && port.status === "verified") {
         port.differential=compareDifferentialTraces(
           gateRuns[decision.winner]?.stdout, port.run?.stdout);
