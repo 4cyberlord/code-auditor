@@ -751,6 +751,10 @@ fn run() -> Result<(), String> {
     // from left to right. A live reader follows only the current Coding run.
     let mut code_focus_from_history = false;
     let mut code_focus_live_run_id: Option<String> = None;
+    // RR / CP / PY select a verified language port for one exact Coding run.
+    // Keep that choice on the native side too: SL/SR are native shortcuts and
+    // must not race the browser's 500ms state refresh when opening the reader.
+    let mut code_focus_language: Option<(String, String)> = None;
     let mut history_open = false;
     let mut history_rows: Vec<Value> = Vec::new();
     let mut history_index = 0_usize;
@@ -1310,6 +1314,21 @@ fn run() -> Result<(), String> {
                 let _ = mac_shortcuts::take_history_back();
                 history_detail_requested_id = None;
             }
+            // Handle the language pair before SL/SR.  A person can type CP
+            // then SL in rapid succession; opening the reader must use C++ on
+            // its very first render rather than briefly falling back to Python.
+            let requested_language=mac_shortcuts::take_language_command();
+            if overlay_visible&&!history_open&&active_view=="coding"&&requested_language!=0 {
+                let language=match requested_language {1=>"rust",2=>"cpp",3=>"python",_=>""};
+                if !language.is_empty() {
+                    let current = read_submitted_job_for("coding").ok().flatten()
+                        .map(|job| coding_overlay_state(&job));
+                    code_focus_language = current.as_ref().and_then(code_state_id)
+                        .map(|run_id| (run_id, language.to_string()));
+                    let _=webview.evaluate_script(&format!("window.selectVerifiedOverlayLanguage({});",
+                        serde_json::to_string(language).unwrap_or_else(|_|"\"\"".into())));
+                }
+            }
             // Code-only mode shares this exact capture-protected click-through window.
             // Never show unverified code or move the main app into focus.
             let focus_command=mac_shortcuts::take_code_focus_command();
@@ -1361,11 +1380,19 @@ fn run() -> Result<(), String> {
                         code_focus_live_run_id = if follow_live {
                             code_state_id(chosen_state.as_ref().expect("verified reader source"))
                         } else { None };
+                        // Apply a port choice only when it belongs to this
+                        // exact result.  A C++ choice from an earlier task
+                        // cannot leak into a later Python solution.
+                        let chosen_language = code_state_id(chosen_state.as_ref().expect("verified reader source"))
+                            .and_then(|run_id| code_focus_language.as_ref().and_then(|(selected_run, language)|
+                                (selected_run == &run_id).then(|| language.clone())))
+                            .unwrap_or_default();
                         let _ = webview.evaluate_script(&format!(
-                            "window.setCodeFocusSolution({},{});",
+                            "window.setCodeFocusSolution({},{},{});",
                             serde_json::to_string(chosen_state.as_ref().expect("verified reader source"))
                                 .unwrap_or_else(|_| "null".into()),
-                            follow_live
+                            follow_live,
+                            serde_json::to_string(&chosen_language).unwrap_or_else(|_| "\"\"".into())
                         ));
                     } else {
                         let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
@@ -1381,14 +1408,6 @@ fn run() -> Result<(), String> {
                     let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                 } else {
                     eprintln!("code-focus unavailable: current Coding result is not E2B-verified");
-                }
-            }
-            let requested_language=mac_shortcuts::take_language_command();
-            if overlay_visible&&!history_open&&active_view=="coding"&&requested_language!=0 {
-                let language=match requested_language {1=>"rust",2=>"cpp",3=>"python",_=>""};
-                if !language.is_empty() {
-                    let _=webview.evaluate_script(&format!("window.selectVerifiedOverlayLanguage({});",
-                        serde_json::to_string(language).unwrap_or_else(|_|"\"\"".into())));
                 }
             }
             // HH and arrow-only History doesn't change the active solving task.
@@ -3601,9 +3620,17 @@ fn overlay_html() -> &'static str {
               else target.replaceChildren();
               target.scrollTop=0;
             };
-            window.setCodeFocusSolution=function(state,followLive){
+            window.setCodeFocusSolution=function(state,followLive,language){
               window.__overlayCodeFocusState=focusVerified(state)?state:null;
               window.__overlayCodeFocusLiveRunId=followLive&&state?String(state.runId||''):null;
+              const desired=canonicalPortLanguage(language);
+              if(['python','rust','cpp'].includes(desired)&&state){
+                // Native SL/SR supplies the exact port selected by RR/CP/PY.
+                // Mark the matching run too so a normal pane refresh cannot
+                // clear the choice between docking and the first render.
+                window.__overlayDesiredLanguage=desired;
+                window.__overlayLanguageRunId=String(state.runId||'');
+              }
               window.renderCodeFocusSheet();
             };
             window.clearCodeFocusSolution=function(){
@@ -4036,7 +4063,8 @@ mod tests {
     #[test]
     fn code_reader_uses_verified_current_state_and_preserves_click_through() {
         let html=overlay_html();
-        assert!(html.contains("window.setCodeFocusSolution=function(state,followLive)"));
+        assert!(html.contains("window.setCodeFocusSolution=function(state,followLive,language)"));
+        assert!(html.contains("window.__overlayDesiredLanguage=desired"));
         assert!(html.contains("String(state.runId||'')===watched"));
         assert!(html.contains("port.status==='verified'") || html.contains("item.status==='verified'"));
         assert!(html.contains("#code-focus-sheet[hidden]{display:none}"));
