@@ -192,7 +192,7 @@ mod mac_shortcuts {
     static HISTORY_OPEN: AtomicBool = AtomicBool::new(false);
     static HISTORY_BACK: AtomicBool = AtomicBool::new(false);
     static LANGUAGE_COMMAND: AtomicU8 = AtomicU8::new(0);
-    // SS toggles code-only view; SL/SR dock it left or right.
+    // SL/SR dock the verified code reader left or right.
     static CODE_FOCUS_COMMAND: AtomicU8 = AtomicU8::new(0);
     static LANGUAGE_KEY_HELD: AtomicU8 = AtomicU8::new(0);
     static LAST_LANGUAGE_KEY: Mutex<Option<(u32, Instant)>> = Mutex::new(None);
@@ -317,14 +317,13 @@ mod mac_shortcuts {
                         Some((HID_USAGE_KEYBOARD_R,HID_USAGE_KEYBOARD_R))=>1,
                         Some((HID_USAGE_KEYBOARD_C,HID_USAGE_KEYBOARD_P))=>2,
                         Some((HID_USAGE_KEYBOARD_P,HID_USAGE_KEYBOARD_Y))=>3,
-                        Some((HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_S))=>4,
                         Some((HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_L))=>5,
                         Some((HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_R))=>6,
                         _=>0,
                     };
                     if choice!=0 {
                         // Preserve prior behavior: RR/CP/PY are active only
-                        // while the Coding overlay is visible. Only SS/SL/SR
+                        // while the Coding overlay is visible. Only SL/SR
                         // may open the verified code sheet from another app.
                         if choice<=3 {
                             if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) {
@@ -720,7 +719,7 @@ fn run() -> Result<(), String> {
     update_overlay(&webview, &active_view, &mut overlay_refresh)?;
     let mut overlay_visible = false;
     let mut overlay_alpha = 0.46_f64;
-    // 0 = normal Council overlay, 1 = code full, 2 = left, 3 = right.
+    // 0 = normal Council overlay, 2 = code reader left, 3 = code reader right.
     let mut code_focus_mode = 0_u8;
     let mut history_open = false;
     let mut history_rows: Vec<Value> = Vec::new();
@@ -734,7 +733,7 @@ fn run() -> Result<(), String> {
     let mut history_detail_requested_id: Option<String> = None;
     let mut history_detail_cache = std::collections::HashMap::<String, Value>::new();
     // A history result remains an independent, read-only source while it is
-    // opened. It lets SS/SL/SR extract that verified result without replacing
+    // opened. It lets SL/SR extract that verified result without replacing
     // it with the newest live coding job.
     let mut history_code_focus_state: Option<Value> = None;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
@@ -1275,11 +1274,9 @@ fn run() -> Result<(), String> {
                 let available = opened_history.as_ref().is_some_and(code_focus_state_eligible)
                     || code_focus_eligible(current_job.as_ref(), no_pending_batch);
                 if available {
-                    // SS is an actual toggle. SL and SR select/dock their side;
-                    // repeated SL/SR also return to the original normal pane.
-                    let next = if focus_command == 1 {
-                        if code_focus_mode == 0 { 1 } else { 0 }
-                    } else if focus_command == code_focus_mode { 0 } else { focus_command };
+                    // SL/SR select their side; repeating the same dock pair
+                    // returns to the normal capture pane.
+                    let next = if focus_command == code_focus_mode { 0 } else { focus_command };
                     code_focus_mode = next;
                     if next == 0 {
                         overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
@@ -1293,7 +1290,7 @@ fn run() -> Result<(), String> {
                     history_detail_open = false;
                     mac_shortcuts::set_history_visible(false);
                     let _ = webview.evaluate_script("window.closeSharedHistory()");
-                    let mode = match next { 1 => "full", 2 => "left", 3 => "right", _ => "normal" };
+                    let mode = match next { 2 => "left", 3 => "right", _ => "normal" };
                     if next != 0 {
                         if let Some(state) = opened_history {
                         let _ = webview.evaluate_script(&format!(
@@ -1367,7 +1364,7 @@ fn code_focus_geometry<T>(
     let (x, available_width) = match mode {
         2 => (location.x, half),
         3 => (location.x.saturating_add(half as i32), extent.width - half),
-        _ => (location.x, extent.width),
+        _ => return None,
     };
     let inner_width = available_width.saturating_sub(inset * 2).max(260);
     let inner_height = extent.height.saturating_sub(inset * 2).max(260);
@@ -3041,7 +3038,7 @@ fn coding_agents_from_events(job: &SubmittedJob) -> Vec<Value> {
     }).collect()
 }
 
-/// Eligibility for SS/SL/SR is derived from the exact current Coding job.
+/// Eligibility for SL/SR is derived from the exact current Coding job.
 /// An agent's generated candidate, a failed run, or a prior batch's solution
 /// must not unlock the global code-only shortcut.
 fn code_focus_eligible(job: Option<&SubmittedJob>, no_pending_batch: bool) -> bool {
@@ -3486,10 +3483,9 @@ fn overlay_html() -> &'static str {
             .code-lines li[data-change="add"]{background:rgba(65,200,120,.16);border-left:3px solid rgba(65,200,120,.7)}
             .code-lines li[data-change="same"]{border-left:3px solid transparent}
             .code-lines li[data-change] code{overflow-wrap:anywhere}
-            /* SS is a standalone reader, not a squeezed version of the
-               capture HUD. SL/SR use that same reader in a monitor-anchored
-               half-screen window. */
-            body[data-code-focus="full"],body[data-code-focus="left"],body[data-code-focus="right"]{padding:0;gap:0}
+            /* SL/SR use a standalone reader rather than a squeezed capture
+               HUD, each in a monitor-anchored half-screen window. */
+            body[data-code-focus="left"],body[data-code-focus="right"]{padding:0;gap:0}
             body[data-code-focus]:not([data-code-focus="normal"]) #hudbar,
             body[data-code-focus]:not([data-code-focus="normal"]) #panel{display:none!important}
             #code-focus-sheet{position:fixed;inset:0;box-sizing:border-box;display:flex;min-width:0;min-height:0;background:rgba(2,7,13,.92);overflow:hidden}
@@ -3520,7 +3516,7 @@ fn overlay_html() -> &'static str {
             window.clearCodeFocusSolution=function(){window.__overlayCodeFocusState=null;};
             window.setCodeFocusMode=function(mode){
               const previous=document.body.dataset.codeFocus||'normal';
-              const next=['full','left','right'].includes(mode)?mode:'normal';
+              const next=['left','right'].includes(mode)?mode:'normal';
               if(previous==='normal'&&next!=='normal'){
                 window.__overlayDiffBeforeCodeFocus=window.__overlayDiffHidden===true;
                 // Code-only must show the clean verified code, never diff marks.
@@ -3539,7 +3535,7 @@ fn overlay_html() -> &'static str {
                 ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
                 : view==='mcq'
                 ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31'],['Left','32'],['Right','33'],['Region','34'],['Submit','35']]
-                : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py'],['Code only','ss/sl/sr']];
+                : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py'],['Dock code','sl/sr']];
               const fingerprint=controls.map(([name,key])=>name+key).join('|');
               if(host.dataset.shortcutSet===fingerprint)return;
               host.dataset.shortcutSet=fingerprint;host.replaceChildren();
