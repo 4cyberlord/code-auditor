@@ -306,7 +306,8 @@ mod mac_shortcuts {
             else if !HISTORY_VISIBLE.load(Ordering::SeqCst)
                 && !CONTROL_DOWN.load(Ordering::SeqCst)
                 && !OPTION_DOWN.load(Ordering::SeqCst)
-                && !SHIFT_DOWN.load(Ordering::SeqCst)
+                // The physical S/L/R usages are identical for uppercase and
+                // lowercase; Shift must not disable the requested SL/SR docks.
                 && LANGUAGE_KEY_HELD.fetch_or(bit,Ordering::SeqCst)&bit==0
             {
                 if let Ok(mut previous)=LAST_LANGUAGE_KEY.lock(){
@@ -326,10 +327,14 @@ mod mac_shortcuts {
                         // while the Coding overlay is visible. Only SL/SR
                         // may open the verified code sheet from another app.
                         if choice<=3 {
-                            if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) {
+                            // Keep legacy RR/CP/PY unshifted, scoped to Coding.
+                            if !SHIFT_DOWN.load(Ordering::SeqCst)
+                                && CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) {
                                 LANGUAGE_COMMAND.store(choice,Ordering::SeqCst);
                             }
                         } else {
+                            // 5 -> left (2), 6 -> right (3). Both work with
+                            // Shift held throughout or on either letter.
                             CODE_FOCUS_COMMAND.store(choice-3,Ordering::SeqCst);
                         }
                         *previous=None;
@@ -1005,11 +1010,13 @@ fn run() -> Result<(), String> {
                 command @ (1 | 2 | 3)
                     if capture_task.as_ref().is_none_or(|task| task.is_finished()) =>
                 {
-                    if code_focus_mode != 0 {
+                    let was_code_reader = code_focus_mode != 0;
+                    if was_code_reader {
                         code_focus_mode = 0;
                         overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
                         overlay.set_outer_position(overlay_position);
                         let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
+                        let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
                     }
                     if command == 3 {
                         // HH is a true toggle. Repeating it closes the whole
@@ -1048,7 +1055,8 @@ fn run() -> Result<(), String> {
                         let target_view = if command == 1 { "coding" } else { "mcq" };
                         // CC/MM close their own open surface, while a command
                         // for the other surface switches without hiding.
-                        if overlay_visible && !history_open && active_view == target_view {
+                        if overlay_visible && !history_open && active_view == target_view
+                            && !was_code_reader {
                             overlay_visible = false;
                             let _ = show_overlay(&overlay, false);
                         } else {
@@ -1271,9 +1279,15 @@ fn run() -> Result<(), String> {
                 let opened_history = history_detail_open
                     .then(|| history_code_focus_state.clone())
                     .flatten();
-                let available = opened_history.as_ref().is_some_and(code_focus_state_eligible)
-                    || code_focus_eligible(current_job.as_ref(), no_pending_batch);
-                if available {
+                let live_state = current_job.as_ref()
+                    .filter(|job| code_focus_eligible(Some(job), no_pending_batch))
+                    .map(coding_overlay_state);
+                // When an explicitly opened HH result is selected, do not
+                // silently substitute a different live question.
+                let chosen_state = if history_detail_open {
+                    opened_history.filter(code_focus_state_eligible)
+                } else { live_state };
+                if let Some(code_state) = chosen_state {
                     // SL/SR select their side; repeating the same dock pair
                     // returns to the normal capture pane.
                     let next = if focus_command == code_focus_mode { 0 } else { focus_command };
@@ -1292,14 +1306,15 @@ fn run() -> Result<(), String> {
                     let _ = webview.evaluate_script("window.closeSharedHistory()");
                     let mode = match next { 2 => "left", 3 => "right", _ => "normal" };
                     if next != 0 {
-                        if let Some(state) = opened_history {
+                        // Pin the exact verified solution before the screen
+                        // changes. Live jobs follow newer verified revisions of
+                        // this same run; opened History results remain frozen.
+                        let follow_live = !history_detail_open;
                         let _ = webview.evaluate_script(&format!(
-                            "window.setCodeFocusSolution({});",
-                            serde_json::to_string(&state).unwrap_or_else(|_| "null".into())
+                            "window.setCodeFocusSolution({},{});",
+                            serde_json::to_string(&code_state).unwrap_or_else(|_| "null".into()),
+                            follow_live
                         ));
-                        } else {
-                            let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
-                        }
                     } else {
                         let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
                         history_code_focus_state = None;
@@ -1311,7 +1326,7 @@ fn run() -> Result<(), String> {
                     overlay_refresh.sent_state = None;
                     let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                 } else {
-                    eprintln!("code-focus unavailable: no E2B-verified coding solution yet");
+                    eprintln!("code-focus unavailable: current Coding result is not E2B-verified");
                 }
             }
             let requested_language=mac_shortcuts::take_language_command();
