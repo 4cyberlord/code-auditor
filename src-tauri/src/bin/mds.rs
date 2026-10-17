@@ -1250,11 +1250,11 @@ fn run() -> Result<(), String> {
             // Never show unverified code or move the main app into focus.
             let focus_command=mac_shortcuts::take_code_focus_command();
             if focus_command != 0 && !history_open {
-                let pending_new_batch = read_pending_for("coding").ok().flatten().is_some();
-                let available = !pending_new_batch && read_submitted_job_for("coding").ok().flatten()
-                    .and_then(|job| coding_overlay_state(&job).pointer("/solution/code")
-                        .and_then(Value::as_str).map(|text| !text.trim().is_empty()))
-                    .unwrap_or(false);
+                // Fail closed if the pending-batch file cannot be read: an
+                // unreadable fresh capture must never unlock an older answer.
+                let no_pending_batch = matches!(read_pending_for("coding"), Ok(None));
+                let current_job = read_submitted_job_for("coding").ok().flatten();
+                let available = code_focus_eligible(current_job.as_ref(), no_pending_batch);
                 if available {
                     // SS is an actual toggle. SL and SR select/dock their side;
                     // repeated SL/SR also return to the original normal pane.
@@ -3006,6 +3006,22 @@ fn coding_agents_from_events(job: &SubmittedJob) -> Vec<Value> {
         serde_json::json!({ "id": format!("seat-{}", index + 1), "label": label, "model": model,
             "status": status, "detail": detail, "error": error })
     }).collect()
+}
+
+/// Eligibility for SS/SL/SR is derived from the exact current Coding job.
+/// An agent's generated candidate, a failed run, or a prior batch's solution
+/// must not unlock the global code-only shortcut.
+fn code_focus_eligible(job: Option<&SubmittedJob>, no_pending_batch: bool) -> bool {
+    if !no_pending_batch { return false; }
+    let Some(job) = job else { return false; };
+    if job.mode != "council"
+        || matches!(job.status.as_str(), "failed" | "needs_attention" | "cancelled")
+    { return false; }
+    let state = coding_overlay_state(job);
+    let verified = matches!(state.pointer("/solution/status").and_then(Value::as_str),
+        Some("provisional" | "reviewed"));
+    verified && state.pointer("/solution/code").and_then(Value::as_str)
+        .is_some_and(|code| !code.trim().is_empty())
 }
 
 fn coding_solution_from_report(body: &Value, winner: &str, candidates: &[Value]) -> Option<Value> {
