@@ -733,6 +733,10 @@ fn run() -> Result<(), String> {
     let mut history_detail_fetch: Option<tokio::task::JoinHandle<(String, Result<Value,String>)>> = None;
     let mut history_detail_requested_id: Option<String> = None;
     let mut history_detail_cache = std::collections::HashMap::<String, Value>::new();
+    // A history result remains an independent, read-only source while it is
+    // opened. It lets SS/SL/SR extract that verified result without replacing
+    // it with the newest live coding job.
+    let mut history_code_focus_state: Option<Value> = None;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
     let mut last_history_refresh = Instant::now() - Duration::from_secs(60);
@@ -911,6 +915,8 @@ fn run() -> Result<(), String> {
                         let selected = history_rows.get(history_index)
                             .and_then(|row| row.get("id")).and_then(Value::as_str);
                         if history_open && history_detail_open && selected == Some(id.as_str()) {
+                            history_code_focus_state = detail.get("state").cloned()
+                                .filter(code_focus_state_eligible);
                             let script = format!("window.showSharedHistoryDetail({});",
                                 serde_json::to_string(&detail).unwrap_or_else(|_| "{}".into()));
                             let _ = webview.evaluate_script(&script);
@@ -1204,6 +1210,8 @@ fn run() -> Result<(), String> {
                                 if let Some(state) = detail.get_mut("state").and_then(Value::as_object_mut) {
                                     state.insert("historyTitle".into(), Value::String(title));
                                 }
+                                history_code_focus_state = detail.get("state").cloned()
+                                    .filter(code_focus_state_eligible);
                                 let _ = webview.evaluate_script(&format!(
                                     "window.showSharedHistoryDetail({});",
                                     serde_json::to_string(&detail).unwrap_or_else(|_| "{}".into())));
@@ -1253,12 +1261,19 @@ fn run() -> Result<(), String> {
             // Code-only mode shares this exact capture-protected click-through window.
             // Never show unverified code or move the main app into focus.
             let focus_command=mac_shortcuts::take_code_focus_command();
-            if focus_command != 0 && !history_open {
+            // A verified coding result opened from HH is just as safe to read
+            // as the current live result. The history list itself is not: a
+            // person must first open a result with →.
+            if focus_command != 0 && (!history_open || history_detail_open) {
                 // Fail closed if the pending-batch file cannot be read: an
                 // unreadable fresh capture must never unlock an older answer.
                 let no_pending_batch = matches!(read_pending_for("coding"), Ok(None));
                 let current_job = read_submitted_job_for("coding").ok().flatten();
-                let available = code_focus_eligible(current_job.as_ref(), no_pending_batch);
+                let opened_history = history_detail_open
+                    .then(|| history_code_focus_state.clone())
+                    .flatten();
+                let available = opened_history.as_ref().is_some_and(code_focus_state_eligible)
+                    || code_focus_eligible(current_job.as_ref(), no_pending_batch);
                 if available {
                     // SS is an actual toggle. SL and SR select/dock their side;
                     // repeated SL/SR also return to the original normal pane.
@@ -1279,6 +1294,19 @@ fn run() -> Result<(), String> {
                     mac_shortcuts::set_history_visible(false);
                     let _ = webview.evaluate_script("window.closeSharedHistory()");
                     let mode = match next { 1 => "full", 2 => "left", 3 => "right", _ => "normal" };
+                    if next != 0 {
+                        if let Some(state) = opened_history {
+                        let _ = webview.evaluate_script(&format!(
+                            "window.setCodeFocusSolution({});",
+                            serde_json::to_string(&state).unwrap_or_else(|_| "null".into())
+                        ));
+                        } else {
+                            let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
+                        }
+                    } else {
+                        let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
+                        history_code_focus_state = None;
+                    }
                     let _ = webview.evaluate_script(&format!("window.setCodeFocusMode('{}')",mode));
                     overlay_visible = true;
                     event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
@@ -3022,7 +3050,13 @@ fn code_focus_eligible(job: Option<&SubmittedJob>, no_pending_batch: bool) -> bo
     if job.mode != "council"
         || matches!(job.status.as_str(), "failed" | "needs_attention" | "cancelled")
     { return false; }
-    let state = coding_overlay_state(job);
+    code_focus_state_eligible(&coding_overlay_state(job))
+}
+
+/// The reader accepts only the exact normalized coding state which already
+/// passed the E2B-backed solution gate. This is also used for a result opened
+/// from the Coding overlay's history, never for an unselected history row.
+fn code_focus_state_eligible(state: &Value) -> bool {
     let verified = matches!(state.pointer("/solution/status").and_then(Value::as_str),
         Some("provisional" | "reviewed"));
     verified && state.pointer("/solution/code").and_then(Value::as_str)
@@ -3469,7 +3503,7 @@ fn overlay_html() -> &'static str {
             // Keep the overlay's real capture controls, not generic demo shortcuts.
             window.renderCodeFocusSheet=function(){
               const target=document.getElementById('code-focus-code');
-              const current=window.__overlayCurrentState;
+              const current=window.__overlayCodeFocusState||window.__overlayCurrentState;
               if(!target)return;
               const solution=current&&current.solution;
               if(solution&&String(solution.code||'').trim()){
@@ -3479,6 +3513,11 @@ fn overlay_html() -> &'static str {
                 renderCodeLines(target,'Verified code is not available.','');
               }
             };
+            window.setCodeFocusSolution=function(state){
+              window.__overlayCodeFocusState=state&&state.solution?state:null;
+              window.renderCodeFocusSheet();
+            };
+            window.clearCodeFocusSolution=function(){window.__overlayCodeFocusState=null;};
             window.setCodeFocusMode=function(mode){
               const previous=document.body.dataset.codeFocus||'normal';
               const next=['full','left','right'].includes(mode)?mode:'normal';
@@ -4146,6 +4185,19 @@ CA_CASE {"id":"statement example","input":{"n":4},"expected":6,"actual":6,"statu
         assert!(!code_focus_eligible(
             Some(&make_job("completed", "council", Some(final_without_proof))), true),
             "prose or unverified presentation is not sufficient");
+
+        let saved_history_state = serde_json::json!({
+            "kind":"coding",
+            "solution":{"status":"reviewed","code":"fn solve() {}","language":"rust"}
+        });
+        assert!(code_focus_state_eligible(&saved_history_state),
+            "an explicitly opened, E2B-verified history result is readable");
+        let saved_unverified = serde_json::json!({
+            "kind":"coding",
+            "solution":{"status":"candidate","code":"fn solve() {}","language":"rust"}
+        });
+        assert!(!code_focus_state_eligible(&saved_unverified),
+            "an unverified history result cannot unlock code focus");
     }
 
     #[test]
