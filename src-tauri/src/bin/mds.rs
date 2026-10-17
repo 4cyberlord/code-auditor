@@ -4003,6 +4003,32 @@ CA_CASE {"id":"statement example","input":{"n":4},"expected":6,"actual":6,"statu
     }
 
     #[test]
+    fn overlay_keeps_port_cases_separate_from_primary_language_evidence() {
+        let job = SubmittedJob {
+            id: "port-evidence".into(), mode: "council".into(), mcq_model: None,
+            status: "completed".into(), progress_phase: "completed".into(),
+            submitted_at: now(), previews: vec![], error: None, events: vec![],
+            report: Some(serde_json::json!({"report": {
+                "winner": "A",
+                "presentation": {"standing": "verified", "language": "Python",
+                    "code": "def solve(n): return n", "provenance": "candidate A"},
+                "runs": {"A": {"ran": true,
+                    "stdout": r#"CA_CASE {"id":"primary","input":{"n":2},"expected":2,"actual":2}"#}},
+                "ports": [{
+                    "language": "Rust", "status": "verified", "code": "fn solve(n:i32)->i32{n}",
+                    "run": {"ran": true, "ok": true,
+                        "stdout": r#"CA_CASE {"id":"port","input":{"n":8},"expected":8,"actual":8}"#}
+                }]
+            }})),
+        };
+        let state = coding_overlay_state(&job);
+        assert_eq!(state["tests"][0]["input"]["n"], 2);
+        assert_eq!(state["portCases"][0]["language"], "Rust");
+        assert_eq!(state["portCases"][0]["tests"][0]["input"]["n"], 8);
+        assert_eq!(state["portCases"][0]["tests"][0]["status"], "passed");
+    }
+
+    #[test]
     fn completed_cloud_reports_with_preparing_ports_still_require_refresh() {
         assert!(report_has_preparing_ports(&serde_json::json!({
             "report":{"stage":"final","ports":[{"language":"rust","status":"preparing"}]}
