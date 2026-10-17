@@ -3868,7 +3868,10 @@ mod tests {
                             "error": null
                         }
                     ],
-                    "suites": [{ "language": "python" }], "presentation": {"standing":"verified", "code":"def solve():\n    return 42", "language":"py","provenance":"Candidate B"}
+                    "suites": [{ "language": "python" }],
+                    "runs": {"B":{"ran":true,"ok":true,"passed":1,"failed":0,
+                        "stdout": r#"PASS example\nCA_CASE {"id":"statement example","input":{"n":4},"expected":6,"actual":6,"status":"passed"}"#}},
+                    "presentation": {"standing":"verified", "code":"def solve():\n    return 42", "language":"py","provenance":"Candidate B"}
                 }
             })),
             events: vec![],
