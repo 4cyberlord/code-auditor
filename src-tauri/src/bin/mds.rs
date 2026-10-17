@@ -723,7 +723,12 @@ fn run() -> Result<(), String> {
     let mut history_index = 0_usize;
     let mut history_detail_open = false;
     let mut history_fetch: Option<tokio::task::JoinHandle<Result<(Vec<Value>,Option<String>),String>>> = None;
-    let mut history_detail_fetch: Option<tokio::task::JoinHandle<Result<Value,String>>> = None;
+    // History rows stay separate from live work.  Keep only a small, per-item
+    // cache so moving through rows is immediate without allowing an earlier
+    // network response to overwrite the newly selected result.
+    let mut history_detail_fetch: Option<tokio::task::JoinHandle<(String, Result<Value,String>)>> = None;
+    let mut history_detail_requested_id: Option<String> = None;
+    let mut history_detail_cache = std::collections::HashMap::<String, Value>::new();
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
     let mut last_history_refresh = Instant::now() - Duration::from_secs(60);
@@ -863,8 +868,13 @@ fn run() -> Result<(), String> {
             if let Some(task)=history_fetch.take() {
                 match rt.block_on(task) {
                     Ok(Ok((rows,warning))) if history_open => {
+                        let selected_id = history_rows.get(history_index)
+                            .and_then(|row| row.get("id")).and_then(Value::as_str)
+                            .map(str::to_owned);
                         history_rows=rows;
-                        history_index=history_index.min(history_rows.len().saturating_sub(1));
+                        history_index=selected_id.as_deref().and_then(|id| history_rows.iter()
+                            .position(|row| row.get("id").and_then(Value::as_str)==Some(id)))
+                            .unwrap_or(0);
                         let payload=serde_json::to_string(&history_rows)
                             .unwrap_or_else(|_| "[]".into());
                         let notice=serde_json::to_string(&warning).unwrap_or_else(|_| "null".into());
@@ -887,13 +897,27 @@ fn run() -> Result<(), String> {
         }
         if history_detail_fetch.as_ref().is_some_and(|task| task.is_finished()) {
             if let Some(task) = history_detail_fetch.take() {
-                if history_open && history_detail_open {
-                    let script = match rt.block_on(task) {
-                        Ok(Ok(detail)) => format!("window.showSharedHistoryDetail({});", serde_json::to_string(&detail).unwrap_or_else(|_| "{}".into())),
-                        Ok(Err(error)) => format!("window.showSharedHistoryDetail({});", serde_json::json!({"error": error})),
-                        Err(error) => format!("window.showSharedHistoryDetail({});", serde_json::json!({"error": error.to_string()})),
-                    };
-                    let _ = webview.evaluate_script(&script);
+                match rt.block_on(task) {
+                    Ok((id, result)) => {
+                        let detail = result.unwrap_or_else(|error| serde_json::json!({"error": error}));
+                        if history_detail_cache.len() >= 35 {
+                            history_detail_cache.clear();
+                        }
+                        history_detail_cache.insert(id.clone(), detail.clone());
+                        let selected = history_rows.get(history_index)
+                            .and_then(|row| row.get("id")).and_then(Value::as_str);
+                        if history_open && history_detail_open && selected == Some(id.as_str()) {
+                            let script = format!("window.showSharedHistoryDetail({});",
+                                serde_json::to_string(&detail).unwrap_or_else(|_| "{}".into()));
+                            let _ = webview.evaluate_script(&script);
+                        }
+                    }
+                    Err(error) if history_open && history_detail_open => {
+                        let script = format!("window.showSharedHistoryDetail({});",
+                            serde_json::json!({"error": error.to_string()}));
+                        let _ = webview.evaluate_script(&script);
+                    }
+                    Err(_) => {}
                 }
             }
         }
@@ -986,6 +1010,7 @@ fn run() -> Result<(), String> {
                             history_open = false;
                             history_detail_open = false;
                             if let Some(task) = history_detail_fetch.take() { task.abort(); }
+                            history_detail_requested_id = None;
                             mac_shortcuts::set_history_visible(false);
                             let _ = webview.evaluate_script("window.closeSharedHistory()");
                             overlay_visible = false;
@@ -998,6 +1023,7 @@ fn run() -> Result<(), String> {
                             history_index = 0;
                             history_open = true;
                             history_detail_open = false;
+                            history_detail_requested_id = None;
                             mac_shortcuts::set_history_visible(true);
                             let rows = serde_json::to_string(&history_rows).unwrap_or_else(|_| "[]".into());
                             last_history_refresh = Instant::now();
@@ -1020,6 +1046,7 @@ fn run() -> Result<(), String> {
                             history_open = false;
                             history_detail_open = false;
                             if let Some(task) = history_detail_fetch.take() { task.abort(); }
+                            history_detail_requested_id = None;
                             mac_shortcuts::set_history_visible(false);
                             let _ = webview.evaluate_script("window.closeSharedHistory()");
                             overlay_refresh.sent_state=None;
@@ -1133,6 +1160,7 @@ fn run() -> Result<(), String> {
                         // reopen a result the person has deliberately left.
                         history_detail_open = false;
                         if let Some(task) = history_detail_fetch.take() { task.abort(); }
+                        history_detail_requested_id = None;
                         let rows = serde_json::to_string(&history_rows).unwrap_or_else(|_| "[]".into());
                         let _ = webview.evaluate_script(&format!(
                             "window.showSharedHistory({rows},{history_index},false,null)"));
@@ -1159,19 +1187,56 @@ fn run() -> Result<(), String> {
                         "window.selectSharedHistoryRow({history_index})"));
                 }
                 if !history_detail_open && mac_shortcuts::take_history_open()
-                    && history_detail_fetch.as_ref().is_none_or(|task| task.is_finished())
                 {
                     if let Some(row) = history_rows.get(history_index).cloned() {
-                        let title = row.get("title").and_then(Value::as_str).unwrap_or("Saved result").to_string();
-                        history_detail_open = true;
-                        history_detail_fetch = Some(rt.spawn(async move {
-                            let mut detail = fetch_history_detail(row).await?;
-                            if let Some(state) = detail.get_mut("state").and_then(Value::as_object_mut) {
-                                state.insert("historyTitle".into(), Value::String(title));
+                        let id = row.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                        if id.is_empty() {
+                            eprintln!("history item had no identifier");
+                        } else {
+                            let title = row.get("title").and_then(Value::as_str).unwrap_or("Saved result").to_string();
+                            history_detail_open = true;
+                            if let Some(detail) = history_detail_cache.get(&id) {
+                                let mut detail = detail.clone();
+                                if let Some(state) = detail.get_mut("state").and_then(Value::as_object_mut) {
+                                    state.insert("historyTitle".into(), Value::String(title));
+                                }
+                                let _ = webview.evaluate_script(&format!(
+                                    "window.showSharedHistoryDetail({});",
+                                    serde_json::to_string(&detail).unwrap_or_else(|_| "{}".into())));
+                            } else {
+                                if let Some(task) = history_detail_fetch.take() { task.abort(); }
+                                history_detail_requested_id = Some(id.clone());
+                                history_detail_fetch = Some(rt.spawn(async move {
+                                    let result = fetch_history_detail(row).await.map(|mut detail| {
+                                        if let Some(state) = detail.get_mut("state").and_then(Value::as_object_mut) {
+                                            state.insert("historyTitle".into(), Value::String(title));
+                                        }
+                                        detail
+                                    });
+                                    (id, result)
+                                }));
+                                let _ = webview.evaluate_script("window.showSharedHistoryDetail({loading:true});");
                             }
-                            Ok(detail)
-                        }));
-                        let _ = webview.evaluate_script("window.showSharedHistoryDetail({loading:true});");
+                        }
+                    }
+                }
+                // Read the selected saved result ahead of an explicit open.
+                // This leaves the History list visible, but makes → immediate
+                // for recently selected rows.  A new arrow selection cancels
+                // only its own stale fetch; it never touches a live Council run.
+                if !history_detail_open {
+                    if let Some(row) = history_rows.get(history_index).cloned() {
+                        if let Some(id) = row.get("id").and_then(Value::as_str).map(str::to_owned) {
+                            if !history_detail_cache.contains_key(&id)
+                                && history_detail_requested_id.as_deref() != Some(id.as_str()) {
+                                if let Some(task) = history_detail_fetch.take() { task.abort(); }
+                                history_detail_requested_id = Some(id.clone());
+                                history_detail_fetch = Some(rt.spawn(async move {
+                                    let result = fetch_history_detail(row).await;
+                                    (id, result)
+                                }));
+                            }
+                        }
                     }
                 }
             } else {
@@ -1179,6 +1244,7 @@ fn run() -> Result<(), String> {
                 let _ = mac_shortcuts::take_history_next();
                 let _ = mac_shortcuts::take_history_open();
                 let _ = mac_shortcuts::take_history_back();
+                history_detail_requested_id = None;
             }
             // Code-only mode shares this exact capture-protected click-through window.
             // Never show unverified code or move the main app into focus.
@@ -1586,6 +1652,47 @@ fn main_council_history_report(council: &Value) -> Value {
 
 /// Fetch a saved result only after the person opens it from History. The list
 /// itself stays metadata-only and every detail read remains account-scoped.
+fn archived_history_job(job_id: &str) -> Option<SubmittedJob> {
+    Uuid::parse_str(job_id).ok()?;
+    for view in ["coding", "mcq"] {
+        if let Ok(Some(job)) = read_submitted_job_for(view) {
+            if job.id == job_id {
+                return Some(job);
+            }
+        }
+    }
+    let path = cache_dir().ok()?.join("job-history").join(format!("{job_id}.json"));
+    let job: SubmittedJob = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    (job.id == job_id).then_some(job)
+}
+
+/// A history result may show only the helper's own, bounded capture cache.
+/// Cloud image URLs remain private to the model pipeline and are never exposed
+/// from history as anonymous blob links.
+fn history_preview_sources(job: &SubmittedJob) -> Vec<String> {
+    let root = match cache_dir().map(|path| path.join("captures")).and_then(|path| {
+        path.canonicalize().map_err(|error| error.to_string())
+    }) {
+        Ok(root) => root,
+        Err(_) => return Vec::new(),
+    };
+    job.previews.iter().take(4).filter_map(|preview| {
+        if preview.starts_with("data:image/png;base64,") && preview.len() <= 1_400_000 {
+            return Some(preview.clone());
+        }
+        let path = Path::new(preview).canonicalize().ok()?;
+        if !path.starts_with(&root) || path.extension().and_then(|value| value.to_str()) != Some("png") {
+            return None;
+        }
+        let metadata = fs::metadata(&path).ok()?;
+        if !metadata.is_file() || metadata.len() > 1_000_000 {
+            return None;
+        }
+        let bytes = fs::read(path).ok()?;
+        Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
+    }).collect()
+}
+
 async fn fetch_history_detail(row: Value) -> Result<Value, String> {
     let id = row.get("id").and_then(Value::as_str).unwrap_or("");
     if let Some(job_id) = id.strip_prefix("job:") {
@@ -1593,7 +1700,12 @@ async fn fetch_history_detail(row: Value) -> Result<Value, String> {
         // local helper snapshot to hide a newer completed Council report.
         let report = api("reports.get", serde_json::json!({"jobId": job_id})).await?;
         let body = report.get("report").unwrap_or(&report);
-        return Ok(serde_json::json!({"state": history_coding_state(job_id, body)}));
+        let previews = archived_history_job(job_id)
+            .map(|job| history_preview_sources(&job)).unwrap_or_default();
+        return Ok(serde_json::json!({
+            "state": history_coding_state(job_id, body),
+            "historyPreviews": previews,
+        }));
     }
     if let Some(run_id) = id.strip_prefix("main:") {
         let payload = api("runs.get", serde_json::json!({"runId": run_id})).await?;
@@ -3579,7 +3691,7 @@ fn overlay_html() -> &'static str {
               window.setOverlayControls(window.__overlayCurrentState&&(window.__overlayCurrentState.kind==='mcq'||window.__overlayCurrentState.mcq)?'mcq':'coding');
             };
             window.showSharedHistoryDetail=function(detail){
-              if(detail&&detail.state){window.closeSharedHistory();window.updateOverlayState(detail.state);return;}
+              if(detail&&detail.state){window.closeSharedHistory();window.updateOverlayState(detail.state);if(Array.isArray(detail.historyPreviews))window.updatePreviews(detail.historyPreviews);return;}
               const panel=document.getElementById('panel');if(!panel)return;
               let root=document.getElementById('shared-history-detail');
               if(!root){root=document.createElement('section');root.id='shared-history-detail';root.className='history-sheet';panel.appendChild(root);}
