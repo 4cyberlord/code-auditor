@@ -332,7 +332,9 @@ mod mac_shortcuts {
                 && LANGUAGE_KEY_HELD.fetch_or(bit,Ordering::SeqCst)&bit==0
             {
                 if let Ok(mut previous)=LAST_LANGUAGE_KEY.lock(){
-                    let pair=previous.take().filter(|(_,at)|at.elapsed()<=Duration::from_millis(650))
+                    // Let an intentional pair work at a normal typing pace;
+                    // SL/SR must not require an unrealistically fast chord.
+                    let pair=previous.take().filter(|(_,at)|at.elapsed()<=Duration::from_millis(1_200))
                         .map(|(first,_)|(first,usage));
                     *previous=Some((usage,Instant::now()));
                     let choice=match pair {
@@ -2131,7 +2133,7 @@ fn helper_capture_mode(digit: u8) -> Option<CaptureMode> {
 /// key usages, making caps lock and shift equivalent for this command.
 fn double_tap_panel(previous: &mut Option<(u8, Instant)>, key: u8, at: Instant) -> Option<u8> {
     let matched = previous.as_ref().is_some_and(|(last, time)|
-        *last == key && at.saturating_duration_since(*time) <= Duration::from_millis(650)
+        *last == key && at.saturating_duration_since(*time) <= Duration::from_millis(1_200)
     );
     *previous = if matched { None } else { Some((key, at)) };
     if matched { Some(key) } else { None }
@@ -4098,8 +4100,8 @@ mod tests {
         assert_eq!(double_tap_panel(&mut last, 2, start + Duration::from_millis(475)), None);
         assert_eq!(double_tap_panel(&mut last, 2, start + Duration::from_millis(900)), Some(2));
         assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(1000)), None);
-        assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(1701)), None);
-        assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(1710)), Some(3));
+        assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(2_301)), None);
+        assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(2_310)), Some(3));
     }
 
     #[test]
