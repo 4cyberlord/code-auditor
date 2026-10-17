@@ -651,6 +651,11 @@ async function discoverWorkerCatalog(settings) {
 }
 
 function retryDelayMs(status, text, attempt, retryAfter) {
+  // A 524 is emitted by an upstream Cloudflare edge after its origin model
+  // did not finish in that edge's window.  Waiting in the desktop app cannot
+  // revive that closed request; retrying the same job-bound request can.  Keep
+  // this short and bounded so one slow route does not hold the Council hostage.
+  if (status === 524) return Math.min(1_500 * (attempt + 1), 6_000);
   if (status !== 429) return 0;
   const seconds = retryAfter == null ? NaN : Number(retryAfter);
   if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds * 1000, 90_000);
@@ -658,6 +663,21 @@ function retryDelayMs(status, text, attempt, retryAfter) {
   const explicit = /retry(?:\s|-)?after["':\s]+(\d+)/i.exec(text);
   if (explicit) return Math.min(Number(explicit[1]) * 1000, 90_000);
   return minuteLimit ? 65_000 : Math.min(10_000 * 2 ** attempt, 60_000);
+}
+
+function gatewayFailureSummary(model, status, body) {
+  const raw = String(body || "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&(?:nbsp|amp|lt|gt|quot);/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (Number(status) === 524) {
+    return `${model}: upstream model timed out (524)`;
+  }
+  if (!raw) return `${model}: gateway request failed (${status || "unknown status"})`;
+  return `${model}: gateway request failed (${status || "unknown status"}) — ${raw.slice(0, 180)}`;
 }
 
 async function sleep(ms) {
@@ -728,7 +748,7 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
       clearTimeout(timeout);
     }
     const text = await resp.text();
-    last = `${resp.status} ${resp.statusText}: ${text}`;
+    last = gatewayFailureSummary(model, resp.status, text);
     if (resp.ok) {
       let answer = "";
       try {
@@ -775,6 +795,15 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
       continue;
     }
 
+    // Retry an upstream 524.  It represents an interrupted provider request,
+    // not a model answer or a bad harness.  After the first 524, reduce hidden
+    // reasoning only for this one request so the provider has room to return
+    // the required code/text before its own edge deadline.
+    if (resp.status === 524 && attempt < 2) {
+      if (think !== "off" && attempt > 0) think = "off";
+      await sleep(retryDelayMs(resp.status, text, attempt, resp.headers.get("retry-after")));
+      continue;
+    }
     const waitMs = retryDelayMs(resp.status, text, attempt, resp.headers.get("retry-after"));
     if (!waitMs || attempt === 2) break;
     await sleep(waitMs);
@@ -849,7 +878,7 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
     }
 
     const text = await resp.text();
-    last = `${resp.status} ${resp.statusText}: ${text}`;
+    last = gatewayFailureSummary(model, resp.status, text);
     if (resp.ok) {
       let answer = "";
       try {
@@ -880,6 +909,12 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
       noReasoning.add(model);
       think = "off";
       attempt -= 1;
+      continue;
+    }
+
+    if (resp.status === 524 && attempt < 2) {
+      if (think !== "off" && attempt > 0) think = "off";
+      await sleep(retryDelayMs(resp.status, text, attempt, resp.headers.get("retry-after")));
       continue;
     }
 
@@ -2042,17 +2077,29 @@ async function verifiedLanguagePort(job,settings,baseUrl,models,judges,question,
   try{
     // Resolve the translator before speculative harness retries can affect the
     // job-local model bench. The same configured provider is used throughout.
-    const translatorOptions=[...new Set([settings.synthesisModel,...judges.map(j=>j.model),...models.map(m=>m.id)])]
-      .filter(id=>id&&!bench.has(id));
+    // The solver that produced the verified source is the best qualified
+    // translator for its own algorithm and interface.  Do not let the generic
+    // synthesis/judge order replace it with a model that never solved this
+    // problem.  It may have already been used as a solver, which is expected;
+    // that is not a reason to exclude it from translating its own work.
+    const translatorOptions=[...new Set([
+      sourceSolverModel,
+      settings.synthesisModel,
+      ...judges.map(j=>j.model),
+      ...models.map(m=>m.id),
+    ])].filter(Boolean);
     if(!translatorOptions.length)throw new Error("No available translation model");
-    translator=translatorOptions[0];
+    translator=translatorOptions.find(id=>id===sourceSolverModel) ||
+      translatorOptions.find(id=>!bench.has(id)) || translatorOptions[0];
     // The source's known callable contract permits a reference-only harness.
     // Generate it alongside the translation; unknown interfaces keep the
     // original candidate-aware path. Neither path skips independent E2B checks.
     const preparation = await preparePortConcurrently({
-      // Operator rollback: disable overlap without removing any verification step.
-      earlyEligible: process.env.CODE_AUDITOR_PORT_PARALLEL_HARNESS !== "0" &&
-        contractSupportsEarlyHarness(question,"code"),
+      // A language port must use the exact translated candidate's interface.
+      // Spec-only harnesses can be faster, but have repeatedly been the source
+      // of false integration failures.  Generate the harness after the source
+      // solver's translation so it sees the real target-language signature.
+      earlyEligible: false,
       prepareEarly: async () => {
         const startedAt=Date.now();
         try {

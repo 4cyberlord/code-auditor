@@ -728,7 +728,11 @@ fn run() -> Result<(), String> {
     let mut capture_active_view: Option<String> = None;
 
     event_loop.run(move |_event, event_loop_target, control_flow| {
-        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250));
+        // Global capture hotkeys do not wake Tao's event loop themselves.
+        // Keep this short so the helper begins screencapture and restores the
+        // click-through overlay promptly, without ever showing the overlay in
+        // the image being taken.  The cloud work remains asynchronous.
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(33));
         #[cfg(target_os = "macos")]
         drain_capture_commands();
         #[cfg(target_os = "macos")]
@@ -774,6 +778,9 @@ fn run() -> Result<(), String> {
                         eprintln!("screenshot capture unavailable during cloud submission");
                     } else if let Some(mode) = helper_capture_mode(if command == 20 { 1 } else if command < 30 { command - 20 } else { command % 10 }) {
                         active_view = target_view.to_string();
+                        if let Err(error) = clear_pending_capture_error(&active_view) {
+                            eprintln!("could not clear prior capture diagnostic: {error}");
+                        }
                         capture_active_view = Some(active_view.clone());
                         // Background-route captures open their own coding/MCQ
                         // surface after the grab so the staged images and next
@@ -1006,7 +1013,14 @@ fn run() -> Result<(), String> {
                         else if right_capture { CaptureMode::Right }
                         else if region_capture { CaptureMode::Region }
                         else { CaptureMode::Full };
-                    restore_overlay_after_capture = overlay_visible;
+                    // These are helper-overlay captures even when their
+                    // shortcut is pressed from another app.  Always restore
+                    // the Coding/MCQ surface when screencapture returns so
+                    // the person can immediately confirm the staged image.
+                    restore_overlay_after_capture = true;
+                    if let Err(error) = clear_pending_capture_error(&active_view) {
+                        eprintln!("could not clear prior capture diagnostic: {error}");
+                    }
                     capture_active_view = Some(active_view.clone());
                     overlay_visible = false;
                     let _ = show_overlay(&overlay, false);
@@ -1659,6 +1673,26 @@ fn update_pending_error(view: &str, message: &str) -> Result<(), String> {
         batch.status = "ready".to_string();
         batch.error = Some(message.to_string());
         save_pending_for(view, &batch)?;
+    }
+    Ok(())
+}
+
+/// A new capture is a fresh attempt at collecting the current batch.  Do not
+/// leave a diagnostic from a cancelled selection or an earlier capture error
+/// painted over the new screenshot.  Submission errors are still retained
+/// until the person starts another capture or explicitly changes the batch.
+fn clear_pending_capture_error(view: &str) -> Result<(), String> {
+    if let Some(mut batch) = read_pending_for(view)? {
+        if batch.error.take().is_some() {
+            if batch.status != "submitting" {
+                batch.status = if batch.images.is_empty() {
+                    "collecting".to_string()
+                } else {
+                    "ready".to_string()
+                };
+            }
+            save_pending_for(view, &batch)?;
+        }
     }
     Ok(())
 }
@@ -3411,8 +3445,18 @@ fn overlay_html() -> &'static str {
               root.append(body);const footer=document.createElement('footer');footer.className='history-footer';footer.textContent='hh returns to History · cc Coding · mm MCQ';root.append(footer);
             };
             const baseUpdateOverlayState=window.updateOverlayState;
+            function friendlyModelFailure(value){
+              const raw=String(value||'').replace(/<script\\b[^>]*>[\\s\\S]*?<\\/script\\s*>/gi,' ')
+                .replace(/<style\\b[^>]*>[\\s\\S]*?<\\/style\\s*>/gi,' ')
+                .replace(/<[^>]+>/g,' ').replace(/&(?:nbsp|amp|lt|gt|quot);/gi,' ')
+                .replace(/\\s+/g,' ').trim();
+              if(/(?:\\b524\\b|upstream model timed out)/i.test(raw))return 'Model timed out upstream; Council retried it.';
+              if(/empty model response/i.test(raw))return 'Model returned no usable answer.';
+              if(/timed out|timeout/i.test(raw))return 'Model timed out.';
+              return raw?('Model failed: '+raw.slice(0,160)):'Model failed.';
+            }
             function agentStatusText(agent){
-              if(agent.error)return String(agent.error);
+              if(agent.error)return friendlyModelFailure(agent.error);
               if(agent.detail)return String(agent.detail);
               const labels={done:'Answer ready',running:'Generating answer',streaming:'Generating answer',reviewing:'Reviewing answer',pending:'Queued for Council',cancelled:'Cancelled'};
               return labels[agent.status]||String(agent.status||'Waiting');
@@ -3441,11 +3485,13 @@ fn overlay_html() -> &'static str {
                 judging:'Independent Council judges',synthesizing:'Selecting verified winner',
                 porting:'Verifying language translations',completed:'Council completed'};
               const stage=stages[state.progressPhase]||waiting;
-              progress.textContent=state.phase==='done'?'Council completed. Verified solution and ports are available below.':
+              const verifiedPorts=Array.isArray(state.ports)?state.ports.filter(port=>port&&port.status==='verified'&&String(port.code||'').trim()).length:0;
+              progress.textContent=state.phase==='done'
+                ? (verifiedPorts?'Council completed. Verified solution and '+verifiedPorts+' language port'+(verifiedPorts===1?' is':'s are')+' available below.':'Council completed. The verified primary solution is available below; no additional language port was verified for this run.'):
                 state.phase==='error'?'Council needs attention. See the diagnostic below.':
                 stage+(state.progress&&stage!==state.progress?' · '+String(state.progress).slice(0,145):'');
               agents.after(progress);
-              const failures=selected.filter((agent)=>agent.error).map((agent)=>(agent.label||agent.id||'Council agent')+': '+agent.error);
+              const failures=selected.filter((agent)=>agent.error).map((agent)=>(agent.label||agent.id||'Council agent')+': '+friendlyModelFailure(agent.error));
               if(failures.length||state.phase==='error'){const diagnostic=document.createElement('div');diagnostic.className='overlay-diagnostics';const label=document.createElement('b');label.textContent='Run diagnostics';const message=document.createElement('span');message.textContent=failures.join(' · ')||'The Council run reported an issue. The captured images and any available answer remain available.';diagnostic.append(label,message);progress.after(diagnostic);}
             }
             function renderHistoryContext(state){
