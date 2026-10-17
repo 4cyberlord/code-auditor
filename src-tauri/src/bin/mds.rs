@@ -3314,7 +3314,7 @@ fn overlay_html() -> &'static str {
               width:100%;height:100%;min-height:0;grid-template-columns:minmax(0,1fr);
               border-radius:14px;background:linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base)}
             body[data-code-focus]:not([data-code-focus="normal"]) .pictures-pane{
-              width:100%;height:100%;min-height:0;padding:14px}
+              box-sizing:border-box;width:100%;height:100%;min-height:0;padding:14px}
             body[data-code-focus]:not([data-code-focus="normal"]) .pictures-pane > :not(.solution-editor){display:none!important}
             body[data-code-focus]:not([data-code-focus="normal"]) .thought-pane{display:none!important}
             body[data-code-focus]:not([data-code-focus="normal"]) .solution-editor{flex:1;width:100%;height:100%;min-height:0;border-radius:12px}
@@ -3699,9 +3699,12 @@ fn overlay_html() -> &'static str {
                 const candidate=ports.find(port=>canonicalPortLanguage(port.language)===desired);
                 const name=desired==='cpp'?'C++':desired==='rust'?'Rust':'Python';
                 const primaryName=primaryLang==='cpp'?'C++':primaryLang==='rust'?'Rust':'Python';
-                if(source)source.textContent=candidate?.status==='failed'
-                  ? name+' failed E2B: '+String(candidate.error||'independent verification rejected').slice(0,100)+' · showing verified '+primaryName
-                  : name+' port pending · showing verified '+primaryName;
+                if(source){
+                  source.textContent=candidate?.status==='failed'
+                    ? name+' · E2B failed · showing '+primaryName
+                    : name+' · verification pending · showing '+primaryName;
+                  source.title=candidate?.error?String(candidate.error).slice(0,350):'';
+                }
                 return;
               }
               const code=document.getElementById('solution-code');
