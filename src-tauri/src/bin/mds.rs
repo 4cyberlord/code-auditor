@@ -3570,9 +3570,12 @@ fn overlay_html() -> &'static str {
                 judging:'Independent Council judges',synthesizing:'Selecting verified winner',
                 porting:'Verifying language translations',completed:'Council completed'};
               const stage=stages[state.progressPhase]||waiting;
-              const verifiedPorts=Array.isArray(state.ports)?state.ports.filter(port=>port&&port.status==='verified'&&String(port.code||'').trim()).length:0;
+              const verifiedNames=Array.isArray(state.ports)?state.ports
+                .filter(port=>port&&port.status==='verified'&&String(port.code||'').trim())
+                .map(port=>canonicalPortLanguage(port.language)==='cpp'?'C++':
+                  canonicalPortLanguage(port.language)==='rust'?'Rust':'Python'):[];
               progress.textContent=state.phase==='done'
-                ? (verifiedPorts?'Council completed. Verified solution and '+verifiedPorts+' language port'+(verifiedPorts===1?' is':'s are')+' available below.':'Council completed. The verified primary solution is available below; no additional language port was verified for this run.'):
+                ? (verifiedNames.length?'Council completed. Primary verified; independently tested ports: '+verifiedNames.join(', ')+'.':'Council completed. Only the verified primary is available; requested ports did not pass verification.'): 
                 state.phase==='error'?'Council needs attention. See the diagnostic below.':
                 stage+(state.progress&&stage!==state.progress?' · '+String(state.progress).slice(0,145):'');
               agents.after(progress);
@@ -3625,10 +3628,14 @@ fn overlay_html() -> &'static str {
               const keyPairs=[['python','py'],['rust','rr'],['cpp','cp']];
               for(const [lang,key] of keyPairs){
                 const available=lang===primaryLang||validated.some(port=>canonicalPortLanguage(port.language)===lang);
+                const unfinished=ports.find(port=>canonicalPortLanguage(port.language)===lang);
                 const chip=document.createElement('span');chip.className='overlay-port-chip';
                 chip.dataset.available=available?'true':'false';chip.dataset.selected=desired===lang?'true':'false';
-                chip.textContent=lang==='cpp'?'C++ · '+key:lang[0].toUpperCase()+lang.slice(1)+' · '+key;
-                chip.title=available?'E2B verified · type '+key+' to select':'Pending independent E2B verification';
+                const label=lang==='cpp'?'C++':lang[0].toUpperCase()+lang.slice(1);
+                chip.textContent=label+' · '+key+(available?' ✓':unfinished&&unfinished.status==='failed'?' ✕':' …');
+                chip.title=available?'E2B verified · type '+key+' to select':
+                  unfinished&&unfinished.status==='failed'?'E2B verification failed: '+String(unfinished.error||'unspecified failure').slice(0,200):
+                  'Independent E2B verification pending';
                 list.append(chip);
               }
               section.append(list);editor.after(section);
@@ -3637,7 +3644,12 @@ fn overlay_html() -> &'static str {
                 validated.find(port=>canonicalPortLanguage(port.language)===desired);
               const source=document.getElementById('solution-source'),title=document.getElementById('solution-title');
               if(!chosen){
-                if(source)source.textContent=(desired==='cpp'?'C++':desired)+' not verified yet · primary solution shown';
+                const candidate=ports.find(port=>canonicalPortLanguage(port.language)===desired);
+                const name=desired==='cpp'?'C++':desired==='rust'?'Rust':'Python';
+                const primaryName=primaryLang==='cpp'?'C++':primaryLang==='rust'?'Rust':'Python';
+                if(source)source.textContent=candidate?.status==='failed'
+                  ? name+' failed E2B: '+String(candidate.error||'independent verification rejected').slice(0,100)+' · showing verified '+primaryName
+                  : name+' port pending · showing verified '+primaryName;
                 return;
               }
               const code=document.getElementById('solution-code');
