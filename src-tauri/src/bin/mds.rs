@@ -1250,11 +1250,11 @@ fn run() -> Result<(), String> {
             // Never show unverified code or move the main app into focus.
             let focus_command=mac_shortcuts::take_code_focus_command();
             if focus_command != 0 && !history_open {
-                let pending_new_batch = read_pending_for("coding").ok().flatten().is_some();
-                let available = !pending_new_batch && read_submitted_job_for("coding").ok().flatten()
-                    .and_then(|job| coding_overlay_state(&job).pointer("/solution/code")
-                        .and_then(Value::as_str).map(|text| !text.trim().is_empty()))
-                    .unwrap_or(false);
+                // Fail closed if the pending-batch file cannot be read: an
+                // unreadable fresh capture must never unlock an older answer.
+                let no_pending_batch = matches!(read_pending_for("coding"), Ok(None));
+                let current_job = read_submitted_job_for("coding").ok().flatten();
+                let available = code_focus_eligible(current_job.as_ref(), no_pending_batch);
                 if available {
                     // SS is an actual toggle. SL and SR select/dock their side;
                     // repeated SL/SR also return to the original normal pane.
@@ -3008,6 +3008,22 @@ fn coding_agents_from_events(job: &SubmittedJob) -> Vec<Value> {
     }).collect()
 }
 
+/// Eligibility for SS/SL/SR is derived from the exact current Coding job.
+/// An agent's generated candidate, a failed run, or a prior batch's solution
+/// must not unlock the global code-only shortcut.
+fn code_focus_eligible(job: Option<&SubmittedJob>, no_pending_batch: bool) -> bool {
+    if !no_pending_batch { return false; }
+    let Some(job) = job else { return false; };
+    if job.mode != "council"
+        || matches!(job.status.as_str(), "failed" | "needs_attention" | "cancelled")
+    { return false; }
+    let state = coding_overlay_state(job);
+    let verified = matches!(state.pointer("/solution/status").and_then(Value::as_str),
+        Some("provisional" | "reviewed"));
+    verified && state.pointer("/solution/code").and_then(Value::as_str)
+        .is_some_and(|code| !code.trim().is_empty())
+}
+
 fn coding_solution_from_report(body: &Value, winner: &str, candidates: &[Value]) -> Option<Value> {
     // Early code may appear ONLY after the shared E2B gate approved it.
     if body.get("stage").and_then(Value::as_str) == Some("provisional") {
@@ -4050,6 +4066,77 @@ CA_CASE {"id":"statement example","input":{"n":4},"expected":6,"actual":6,"statu
             .contains("return 42"));
         assert_eq!(state["agents"].as_array().map(|a| a.len()), Some(2));
         assert_eq!(state["tests"].as_array().map(|a| a.len()), Some(1));
+    }
+
+    #[test]
+    fn code_only_hotkeys_require_the_current_verified_coding_solution() {
+        let make_job = |status: &str, mode: &str, report: Option<Value>| SubmittedJob {
+            id: "current-coding-run".into(),
+            mode: mode.into(),
+            mcq_model: None,
+            status: status.into(),
+            progress_phase: "reviewing".into(),
+            submitted_at: now(),
+            previews: vec![],
+            error: None,
+            report,
+            events: vec![],
+        };
+        assert!(!code_focus_eligible(None, true), "no current job");
+        assert!(!code_focus_eligible(
+            Some(&make_job("queued", "council", None)), true),
+            "queued job has no verified answer");
+        let generated_only = serde_json::json!({"report":{
+            "winner":"A",
+            "candidates":[{"letter":"A","final":{"kind":"code","code":"print(123)"}}]
+        }});
+        assert!(!code_focus_eligible(
+            Some(&make_job("running", "council", Some(generated_only))), true),
+            "AI-generated code alone cannot unlock SS/SL/SR");
+
+        let unverified = serde_json::json!({"report":{
+            "stage":"provisional",
+            "provisional":{"status":"provisional","code":"print(4)",
+                "passed":0,"failed":1}
+        }});
+        assert!(!code_focus_eligible(
+            Some(&make_job("running", "council", Some(unverified))), true),
+            "failed E2B test cannot unlock code only");
+        let verified_early = serde_json::json!({"report":{
+            "stage":"provisional",
+            "provisional":{"status":"provisional","code":"print(6)",
+                "passed":3,"failed":0,"language":"Python"}
+        }});
+        let reviewing = make_job("running", "council", Some(verified_early.clone()));
+        assert!(code_focus_eligible(Some(&reviewing), true),
+            "verified early code is ready even while Council judges are reviewing");
+        assert!(!code_focus_eligible(Some(&reviewing), false),
+            "a fresh/pending capture must block showing the previous answer");
+        for status in ["failed", "needs_attention", "cancelled"] {
+            assert!(!code_focus_eligible(
+                Some(&make_job(status, "council", Some(verified_early.clone()))), true),
+                "terminal failed job must not enable code only");
+        }
+        assert!(!code_focus_eligible(
+            Some(&make_job("running", "mcq", Some(verified_early))), true),
+            "MCQ output cannot enable coding shortcuts");
+
+        let final_verified = serde_json::json!({"report":{
+            "winner":"B",
+            "presentation":{"standing":"verified","code":"def solve(n): return n",
+                "language":"Python","provenance":"candidate B"}
+        }});
+        assert!(code_focus_eligible(
+            Some(&make_job("completed", "council", Some(final_verified))), true),
+            "completed Council-verified primary solution enables all code-only keys");
+
+        let final_without_proof = serde_json::json!({"report":{
+            "winner":"B",
+            "presentation":{"standing":"pending","code":"print('unverified')"}
+        }});
+        assert!(!code_focus_eligible(
+            Some(&make_job("completed", "council", Some(final_without_proof))), true),
+            "prose or unverified presentation is not sufficient");
     }
 
     #[test]
