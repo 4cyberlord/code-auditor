@@ -188,6 +188,8 @@ mod mac_shortcuts {
     static HISTORY_OPEN: AtomicBool = AtomicBool::new(false);
     static HISTORY_BACK: AtomicBool = AtomicBool::new(false);
     static LANGUAGE_COMMAND: AtomicU8 = AtomicU8::new(0);
+    // SS toggles code-only view; SL/SR dock it left or right.
+    static CODE_FOCUS_COMMAND: AtomicU8 = AtomicU8::new(0);
     static LANGUAGE_KEY_HELD: AtomicU8 = AtomicU8::new(0);
     static LAST_LANGUAGE_KEY: Mutex<Option<(u32, Instant)>> = Mutex::new(None);
     static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
@@ -292,12 +294,12 @@ mod mac_shortcuts {
         let lang_key=match usage {
             HID_USAGE_KEYBOARD_R=>Some(1_u8), HID_USAGE_KEYBOARD_C=>Some(2_u8),
             HID_USAGE_KEYBOARD_P=>Some(4_u8), HID_USAGE_KEYBOARD_Y=>Some(8_u8),
+            HID_USAGE_KEYBOARD_S=>Some(16_u8), HID_USAGE_KEYBOARD_L=>Some(32_u8),
             _=>None,
         };
         if let Some(bit)=lang_key {
             if !pressed {LANGUAGE_KEY_HELD.fetch_and(!bit,Ordering::SeqCst);}
-            else if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst)
-                && !HISTORY_VISIBLE.load(Ordering::SeqCst)
+            else if !HISTORY_VISIBLE.load(Ordering::SeqCst)
                 && !CONTROL_DOWN.load(Ordering::SeqCst)
                 && !OPTION_DOWN.load(Ordering::SeqCst)
                 && !SHIFT_DOWN.load(Ordering::SeqCst)
@@ -311,9 +313,24 @@ mod mac_shortcuts {
                         Some((HID_USAGE_KEYBOARD_R,HID_USAGE_KEYBOARD_R))=>1,
                         Some((HID_USAGE_KEYBOARD_C,HID_USAGE_KEYBOARD_P))=>2,
                         Some((HID_USAGE_KEYBOARD_P,HID_USAGE_KEYBOARD_Y))=>3,
+                        Some((HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_S))=>4,
+                        Some((HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_L))=>5,
+                        Some((HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_R))=>6,
                         _=>0,
                     };
-                    if choice!=0 {LANGUAGE_COMMAND.store(choice,Ordering::SeqCst);*previous=None;}
+                    if choice!=0 {
+                        // Preserve prior behavior: RR/CP/PY are active only
+                        // while the Coding overlay is visible. Only SS/SL/SR
+                        // may open the verified code sheet from another app.
+                        if choice<=3 {
+                            if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) {
+                                LANGUAGE_COMMAND.store(choice,Ordering::SeqCst);
+                            }
+                        } else {
+                            CODE_FOCUS_COMMAND.store(choice-3,Ordering::SeqCst);
+                        }
+                        *previous=None;
+                    }
                 }
             }
         }else if pressed&&usage<HID_USAGE_KEYBOARD_LEFT_CONTROL{
@@ -498,6 +515,7 @@ mod mac_shortcuts {
     }
     pub fn take_number_command() -> u8 { NUMBER_COMMAND.swap(0, Ordering::SeqCst) }
     pub fn set_coding_overlay_visible(value: bool) { CODING_OVERLAY_VISIBLE.store(value, Ordering::SeqCst); }
+    pub fn take_code_focus_command() -> u8 { CODE_FOCUS_COMMAND.swap(0, Ordering::SeqCst) }
     pub fn take_fade_down() -> bool { FADE_DOWN.swap(false, Ordering::SeqCst) }
     pub fn take_fade_up() -> bool { FADE_UP.swap(false, Ordering::SeqCst) }
     pub fn take_history_previous() -> bool { HISTORY_PREVIOUS.swap(false, Ordering::SeqCst) }
@@ -698,6 +716,8 @@ fn run() -> Result<(), String> {
     update_overlay(&webview, &active_view, &mut overlay_refresh)?;
     let mut overlay_visible = false;
     let mut overlay_alpha = 0.46_f64;
+    // 0 = normal Council overlay, 1 = code full, 2 = left, 3 = right.
+    let mut code_focus_mode = 0_u8;
     let mut history_open = false;
     let mut history_rows: Vec<Value> = Vec::new();
     let mut history_index = 0_usize;
@@ -744,6 +764,12 @@ fn run() -> Result<(), String> {
                 12 => send_capture_to_council("right"),
                 13 => send_process_to_council(),
                 6 => {
+                        if code_focus_mode != 0 {
+                            code_focus_mode = 0;
+                            overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
+                            overlay.set_outer_position(overlay_position);
+                            let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
+                        }
                     // 00 starts a new Coding overlay workspace. Previous
                     // finished jobs remain archived; main-app runs are untouched.
                     active_view = "coding".to_string();
@@ -772,6 +798,12 @@ fn run() -> Result<(), String> {
                 }
                 20 | 22 | 23 | 31..=34 => {
                     let target_view = if command < 30 { "coding" } else { "mcq" };
+                        if code_focus_mode != 0 {
+                            code_focus_mode = 0;
+                            overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
+                            overlay.set_outer_position(overlay_position);
+                            let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
+                        }
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("screenshot capture already in progress");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -795,6 +827,14 @@ fn run() -> Result<(), String> {
                 }
                 24 | 35 => {
                     let target_view = if command == 24 { "coding" } else { "mcq" };
+                    if command == 35 {
+                        if code_focus_mode != 0 {
+                            code_focus_mode = 0;
+                            overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
+                            overlay.set_outer_position(overlay_position);
+                            let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
+                        }
+                    }
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("finish the screenshot selection before submitting");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -932,6 +972,12 @@ fn run() -> Result<(), String> {
                 command @ (1 | 2 | 3)
                     if capture_task.as_ref().is_none_or(|task| task.is_finished()) =>
                 {
+                    if code_focus_mode != 0 {
+                        code_focus_mode = 0;
+                        overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
+                        overlay.set_outer_position(overlay_position);
+                        let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
+                    }
                     if command == 3 {
                         // HH is a true toggle. Repeating it closes the whole
                         // overlay rather than leaving a hidden history sheet
@@ -1134,6 +1180,45 @@ fn run() -> Result<(), String> {
                 let _ = mac_shortcuts::take_history_open();
                 let _ = mac_shortcuts::take_history_back();
             }
+            // Code-only mode shares this exact capture-protected click-through window.
+            // Never show unverified code or move the main app into focus.
+            let focus_command=mac_shortcuts::take_code_focus_command();
+            if focus_command != 0 && !history_open {
+                let pending_new_batch = read_pending_for("coding").ok().flatten().is_some();
+                let available = !pending_new_batch && read_submitted_job_for("coding").ok().flatten()
+                    .and_then(|job| coding_overlay_state(&job).pointer("/solution/code")
+                        .and_then(Value::as_str).map(|text| !text.trim().is_empty()))
+                    .unwrap_or(false);
+                if available {
+                    // SS is an actual toggle. SL and SR select/dock their side;
+                    // repeated SL/SR also return to the original normal pane.
+                    let next = if focus_command == 1 {
+                        if code_focus_mode == 0 { 1 } else { 0 }
+                    } else if focus_command == code_focus_mode { 0 } else { focus_command };
+                    code_focus_mode = next;
+                    if next == 0 {
+                        overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
+                        overlay.set_outer_position(overlay_position);
+                    } else if let Some((point,size)) = code_focus_geometry(&overlay, event_loop_target, next) {
+                        overlay.set_inner_size(size);
+                        overlay.set_outer_position(point);
+                    }
+                    active_view = "coding".to_string();
+                    history_open = false;
+                    history_detail_open = false;
+                    mac_shortcuts::set_history_visible(false);
+                    let _ = webview.evaluate_script("window.closeSharedHistory()");
+                    let mode = match next { 1 => "full", 2 => "left", 3 => "right", _ => "normal" };
+                    let _ = webview.evaluate_script(&format!("window.setCodeFocusMode('{}')",mode));
+                    overlay_visible = true;
+                    event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                    let _ = show_overlay(&overlay, true);
+                    overlay_refresh.sent_state = None;
+                    let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                } else {
+                    eprintln!("code-focus unavailable: no E2B-verified coding solution yet");
+                }
+            }
             let requested_language=mac_shortcuts::take_language_command();
             if overlay_visible&&!history_open&&active_view=="coding"&&requested_language!=0 {
                 let language=match requested_language {1=>"rust",2=>"cpp",3=>"python",_=>""};
@@ -1163,6 +1248,34 @@ fn overlay_position<T>(event_loop: &tao::event_loop::EventLoop<T>) -> LogicalPos
         return LogicalPosition::new(x.max(0.0), y.max(0.0));
     }
     LogicalPosition::new(320.0, 100.0)
+}
+
+/// Coordinates use the monitor holding the helper overlay, not a hard-coded
+/// primary display. Geometry is logical (Tao compensates for Retina scaling).
+fn code_focus_geometry<T>(
+    window: &Window,
+    event_loop: &tao::event_loop::EventLoopWindowTarget<T>,
+    mode: u8,
+) -> Option<(LogicalPosition<f64>, LogicalSize<f64>)> {
+    let monitor = window.current_monitor().or_else(|| event_loop.primary_monitor())?;
+    let scale = monitor.scale_factor();
+    let location = monitor.position();
+    let extent = monitor.size();
+    let width = extent.width as f64 / scale;
+    let height = extent.height as f64 / scale;
+    let origin_x = location.x as f64 / scale;
+    let origin_y = location.y as f64 / scale;
+    let half = (width / 2.0).floor();
+    let inset = 8.0;
+    let (x, available_width) = match mode {
+        2 => (origin_x, half),
+        3 => (origin_x + half, width - half),
+        _ => (origin_x, width),
+    };
+    Some((
+        LogicalPosition::new(x + inset, origin_y + inset),
+        LogicalSize::new((available_width - inset * 2.0).max(260.0), (height - inset * 2.0).max(260.0)),
+    ))
 }
 
 fn overlay_window<T>(
@@ -2160,6 +2273,16 @@ fn tracked_job_row<'a>(data: &'a Value, expected_id: &str) -> Option<&'a Value> 
         .and_then(|items| items.iter().find(|item| item.get("id").and_then(Value::as_str) == Some(expected_id)))
 }
 
+/// A final primary result is not the whole cloud report until its target
+/// language ports have reached their own terminal verification states.
+fn report_has_preparing_ports(report: &Value) -> bool {
+    report.get("report").unwrap_or(report).get("ports")
+        .and_then(Value::as_array)
+        .is_some_and(|ports| ports.iter().any(|port|
+            matches!(port.get("status").and_then(Value::as_str),
+                Some("preparing" | "pending" | "running"))))
+}
+
 async fn refresh_job() -> Result<(), String> {
     for view in ["coding", "mcq"] {
         if let Some(job) = read_submitted_job_for(view)? {
@@ -2184,7 +2307,8 @@ async fn refresh_job() -> Result<(), String> {
             let Ok(raw) = fs::read_to_string(&path) else { continue; };
             let Ok(job) = serde_json::from_str::<SubmittedJob>(&raw) else { continue; };
             if matches!(job.status.as_str(), "failed" | "needs_attention" | "cancelled")
-                || (job.status == "completed" && job.report.is_some()) { continue; }
+                || (job.status == "completed" && job.report.as_ref()
+                    .is_some_and(|report| !report_has_preparing_ports(report))) { continue; }
             let result = refresh_one_job(job).await?;
             write_private(&path, serde_json::to_vec(&result).map_err(|e| e.to_string())?)
                 .map_err(|e| e.to_string())?;
@@ -2203,6 +2327,7 @@ async fn refresh_one_job(mut tracked: SubmittedJob) -> Result<SubmittedJob, Stri
     ) && (tracked.status != "completed" || tracked.report.as_ref().is_some_and(|report| {
         let body = report.get("report").unwrap_or(report);
         body.get("stage").and_then(Value::as_str) != Some("provisional")
+            && !report_has_preparing_ports(report)
     }))
     {
         return Ok(tracked);
@@ -2687,12 +2812,30 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
         }).collect()
     };
     let solution = body.and_then(|b| coding_solution_from_report(b, winner, &candidates));
-    let tests = body.map(coding_tests_from_report).unwrap_or_default();
+    let tests = body.map(|body| coding_tests_from_report(body, winner)).unwrap_or_default();
+    // Every selected port owns its own independent test evidence. Do not
+    // present Python cases as if a Rust/C++ translation had run them.
+    let port_cases: Vec<Value> = body.and_then(|body| body.get("ports"))
+        .and_then(Value::as_array)
+        .into_iter().flatten()
+        .filter(|port| port.get("status").and_then(Value::as_str) == Some("verified")
+            && port.get("code").and_then(Value::as_str)
+                .is_some_and(|code| !code.trim().is_empty())
+            && port.pointer("/run/ran").and_then(Value::as_bool) == Some(true)
+            && port.pointer("/run/ok").and_then(Value::as_bool) == Some(true)
+            && port.pointer("/run/failed").and_then(Value::as_u64) == Some(0))
+        .map(|port| serde_json::json!({
+            "language": port.get("language"),
+            "tests": actual_case_rows(port.pointer("/run/stdout")
+                .and_then(Value::as_str).unwrap_or(""))
+        }))
+        .collect();
     serde_json::json!({
         "runId": job.id, "updatedAt": now(), "kind": "coding",
         "phase": phase, "status": job.status,
         "progress": progress, "error": job.error,
         "agents": agents, "solution": solution, "tests": tests,
+        "portCases": port_cases,
         "presentation": body.and_then(|b| b.get("presentation")).cloned(),
         "insights": body.map(coding_sidebar_evidence),
         "ports": body.and_then(|b|b.get("ports")).cloned().unwrap_or_else(||Value::Array(Vec::new())),
@@ -2809,102 +2952,53 @@ fn coding_solution_from_report(body: &Value, winner: &str, candidates: &[Value])
     }))
 }
 
-fn coding_tests_from_report(body: &Value) -> Vec<Value> {
-    // A provisional result has real E2B verification but no finalized Council
-    // evidence rows yet. Report the measured passed count, never invented cases.
-    if body.get("stage").and_then(Value::as_str) == Some("provisional") {
-        if let Some(early) = body.get("provisional") {
-            let passed = early.get("passed").and_then(Value::as_u64).unwrap_or(0);
-            let failed = early.get("failed").and_then(Value::as_u64).unwrap_or(1);
-            if passed > 0 && failed == 0 {
-                let letter = early.get("letter").and_then(Value::as_str).unwrap_or("?");
-                return vec![serde_json::json!({
-                    "name": format!("Candidate {letter} · preliminary E2B"),
-                    "input": early.get("language").and_then(Value::as_str).unwrap_or(""),
-                    "expected": format!("{passed} executed test cases"),
-                    "actual": format!("{passed} passed, 0 failed; Council review pending"),
-                    "status": "passed"
-                })];
-            }
-        }
-    }
-    // One row per candidate, carrying what its run did. The harness rows this
-    // falls back to say "From cloud report" five times, which is a pane that
-    // reports nothing at all.
-    if let Some(evidence) = body
-        .pointer("/presentation/evidence")
-        .and_then(Value::as_array)
-        .filter(|rows| !rows.is_empty())
-    {
-        return evidence
-            .iter()
-            .take(8)
-            .map(|row| {
-                let letter = row.get("letter").and_then(Value::as_str).unwrap_or("?");
-                let gate = row.get("gate").and_then(Value::as_str).unwrap_or("untested");
-                let passed = row.get("passed").and_then(Value::as_i64).unwrap_or(0);
-                let failed = row.get("failed").and_then(Value::as_i64).unwrap_or(0);
-                let revised = row.get("revised").and_then(Value::as_bool).unwrap_or(false);
-                let note = row.get("note").and_then(Value::as_str).unwrap_or("");
-                let runtime = row.get("runtime").and_then(Value::as_str).unwrap_or("");
-                let name = if revised {
-                    format!("Candidate {letter} (revised)")
-                } else {
-                    format!("Candidate {letter}")
-                };
-                let actual = if gate == "untested" {
-                    if note.is_empty() {
-                        "not executed".to_string()
-                    } else {
-                        note.to_string()
-                    }
-                } else if runtime.is_empty() {
-                    format!("{passed} passed, {failed} failed")
-                } else {
-                    format!("{passed} passed, {failed} failed · {runtime}")
-                };
-                let expected = if gate == "untested" {
-                    "not executed".to_string()
-                } else {
-                    format!("{} case(s)", passed + failed)
-                };
-                let status = match gate {
-                    "pass" => "passed",
-                    "fail" => "failed",
-                    _ => "pending",
-                };
-                serde_json::json!({
-                    "name": name,
-                    "input": row.get("model").and_then(Value::as_str).unwrap_or(""),
-                    "expected": expected,
-                    "actual": actual,
-                    "status": status,
-                })
-            })
-            .collect();
-    }
-
-    let Some(suites) = body.get("suites").and_then(Value::as_array) else {
-        return vec![];
-    };
-    suites
-        .iter()
-        .take(5)
-        .enumerate()
-        .map(|(index, suite)| {
-            let language = suite
-                .get("language")
-                .and_then(Value::as_str)
-                .unwrap_or("suite");
-            serde_json::json!({
-                "name": format!("Harness {}", index + 1),
-                "input": language,
-                "expected": "PASS lines",
-                "actual": "From cloud report",
-                "status": "pending",
-            })
+/// Only true per-case stdout traces from the executed winner are shown as
+/// test cases. Candidate gate totals and synthetic "Harness N" descriptions
+/// are NOT test inputs or observed outputs.
+fn actual_case_rows(stdout: &str) -> Vec<Value> {
+    stdout.lines()
+        .filter_map(|line| line.trim().strip_prefix("CA_CASE "))
+        .take(48)
+        .filter_map(|record| serde_json::from_str::<Value>(record).ok())
+        .filter_map(|record| {
+            let input = record.get("input")?;
+            let expected = record.get("expected")?;
+            let actual = record.get("actual")?;
+            let id = record.get("id").and_then(Value::as_str).unwrap_or("Case");
+            // Never display an alleged PASS when the actual and expected differ.
+            let passed = actual == expected;
+            let status = if passed { "passed" } else { "failed" };
+            Some(serde_json::json!({
+                "name": id.chars().take(80).collect::<String>(),
+                "input": input,
+                "expected": expected,
+                "actual": actual,
+                "status": status,
+                "source": "executed-harness"
+            }))
         })
         .collect()
+}
+
+fn coding_tests_from_report(body: &Value, winner: &str) -> Vec<Value> {
+    // Use the same deterministic winner that supplied the displayed code.
+    // For a revised winner, only the rerun is authoritative.
+    let revised = body.get("revisedRuns").and_then(|runs| runs.get(winner));
+    let normal = body.get("runs").and_then(|runs| runs.get(winner));
+    // A present revised candidate supersedes its original run. In that
+    // situation, never substitute old pre-repair cases as verification for
+    // the revised code shown to the user.
+    let selected = revised.or(normal);
+    let run = selected.filter(|run| run.get("ran").and_then(Value::as_bool) == Some(true));
+    if let Some(stdout) = run.and_then(|run| run.get("stdout")).and_then(Value::as_str) {
+        let rows = actual_case_rows(stdout);
+        if !rows.is_empty() {
+            return rows;
+        }
+    }
+    // Legacy or provisional report: it has verified aggregate counts but no
+    // captured per-case input/output. Never manufacture examples from totals.
+    vec![]
 }
 
 fn submitted_overlay_state(job: &SubmittedJob) -> Value {
@@ -3057,7 +3151,7 @@ fn overlay_html() -> &'static str {
 		      .hud-key,.hud-pause{display:grid;place-items:center;min-width:32px;height:28px;padding:0 10px;border-radius:8px;background:rgba(255,255,255,.13);box-shadow:inset 0 1px 0 rgba(255,255,255,.08);color:rgba(255,255,255,.9);flex:0 0 auto}
 		      .hud-action{color:rgba(255,255,255,.68);margin-left:4px}
 	      .hud-meter{display:inline-flex;align-items:end;gap:2px;height:18px;padding:0 2px}.hud-meter i{display:block;width:3px;border-radius:3px;background:rgba(205,224,242,.7);box-shadow:0 0 9px rgba(190,215,235,.18)}.hud-meter i:nth-child(1){height:7px}.hud-meter i:nth-child(2){height:12px}.hud-meter i:nth-child(3){height:9px}
-	      #panel{box-sizing:border-box;width:100%;flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;border:1px solid rgba(255,255,255,.26);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(205,222,239,.10),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(255,255,255,.09),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
+	      #panel{box-sizing:border-box;width:100%;flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,.75fr);border:1px solid rgba(255,255,255,.26);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(205,222,239,.10),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(255,255,255,.09),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
             .pane{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:10px;padding:18px;overflow:hidden}.pane+ .pane{border-left:1px solid var(--pane-line)}
             .pictures-pane{align-items:flex-start}
             .title{font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.95;text-shadow:0 1px 2px var(--title-shadow)}
@@ -3088,16 +3182,21 @@ fn overlay_html() -> &'static str {
 	            .solution-editor{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;border:1px solid var(--panel-line);border-radius:9px;background:var(--editor-bg);overflow:hidden}
             .editor-head,.tests-head{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.76);font-size:11px}
             .editor-head b,.tests-head b{color:rgba(255,255,255,.95)}
-	            .code-lines{flex:1;min-height:0;margin:0;padding:13px 0;color:var(--code-text);font:500 12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line}
-	            .code-lines li{display:grid;grid-template-columns:42px minmax(0,1fr);min-height:20px;padding:0 14px 0 0;list-style:none;counter-increment:code-line}
+	            .code-lines{flex:1;min-height:0;margin:0;padding:15px 0;color:var(--code-text);font:530 14.5px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line}
+	            .code-lines li{display:grid;grid-template-columns:48px minmax(0,1fr);min-height:24px;padding:0 17px 0 0;list-style:none;counter-increment:code-line}
 	            .code-lines li:before{content:counter(code-line);padding-right:12px;text-align:right;color:rgba(255,255,255,.3)}
 	            .code-lines code{display:block;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
             .kw{color:var(--kw)}.fn{color:var(--fn)}.arg{color:var(--arg)}.num{color:var(--num)}.str{color:var(--str)}.built{color:var(--built)}.op{color:var(--op)}.cm{color:var(--cm)}
-	            .tests{box-sizing:border-box;width:100%;min-height:58px;max-height:92px;overflow-y:auto;border:1px solid var(--panel-line);border-radius:9px;background:var(--tests-bg);overflow:hidden}
-	            .case-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;padding:7px}
-	            .case{min-width:0;padding:5px;border:1px solid rgba(255,255,255,.12);border-radius:7px;background:rgba(255,255,255,.045);font-size:10px;color:rgba(255,255,255,.82)}
+	            .tests{box-sizing:border-box;width:100%;min-height:58px;max-height:180px;border:1px solid var(--panel-line);border-radius:9px;background:var(--tests-bg);overflow-y:auto;overflow-x:hidden}
+	            .case-list{display:grid;grid-template-columns:minmax(0,1fr);gap:7px;padding:9px}
+	            .case{min-width:0;padding:10px 11px;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:rgba(255,255,255,.045);font-size:11.5px;color:rgba(255,255,255,.88);line-height:1.5}
             .case b{display:block;margin-bottom:4px;color:rgba(255,255,255,.95)}
-            .case code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#d5f5ff}
+            .case code{display:block;white-space:pre-wrap;overflow-wrap:anywhere;font:530 11.5px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#d5f5ff}
+            .case[data-status="failed"]{border-color:rgba(255,112,112,.55)}
+            .case[data-status="passed"]{border-color:rgba(102,218,159,.36)}
+            .case .case-field{display:grid;grid-template-columns:74px minmax(0,1fr);gap:9px;align-items:start}
+            .case .case-field b{color:rgba(255,255,255,.6);font-size:10.5px;font-weight:700;margin:0}
+            .case .case-field code{min-width:0}
 	            .thought-pane{gap:10px}
 	            .thought-list{box-sizing:border-box;width:100%;display:flex;flex-direction:column;gap:8px;overflow:hidden}
             .thought-item{width:100%;display:flex;flex-direction:column;gap:5px}
@@ -3220,16 +3319,51 @@ fn overlay_html() -> &'static str {
             .code-lines li[data-change="add"]{background:rgba(65,200,120,.16);border-left:3px solid rgba(65,200,120,.7)}
             .code-lines li[data-change="same"]{border-left:3px solid transparent}
             .code-lines li[data-change] code{overflow-wrap:anywhere}
+            /* Preserve the original HUD and overlay dimensions. Code-only
+               sheets are different display modes of the SAME protected window. */
+            body[data-code-focus="full"],body[data-code-focus="left"],body[data-code-focus="right"]{padding:10px 12px;gap:0}
+            body[data-code-focus]:not([data-code-focus="normal"]) #hudbar{display:none}
+            body[data-code-focus]:not([data-code-focus="normal"]) #panel{
+              width:100%;height:100%;min-height:0;grid-template-columns:minmax(0,1fr);
+              border-radius:14px;background:linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base)}
+            body[data-code-focus]:not([data-code-focus="normal"]) .pictures-pane{
+              box-sizing:border-box;width:100%;height:100%;min-height:0;padding:14px}
+            body[data-code-focus]:not([data-code-focus="normal"]) .pictures-pane > :not(.solution-editor){display:none!important}
+            body[data-code-focus]:not([data-code-focus="normal"]) .thought-pane{display:none!important}
+            body[data-code-focus]:not([data-code-focus="normal"]) .solution-editor{flex:1;width:100%;height:100%;min-height:0;border-radius:12px}
+            body[data-code-focus]:not([data-code-focus="normal"]) .editor-head{display:none!important}
+            body[data-code-focus]:not([data-code-focus="normal"]) .code-lines{font-size:17px;line-height:1.7;padding:19px 0}
+            body[data-code-focus]:not([data-code-focus="normal"]) .code-lines li{grid-template-columns:minmax(0,1fr);min-height:29px;padding-left:16px}
+            body[data-code-focus]:not([data-code-focus="normal"]) .code-lines li::before{display:none}
+            @media(prefers-reduced-motion:reduce){body[data-code-focus] #panel{transition:none}}
         </style></head><body><div class="hudbar" id="hudbar"><span class="hud-logo">CA</span><span class="hud-pause">||</span><span class="hud-meter"><i></i><i></i><i></i></span><span id="hud-shortcuts" class="hud-shortcuts"></span></div><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><script>
 	            // HUD labels come from the numeric command table handled by mac_shortcuts.
             // Keep the overlay's real capture controls, not generic demo shortcuts.
+            window.setCodeFocusMode=function(mode){
+              const previous=document.body.dataset.codeFocus||'normal';
+              const next=['full','left','right'].includes(mode)?mode:'normal';
+              if(previous==='normal'&&next!=='normal'){
+                window.__overlayDiffBeforeCodeFocus=window.__overlayDiffHidden===true;
+                // Code-only must show the clean verified code, never diff marks.
+                window.__overlayDiffHidden=true;
+              }else if(previous!=='normal'&&next==='normal'){
+                window.__overlayDiffHidden=window.__overlayDiffBeforeCodeFocus===true;
+              }
+              document.body.dataset.codeFocus=next;
+              const current=window.__overlayCurrentState;
+              const target=document.getElementById('solution-code');
+              if(current&&current.solution&&target){
+                renderOverlayCodeResult(target,current);
+                if(typeof renderVerifiedPorts==='function')renderVerifiedPorts(current);
+              }
+            };
             window.setOverlayControls=function(view){
               const host=document.getElementById('hud-shortcuts');if(!host)return;
               const controls=view==='history'
                 ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
                 : view==='mcq'
                 ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31'],['Left','32'],['Right','33'],['Region','34'],['Submit','35']]
-                : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py']];
+                : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py'],['Code only','ss/sl/sr']];
               const fingerprint=controls.map(([name,key])=>name+key).join('|');
               if(host.dataset.shortcutSet===fingerprint)return;
               host.dataset.shortcutSet=fingerprint;host.replaceChildren();
@@ -3269,7 +3403,24 @@ fn overlay_html() -> &'static str {
 		            function detectedFunctionNames(code){const found=[];String(code||'').replace(/\b([A-Za-z_]\w*)\s*\(/g,(_,name)=>{if(!found.includes(name)&&!['if','for','while','switch','return','def','function'].includes(name))found.push(name);return _;});return found;}
 		            function renderFunctionNotes(code){const target=document.getElementById('function-notes');if(!target)return;const meanings={set:'stores unique values for quick membership checks',sum:'adds numeric values together',max:'returns the largest value',min:'returns the smallest value',len:'counts items',range:'creates a numeric loop sequence',enumerate:'loops with index and value',append:'adds an item to a list',sort:'orders a list in place',sorted:'returns ordered values',print:'writes debug output',useState:'stores React component state',useEffect:'runs React side effects',fetch:'requests network data',map:'transforms each item',filter:'keeps matching items',reduce:'combines items into one result'};const found=detectedFunctionNames(code);target.innerHTML='';found.slice(0,5).forEach((name)=>{const row=document.createElement('div');row.textContent=name+': '+(meanings[name]||'function call used by the solution');target.appendChild(row);});if(!target.children.length){const row=document.createElement('div');row.textContent='No function calls detected yet.';target.appendChild(row);}}
 		            function functionExample(name){const examples={sum:'sum([18, 9]) -> 27',set:'set([18, 9, 18]) -> {18, 9}',max:'max([18, 9]) -> 18',min:'min([18, 9]) -> 9',len:'len([18, 9]) -> 2',range:'range(0, 5) -> 0..4',enumerate:'enumerate(items) -> index + value',append:'outliers.append(18) -> adds 18',sort:'values.sort() -> in-place order',sorted:'sorted(values) -> ordered copy',print:'print(result) -> console output',useState:'useState(false) -> state + setter',useEffect:'useEffect(fn, []) -> run side effect',fetch:'fetch(url) -> request data',map:'items.map(fn) -> transformed items',filter:'items.filter(fn) -> matching items',reduce:'items.reduce(fn, seed) -> one value'};return examples[name]||name+'(exampleInput) -> expected output';}
-		            function renderSmartTests(target,count,code,stateTests){target.innerHTML='';const cases=Array.isArray(stateTests)?stateTests:[];count.textContent=cases.length?cases.length+' evidence row'+(cases.length===1?'':'s'):'no execution evidence';if(!cases.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No verified execution evidence available yet.';target.appendChild(empty);return;}cases.slice(0,8).forEach((item)=>{const card=document.createElement('div');card.className='case';const name=document.createElement('b');name.textContent=item.name||'Execution result';const detail=document.createElement('code');detail.textContent=[item.status,item.expected!==undefined?'expected: '+String(item.expected):'',item.actual!==undefined?'actual: '+String(item.actual):'',item.input!==undefined?'input: '+String(item.input):''].filter(Boolean).join(' · ');card.appendChild(name);card.appendChild(detail);target.appendChild(card);});}
+		            function renderSmartTests(target,count,code,stateTests){
+              target.replaceChildren();const cases=Array.isArray(stateTests)?stateTests:[];
+              count.textContent=cases.length?cases.length+' executed test case'+(cases.length===1?'':'s'):'no per-case I/O';
+              if(!cases.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='This harness did not preserve individual inputs and outputs. No test values are invented.';target.appendChild(empty);return;}
+              const printable=value=>typeof value==='string'?value:JSON.stringify(value);
+              cases.slice(0,20).forEach((item,index)=>{
+                const card=document.createElement('div');card.className='case';card.dataset.status=item.status||'';
+                const name=document.createElement('b');name.textContent='Test case '+(index+1)+(item.name?' · '+String(item.name):'')+(item.status==='passed'?' · ✓':item.status==='failed'?' · ✕':'');
+                card.appendChild(name);
+                [['Input',item.input],['Expected',item.expected],['Output',item.actual]].forEach(([label,value])=>{
+                  const row=document.createElement('div');row.className='case-field';
+                  const title=document.createElement('b');title.textContent=label;
+                  const data=document.createElement('code');data.textContent=printable(value);
+                  row.append(title,data);card.appendChild(row);
+                });
+                target.appendChild(card);
+              });
+            }
             // Show the Council worker's exact E2B-tested candidate first. When
             // the deterministic judges publish a changed final winner, render
             // an actual red/green line diff in the EXISTING code window.
@@ -3485,9 +3636,12 @@ fn overlay_html() -> &'static str {
                 judging:'Independent Council judges',synthesizing:'Selecting verified winner',
                 porting:'Verifying language translations',completed:'Council completed'};
               const stage=stages[state.progressPhase]||waiting;
-              const verifiedPorts=Array.isArray(state.ports)?state.ports.filter(port=>port&&port.status==='verified'&&String(port.code||'').trim()).length:0;
+              const verifiedNames=Array.isArray(state.ports)?state.ports
+                .filter(port=>port&&port.status==='verified'&&String(port.code||'').trim())
+                .map(port=>canonicalPortLanguage(port.language)==='cpp'?'C++':
+                  canonicalPortLanguage(port.language)==='rust'?'Rust':'Python'):[];
               progress.textContent=state.phase==='done'
-                ? (verifiedPorts?'Council completed. Verified solution and '+verifiedPorts+' language port'+(verifiedPorts===1?' is':'s are')+' available below.':'Council completed. The verified primary solution is available below; no additional language port was verified for this run.'):
+                ? (verifiedNames.length?'Council completed. Primary verified; independently tested ports: '+verifiedNames.join(', ')+'.':'Council completed. Only the verified primary is available; requested ports did not pass verification.'):
                 state.phase==='error'?'Council needs attention. See the diagnostic below.':
                 stage+(state.progress&&stage!==state.progress?' · '+String(state.progress).slice(0,145):'');
               agents.after(progress);
@@ -3540,10 +3694,14 @@ fn overlay_html() -> &'static str {
               const keyPairs=[['python','py'],['rust','rr'],['cpp','cp']];
               for(const [lang,key] of keyPairs){
                 const available=lang===primaryLang||validated.some(port=>canonicalPortLanguage(port.language)===lang);
+                const unfinished=ports.find(port=>canonicalPortLanguage(port.language)===lang);
                 const chip=document.createElement('span');chip.className='overlay-port-chip';
                 chip.dataset.available=available?'true':'false';chip.dataset.selected=desired===lang?'true':'false';
-                chip.textContent=lang==='cpp'?'C++ · '+key:lang[0].toUpperCase()+lang.slice(1)+' · '+key;
-                chip.title=available?'E2B verified · type '+key+' to select':'Pending independent E2B verification';
+                const label=lang==='cpp'?'C++':lang[0].toUpperCase()+lang.slice(1);
+                chip.textContent=label+' · '+key+(available?' ✓':unfinished&&unfinished.status==='failed'?' ✕':' …');
+                chip.title=available?'E2B verified · type '+key+' to select':
+                  unfinished&&unfinished.status==='failed'?'E2B verification failed: '+String(unfinished.error||'unspecified failure').slice(0,200):
+                  'Independent E2B verification pending';
                 list.append(chip);
               }
               section.append(list);editor.after(section);
@@ -3552,7 +3710,15 @@ fn overlay_html() -> &'static str {
                 validated.find(port=>canonicalPortLanguage(port.language)===desired);
               const source=document.getElementById('solution-source'),title=document.getElementById('solution-title');
               if(!chosen){
-                if(source)source.textContent=(desired==='cpp'?'C++':desired)+' not verified yet · primary solution shown';
+                const candidate=ports.find(port=>canonicalPortLanguage(port.language)===desired);
+                const name=desired==='cpp'?'C++':desired==='rust'?'Rust':'Python';
+                const primaryName=primaryLang==='cpp'?'C++':primaryLang==='rust'?'Rust':'Python';
+                if(source){
+                  source.textContent=candidate?.status==='failed'
+                    ? name+' · E2B failed · showing '+primaryName
+                    : name+' · verification pending · showing '+primaryName;
+                  source.title=candidate?.error?String(candidate.error).slice(0,350):'';
+                }
                 return;
               }
               const code=document.getElementById('solution-code');
@@ -3562,6 +3728,10 @@ fn overlay_html() -> &'static str {
               }
               if(title)title.textContent='solution.'+(desired==='cpp'?'cpp':desired==='python'?'py':'rs');
               if(source)source.textContent=chosen===primary?'Council-verified primary':'Independently E2B-verified port';
+              const cases=chosen===primary?state.tests:
+                (Array.isArray(state.portCases)?state.portCases.find(entry=>canonicalPortLanguage(entry.language)===desired)?.tests:[]);
+              const caseTarget=document.getElementById('tests'),caseCount=document.getElementById('tests-count');
+              if(caseTarget&&caseCount)renderSmartTests(caseTarget,caseCount,String(chosen.code||''),cases);
               // Editing one version or importing from a live report never alters
               // the saved original code or the cloud report.
             }
@@ -3750,7 +3920,11 @@ mod tests {
                             "error": null
                         }
                     ],
-                    "suites": [{ "language": "python" }], "presentation": {"standing":"verified", "code":"def solve():\n    return 42", "language":"py","provenance":"Candidate B"}
+                    "suites": [{ "language": "python" }],
+                    "runs": {"B":{"ran":true,"ok":true,"passed":1,"failed":0,
+                        "stdout": r#"PASS example
+CA_CASE {"id":"statement example","input":{"n":4},"expected":6,"actual":6,"status":"passed"}"#}},
+                    "presentation": {"standing":"verified", "code":"def solve():\n    return 42", "language":"py","provenance":"Candidate B"}
                 }
             })),
             events: vec![],
@@ -3813,6 +3987,74 @@ mod tests {
         assert!(state["progress"].as_str().unwrap_or("").contains("Asking models"));
     }
 
+
+    #[test]
+    fn overlay_case_rows_show_only_real_executed_inputs_expected_and_actual() {
+        let trace = [
+            "PASS example one",
+            r#"CA_CASE {"id":"example 1","input":{"n":4},"expected":6,"actual":6,"status":"passed"}"#,
+            r#"CA_CASE {"id":"example 2","input":{"n":9},"expected":12,"actual":154,"status":"passed"}"#,
+            "PASS summary without I/O",
+            "CA_CASE not valid json",
+        ].join("\n");
+        let report = serde_json::json!({
+            "winner": "B",
+            "runs": {"A":{"ran":true,"stdout":r#"CA_CASE {"input":0,"expected":0,"actual":0}"#},
+                     "B":{"ran":true,"stdout": trace}},
+        });
+        let rows = coding_tests_from_report(&report, "B");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["input"]["n"], 4);
+        assert_eq!(rows[0]["expected"], 6);
+        assert_eq!(rows[0]["actual"], 6);
+        assert_eq!(rows[0]["status"], "passed");
+        // An incorrect status claimed by a generator cannot hide a mismatch.
+        assert_eq!(rows[1]["status"], "failed");
+        assert_eq!(rows[1]["actual"], 154);
+        assert_eq!(rows[1]["expected"], 12);
+        assert!(coding_tests_from_report(&report, "A").is_empty() == false);
+        assert!(coding_tests_from_report(&report, "C").is_empty());
+    }
+
+    #[test]
+    fn overlay_keeps_port_cases_separate_from_primary_language_evidence() {
+        let job = SubmittedJob {
+            id: "port-evidence".into(), mode: "council".into(), mcq_model: None,
+            status: "completed".into(), progress_phase: "completed".into(),
+            submitted_at: now(), previews: vec![], error: None, events: vec![],
+            report: Some(serde_json::json!({"report": {
+                "winner": "A",
+                "presentation": {"standing": "verified", "language": "Python",
+                    "code": "def solve(n): return n", "provenance": "candidate A"},
+                "runs": {"A": {"ran": true,
+                    "stdout": r#"CA_CASE {"id":"primary","input":{"n":2},"expected":2,"actual":2}"#}},
+                "ports": [{
+                    "language": "Rust", "status": "verified", "code": "fn solve(n:i32)->i32{n}",
+                    "run": {"ran": true, "ok": true, "failed": 0,
+                        "stdout": r#"CA_CASE {"id":"port","input":{"n":8},"expected":8,"actual":8}"#}
+                }]
+            }})),
+        };
+        let state = coding_overlay_state(&job);
+        assert_eq!(state["tests"][0]["input"]["n"], 2);
+        assert_eq!(state["portCases"][0]["language"], "Rust");
+        assert_eq!(state["portCases"][0]["tests"][0]["input"]["n"], 8);
+        assert_eq!(state["portCases"][0]["tests"][0]["status"], "passed");
+    }
+
+    #[test]
+    fn completed_cloud_reports_with_preparing_ports_still_require_refresh() {
+        assert!(report_has_preparing_ports(&serde_json::json!({
+            "report":{"stage":"final","ports":[{"language":"rust","status":"preparing"}]}
+        })));
+        assert!(!report_has_preparing_ports(&serde_json::json!({
+            "report":{"stage":"final","ports":[
+                {"language":"rust","status":"verified","code":"fn main() {}"},
+                {"language":"c++","status":"failed"}
+            ]}
+        })));
+    }
+
     #[test]
     fn coding_overlay_presents_verified_early_code_and_upgrade_diff_history() {
         let report = serde_json::json!({"job_id":"early-1","report":{
@@ -3830,7 +4072,8 @@ mod tests {
         let state = coding_overlay_state(&job);
         assert_eq!(state["solution"]["status"],"provisional");
         assert_eq!(state["solution"]["code"],"print(1)");
-        assert_eq!(state["tests"][0]["status"],"passed");
+        assert!(state["tests"].as_array().unwrap().is_empty(),
+            "Aggregate provisional totals must not masquerade as executed case I/O");
         assert_eq!(state["phase"],"running");
         assert!(is_usable_cloud_report(&serde_json::json!({"report":{
             "stage":"provisional","provisional":{"status":"provisional",
@@ -3882,7 +4125,8 @@ mod tests {
         let state = history_coding_state("saved-main-run", &report);
         assert_eq!(state["solution"]["code"], "print(42)");
         assert_eq!(state["presentation"]["approach"], "Scan the input once.");
-        assert_eq!(state["tests"][0]["status"], "passed");
+        assert!(state["tests"].as_array().unwrap().is_empty(),
+            "Legacy candidate pass totals are not individual case evidence");
         assert_eq!(state["ports"][0]["language"], "rust");
     }
 
