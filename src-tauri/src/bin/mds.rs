@@ -3089,7 +3089,7 @@ fn overlay_html() -> &'static str {
 		      .hud-key,.hud-pause{display:grid;place-items:center;min-width:32px;height:28px;padding:0 10px;border-radius:8px;background:rgba(255,255,255,.13);box-shadow:inset 0 1px 0 rgba(255,255,255,.08);color:rgba(255,255,255,.9);flex:0 0 auto}
 		      .hud-action{color:rgba(255,255,255,.68);margin-left:4px}
 	      .hud-meter{display:inline-flex;align-items:end;gap:2px;height:18px;padding:0 2px}.hud-meter i{display:block;width:3px;border-radius:3px;background:rgba(205,224,242,.7);box-shadow:0 0 9px rgba(190,215,235,.18)}.hud-meter i:nth-child(1){height:7px}.hud-meter i:nth-child(2){height:12px}.hud-meter i:nth-child(3){height:9px}
-	      #panel{box-sizing:border-box;width:100%;flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;border:1px solid rgba(255,255,255,.26);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(205,222,239,.10),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(255,255,255,.09),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
+	      #panel{box-sizing:border-box;width:100%;flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,.75fr);border:1px solid rgba(255,255,255,.26);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(205,222,239,.10),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(255,255,255,.09),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
             .pane{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:10px;padding:18px;overflow:hidden}.pane+ .pane{border-left:1px solid var(--pane-line)}
             .pictures-pane{align-items:flex-start}
             .title{font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.95;text-shadow:0 1px 2px var(--title-shadow)}
@@ -3120,16 +3120,21 @@ fn overlay_html() -> &'static str {
 	            .solution-editor{box-sizing:border-box;width:100%;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;border:1px solid var(--panel-line);border-radius:9px;background:var(--editor-bg);overflow:hidden}
             .editor-head,.tests-head{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.76);font-size:11px}
             .editor-head b,.tests-head b{color:rgba(255,255,255,.95)}
-	            .code-lines{flex:1;min-height:0;margin:0;padding:13px 0;color:var(--code-text);font:500 12px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line}
-	            .code-lines li{display:grid;grid-template-columns:42px minmax(0,1fr);min-height:20px;padding:0 14px 0 0;list-style:none;counter-increment:code-line}
+	            .code-lines{flex:1;min-height:0;margin:0;padding:15px 0;color:var(--code-text);font:530 14.5px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line}
+	            .code-lines li{display:grid;grid-template-columns:48px minmax(0,1fr);min-height:24px;padding:0 17px 0 0;list-style:none;counter-increment:code-line}
 	            .code-lines li:before{content:counter(code-line);padding-right:12px;text-align:right;color:rgba(255,255,255,.3)}
 	            .code-lines code{display:block;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
             .kw{color:var(--kw)}.fn{color:var(--fn)}.arg{color:var(--arg)}.num{color:var(--num)}.str{color:var(--str)}.built{color:var(--built)}.op{color:var(--op)}.cm{color:var(--cm)}
-	            .tests{box-sizing:border-box;width:100%;min-height:58px;max-height:92px;overflow-y:auto;border:1px solid var(--panel-line);border-radius:9px;background:var(--tests-bg);overflow:hidden}
-	            .case-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;padding:7px}
-	            .case{min-width:0;padding:5px;border:1px solid rgba(255,255,255,.12);border-radius:7px;background:rgba(255,255,255,.045);font-size:10px;color:rgba(255,255,255,.82)}
+	            .tests{box-sizing:border-box;width:100%;min-height:58px;max-height:180px;border:1px solid var(--panel-line);border-radius:9px;background:var(--tests-bg);overflow-y:auto;overflow-x:hidden}
+	            .case-list{display:grid;grid-template-columns:minmax(0,1fr);gap:7px;padding:9px}
+	            .case{min-width:0;padding:10px 11px;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:rgba(255,255,255,.045);font-size:11.5px;color:rgba(255,255,255,.88);line-height:1.5}
             .case b{display:block;margin-bottom:4px;color:rgba(255,255,255,.95)}
-            .case code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#d5f5ff}
+            .case code{display:block;white-space:pre-wrap;overflow-wrap:anywhere;font:530 11.5px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#d5f5ff}
+            .case[data-status="failed"]{border-color:rgba(255,112,112,.55)}
+            .case[data-status="passed"]{border-color:rgba(102,218,159,.36)}
+            .case .case-field{display:grid;grid-template-columns:74px minmax(0,1fr);gap:9px;align-items:start}
+            .case .case-field b{color:rgba(255,255,255,.6);font-size:10.5px;font-weight:700;margin:0}
+            .case .case-field code{min-width:0}
 	            .thought-pane{gap:10px}
 	            .thought-list{box-sizing:border-box;width:100%;display:flex;flex-direction:column;gap:8px;overflow:hidden}
             .thought-item{width:100%;display:flex;flex-direction:column;gap:5px}
@@ -3252,16 +3257,35 @@ fn overlay_html() -> &'static str {
             .code-lines li[data-change="add"]{background:rgba(65,200,120,.16);border-left:3px solid rgba(65,200,120,.7)}
             .code-lines li[data-change="same"]{border-left:3px solid transparent}
             .code-lines li[data-change] code{overflow-wrap:anywhere}
+            /* Preserve the original HUD and overlay dimensions. Code-only
+               sheets are different display modes of the SAME protected window. */
+            body[data-code-focus="full"],body[data-code-focus="left"],body[data-code-focus="right"]{padding:10px 12px;gap:0}
+            body[data-code-focus]:not([data-code-focus="normal"]) #hudbar{display:none}
+            body[data-code-focus]:not([data-code-focus="normal"]) #panel{
+              width:100%;height:100%;min-height:0;grid-template-columns:minmax(0,1fr);
+              border-radius:14px;background:linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base)}
+            body[data-code-focus]:not([data-code-focus="normal"]) .pictures-pane{
+              width:100%;height:100%;min-height:0;padding:14px}
+            body[data-code-focus]:not([data-code-focus="normal"]) .pictures-pane > :not(.solution-editor){display:none!important}
+            body[data-code-focus]:not([data-code-focus="normal"]) .thought-pane{display:none!important}
+            body[data-code-focus]:not([data-code-focus="normal"]) .solution-editor{flex:1;width:100%;height:100%;min-height:0;border-radius:12px}
+            body[data-code-focus]:not([data-code-focus="normal"]) .editor-head{display:none!important}
+            body[data-code-focus]:not([data-code-focus="normal"]) .code-lines{font-size:17px;line-height:1.7;padding:19px 0}
+            body[data-code-focus]:not([data-code-focus="normal"]) .code-lines li{grid-template-columns:52px minmax(0,1fr);min-height:29px}
+            @media(prefers-reduced-motion:reduce){body[data-code-focus] #panel{transition:none}}
         </style></head><body><div class="hudbar" id="hudbar"><span class="hud-logo">CA</span><span class="hud-pause">||</span><span class="hud-meter"><i></i><i></i><i></i></span><span id="hud-shortcuts" class="hud-shortcuts"></span></div><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><script>
 	            // HUD labels come from the numeric command table handled by mac_shortcuts.
             // Keep the overlay's real capture controls, not generic demo shortcuts.
+            window.setCodeFocusMode=function(mode){
+              document.body.dataset.codeFocus=['full','left','right'].includes(mode)?mode:'normal';
+            };
             window.setOverlayControls=function(view){
               const host=document.getElementById('hud-shortcuts');if(!host)return;
               const controls=view==='history'
                 ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
                 : view==='mcq'
                 ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31'],['Left','32'],['Right','33'],['Region','34'],['Submit','35']]
-                : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py']];
+                : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py'],['Code only','ss/sl/sr']];
               const fingerprint=controls.map(([name,key])=>name+key).join('|');
               if(host.dataset.shortcutSet===fingerprint)return;
               host.dataset.shortcutSet=fingerprint;host.replaceChildren();
@@ -3301,7 +3325,24 @@ fn overlay_html() -> &'static str {
 		            function detectedFunctionNames(code){const found=[];String(code||'').replace(/\b([A-Za-z_]\w*)\s*\(/g,(_,name)=>{if(!found.includes(name)&&!['if','for','while','switch','return','def','function'].includes(name))found.push(name);return _;});return found;}
 		            function renderFunctionNotes(code){const target=document.getElementById('function-notes');if(!target)return;const meanings={set:'stores unique values for quick membership checks',sum:'adds numeric values together',max:'returns the largest value',min:'returns the smallest value',len:'counts items',range:'creates a numeric loop sequence',enumerate:'loops with index and value',append:'adds an item to a list',sort:'orders a list in place',sorted:'returns ordered values',print:'writes debug output',useState:'stores React component state',useEffect:'runs React side effects',fetch:'requests network data',map:'transforms each item',filter:'keeps matching items',reduce:'combines items into one result'};const found=detectedFunctionNames(code);target.innerHTML='';found.slice(0,5).forEach((name)=>{const row=document.createElement('div');row.textContent=name+': '+(meanings[name]||'function call used by the solution');target.appendChild(row);});if(!target.children.length){const row=document.createElement('div');row.textContent='No function calls detected yet.';target.appendChild(row);}}
 		            function functionExample(name){const examples={sum:'sum([18, 9]) -> 27',set:'set([18, 9, 18]) -> {18, 9}',max:'max([18, 9]) -> 18',min:'min([18, 9]) -> 9',len:'len([18, 9]) -> 2',range:'range(0, 5) -> 0..4',enumerate:'enumerate(items) -> index + value',append:'outliers.append(18) -> adds 18',sort:'values.sort() -> in-place order',sorted:'sorted(values) -> ordered copy',print:'print(result) -> console output',useState:'useState(false) -> state + setter',useEffect:'useEffect(fn, []) -> run side effect',fetch:'fetch(url) -> request data',map:'items.map(fn) -> transformed items',filter:'items.filter(fn) -> matching items',reduce:'items.reduce(fn, seed) -> one value'};return examples[name]||name+'(exampleInput) -> expected output';}
-		            function renderSmartTests(target,count,code,stateTests){target.innerHTML='';const cases=Array.isArray(stateTests)?stateTests:[];count.textContent=cases.length?cases.length+' evidence row'+(cases.length===1?'':'s'):'no execution evidence';if(!cases.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No verified execution evidence available yet.';target.appendChild(empty);return;}cases.slice(0,8).forEach((item)=>{const card=document.createElement('div');card.className='case';const name=document.createElement('b');name.textContent=item.name||'Execution result';const detail=document.createElement('code');detail.textContent=[item.status,item.expected!==undefined?'expected: '+String(item.expected):'',item.actual!==undefined?'actual: '+String(item.actual):'',item.input!==undefined?'input: '+String(item.input):''].filter(Boolean).join(' · ');card.appendChild(name);card.appendChild(detail);target.appendChild(card);});}
+		            function renderSmartTests(target,count,code,stateTests){
+              target.replaceChildren();const cases=Array.isArray(stateTests)?stateTests:[];
+              count.textContent=cases.length?cases.length+' executed test case'+(cases.length===1?'':'s'):'no per-case I/O';
+              if(!cases.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='This harness did not preserve individual inputs and outputs. No test values are invented.';target.appendChild(empty);return;}
+              const printable=value=>typeof value==='string'?value:JSON.stringify(value);
+              cases.slice(0,20).forEach((item,index)=>{
+                const card=document.createElement('div');card.className='case';card.dataset.status=item.status||'';
+                const name=document.createElement('b');name.textContent='Test case '+(index+1)+(item.name?' · '+String(item.name):'')+(item.status==='passed'?' · ✓':item.status==='failed'?' · ✕':'');
+                card.appendChild(name);
+                [['Input',item.input],['Expected',item.expected],['Output',item.actual]].forEach(([label,value])=>{
+                  const row=document.createElement('div');row.className='case-field';
+                  const title=document.createElement('b');title.textContent=label;
+                  const data=document.createElement('code');data.textContent=printable(value);
+                  row.append(title,data);card.appendChild(row);
+                });
+                target.appendChild(card);
+              });
+            }
             // Show the Council worker's exact E2B-tested candidate first. When
             // the deterministic judges publish a changed final winner, render
             // an actual red/green line diff in the EXISTING code window.
