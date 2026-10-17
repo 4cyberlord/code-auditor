@@ -2687,7 +2687,7 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
         }).collect()
     };
     let solution = body.and_then(|b| coding_solution_from_report(b, winner, &candidates));
-    let tests = body.map(coding_tests_from_report).unwrap_or_default();
+    let tests = body.map(|body| coding_tests_from_report(body, winner)).unwrap_or_default();
     serde_json::json!({
         "runId": job.id, "updatedAt": now(), "kind": "coding",
         "phase": phase, "status": job.status,
@@ -2809,102 +2809,50 @@ fn coding_solution_from_report(body: &Value, winner: &str, candidates: &[Value])
     }))
 }
 
-fn coding_tests_from_report(body: &Value) -> Vec<Value> {
-    // A provisional result has real E2B verification but no finalized Council
-    // evidence rows yet. Report the measured passed count, never invented cases.
-    if body.get("stage").and_then(Value::as_str) == Some("provisional") {
-        if let Some(early) = body.get("provisional") {
-            let passed = early.get("passed").and_then(Value::as_u64).unwrap_or(0);
-            let failed = early.get("failed").and_then(Value::as_u64).unwrap_or(1);
-            if passed > 0 && failed == 0 {
-                let letter = early.get("letter").and_then(Value::as_str).unwrap_or("?");
-                return vec![serde_json::json!({
-                    "name": format!("Candidate {letter} · preliminary E2B"),
-                    "input": early.get("language").and_then(Value::as_str).unwrap_or(""),
-                    "expected": format!("{passed} executed test cases"),
-                    "actual": format!("{passed} passed, 0 failed; Council review pending"),
-                    "status": "passed"
-                })];
-            }
-        }
-    }
-    // One row per candidate, carrying what its run did. The harness rows this
-    // falls back to say "From cloud report" five times, which is a pane that
-    // reports nothing at all.
-    if let Some(evidence) = body
-        .pointer("/presentation/evidence")
-        .and_then(Value::as_array)
-        .filter(|rows| !rows.is_empty())
-    {
-        return evidence
-            .iter()
-            .take(8)
-            .map(|row| {
-                let letter = row.get("letter").and_then(Value::as_str).unwrap_or("?");
-                let gate = row.get("gate").and_then(Value::as_str).unwrap_or("untested");
-                let passed = row.get("passed").and_then(Value::as_i64).unwrap_or(0);
-                let failed = row.get("failed").and_then(Value::as_i64).unwrap_or(0);
-                let revised = row.get("revised").and_then(Value::as_bool).unwrap_or(false);
-                let note = row.get("note").and_then(Value::as_str).unwrap_or("");
-                let runtime = row.get("runtime").and_then(Value::as_str).unwrap_or("");
-                let name = if revised {
-                    format!("Candidate {letter} (revised)")
-                } else {
-                    format!("Candidate {letter}")
-                };
-                let actual = if gate == "untested" {
-                    if note.is_empty() {
-                        "not executed".to_string()
-                    } else {
-                        note.to_string()
-                    }
-                } else if runtime.is_empty() {
-                    format!("{passed} passed, {failed} failed")
-                } else {
-                    format!("{passed} passed, {failed} failed · {runtime}")
-                };
-                let expected = if gate == "untested" {
-                    "not executed".to_string()
-                } else {
-                    format!("{} case(s)", passed + failed)
-                };
-                let status = match gate {
-                    "pass" => "passed",
-                    "fail" => "failed",
-                    _ => "pending",
-                };
-                serde_json::json!({
-                    "name": name,
-                    "input": row.get("model").and_then(Value::as_str).unwrap_or(""),
-                    "expected": expected,
-                    "actual": actual,
-                    "status": status,
-                })
-            })
-            .collect();
-    }
-
-    let Some(suites) = body.get("suites").and_then(Value::as_array) else {
-        return vec![];
-    };
-    suites
-        .iter()
-        .take(5)
-        .enumerate()
-        .map(|(index, suite)| {
-            let language = suite
-                .get("language")
-                .and_then(Value::as_str)
-                .unwrap_or("suite");
-            serde_json::json!({
-                "name": format!("Harness {}", index + 1),
-                "input": language,
-                "expected": "PASS lines",
-                "actual": "From cloud report",
-                "status": "pending",
-            })
+/// Only true per-case stdout traces from the executed winner are shown as
+/// test cases. Candidate gate totals and synthetic "Harness N" descriptions
+/// are NOT test inputs or observed outputs.
+fn actual_case_rows(stdout: &str) -> Vec<Value> {
+    stdout.lines()
+        .filter_map(|line| line.trim().strip_prefix("CA_CASE "))
+        .take(48)
+        .filter_map(|record| serde_json::from_str::<Value>(record).ok())
+        .filter_map(|record| {
+            let input = record.get("input")?;
+            let expected = record.get("expected")?;
+            let actual = record.get("actual")?;
+            let id = record.get("id").and_then(Value::as_str).unwrap_or("Case");
+            // Never display an alleged PASS when the actual and expected differ.
+            let passed = actual == expected;
+            let status = if passed { "passed" } else { "failed" };
+            Some(serde_json::json!({
+                "name": id.chars().take(80).collect::<String>(),
+                "input": input,
+                "expected": expected,
+                "actual": actual,
+                "status": status,
+                "source": "executed-harness"
+            }))
         })
         .collect()
+}
+
+fn coding_tests_from_report(body: &Value, winner: &str) -> Vec<Value> {
+    // Use the same deterministic winner that supplied the displayed code.
+    // For a revised winner, only the rerun is authoritative.
+    let revised = body.get("revisedRuns").and_then(|runs| runs.get(winner));
+    let normal = body.get("runs").and_then(|runs| runs.get(winner));
+    let run = revised.filter(|run| run.get("ran").and_then(Value::as_bool) == Some(true))
+        .or(normal.filter(|run| run.get("ran").and_then(Value::as_bool) == Some(true)));
+    if let Some(stdout) = run.and_then(|run| run.get("stdout")).and_then(Value::as_str) {
+        let rows = actual_case_rows(stdout);
+        if !rows.is_empty() {
+            return rows;
+        }
+    }
+    // Legacy or provisional report: it has verified aggregate counts but no
+    // captured per-case input/output. Never manufacture examples from totals.
+    vec![]
 }
 
 fn submitted_overlay_state(job: &SubmittedJob) -> Value {
