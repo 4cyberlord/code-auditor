@@ -851,10 +851,28 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
     const text = await resp.text();
     last = `${resp.status} ${resp.statusText}: ${text}`;
     if (resp.ok) {
-      const json = JSON.parse(text);
-      const answer = responseText(json);
+      let answer = "";
+      try {
+        answer = responseText(JSON.parse(text));
+      } catch {
+        throw new Error(`${model}: gateway returned malformed JSON`);
+      }
       if (answer.trim()) return answer;
+
+      // Match the Chat Completions recovery path.  A few compatible Responses
+      // routes return a successful reasoning-only envelope with no final text.
+      // That is not a usable harness (or answer), but it also is not evidence
+      // that the model is unavailable.  Retry once without the reasoning field
+      // before giving the route its remaining bounded attempt.
       last = `${model}: empty model response`;
+      if (think !== "off") {
+        noReasoning.add(model);
+        think = "off";
+      }
+      if (attempt < 2) {
+        await sleep(250 * (attempt + 1));
+        continue;
+      }
       break;
     }
 
@@ -1389,8 +1407,16 @@ async function runMutationOracle(job, settings, suites, candidates, runs) {
 async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, question, candidates, languages, knowledge, bench) {
   if(!languages.length)return [];
   await addEvent(job.id,"info","harness_preparing","Preparing specification-derived E2B tests for "+languages.join(", "),{languages});
+  // A successfully selected solver has just demonstrated that its route can
+  // return a structured answer for this exact screenshot.  Prefer those seats
+  // for the harness pass over an arbitrary, configured roster order.  This is
+  // the same selected-agent contract used by the desktop path and prevents an
+  // otherwise healthy overlay run being blocked by a cold unrelated route.
+  const candidateAuthors = candidates
+    .filter((candidate) => candidate?.final?.kind === "code" && candidate.final.code?.trim())
+    .map((candidate) => candidate.model);
   const specModels = [...new Set([
-    settings.synthesisModel, ...judges.map(judge => judge.model), ...models.map(model => model.id),
+    ...candidateAuthors, settings.synthesisModel, ...judges.map(judge => judge.model), ...models.map(model => model.id),
   ].filter(Boolean))];
   const specStartedAt = Date.now();
   const failures = new Map();
@@ -1472,6 +1498,12 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
           // this budget.  Asking a gateway for an arbitrary larger answer is
           // less reliable and was returning HTTP 200 with an empty body.
           maxTokens: Math.min(6_144, Math.max(Number(settings.maxTokens || 4096), 4_096)),
+          // Harnesses need careful formatting, but they do not need the full
+          // solve-time deliberation budget.  Leaving this at "high" lets some
+          // gateways consume their completion budget in hidden reasoning and
+          // return HTTP 200 with no final text at all.  Solvers and judges
+          // retain the user's configured (high by default) reasoning level.
+          reasoning: "low",
         });
         const suite = parseTestSuites(specText).find(item => item.language === language);
         if (!suite) throw new Error("No valid executable harness block parsed.");
@@ -2887,13 +2919,27 @@ export async function runCouncilJob(job) {
   const earlyLanguages=contractSupportsEarlyHarness(
     [reading.context,contractText,question].filter(Boolean).join("\n"),inferredKind
   )?[primaryLanguage]:[];
-  const preparedSuites=earlyLanguages.length
-    ? prepareProblemHarnesses(job,settings,baseUrl,models,judges,question,[],earlyLanguages,knowledge,bench)
-      .catch(async err=>{
-        await addEvent(job.id,"warn","early_harness_fallback","Early E2B harness unavailable; candidate-aware fallback remains enabled.",
-          {detail:String(err).slice(0,180)}).catch(()=>{});
-        return [];
-      }):Promise.resolve([]);
+  // Do not ask for a speculative harness before a solver has returned code.
+  // That old path competed with the actual screenshot solvers for the same
+  // gateway, then often guessed an interface without a real candidate.  Start
+  // the first candidate-aware harness as soon as a code answer lands instead;
+  // it still overlaps the remaining solvers and E2B warm-up, but uses a proven
+  // route and the real signature the harness must exercise.
+  let preparedSuites = Promise.resolve([]);
+  let earlyHarnessStarted = false;
+  const beginCandidateAwareHarness = (candidate) => {
+    if (earlyHarnessStarted || !candidate?.final?.code?.trim()) return;
+    const language = candidateLanguage(candidate.final);
+    if (!earlyLanguages.includes(language)) return;
+    earlyHarnessStarted = true;
+    preparedSuites = prepareProblemHarnesses(
+      job, settings, baseUrl, models, judges, question, [candidate], [language], knowledge, bench
+    ).catch(async (err) => {
+      await addEvent(job.id,"warn","early_harness_fallback","Early candidate-aware E2B harness unavailable; the complete field will be retried.",
+        {detail:String(err).slice(0,180), language, model:candidate.model}).catch(()=>{});
+      return [];
+    });
+  };
   const scheduleE2B=createBoundedExecutor(workerConcurrency(process.env.CODE_AUDITOR_E2B_CONCURRENCY,4,9));
   const eagerRuns=new Map();
   // Only the FIRST eligible candidate is displayed provisionally. It is an
@@ -2988,6 +3034,9 @@ export async function runCouncilJob(job) {
         });
         const final = parseFinal(text);
         candidates[index] = { letter, model: spec.id, final, text, error: null };
+        if (final?.kind === "code" && final.code?.trim()) {
+          beginCandidateAwareHarness(candidates[index]);
+        }
         if(final?.kind==="code"&&final.code?.trim()&&earlyLanguages.includes(candidateLanguage(final))){
           eagerRuns.set(letter,scheduleE2B(async()=>{
             const ready=await preparedSuites;
