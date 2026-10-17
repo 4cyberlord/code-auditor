@@ -33,6 +33,10 @@ const BUCKET: &str = "azure:council-images";
 const AZURE_STORAGE_VERSION: &str = "2023-11-03";
 const MAX_IMAGES: usize = 10;
 const OVERLAY_WIDTH: f64 = 1320.0;
+const HUD_WIDTH: f64 = 188.0;
+const HUD_GAP: f64 = 14.0;
+const HUD_HEIGHT: f64 = 392.0;
+const HISTORY_HUD_HEIGHT: f64 = 272.0;
 // The normal capture workspace deliberately has more vertical room than the
 // original HUD: screenshots, the solution, and the thought pane should not
 // compete for a short window. Code-focus uses the monitor's full physical
@@ -121,6 +125,18 @@ fn ghost_process_hide() {}
 
 #[cfg(target_os = "macos")]
 mod mac_shortcuts {
+    use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+    use core_graphics::{
+        event::{
+            CallbackResult, CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation,
+            CGEventTapOptions, CGEventTapPlacement, CGEventType,
+        },
+        window::{
+            kCGWindowLayer, kCGWindowListExcludeDesktopElements,
+            kCGWindowListOptionOnScreenOnly, kCGWindowOwnerPID, CGWindowListCopyWindowInfo,
+        },
+    };
+    use objc2_app_kit::NSWorkspace;
     use std::{
         ffi::c_void,
         ptr,
@@ -172,6 +188,125 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_0: u32 = 0x27;
     const HID_USAGE_KEYBOARD_MINUS: u32 = 0x2D;
     const HID_USAGE_KEYBOARD_EQUAL: u32 = 0x2E;
+    const HID_USAGE_KEYBOARD_CAPS_LOCK: u32 = 0x39;
+
+    // The HID observer deliberately does not consume keys, preserving typing
+    // in every foreground app. On an empty Stage Manager space macOS has no
+    // key window, so it sounds the alert for those same overlay commands.
+    // A separate session filter drops only command key-downs on that empty
+    // desktop; the HID observer still receives the physical shortcut.
+    fn quiet_desktop_key(keycode: i64, shifted: bool, modified: bool) -> bool {
+        if modified {
+            return false;
+        }
+        match keycode {
+            // C/M/H open panels; S/L/R/P/Y select a code reader/language.
+            8 | 46 | 4 | 1 | 37 | 15 | 35 | 16 => true,
+            // The number-pair capture commands do not accept Shift.
+            29 | 18 | 19 | 20 | 21 | 23 => !shifted,
+            _ => false,
+        }
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
+        fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
+        fn CFNumberGetValue(number: *const c_void, number_type: i32, value: *mut c_void) -> bool;
+        fn CFRelease(value: *const c_void);
+    }
+
+    fn has_frontmost_normal_window(pid: i32) -> Option<bool> {
+        let windows = unsafe {
+            CGWindowListCopyWindowInfo(
+                kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+                0,
+            )
+        };
+        if windows.is_null() {
+            return None;
+        }
+        let mut found = false;
+        unsafe {
+            for index in 0..CFArrayGetCount(windows.cast()) {
+                let window = CFArrayGetValueAtIndex(windows.cast(), index);
+                if window.is_null() {
+                    continue;
+                }
+                let owner = CFDictionaryGetValue(window, kCGWindowOwnerPID.cast());
+                let layer = CFDictionaryGetValue(window, kCGWindowLayer.cast());
+                if owner.is_null() || layer.is_null() {
+                    continue;
+                }
+                let mut owner_pid = 0_i32;
+                let mut window_layer = -1_i32;
+                if CFNumberGetValue(owner, 3, (&mut owner_pid as *mut i32).cast())
+                    && CFNumberGetValue(layer, 3, (&mut window_layer as *mut i32).cast())
+                    && owner_pid == pid
+                    && window_layer == 0
+                {
+                    found = true;
+                    break;
+                }
+            }
+            CFRelease(windows.cast());
+        }
+        Some(found)
+    }
+
+    fn empty_stage_manager_desktop() -> bool {
+        // NSWorkspace identifies the app that receives key events. A visible
+        // layer-zero window means there is a real foreground destination;
+        // fail open if macOS will not provide its window list.
+        let frontmost = NSWorkspace::sharedWorkspace().frontmostApplication();
+        let Some(frontmost) = frontmost else {
+            return true;
+        };
+        let pid = frontmost.processIdentifier();
+        pid > 0 && has_frontmost_normal_window(pid) == Some(false)
+    }
+
+    pub fn register_quiet_desktop_filter() -> Result<CGEventTap<'static>, String> {
+        let tap = CGEventTap::new(
+            CGEventTapLocation::Session,
+            CGEventTapPlacement::TailAppendEventTap,
+            CGEventTapOptions::Default,
+            vec![CGEventType::KeyDown],
+            |_proxy, event_type, event: &CGEvent| {
+                if !matches!(event_type, CGEventType::KeyDown) {
+                    return CallbackResult::Keep;
+                }
+                let flags = event.get_flags();
+                let modified = flags.intersects(
+                    CGEventFlags::CGEventFlagControl
+                        | CGEventFlags::CGEventFlagAlternate
+                        | CGEventFlags::CGEventFlagCommand,
+                );
+                let keycode = event.get_integer_value_field(
+                    core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE,
+                );
+                if quiet_desktop_key(
+                    keycode,
+                    flags.contains(CGEventFlags::CGEventFlagShift),
+                    modified,
+                ) && empty_stage_manager_desktop()
+                {
+                    CallbackResult::Drop
+                } else {
+                    CallbackResult::Keep
+                }
+            },
+        )
+        .map_err(|_| "macOS did not permit the quiet desktop shortcut filter (Accessibility permission may be needed)".to_string())?;
+        let source = tap
+            .mach_port()
+            .create_runloop_source(0)
+            .map_err(|_| "Could not create the quiet desktop shortcut run-loop source")?;
+        CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
+        tap.enable();
+        Ok(tap)
+    }
 
     pub static START_BATCH: AtomicBool = AtomicBool::new(false);
     pub static CAPTURE: AtomicBool = AtomicBool::new(false);
@@ -195,20 +330,28 @@ mod mac_shortcuts {
     // SL/SR dock the verified code reader left or right.
     static CODE_FOCUS_COMMAND: AtomicU8 = AtomicU8::new(0);
     static LANGUAGE_KEY_HELD: AtomicU8 = AtomicU8::new(0);
-    static LAST_LANGUAGE_KEY: Mutex<Option<(u32, Instant)>> = Mutex::new(None);
+    static LAST_LANGUAGE_KEY: Mutex<Option<(u32, bool, Instant)>> = Mutex::new(None);
+    static OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
     static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
     static HISTORY_VISIBLE: AtomicBool = AtomicBool::new(false);
     // 1 coding, 2 multiple-choice, 3 shared cloud history.
     static PANEL_COMMAND: AtomicU8 = AtomicU8::new(0);
+    // History must remain reachable even if a screenshot picker is pending.
+    static HISTORY_TOGGLE_COMMAND: AtomicBool = AtomicBool::new(false);
     // Suppress hardware key-repeat; require two distinct keydown edges.
     static PANEL_KEY_HELD: AtomicU8 = AtomicU8::new(0);
-    static LAST_PANEL_KEY: Mutex<Option<(u8, Instant)>> = Mutex::new(None);
+    static LAST_PANEL_KEY: Mutex<Option<(u8, bool, Instant)>> = Mutex::new(None);
     // Encoded pairs: 00 and 10-13 route to the main app, 21-25 are coding
     // overlay controls, and 31-35 are MCQ overlay controls.
     static NUMBER_COMMAND: AtomicU8 = AtomicU8::new(0);
 
     static CONTROL_DOWN: AtomicBool = AtomicBool::new(false);
     static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
+    // The initial lock state need not be queried: paired-case equality is
+    // invariant if both letters are inverted. Tracking subsequent toggles is
+    // enough to reject a pair that changes case between its two keypresses.
+    static CAPS_LOCK_ON: AtomicBool = AtomicBool::new(false);
+    static CAPS_LOCK_HELD: AtomicBool = AtomicBool::new(false);
     static OPTION_DOWN: AtomicBool = AtomicBool::new(false);
     static LAST_DIGIT: Mutex<Option<(u8, Instant)>> = Mutex::new(None);
     static MONITOR: Mutex<Option<usize>> = Mutex::new(None);
@@ -250,6 +393,23 @@ mod mac_shortcuts {
         }
     }
 
+    fn panel_key_command(usage: u32) -> Option<(u8, u8)> {
+        match usage {
+            HID_USAGE_KEYBOARD_C => Some((1, 1)),
+            HID_USAGE_KEYBOARD_M => Some((2, 2)),
+            HID_USAGE_KEYBOARD_H => Some((3, 4)),
+            _ => None,
+        }
+    }
+
+    fn language_pair_window(first: u32, second: u32) -> Duration {
+        if dock_pair_command(first, second) != 0 {
+            Duration::from_millis(1_200)
+        } else {
+            Duration::from_millis(650)
+        }
+    }
+
     #[cfg(test)]
     mod dock_tests {
         use super::*;
@@ -259,6 +419,27 @@ mod mac_shortcuts {
             assert_eq!(dock_pair_command(HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_R),6);
             assert_eq!(dock_pair_command(HID_USAGE_KEYBOARD_L,HID_USAGE_KEYBOARD_S),0);
             assert_eq!(dock_pair_command(HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_S),0);
+            assert_eq!(language_pair_window(HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_L), Duration::from_millis(1_200));
+            assert_eq!(language_pair_window(HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_R), Duration::from_millis(1_200));
+            assert_eq!(language_pair_window(HID_USAGE_KEYBOARD_C,HID_USAGE_KEYBOARD_P), Duration::from_millis(650));
+            assert_eq!(language_pair_window(HID_USAGE_KEYBOARD_R,HID_USAGE_KEYBOARD_R), Duration::from_millis(650));
+        }
+
+        #[test]
+        fn legacy_panel_pairs_keep_their_original_destinations() {
+            assert_eq!(panel_key_command(HID_USAGE_KEYBOARD_C), Some((1, 1)));
+            assert_eq!(panel_key_command(HID_USAGE_KEYBOARD_M), Some((2, 2)), "MM remains the MCQ panel command");
+            assert_eq!(panel_key_command(HID_USAGE_KEYBOARD_H), Some((3, 4)));
+        }
+
+        #[test]
+        fn idle_desktop_filter_spares_modified_keys_and_unrelated_typing() {
+            assert!(quiet_desktop_key(8, false, false)); // cc
+            assert!(quiet_desktop_key(8, true, false)); // CC
+            assert!(quiet_desktop_key(19, false, false)); // 22
+            assert!(!quiet_desktop_key(8, false, true)); // Cmd-C / Ctrl-C
+            assert!(!quiet_desktop_key(19, true, false));
+            assert!(!quiet_desktop_key(0, false, false)); // a
         }
     }
 
@@ -282,15 +463,12 @@ mod mac_shortcuts {
         let usage = unsafe { IOHIDElementGetUsage(element) };
         let pressed = unsafe { IOHIDValueGetIntegerValue(value) } != 0;
 
-        // Case-insensitive CC/MM/HH via physical HID codes. A double press
-        // must have a key release between taps. The callback does not store
-        // keystrokes or interfere with the underlying app's input stream.
-        let panel_key = match usage {
-            HID_USAGE_KEYBOARD_C => Some((1_u8, 1_u8)),
-            HID_USAGE_KEYBOARD_M => Some((2_u8, 2_u8)),
-            HID_USAGE_KEYBOARD_H => Some((3_u8, 4_u8)),
-            _ => None,
-        };
+        // Accept all-lowercase or all-uppercase pairs, but not mixed-case
+        // pairs. A double press must have a key release between taps. The
+        // callback does not store keystrokes or alter foreground input.
+        let uppercase = SHIFT_DOWN.load(Ordering::SeqCst)
+            ^ CAPS_LOCK_ON.load(Ordering::SeqCst);
+        let panel_key = panel_key_command(usage);
         if let Some((command, bit)) = panel_key {
             if !pressed {
                 PANEL_KEY_HELD.fetch_and(!bit, Ordering::SeqCst);
@@ -299,8 +477,12 @@ mod mac_shortcuts {
                 && PANEL_KEY_HELD.fetch_or(bit, Ordering::SeqCst) & bit == 0
             {
                 if let Ok(mut previous) = LAST_PANEL_KEY.lock() {
-                    if super::double_tap_panel(&mut previous, command, Instant::now()).is_some() {
-                        PANEL_COMMAND.store(command, Ordering::SeqCst);
+                    if super::double_tap_panel(&mut previous, command, uppercase, Instant::now()).is_some() {
+                            if command == 3 {
+                                HISTORY_TOGGLE_COMMAND.store(true, Ordering::SeqCst);
+                            } else {
+                                PANEL_COMMAND.store(command, Ordering::SeqCst);
+                            }
                     }
                 }
             }
@@ -334,9 +516,11 @@ mod mac_shortcuts {
                 if let Ok(mut previous)=LAST_LANGUAGE_KEY.lock(){
                     // Let an intentional pair work at a normal typing pace;
                     // SL/SR must not require an unrealistically fast chord.
-                    let pair=previous.take().filter(|(_,at)|at.elapsed()<=Duration::from_millis(1_200))
-                        .map(|(first,_)|(first,usage));
-                    *previous=Some((usage,Instant::now()));
+                    let pair=previous.take().filter(|(first, first_uppercase, at)|
+                        super::same_letter_case(*first_uppercase, uppercase)
+                            && at.elapsed() <= language_pair_window(*first, usage))
+                        .map(|(first, _, _)|(first,usage));
+                    *previous=Some((usage, uppercase, Instant::now()));
                     let choice=match pair {
                         Some((HID_USAGE_KEYBOARD_R,HID_USAGE_KEYBOARD_R))=>1,
                         Some((HID_USAGE_KEYBOARD_C,HID_USAGE_KEYBOARD_P))=>2,
@@ -349,9 +533,9 @@ mod mac_shortcuts {
                         // while the Coding overlay is visible. Only SL/SR
                         // may open the verified code sheet from another app.
                         if choice<=3 {
-                            // Keep legacy RR/CP/PY unshifted, scoped to Coding.
-                            if !SHIFT_DOWN.load(Ordering::SeqCst)
-                                && !HISTORY_VISIBLE.load(Ordering::SeqCst)
+                            // Both lowercase and uppercase pairs are accepted,
+                            // but modifiers must not route the command elsewhere.
+                            if !HISTORY_VISIBLE.load(Ordering::SeqCst)
                                 && CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) {
                                 LANGUAGE_COMMAND.store(choice,Ordering::SeqCst);
                             }
@@ -400,7 +584,7 @@ mod mac_shortcuts {
 
         // These controls are deliberately active only while the coding overlay
         // is visible, so ordinary typing elsewhere is unaffected.
-        if pressed && (CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) || HISTORY_VISIBLE.load(Ordering::SeqCst))
+        if pressed && OVERLAY_VISIBLE.load(Ordering::SeqCst)
             && !CONTROL_DOWN.load(Ordering::SeqCst)
             && !OPTION_DOWN.load(Ordering::SeqCst)
         {
@@ -428,6 +612,15 @@ mod mac_shortcuts {
             HID_USAGE_KEYBOARD_LEFT_SHIFT | HID_USAGE_KEYBOARD_RIGHT_SHIFT => {
                 SHIFT_DOWN.store(pressed, Ordering::SeqCst)
             }
+            HID_USAGE_KEYBOARD_CAPS_LOCK => {
+                if pressed {
+                    if !CAPS_LOCK_HELD.swap(true, Ordering::SeqCst) {
+                        CAPS_LOCK_ON.fetch_xor(true, Ordering::SeqCst);
+                    }
+                } else {
+                    CAPS_LOCK_HELD.store(false, Ordering::SeqCst);
+                }
+            }
             HID_USAGE_KEYBOARD_LEFT_ALT | HID_USAGE_KEYBOARD_RIGHT_ALT => {
                 OPTION_DOWN.store(pressed, Ordering::SeqCst)
             }
@@ -436,6 +629,7 @@ mod mac_shortcuts {
             | HID_USAGE_KEYBOARD_UP_ARROW
             | HID_USAGE_KEYBOARD_DOWN_ARROW
                 if pressed
+                    && OVERLAY_VISIBLE.load(Ordering::SeqCst)
                     && SHIFT_DOWN.load(Ordering::SeqCst)
                     && OPTION_DOWN.load(Ordering::SeqCst) =>
             {
@@ -525,6 +719,9 @@ mod mac_shortcuts {
         SUBMIT.swap(false, Ordering::SeqCst)
     }
     pub fn take_panel_command() -> u8 { PANEL_COMMAND.swap(0, Ordering::SeqCst) }
+    pub fn take_history_toggle_command() -> bool {
+        HISTORY_TOGGLE_COMMAND.swap(false, Ordering::SeqCst)
+    }
     pub fn set_history_visible(value: bool) { HISTORY_VISIBLE.store(value, Ordering::SeqCst); }
     pub fn take_move_left() -> bool {
         MOVE_LEFT.swap(false, Ordering::SeqCst)
@@ -545,6 +742,7 @@ mod mac_shortcuts {
         SCROLL_DOWN.swap(false, Ordering::SeqCst)
     }
     pub fn take_number_command() -> u8 { NUMBER_COMMAND.swap(0, Ordering::SeqCst) }
+    pub fn set_overlay_visible(value: bool) { OVERLAY_VISIBLE.store(value, Ordering::SeqCst); }
     pub fn set_coding_overlay_visible(value: bool) { CODING_OVERLAY_VISIBLE.store(value, Ordering::SeqCst); }
     pub fn take_code_focus_command() -> u8 { CODE_FOCUS_COMMAND.swap(0, Ordering::SeqCst) }
     pub fn take_fade_down() -> bool { FADE_DOWN.swap(false, Ordering::SeqCst) }
@@ -737,12 +935,23 @@ fn run() -> Result<(), String> {
             write_helper_status(false, Some(&message));
         }
     }
+    #[cfg(target_os = "macos")]
+    let quiet_desktop_tap = match mac_shortcuts::register_quiet_desktop_filter() {
+        Ok(tap) => Some(tap),
+        Err(error) => {
+            eprintln!("{error}");
+            write_helper_status(mac_shortcuts::hotkeys_ready(), Some(&error));
+            None
+        }
+    };
     #[cfg(not(target_os = "macos"))]
     write_helper_status(true, None);
 
     let mut overlay_position = overlay_position(&event_loop);
     let (overlay, webview) = overlay_window(&event_loop, overlay_position)?;
+    let (hud, hud_webview) = hud_window(&event_loop, overlay_position)?;
     let mut active_view = "coding".to_string();
+    let mut last_hud_view = "coding".to_string();
     let mut overlay_refresh = OverlayRefresh::default();
     update_overlay(&webview, &active_view, &mut overlay_refresh)?;
     let mut overlay_visible = false;
@@ -796,6 +1005,9 @@ fn run() -> Result<(), String> {
     let mut capture_active_view: Option<String> = None;
 
     event_loop.run(move |_event, event_loop_target, control_flow| {
+        // Keep the event tap alive for this run loop's full lifetime.
+        #[cfg(target_os = "macos")]
+        let _ = &quiet_desktop_tap;
         // Global capture hotkeys do not wake Tao's event loop themselves.
         // Keep this short so the helper begins screencapture and restores the
         // click-through overlay promptly, without ever showing the overlay in
@@ -806,18 +1018,36 @@ fn run() -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
             let command = mac_shortcuts::take_number_command();
+            // A new overlay action always starts from its normal task view.
+            // A docked answer or opened History result must not cover the
+            // next capture, submission, or fresh Coding session.
+            if matches!(command, 6 | 20 | 22 | 23 | 24 | 25 | 31..=35) {
+                if code_focus_mode != 0 {
+                    code_focus_mode = 0;
+                    code_focus_from_history = false;
+                    code_focus_live_run_id = None;
+                    restore_normal_geometry(&overlay, &hud, overlay_position);
+                    let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
+                    let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
+                }
+                if history_open {
+                    history_open = false;
+                    history_detail_open = false;
+                    history_code_focus_state = None;
+                    if let Some(task) = history_detail_fetch.take() { task.abort(); }
+                    history_detail_requested_id = None;
+                    mac_shortcuts::set_history_visible(false);
+                    let _ = webview.evaluate_script("window.closeSharedHistory()");
+                    overlay_refresh.sent_state = None;
+                    overlay_refresh.sent_previews = None;
+                }
+            }
             match command {
                 10 => send_capture_to_council("screen"),
                 11 => send_capture_to_council("left"),
                 12 => send_capture_to_council("right"),
                 13 => send_process_to_council(),
                 6 => {
-                        if code_focus_mode != 0 {
-                            code_focus_mode = 0;
-                            overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
-                            overlay.set_outer_position(overlay_position);
-                            let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
-                        }
                     // 00 starts a new Coding overlay workspace. Previous
                     // finished jobs remain archived; main-app runs are untouched.
                     active_view = "coding".to_string();
@@ -829,7 +1059,7 @@ fn run() -> Result<(), String> {
                         eprintln!("new coding session failed: {error}");
                     }
                     overlay_visible = true;
-                    let _ = show_overlay(&overlay, true);
+                    let _ = show_overlay_pair(&overlay, &hud, true, code_focus_mode);
                     let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                 }
                 25 => {
@@ -842,16 +1072,11 @@ fn run() -> Result<(), String> {
                             Err(error) => eprintln!("remove newest capture failed: {error}"),
                         }
                         let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                        let _ = show_overlay_pair(&overlay, &hud, true, code_focus_mode);
                     }
                 }
                 20 | 22 | 23 | 31..=34 => {
                     let target_view = if command < 30 { "coding" } else { "mcq" };
-                        if code_focus_mode != 0 {
-                            code_focus_mode = 0;
-                            overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
-                            overlay.set_outer_position(overlay_position);
-                            let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
-                        }
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("screenshot capture already in progress");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -867,7 +1092,7 @@ fn run() -> Result<(), String> {
                         // action are visible without leaving the source app.
                         restore_overlay_after_capture = true;
                         overlay_visible = false;
-                        let _ = show_overlay(&overlay, false);
+                    let _ = show_overlay_pair(&overlay, &hud, false, code_focus_mode);
                         event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
                         let view = active_view.clone();
                         capture_task = Some(rt.spawn_blocking(move || capture_screen(mode, &view)));
@@ -875,14 +1100,6 @@ fn run() -> Result<(), String> {
                 }
                 24 | 35 => {
                     let target_view = if command == 24 { "coding" } else { "mcq" };
-                    if command == 35 {
-                        if code_focus_mode != 0 {
-                            code_focus_mode = 0;
-                            overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
-                            overlay.set_outer_position(overlay_position);
-                            let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
-                        }
-                    }
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("finish the screenshot selection before submitting");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -890,7 +1107,7 @@ fn run() -> Result<(), String> {
                     } else {
                         active_view = target_view.to_string();
                         overlay_visible = true;
-                        let _ = show_overlay(&overlay, true);
+                    let _ = show_overlay_pair(&overlay, &hud, true, code_focus_mode);
                         event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
                         let gate = std::sync::Arc::clone(&cloud_gate);
                         let view = active_view.clone();
@@ -1002,13 +1219,15 @@ fn run() -> Result<(), String> {
                 } else {
                     ActivationPolicy::Prohibited
                 });
-                let _ = show_overlay(&overlay, overlay_visible);
+                let _ = show_overlay_pair(&overlay, &hud, overlay_visible, code_focus_mode);
                 let capture_view = capture_active_view.take().unwrap_or_else(|| active_view.clone());
                 if let Err(error) = result {
                     eprintln!("capture failed: {error}");
                     let _ = update_pending_error(&capture_view, &error);
                 }
-                let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                if !history_open {
+                    let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                }
             }
         }
 
@@ -1039,10 +1258,10 @@ fn run() -> Result<(), String> {
                 if !current {
                     code_focus_mode = 0;
                     code_focus_live_run_id = None;
-                    overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
-                    overlay.set_outer_position(overlay_position);
+                    restore_normal_geometry(&overlay, &hud, overlay_position);
                     let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
                     let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
+                    let _ = show_overlay_pair(&overlay, &hud, overlay_visible, code_focus_mode);
                 }
             }
             let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
@@ -1050,81 +1269,96 @@ fn run() -> Result<(), String> {
 
         #[cfg(target_os = "macos")]
         {
+            mac_shortcuts::set_overlay_visible(overlay_visible);
             mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
             // HH is its own surface; unlike the two task views it must not
             // change which batch is active. CC/MM switch surfaces in-place
             // without opening the main app, stealing application focus, or
             // changing the cloud solving engine.
-            match mac_shortcuts::take_panel_command() {
-                command @ (1 | 2 | 3)
-                    if capture_task.as_ref().is_none_or(|task| task.is_finished()) =>
-                {
+            // History has its own signal and is always available, including
+            // while a screenshot picker is pending. This prevents a stalled
+            // picker from trapping the person away from HH.
+            if mac_shortcuts::take_history_toggle_command() {
+                let was_code_reader = code_focus_mode != 0;
+                if was_code_reader {
+                    code_focus_mode = 0;
+                    code_focus_from_history = false;
+                    code_focus_live_run_id = None;
+                    restore_normal_geometry(&overlay, &hud, overlay_position);
+                    let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
+                    let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
+                }
+                // HH is a true toggle. Repeating it closes the whole overlay
+                // rather than leaving a hidden history sheet over the prior view.
+                if overlay_visible && history_open {
+                    history_open = false;
+                    history_detail_open = false;
+                    if let Some(task) = history_detail_fetch.take() { task.abort(); }
+                    history_detail_requested_id = None;
+                    mac_shortcuts::set_history_visible(false);
+                    let _ = webview.evaluate_script("window.closeSharedHistory()");
+                    overlay_visible = false;
+                    let _ = show_overlay_pair(&overlay, &hud, false, code_focus_mode);
+                } else {
+                    // The list is server-authoritative. Start empty rather
+                    // than showing stale helper data while the snapshot loads.
+                    history_rows.clear();
+                    history_index = 0;
+                    history_open = true;
+                    history_detail_open = false;
+                    history_detail_requested_id = None;
+                    mac_shortcuts::set_history_visible(true);
+                    let rows = serde_json::to_string(&history_rows).unwrap_or_else(|_| "[]".into());
+                    last_history_refresh = Instant::now();
+                    history_fetch = Some(rt.spawn(fetch_unified_history()));
+                    overlay_visible = true;
+                    event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                    let _ = show_overlay_pair(&overlay, &hud, true, code_focus_mode);
+                    let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                    let _ = webview.evaluate_script(&format!(
+                        "window.showSharedHistory({rows},0,true,null)"));
+                }
+            }
+
+            // Defer CC/MM during an active screenshot picker without taking
+            // and discarding their atomic command.
+            let panel_command = if capture_task.as_ref().is_none_or(|task| task.is_finished()) {
+                mac_shortcuts::take_panel_command()
+            } else {
+                0
+            };
+            match panel_command {
+                command @ (1 | 2) => {
                     let was_code_reader = code_focus_mode != 0;
                     if was_code_reader {
                         code_focus_mode = 0;
                         code_focus_from_history = false;
                         code_focus_live_run_id = None;
-                        overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
-                        overlay.set_outer_position(overlay_position);
+                        restore_normal_geometry(&overlay, &hud, overlay_position);
                         let _ = webview.evaluate_script("window.setCodeFocusMode('normal')");
                         let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
                     }
-                    if command == 3 {
-                        // HH is a true toggle. Repeating it closes the whole
-                        // overlay rather than leaving a hidden history sheet
-                        // over the previous task view.
-                        if overlay_visible && history_open {
-                            history_open = false;
-                            history_detail_open = false;
-                            if let Some(task) = history_detail_fetch.take() { task.abort(); }
-                            history_detail_requested_id = None;
-                            mac_shortcuts::set_history_visible(false);
-                            let _ = webview.evaluate_script("window.closeSharedHistory()");
-                            overlay_visible = false;
-                            let _ = show_overlay(&overlay, false);
-                        } else {
-                            // The list is server-authoritative. Start empty
-                            // rather than showing a stale helper cache while
-                            // the first shared snapshot arrives.
-                            history_rows.clear();
-                            history_index = 0;
-                            history_open = true;
-                            history_detail_open = false;
-                            history_detail_requested_id = None;
-                            mac_shortcuts::set_history_visible(true);
-                            let rows = serde_json::to_string(&history_rows).unwrap_or_else(|_| "[]".into());
-                            last_history_refresh = Instant::now();
-                            history_fetch = Some(rt.spawn(fetch_unified_history()));
-                            overlay_visible = true;
-                            event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
-                            let _ = show_overlay(&overlay, true);
-                            let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
-                            let _ = webview.evaluate_script(&format!(
-                                "window.showSharedHistory({rows},0,true,null)"));
-                        }
+                    let target_view = if command == 1 { "coding" } else { "mcq" };
+                    // CC/MM close their own open surface, while a command
+                    // for the other surface switches without hiding.
+                    if overlay_visible && !history_open && active_view == target_view
+                        && !was_code_reader {
+                        overlay_visible = false;
+                        let _ = show_overlay_pair(&overlay, &hud, false, code_focus_mode);
                     } else {
-                        let target_view = if command == 1 { "coding" } else { "mcq" };
-                        // CC/MM close their own open surface, while a command
-                        // for the other surface switches without hiding.
-                        if overlay_visible && !history_open && active_view == target_view
-                            && !was_code_reader {
-                            overlay_visible = false;
-                            let _ = show_overlay(&overlay, false);
-                        } else {
-                            history_open = false;
-                            history_detail_open = false;
-                            if let Some(task) = history_detail_fetch.take() { task.abort(); }
-                            history_detail_requested_id = None;
-                            mac_shortcuts::set_history_visible(false);
-                            let _ = webview.evaluate_script("window.closeSharedHistory()");
-                            overlay_refresh.sent_state=None;
-                            overlay_refresh.sent_previews=None;
-                            active_view = target_view.to_string();
-                            overlay_visible = true;
-                            event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
-                            let _ = show_overlay(&overlay, true);
-                            let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
-                        }
+                        history_open = false;
+                        history_detail_open = false;
+                        if let Some(task) = history_detail_fetch.take() { task.abort(); }
+                        history_detail_requested_id = None;
+                        mac_shortcuts::set_history_visible(false);
+                        let _ = webview.evaluate_script("window.closeSharedHistory()");
+                        overlay_refresh.sent_state=None;
+                        overlay_refresh.sent_previews=None;
+                        active_view = target_view.to_string();
+                        overlay_visible = true;
+                        event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
+                    let _ = show_overlay_pair(&overlay, &hud, true, code_focus_mode);
+                        let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                     }
                 }
                 _ => {}
@@ -1164,7 +1398,7 @@ fn run() -> Result<(), String> {
                     }
                     capture_active_view = Some(active_view.clone());
                     overlay_visible = false;
-                    let _ = show_overlay(&overlay, false);
+                    let _ = show_overlay_pair(&overlay, &hud, false, code_focus_mode);
                     event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
                     let view = active_view.clone();
                     capture_task = Some(rt.spawn_blocking(move || capture_screen(capture_mode, &view)));
@@ -1191,18 +1425,22 @@ fn run() -> Result<(), String> {
             if overlay_visible && mac_shortcuts::take_move_left() {
                 overlay_position.x -= 80.0;
                 overlay.set_outer_position(overlay_position);
+                hud.set_outer_position(hud_position(overlay_position));
             }
             if overlay_visible && mac_shortcuts::take_move_right() {
                 overlay_position.x += 80.0;
                 overlay.set_outer_position(overlay_position);
+                hud.set_outer_position(hud_position(overlay_position));
             }
             if overlay_visible && mac_shortcuts::take_move_up() {
                 overlay_position.y -= 80.0;
                 overlay.set_outer_position(overlay_position);
+                hud.set_outer_position(hud_position(overlay_position));
             }
             if overlay_visible && mac_shortcuts::take_move_down() {
                 overlay_position.y += 80.0;
                 overlay.set_outer_position(overlay_position);
+                hud.set_outer_position(hud_position(overlay_position));
             }
             if overlay_visible && !history_open && active_view == "coding" && mac_shortcuts::take_scroll_up() {
                 let _ = webview.evaluate_script("window.scrollSolutionBy(-260)");
@@ -1210,13 +1448,15 @@ fn run() -> Result<(), String> {
             if overlay_visible && !history_open && active_view == "coding" && mac_shortcuts::take_scroll_down() {
                 let _ = webview.evaluate_script("window.scrollSolutionBy(260)");
             }
-            if overlay_visible && active_view == "coding" && mac_shortcuts::take_fade_down() {
+            if overlay_visible && mac_shortcuts::take_fade_down() {
                 overlay_alpha = (overlay_alpha - 0.07).max(0.18);
                 let _ = set_ghost_opacity(&overlay, overlay_alpha);
+                let _ = set_ghost_opacity(&hud, overlay_alpha);
             }
-            if overlay_visible && active_view == "coding" && mac_shortcuts::take_fade_up() {
+            if overlay_visible && mac_shortcuts::take_fade_up() {
                 overlay_alpha = (overlay_alpha + 0.07).min(0.95);
                 let _ = set_ghost_opacity(&overlay, overlay_alpha);
+                let _ = set_ghost_opacity(&hud, overlay_alpha);
             }
             // Arrows navigate only while HH history is visible. They are
             // observed by IOHID and do not capture normal application keys.
@@ -1337,7 +1577,13 @@ fn run() -> Result<(), String> {
             // A verified coding result opened from HH is just as safe to read
             // as the current live result. The history list itself is not: a
             // person must first open a result with →.
-            if focus_command != 0 && (!history_open || history_detail_open) {
+            // These are Coding-solution-only controls. They may be triggered
+            // globally while Coding is the selected surface, but must never
+            // hijack an active MCQ view; History permits them only after a
+            // coding result itself has been opened.
+            let code_focus_context =
+                code_focus_shortcut_allowed(&active_view, history_open, history_detail_open);
+            if focus_command != 0 && code_focus_context {
                 // Fail closed if the pending-batch file cannot be read: an
                 // unreadable fresh capture must never unlock an older answer.
                 let no_pending_batch = matches!(read_pending_for("coding"), Ok(None));
@@ -1361,8 +1607,7 @@ fn run() -> Result<(), String> {
                     let next = if focus_command == code_focus_mode { 0 } else { focus_command };
                     code_focus_mode = next;
                     if next == 0 {
-                        overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
-                        overlay.set_outer_position(overlay_position);
+                        restore_normal_geometry(&overlay, &hud, overlay_position);
                     } else if let Some((point,size)) = code_focus_geometry(&overlay, event_loop_target, next) {
                         overlay.set_inner_size(size);
                         overlay.set_outer_position(point);
@@ -1405,15 +1650,28 @@ fn run() -> Result<(), String> {
                     let _ = webview.evaluate_script(&format!("window.setCodeFocusMode('{}')",mode));
                     overlay_visible = true;
                     event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
-                    let _ = show_overlay(&overlay, true);
+                    let _ = show_overlay_pair(&overlay, &hud, true, code_focus_mode);
                     overlay_refresh.sent_state = None;
                     let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                 } else {
                     eprintln!("code-focus unavailable: current Coding result is not E2B-verified");
                 }
             }
+            // The command pill is a second native click-through window. Its
+            // controls follow the active surface, but its DOM and glass frame
+            // never sit inside the Coding/MCQ/History content window.
+            let hud_view = if history_open { "history" }
+                else if overlay_refresh.rendered_view == "mcq" { "mcq" }
+                else { active_view.as_str() };
+            if hud_view != last_hud_view {
+                hud.set_inner_size(LogicalSize::new(HUD_WIDTH, hud_height(hud_view)));
+                let view = serde_json::to_string(hud_view).unwrap_or_else(|_| "\"coding\"".into());
+                let _ = hud_webview.evaluate_script(&format!("window.setOverlayControls({view})"));
+                last_hud_view = hud_view.to_string();
+            }
             // HH and arrow-only History doesn't change the active solving task.
             mac_shortcuts::set_history_visible(history_open && overlay_visible);
+            mac_shortcuts::set_overlay_visible(overlay_visible);
             mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
         }
     });
@@ -1427,12 +1685,32 @@ fn overlay_position<T>(event_loop: &tao::event_loop::EventLoop<T>) -> LogicalPos
         let scale = monitor.scale_factor();
         let size = monitor.size();
         let pos = monitor.position();
-        let x = (pos.x as f64 / scale) + ((size.width as f64 / scale - OVERLAY_WIDTH) / 2.0);
+        let group_width = OVERLAY_WIDTH + HUD_GAP + HUD_WIDTH;
+        let x = (pos.x as f64 / scale)
+            + ((size.width as f64 / scale - group_width) / 2.0)
+            + HUD_WIDTH
+            + HUD_GAP;
+        // Keep the normal overlay slightly above its previous resting point;
+        // the SL/SR code-only docks use their own edge-aligned geometry.
         let y =
-            (pos.y as f64 / scale) + ((size.height as f64 / scale - OVERLAY_HEIGHT) / 2.0) + 40.0;
-        return LogicalPosition::new(x.max(0.0), y.max(0.0));
+            (pos.y as f64 / scale) + ((size.height as f64 / scale - OVERLAY_HEIGHT) / 2.0) + 4.0;
+        return LogicalPosition::new(x.max(HUD_WIDTH + HUD_GAP), y.max(0.0));
     }
-    LogicalPosition::new(320.0, 100.0)
+    LogicalPosition::new(320.0, 64.0)
+}
+
+fn hud_position(content_position: LogicalPosition<f64>) -> LogicalPosition<f64> {
+    LogicalPosition::new(content_position.x - HUD_GAP - HUD_WIDTH, content_position.y)
+}
+
+fn hud_height(view: &str) -> f64 {
+    if view == "history" { HISTORY_HUD_HEIGHT } else { HUD_HEIGHT }
+}
+
+fn restore_normal_geometry(overlay: &Window, hud: &Window, position: LogicalPosition<f64>) {
+    overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
+    overlay.set_outer_position(position);
+    hud.set_outer_position(hud_position(position));
 }
 
 /// Coordinates use the monitor holding the helper overlay, not a hard-coded
@@ -1490,6 +1768,35 @@ fn overlay_window<T>(
         .build(&window)
         .map_err(|e| format!("Could not create ghost overlay webview: {e}"))?;
 
+    let _ = window.set_ignore_cursor_events(true);
+    tune_ghost_overlay(&window)?;
+    Ok((window, webview))
+}
+
+fn hud_window<T>(
+    event_loop: &tao::event_loop::EventLoop<T>,
+    position: LogicalPosition<f64>,
+) -> Result<(Window, WebView), String> {
+    let window = WindowBuilder::new()
+        .with_title("mds controls")
+        .with_inner_size(LogicalSize::new(HUD_WIDTH, HUD_HEIGHT))
+        .with_position(hud_position(position))
+        .with_visible(false)
+        .with_decorations(false)
+        .with_resizable(false)
+        .with_transparent(true)
+        .with_always_on_top(true)
+        .with_focused(false)
+        .with_focusable(false)
+        .with_content_protection(true)
+        .with_visible_on_all_workspaces(true)
+        .build(event_loop)
+        .map_err(|e| format!("Could not create ghost command HUD: {e}"))?;
+    let webview = WebViewBuilder::new()
+        .with_transparent(true)
+        .with_html(hud_html())
+        .build(&window)
+        .map_err(|e| format!("Could not create ghost command HUD webview: {e}"))?;
     let _ = window.set_ignore_cursor_events(true);
     tune_ghost_overlay(&window)?;
     Ok((window, webview))
@@ -1581,6 +1888,19 @@ fn show_overlay(window: &Window, visible: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn show_overlay_pair(content: &Window, hud: &Window, visible: bool, code_focus_mode: u8) -> Result<(), String> {
+    // Hide the command window before capture or the standalone code reader;
+    // it must not remain floating after its content window is gone.
+    if !visible || code_focus_mode != 0 {
+        show_overlay(hud, false)?;
+    }
+    show_overlay(content, visible)?;
+    if visible && code_focus_mode == 0 {
+        show_overlay(hud, true)?;
+    }
+    Ok(())
+}
+
 // ─── CAPTURE / SUBMIT ────────────────────────────────────────────────────────
 
 fn now() -> String {
@@ -1623,6 +1943,10 @@ fn history_row(id: &str, origin: &str, kind: &str, title: &str, subtitle: &str,
         "id": id, "origin": origin, "kind": kind, "title": title,
         "subtitle": subtitle, "status": status, "submittedAt": at
     })
+}
+
+fn is_coding_history_job(item: &Value) -> bool {
+    item.get("mode").and_then(Value::as_str) != Some("mcq")
 }
 
 fn normalize_history(rows: Vec<Value>) -> Result<Vec<Value>, String> {
@@ -1668,6 +1992,9 @@ async fn fetch_unified_history() -> Result<(Vec<Value>,Option<String>), String> 
     for item in payload.get("jobs").and_then(Value::as_array).into_iter().flatten() {
         let id=item.get("id").and_then(Value::as_str).unwrap_or("");
         if id.is_empty(){continue;}
+        // HH is the Coding overlay's history for now. Keep MCQ jobs
+        // independent; they must not appear in this list or affect its count.
+        if !is_coding_history_job(item) { continue; }
         let mode=item.get("mode").and_then(Value::as_str).unwrap_or("council");
         let session_title=item.get("sessionId").and_then(Value::as_str)
             .and_then(|session_id| sessions.get(session_id))
@@ -2131,12 +2458,31 @@ fn helper_capture_mode(digit: u8) -> Option<CaptureMode> {
 /// Commands for the three overlay surfaces. This records only C, M or H,
 /// never text typed into applications. The OS HID callback uses physical
 /// key usages, making caps lock and shift equivalent for this command.
-fn double_tap_panel(previous: &mut Option<(u8, Instant)>, key: u8, at: Instant) -> Option<u8> {
-    let matched = previous.as_ref().is_some_and(|(last, time)|
-        *last == key && at.saturating_duration_since(*time) <= Duration::from_millis(1_200)
+fn double_tap_panel(
+    previous: &mut Option<(u8, bool, Instant)>,
+    key: u8,
+    uppercase: bool,
+    at: Instant,
+) -> Option<u8> {
+    let matched = previous.as_ref().is_some_and(|(last, last_uppercase, time)|
+        *last == key
+            && same_letter_case(*last_uppercase, uppercase)
+            && at.saturating_duration_since(*time) <= Duration::from_millis(1_200)
     );
-    *previous = if matched { None } else { Some((key, at)) };
+    *previous = if matched { None } else { Some((key, uppercase, at)) };
     if matched { Some(key) } else { None }
+}
+
+fn same_letter_case(first_uppercase: bool, second_uppercase: bool) -> bool {
+    first_uppercase == second_uppercase
+}
+
+fn code_focus_shortcut_allowed(active_view: &str, history_open: bool, history_detail_open: bool) -> bool {
+    if history_open {
+        history_detail_open
+    } else {
+        active_view == "coding"
+    }
 }
 
 fn number_pair_command(first: u8, second: u8) -> Option<u8> {
@@ -2680,6 +3026,7 @@ struct OverlayRefresh {
     submitted_sources: Vec<String>,
     sent_state: Option<String>,
     sent_previews: Option<String>,
+    rendered_view: String,
 }
 
 impl OverlayRefresh {
@@ -2799,6 +3146,11 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
     } else {
         read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
     };
+    refresh.rendered_view = serde_json::from_str::<Value>(&state).ok()
+        .filter(|value| value.get("kind").and_then(Value::as_str) == Some("mcq")
+            || value.get("mcq").is_some_and(|mcq| !mcq.is_null()))
+        .map(|_| "mcq".to_string())
+        .unwrap_or_else(|| active_view.to_string());
     let script = refresh.script(&state, payload.as_deref());
     if script.is_empty() { return Ok(()); }
     if let Err(error) = webview.evaluate_script(&script) {
@@ -3399,17 +3751,47 @@ fn safe_segment(raw: &str) -> String {
     }
 }
 
+fn hud_html() -> &'static str {
+    r#"<!doctype html><html><head><meta charset="utf-8"><style>
+      html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden}
+      body{box-sizing:border-box;color:rgba(255,255,255,.94);font:700 11px -apple-system,BlinkMacSystemFont,sans-serif}
+      #hudbar{box-sizing:border-box;width:100%;height:100%;display:flex;flex-direction:column;gap:10px;padding:11px;border:1px solid rgba(255,255,255,.26);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(205,222,239,.10),transparent 28%),linear-gradient(135deg,rgba(255,255,255,.105),rgba(255,255,255,.03)),rgba(10,16,24,.13);box-shadow:0 0 0 1px rgba(255,255,255,.09),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px rgba(0,0,0,.16);backdrop-filter:blur(20px) saturate(1.22);-webkit-backdrop-filter:blur(20px) saturate(1.22)}
+      .hud-head{display:flex;align-items:center;justify-content:center;gap:9px;min-height:32px;padding-bottom:9px;border-bottom:1px solid rgba(255,255,255,.28)}
+      .hud-logo{display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,.14);font-size:10px;font-weight:900;box-shadow:inset 0 1px 0 rgba(255,255,255,.28)}
+      .hud-pause{display:grid;place-items:center;width:30px;height:26px;border-radius:8px;background:rgba(255,255,255,.13);box-shadow:inset 0 1px 0 rgba(255,255,255,.08)}
+      .hud-meter{display:inline-flex;align-items:end;gap:2px;height:18px}.hud-meter i{display:block;width:3px;border-radius:3px;background:rgba(205,224,242,.7);box-shadow:0 0 9px rgba(190,215,235,.18)}.hud-meter i:nth-child(1){height:7px}.hud-meter i:nth-child(2){height:12px}.hud-meter i:nth-child(3){height:9px}
+      #hud-shortcuts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;gap:6px;min-height:0}
+      .hud-command{box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-width:0;min-height:52px;padding:5px 2px;border:1px solid rgba(255,255,255,.13);border-radius:10px;background:rgba(255,255,255,.055)}
+      .hud-key{box-sizing:border-box;display:grid;place-items:center;min-width:29px;max-width:100%;height:23px;padding:0 6px;border-radius:7px;background:rgba(255,255,255,.15);box-shadow:inset 0 1px 0 rgba(255,255,255,.09);font:800 10px SFMono-Regular,Menlo,monospace;white-space:nowrap}
+      .hud-name{display:block;max-width:100%;color:rgba(255,255,255,.76);font-size:9px;font-weight:700;line-height:1.15;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    </style></head><body><div id="hudbar"><div class="hud-head"><span class="hud-logo">CA</span><span class="hud-pause">||</span><span class="hud-meter"><i></i><i></i><i></i></span></div><div id="hud-shortcuts"></div></div><script>
+      window.setOverlayControls=function(view){
+        const host=document.getElementById('hud-shortcuts');if(!host)return;
+        const controls=view==='history'
+          ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
+          : view==='mcq'
+          ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31'],['Left','32'],['Right','33'],['Region','34'],['Submit','35']]
+          : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py'],['Dock code','sl/sr']];
+        const fingerprint=controls.map(([name,key])=>name+key).join('|');
+        if(host.dataset.shortcutSet===fingerprint)return;
+        host.dataset.shortcutSet=fingerprint;host.replaceChildren();
+        controls.forEach(([name,key])=>{
+          const tile=document.createElement('div');tile.className='hud-command';
+          const badge=document.createElement('span');badge.className='hud-key';badge.textContent=key;
+          const label=document.createElement('span');label.className='hud-name';label.textContent=name;
+          tile.append(badge,label);host.appendChild(tile);
+        });
+      };
+      window.setOverlayControls('coding');
+    </script></body></html>"#
+}
+
 fn overlay_html() -> &'static str {
     r#"<!doctype html><html><head><meta charset="utf-8"><style>
       :root{color-scheme:dark;--text:rgba(255,255,255,.98);--muted:rgba(255,255,255,.78);--panel-line:rgba(255,255,255,.18);--panel-a:rgba(255,255,255,.105);--panel-b:rgba(255,255,255,.03);--panel-base:rgba(10,16,24,.13);--panel-shadow:rgba(0,0,0,.16);--pane-line:rgba(255,255,255,.28);--title-shadow:rgba(0,0,0,.24);--dash-line:rgba(255,255,255,.52);--soft-fill:rgba(255,255,255,.085);--chip-fill:rgba(255,255,255,.05);--box-fill:rgba(255,255,255,.045);--editor-bg:rgba(2,7,13,.68);--tests-bg:rgba(2,7,13,.42);--code-text:#e6f1ff;--kw:#ff7b72;--fn:#d2a8ff;--arg:#ffa657;--num:#79c0ff;--str:#a5d6ff;--built:#7ee787;--op:#ffdf5d;--cm:#8b949e}
       @media (prefers-color-scheme:light){:root{color-scheme:light;--text:rgba(18,24,33,.96);--muted:rgba(42,52,66,.78);--panel-line:rgba(20,30,42,.18);--panel-a:rgba(255,255,255,.46);--panel-b:rgba(255,255,255,.22);--panel-base:rgba(235,241,248,.36);--panel-shadow:rgba(12,20,28,.12);--pane-line:rgba(20,30,42,.2);--title-shadow:rgba(255,255,255,.48);--dash-line:rgba(20,30,42,.38);--soft-fill:rgba(255,255,255,.38);--chip-fill:rgba(255,255,255,.3);--box-fill:rgba(255,255,255,.32);--editor-bg:rgba(4,10,18,.74);--tests-bg:rgba(4,10,18,.55);--code-text:#eef6ff}}
       html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden}
-	      body{box-sizing:border-box;padding:16px 22px 22px;color:var(--text);font:600 14px -apple-system,BlinkMacSystemFont,sans-serif;display:flex;flex-direction:column;align-items:center;gap:14px}
-		      .hudbar{box-sizing:border-box;display:flex;align-items:center;gap:10px;max-width:1180px;min-height:42px;padding:6px 12px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:linear-gradient(180deg,rgba(255,255,255,.13),rgba(255,255,255,.045)),rgba(18,19,18,.58);box-shadow:0 14px 36px rgba(0,0,0,.3),inset 0 1px 0 rgba(255,255,255,.18);backdrop-filter:blur(18px) saturate(1.25);white-space:nowrap;color:rgba(255,255,255,.84);font-size:11px;font-weight:800}
-		      .hud-logo{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.14);color:rgba(255,255,255,.92);font-size:10px;font-weight:900;box-shadow:inset 0 1px 0 rgba(255,255,255,.28);flex:0 0 32px}
-		      .hud-key,.hud-pause{display:grid;place-items:center;min-width:32px;height:28px;padding:0 10px;border-radius:8px;background:rgba(255,255,255,.13);box-shadow:inset 0 1px 0 rgba(255,255,255,.08);color:rgba(255,255,255,.9);flex:0 0 auto}
-		      .hud-action{color:rgba(255,255,255,.68);margin-left:4px}
-	      .hud-meter{display:inline-flex;align-items:end;gap:2px;height:18px;padding:0 2px}.hud-meter i{display:block;width:3px;border-radius:3px;background:rgba(205,224,242,.7);box-shadow:0 0 9px rgba(190,215,235,.18)}.hud-meter i:nth-child(1){height:7px}.hud-meter i:nth-child(2){height:12px}.hud-meter i:nth-child(3){height:9px}
+	      body{box-sizing:border-box;padding:16px 22px 22px;color:var(--text);font:600 14px -apple-system,BlinkMacSystemFont,sans-serif;display:flex;flex-direction:column}
 	      #panel{box-sizing:border-box;width:100%;flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,.75fr);border:1px solid rgba(255,255,255,.26);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(205,222,239,.10),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(255,255,255,.09),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
             .pane{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:10px;padding:18px;overflow:hidden}.pane+ .pane{border-left:1px solid var(--pane-line)}
             .pictures-pane{align-items:flex-start}
@@ -3564,9 +3946,6 @@ fn overlay_html() -> &'static str {
             .history-kind{padding:3px 7px;border-radius:7px;background:rgba(201,228,245,.12);color:#c9e4f5;font-weight:800;letter-spacing:.02em}
             .history-empty{padding:44px 16px;font-size:13px;font-weight:500;text-align:center;color:rgba(255,255,255,.66)}
             .history-footer{border-top:1px solid rgba(255,255,255,.15);padding-top:13px;display:flex;justify-content:space-between;gap:12px;font-size:11px;color:rgba(255,255,255,.6);font-weight:600}
-            .hud-shortcuts{display:flex;align-items:center;flex-wrap:wrap;gap:5px 9px;min-width:0}
-            .hud-shortcuts .hud-action{margin-left:1px}
-            .hud-shortcuts .hud-key{padding:0 7px;min-width:auto;height:24px}
             .solution-toolbar{display:inline-flex;align-items:center;gap:8px}
             .overlay-port-list{display:flex;align-items:center;gap:6px;padding:6px 8px;flex-wrap:wrap}
             .overlay-port-chip{padding:4px 8px;border-radius:8px;border:1px solid rgba(255,255,255,.22);background:rgba(255,255,255,.06);font-size:10px;color:rgba(255,255,255,.74)}
@@ -3582,15 +3961,14 @@ fn overlay_html() -> &'static str {
             /* SL/SR use a standalone reader rather than a squeezed capture
                HUD, each in a monitor-anchored half-screen window. */
             body[data-code-focus="left"],body[data-code-focus="right"]{padding:0;gap:0}
-            body[data-code-focus]:not([data-code-focus="normal"]) #hudbar,
             body[data-code-focus]:not([data-code-focus="normal"]) #panel{display:none!important}
-            #code-focus-sheet{position:fixed;inset:0;box-sizing:border-box;display:flex;min-width:0;min-height:0;background:rgba(2,7,13,.73);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);overflow:hidden}
+            #code-focus-sheet{position:fixed;inset:0;box-sizing:border-box;display:flex;min-width:0;min-height:0;border:1px solid rgba(255,255,255,.26);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(205,222,239,.10),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(255,255,255,.09),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);-webkit-backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
             #code-focus-sheet[hidden]{display:none}
-            #code-focus-code{box-sizing:border-box;flex:1;min-width:0;min-height:0;margin:0;padding:24px 26px;color:var(--code-text);font:530 17px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line}
+            #code-focus-code{box-sizing:border-box;flex:1;min-width:0;min-height:0;margin:0;padding:24px 26px;color:var(--code-text);font:530 17px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;text-shadow:0 1px 3px rgba(0,0,0,.8);overflow:auto;counter-reset:code-line}
             #code-focus-code li{display:grid;grid-template-columns:minmax(0,1fr);min-height:29px;padding:0 16px;list-style:none;counter-increment:code-line}
             #code-focus-code li::before{display:none}
             @media(prefers-reduced-motion:reduce){body[data-code-focus] #panel{transition:none}}
-        </style></head><body><div class="hudbar" id="hudbar"><span class="hud-logo">CA</span><span class="hud-pause">||</span><span class="hud-meter"><i></i><i></i><i></i></span><span id="hud-shortcuts" class="hud-shortcuts"></span></div><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><section id="code-focus-sheet" hidden><ol id="code-focus-code"></ol></section><script>
+        </style></head><body><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><section id="code-focus-sheet" hidden><ol id="code-focus-code"></ol></section><script>
 	            // HUD labels come from the numeric command table handled by mac_shortcuts.
             // Keep the overlay's real capture controls, not generic demo shortcuts.
             // The reader always starts with the E2B-gated state selected by
@@ -3657,24 +4035,8 @@ fn overlay_html() -> &'static str {
               if(sheet)sheet.hidden=next==='normal';
               if(next!=='normal')window.renderCodeFocusSheet();
             };
-            window.setOverlayControls=function(view){
-              const host=document.getElementById('hud-shortcuts');if(!host)return;
-              const controls=view==='history'
-                ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
-                : view==='mcq'
-                ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31'],['Left','32'],['Right','33'],['Region','34'],['Submit','35']]
-                : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py'],['Dock code','sl/sr']];
-              const fingerprint=controls.map(([name,key])=>name+key).join('|');
-              if(host.dataset.shortcutSet===fingerprint)return;
-              host.dataset.shortcutSet=fingerprint;host.replaceChildren();
-              controls.forEach(([name,key])=>{
-                const label=document.createElement('span');label.className='hud-action';label.textContent=name;
-                const badge=document.createElement('span');badge.className='hud-key';badge.textContent=key;
-                host.append(label,badge);
-              });
-            };
             const esc=(s)=>String(s||'').replace(/[&<>]/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-	            window.scrollSolutionBy=function(delta){const el=document.getElementById('solution-code');if(el)el.scrollTop+=delta;};
+	            window.scrollSolutionBy=function(delta){const reading=document.body.dataset.codeFocus&&document.body.dataset.codeFocus!=='normal';const el=document.getElementById(reading?'code-focus-code':'solution-code');if(el)el.scrollTop+=delta;};
             function highlight(code,lang){
               // Tokenize first, escape each token at emission. Never regex over
               // generated HTML or accept source as markup.
@@ -3824,7 +4186,7 @@ fn overlay_html() -> &'static str {
               if(!root){
                 root=document.createElement('section');
                 root.id='shared-history-sheet';root.className='history-sheet';
-                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Coding Overlay</div><div class="history-title">History</div><div class="history-description">Overlay captures only · Coding and MCQ results</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate · → Open result</span><span>cc Coding · mm MCQ · hh History</span></footer>';
+                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Coding Overlay</div><div class="history-title">History</div><div class="history-description">Coding overlay results only</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate · → Open result</span><span>cc Coding · hh History</span></footer>';
                 panel.appendChild(root);
               }
               root.hidden=false;
@@ -3852,7 +4214,7 @@ fn overlay_html() -> &'static str {
               });
               if(!list.children.length){
                 const empty=document.createElement('div');empty.className='history-empty';
-                empty.textContent=error?'Could not load cloud history: '+error:loading?'Loading saved overlay history…':'No saved overlay runs yet. Your next Coding or MCQ capture will appear here.';
+                empty.textContent=error?'Could not load cloud history: '+error:loading?'Loading Coding history…':'No saved Coding runs yet. Your next Coding capture will appear here.';
                 list.appendChild(empty);
               }else if(error){
                 const warning=document.createElement('div');warning.className='history-empty';
@@ -3862,7 +4224,6 @@ fn overlay_html() -> &'static str {
               const counter=root.querySelector('#history-counter');
               counter.textContent=root.__rows.length+' saved'+(loading?' · syncing':'');
               window.selectSharedHistoryRow(selected||0);
-              window.setOverlayControls('history');
             };
             window.selectSharedHistoryRow=function(selected){
               const root=document.getElementById('shared-history-sheet');
@@ -3876,7 +4237,6 @@ fn overlay_html() -> &'static str {
             window.closeSharedHistory=function(){
               const root=document.getElementById('shared-history-sheet');if(root)root.hidden=true;
               const detail=document.getElementById('shared-history-detail');if(detail)detail.hidden=true;
-              window.setOverlayControls(window.__overlayCurrentState&&(window.__overlayCurrentState.kind==='mcq'||window.__overlayCurrentState.mcq)?'mcq':'coding');
             };
             window.showSharedHistoryDetail=function(detail){
               if(detail&&detail.state){window.closeSharedHistory();window.updateOverlayState(detail.state);if(Array.isArray(detail.historyPreviews))window.updatePreviews(detail.historyPreviews);return;}
@@ -3897,11 +4257,11 @@ fn overlay_html() -> &'static str {
             };
             const baseUpdateOverlayState=window.updateOverlayState;
             function friendlyModelFailure(value){
-              const raw=String(value||'').replace(/<script\\b[^>]*>[\\s\\S]*?<\\/script\\s*>/gi,' ')
-                .replace(/<style\\b[^>]*>[\\s\\S]*?<\\/style\\s*>/gi,' ')
+              const raw=String(value||'').replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi,' ')
+                .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi,' ')
                 .replace(/<[^>]+>/g,' ').replace(/&(?:nbsp|amp|lt|gt|quot);/gi,' ')
-                .replace(/\\s+/g,' ').trim();
-              if(/(?:\\b524\\b|upstream model timed out)/i.test(raw))return 'Model timed out upstream; Council retried it.';
+                .replace(/\s+/g,' ').trim();
+              if(/(?:\b524\b|upstream model timed out)/i.test(raw))return 'Model timed out upstream; Council retried it.';
               if(/empty model response/i.test(raw))return 'Model returned no usable answer.';
               if(/timed out|timeout/i.test(raw))return 'Model timed out.';
               return raw?('Model failed: '+raw.slice(0,160)):'Model failed.';
@@ -4042,7 +4402,6 @@ fn overlay_html() -> &'static str {
             }
             window.updateOverlayState=function(state){
               baseUpdateOverlayState(state);
-              window.setOverlayControls(state&&(state.kind==='mcq'||state.mcq)?'mcq':'coding');
               if(!state||state.kind!=='mcq'){
                 renderStoryAgents(state||{});
                 renderHistoryContext(state||{});
@@ -4090,18 +4449,56 @@ mod tests {
     }
 
     #[test]
+    fn command_rail_is_separate_from_the_coding_panel() {
+        let content = overlay_html();
+        let controls = hud_html();
+        assert!(content.contains("<body><div id=\"panel\">"));
+        assert!(!content.contains("id=\"hudbar\""));
+        assert!(controls.contains("id=\"hudbar\""));
+        assert!(controls.contains("tile.append(badge,label)"), "names belong below their keys");
+        let point = hud_position(LogicalPosition::new(250.0, 20.0));
+        assert_eq!(point.x, 250.0 - HUD_GAP - HUD_WIDTH);
+        assert_eq!(point.y, 20.0);
+        assert!(hud_height("history") < hud_height("coding"));
+    }
+
+    #[test]
     fn only_distinct_quick_letter_double_taps_open_panels() {
         let start = Instant::now();
         let mut last = None;
-        assert_eq!(double_tap_panel(&mut last, 1, start), None);
-        assert_eq!(double_tap_panel(&mut last, 1, start + Duration::from_millis(230)), Some(1));
+        assert_eq!(double_tap_panel(&mut last, 1, false, start), None);
+        assert_eq!(double_tap_panel(&mut last, 1, false, start + Duration::from_millis(230)), Some(1));
         // A completed pair resets; holding a key is filtered at the HID edge.
-        assert_eq!(double_tap_panel(&mut last, 1, start + Duration::from_millis(400)), None);
-        assert_eq!(double_tap_panel(&mut last, 2, start + Duration::from_millis(475)), None);
-        assert_eq!(double_tap_panel(&mut last, 2, start + Duration::from_millis(900)), Some(2));
-        assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(1000)), None);
-        assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(2_301)), None);
-        assert_eq!(double_tap_panel(&mut last, 3, start + Duration::from_millis(2_310)), Some(3));
+        assert_eq!(double_tap_panel(&mut last, 1, false, start + Duration::from_millis(400)), None);
+        assert_eq!(double_tap_panel(&mut last, 2, false, start + Duration::from_millis(475)), None);
+        assert_eq!(double_tap_panel(&mut last, 2, false, start + Duration::from_millis(900)), Some(2));
+        assert_eq!(double_tap_panel(&mut last, 3, true, start + Duration::from_millis(1000)), None);
+        assert_eq!(double_tap_panel(&mut last, 3, true, start + Duration::from_millis(1700)), Some(3));
+        assert_eq!(double_tap_panel(&mut last, 3, false, start + Duration::from_millis(2_301)), None);
+        assert_eq!(double_tap_panel(&mut last, 3, false, start + Duration::from_millis(3_602)), None);
+        assert_eq!(double_tap_panel(&mut last, 3, false, start + Duration::from_millis(3_610)), Some(3));
+    }
+
+    #[test]
+    fn letter_shortcuts_accept_uniform_case_and_reject_mixed_case() {
+        let start = Instant::now();
+        let mut last = None;
+        assert_eq!(double_tap_panel(&mut last, 1, false, start), None);
+        assert_eq!(double_tap_panel(&mut last, 1, true, start + Duration::from_millis(100)), None);
+        assert_eq!(double_tap_panel(&mut last, 1, true, start + Duration::from_millis(200)), Some(1));
+
+        assert!(same_letter_case(false, false), "cc is a uniform-case pair");
+        assert!(same_letter_case(true, true), "CC is a uniform-case pair");
+        assert!(!same_letter_case(false, true), "cC is mixed case and must not dispatch");
+        assert!(!same_letter_case(true, false), "sL is mixed case and must not dispatch");
+    }
+
+    #[test]
+    fn code_docks_do_not_switch_or_replace_the_mcq_overlay() {
+        assert!(code_focus_shortcut_allowed("coding", false, false));
+        assert!(!code_focus_shortcut_allowed("mcq", false, false));
+        assert!(!code_focus_shortcut_allowed("coding", true, false), "history list is not a solution");
+        assert!(code_focus_shortcut_allowed("mcq", true, true), "opened coding history result may be read");
     }
 
     #[test]
@@ -4119,6 +4516,14 @@ mod tests {
         assert_eq!(rows[0]["id"],"job:456");
         assert_eq!(rows[1]["id"],"main:123");
         assert_eq!(rows[2]["id"],"job:123");
+    }
+
+    #[test]
+    fn coding_history_excludes_only_mcq_jobs() {
+        assert!(is_coding_history_job(&serde_json::json!({"mode":"coding"})));
+        assert!(is_coding_history_job(&serde_json::json!({"mode":"council"})));
+        assert!(is_coding_history_job(&serde_json::json!({})));
+        assert!(!is_coding_history_job(&serde_json::json!({"mode":"mcq"})));
     }
 
     #[test]

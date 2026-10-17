@@ -51,9 +51,10 @@ keyring = { version = "3", features = ["apple-native"] }
 security-framework = "3.7"
 objc2-vision = "0.3"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSWindow"] }
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSWorkspace", "NSRunningApplication"] }
 objc2-foundation = "0.3"
 objc2-core-foundation = "0.3"
+core-foundation = "0.10"
 window-vibrancy = "0.6"
 base64 = "0.22"
 hmac = "0.12"
