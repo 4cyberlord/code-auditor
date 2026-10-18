@@ -3856,6 +3856,7 @@ export async function runCouncilJob(job) {
                 beforeCode:previous.code,afterCode:improved.code,
                 sourceLetter:decision.winner,model:synthesisModel,
                 passed:proposedRun.passed,
+                time:opinions[0].time,space:opinions[0].space,
                 reason:"Two independent reviewers approved the judge-inspired, E2B-retested improvement.",
               };
               await addEvent(job.id,"info","judge_upgrade_verified",
