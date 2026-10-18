@@ -2940,7 +2940,9 @@ export async function runCouncilJob(job) {
       });
     } catch { return ""; }
   };
-  const evidenceReadingsReady = Promise.all(evidenceSeats.slice(0,2).map(readOriginalExamples));
+  const evidenceReadingsReady = images.length > 0
+    ? Promise.all(evidenceSeats.slice(0,2).map(readOriginalExamples))
+    : Promise.resolve([]);
 
   await patchJob(job.id, { progress_phase: "solving" });
 
