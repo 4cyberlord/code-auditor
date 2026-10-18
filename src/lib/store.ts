@@ -80,7 +80,7 @@ import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from ".
 import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
 import { fingerprintCode } from "./codeFingerprint.ts";
 import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
-import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion } from "./independentLanguageCouncil.ts";
+import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "./independentLanguageCouncil.ts";
 import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief } from "./problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "./judgeUpgradePolicy.ts";
 import { buildProvidedHarness, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
@@ -4685,15 +4685,21 @@ async function generateVerifiedPorts(
         const final = candidate.final!;
         if (final.kind !== "code") return;
         try {
-          const executable = spliceSuite(suite!, final.code);
+          // Each candidate can expose a different callable method. Rebind
+          // the same verified sample fixtures to that candidate's own API.
+          const candidateSuite = suite!.source === "provided" && suite!.question
+            ? buildProvidedHarness(suite!.question, language, final.code)
+            : suite;
+          if (!candidateSuite) throw new Error("No compatible candidate-specific input adapter");
+          const executable = spliceSuite(candidateSuite, final.code);
           if (!executable) throw new Error("No harness splice marker");
-          const result = await runE2BBenchmark(sessionId, suite!.runnerLanguage || suite!.language,
+          const result = await runE2BBenchmark(sessionId, candidateSuite.runnerLanguage || candidateSuite.language,
             executable, settings.e2bTimeoutMs);
-          const counts = suite!.source === "provided"
-            ? providedCaseEvidence(result.stdout, requiredHarnessCases(suite!))
+          const counts = candidateSuite.source === "provided"
+            ? providedCaseEvidence(result.stdout, requiredHarnessCases(candidateSuite))
             : countCases(result.stdout);
-          const ok = result.ok && counts.passed >= requiredHarnessCases(suite!) && counts.failed === 0 &&
-            (suite!.source !== "provided" || Boolean("complete" in counts && counts.complete));
+          const ok = result.ok && counts.passed >= requiredHarnessCases(candidateSuite) && counts.failed === 0 &&
+            (candidateSuite.source !== "provided" || Boolean("complete" in counts && counts.complete));
           runs[candidate.letter] = { letter: candidate.letter, ran: true, ok,
             passed: counts.passed, failed: counts.failed, durationMs: result.durationMs,
             runtime: result.runtime, provider: "e2b", codeDigest: await fingerprintCode(final.code),
@@ -4725,7 +4731,10 @@ async function generateVerifiedPorts(
         } catch { return null; }
       }));
       if (!stillActive()) break;
-      const validJudges = judgeReadings.filter((judge): judge is NonNullable<typeof judge> => judge !== null);
+      const validJudges = judgeReadings.filter((judge): judge is NonNullable<typeof judge> =>
+        judge !== null && judge.wellFormed);
+      if (!independentJudgesReady(judgeModels.length, validJudges.length))
+        throw new Error("Independent " + language + " Council did not receive enough valid judge reports.");
       const choice = decideWinner({ claimed: "", judges: validJudges, runs,
         letters: candidates.map(item => item.letter) });
       const chosen = candidates.find(item => item.letter === choice.winner);
