@@ -4619,7 +4619,12 @@ async function generateVerifiedPorts(
   if (!sessionId) return targets.map(language => ({ language, sourceLetter: source.letter, model: source.model,
     code: "", status: "failed" as const, error: "No signed-in session for E2B verification." }));
   const model = settings.synthesisModel || source.model;
-  const ports: VerifiedPort[] = [];
+  const ports: VerifiedPort[] = targets.map(language => ({
+    language, sourceLetter: source.letter, model: "", code: "", status: "preparing",
+  }));
+  if (get().council.runId === runId && get().council.phase === "done") {
+    set(st => ({ council: { ...st.council, ports: [...ports] } }));
+  }
   for (const language of targets) {
     // A new Council run must not receive late ports from an earlier question.
     if (get().council.runId !== runId || get().council.phase === "cancelled") break;
@@ -4674,11 +4679,13 @@ async function generateVerifiedPorts(
         sandboxId: "sandboxId" in result ? result.sandboxId : null,
         note: result.timedOut ? "timed out" : result.exitCode !== 0 ? `exit ${result.exitCode}` : "",
         runtime: result.runtime };
-      ports.push({ language, sourceLetter: source.letter, model, code: parsed.code,
+      ports.splice(ports.findIndex(item => item.language === language), 1,
+        {language, sourceLetter: source.letter, model, code: run.ok ? parsed.code : "",
         status: run.ok && run.failed === 0 && run.passed > 0 ? "verified" : "failed", run,
         error: run.ok && run.failed === 0 && run.passed > 0 ? undefined : run.note || "E2B tests failed." });
     } catch (error) {
-      ports.push({ language, sourceLetter: source.letter, model, code: "", status: "failed",
+      ports.splice(ports.findIndex(item => item.language === language), 1,
+        {language, sourceLetter: source.letter, model, code: "", status: "failed",
         error: cleanError(String(error)) });
     }
     if (get().council.runId === runId && get().council.phase !== "cancelled") {
