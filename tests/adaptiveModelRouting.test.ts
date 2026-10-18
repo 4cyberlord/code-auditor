@@ -45,11 +45,11 @@ check("low merged confidence preserves image", !verifiedTextOnlyScreenshot(true,
 const unmeasuredVision=selectAdaptiveModels([{id:"manual"}],x=>x.id,route,[{id:"manual",vision:true}],1,{passesImages:true});
 check("manual vision assertion cannot receive raw screenshot bytes",unmeasuredVision.selected.length===0);
 
-const readerRoster=[{id:"unprobed"},{id:"reader-a"},{id:"reader-b"},{id:"reader-c"}];
-const probes={"reader-a":{vision:true},"reader-b":{vision:false},"reader-c":{vision:true}};
-const selectedReaders=selectVerifiedContractReaders(readerRoster,r=>r.id,probes,true,["reader-c","reader-b"],2);
+const readerRoster=[{id:"unprobed"},{id:"reader-a"},{id:"reader-b"},{id:"reader-c"},{id:"openai/gpt-5.6-sol"}];
+const probes={"reader-a":{vision:true},"reader-b":{vision:false},"reader-c":{vision:true},"openai/gpt-5.6-sol":{vision:true}};
+const selectedReaders=selectVerifiedContractReaders(readerRoster,r=>r.id,probes,true,["openai/gpt-5.6-sol","reader-c","reader-b"],2);
 check("screenshot contract requires probed vision and retains preferred order",
-  selectedReaders.map(r=>r.id).join(",")==="reader-c,reader-a");
+  selectedReaders.map(r=>r.id).join(",")==="openai/gpt-5.6-sol,reader-c");
 check("text-only contract retains configured seats",
   selectVerifiedContractReaders(readerRoster,r=>r.id,{},false,[],2)[0].id==="unprobed");
 check("unverified screenshot readers yield empty selection",

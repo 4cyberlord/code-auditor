@@ -22,7 +22,7 @@ import { createHash, createHmac, createSign } from "node:crypto";
 import { buildProvidedHarness, buildGeneratedPythonHarness, pythonHarnessJsonSystemPrompt, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "../src/lib/providedCaseHarness.ts";
 import { configuredCodeLanguage, providedTestBrief } from "../src/lib/primaryDeliveryPolicy.ts";
 import { secondaryCouncilLanguages, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "../src/lib/independentLanguageCouncil.ts";
-import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief } from "../src/lib/problemEvidence.ts";
+import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief, evidenceSolverBrief } from "../src/lib/problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "../src/lib/judgeUpgradePolicy.ts";
 import { executionId, validateExecution, e2bCommandFailure, parseExecutionOutput, executionStatus, classifyExecutionFailure, mapCandidateFailureLocation, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
@@ -38,6 +38,7 @@ import { fetchExternalLanguageRows, createRegistryDirectoryLoader } from "./lib/
 import { fetchLanguageViaGateway } from "./lib/supabaseLanguageGateway.mjs";
 import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
 import { phaseTimer } from "./lib/phaseTimings.mjs";
+import { MAX_CANDIDATE_REPAIR_ATTEMPTS } from "../src/lib/revisionPolicy.ts";
 import { requiredProblemLanguage, contractSupportsEarlyHarness, isVerified, evidenceStatus, createBoundedExecutor } from "./lib/specFirstDelivery.mjs";
 import { buildVerifiedSemanticBlueprint } from "./lib/verifiedSemanticBlueprint.mjs";
 import { screenProvisionalCandidate, createProvisionalRecord, buildSolutionHistory } from "./lib/provisionalCouncil.mjs";
@@ -2910,6 +2911,38 @@ export async function runCouncilJob(job) {
     );
   }
 
+  // Start the independent screenshot-example pass as soon as the solver seats
+  // are known. It runs alongside the contract, knowledge, and documentation
+  // lookups below, so harness evidence is ready (or nearly ready) when the
+  // first candidate arrives instead of beginning after those preparation steps.
+  // Use only approved, configured routes: the selected solver pool plus the
+  // configured Council judge seats. This lets the strongest available vision
+  // reader (for example GPT-5.6 when configured) corroborate literal examples
+  // without changing which four models solve the problem.
+  const evidenceRoster = [...models, ...(settings.councilJudges || []).map(seat => ({
+    id: seat.model,
+    model: seat.model,
+  }))];
+  const evidenceSeats = partitionByVision(
+    bench.keep(evidenceRoster, model => model.id), model => model.id,
+    settings.probes, settings.councilModels
+  ).seeing.filter(model => settings.probes?.[model.id]?.vision === true && !bench.isBlind(model.id))
+    .sort((a, b) => {
+      const ai = VISION_PREFERENCE.indexOf(a.id), bi = VISION_PREFERENCE.indexOf(b.id);
+      return (ai < 0 ? Number.MAX_SAFE_INTEGER : ai) - (bi < 0 ? Number.MAX_SAFE_INTEGER : bi);
+    }).slice(0, 2);
+  const evidenceReadingsReady = Promise.all(evidenceSeats.map(async judge => {
+    try {
+      return await tokenRouterGenerate({
+        settings, baseUrl, model: judge.id,
+        system: visionEvidenceSystemPrompt(),
+        user: "Read only the ORIGINAL screenshot pixels to transcribe visible literal input/output examples. Never use an OCR restatement or solver output as your reference.",
+        // Always use ORIGINAL downloaded screenshots, even when solvers use a trusted transcription.
+        images, maxTokens: 2400, reasoning: "off",
+      });
+    } catch { return ""; }
+  }));
+
   await patchJob(job.id, { progress_phase: "solving" });
 
   // Everything the desktop path sends, which until now none of was sent: the
@@ -2957,6 +2990,9 @@ export async function runCouncilJob(job) {
       });
   const contractText = contractBlock(contracting.contract);
   const question = contractText ? `${baseQuestion}\n\n---\n\n${contractText}` : baseQuestion;
+  const evidenceReady = evidenceReadingsReady.then(readings => reconcileProblemEvidence(
+    [reading.context, contractText].filter(Boolean).join("\n\n"), images.length > 0, readings
+  ));
 
   // The library, before the first attempt rather than after it.
   //
@@ -3001,10 +3037,19 @@ export async function runCouncilJob(job) {
     {language:initialReference.language,source:initialReference.source,
      pages:initialReference.pages.map(page=>page.url)});
   let knowledge = initialKnowledge;
+  // Reader calls were started alongside contract, docs and knowledge lookup.
+  // Join them before the solver requests so only independently confirmed
+  // screenshot examples are supplied as extra facts to every selected solver.
+  const screenshotEvidence = await evidenceReady;
+  await addEvent(job.id, screenshotEvidence.disagreements.length ? "warn" : "info",
+    "screenshot_evidence", "Independent screenshot example checks finished before solving.",
+    {status:screenshotEvidence.status,confirmed:screenshotEvidence.fixtures.length,
+      reviewers:screenshotEvidence.reviewers,disagreements:screenshotEvidence.disagreements}).catch(()=>{});
   const solverPrompt = [
     userPrompt("", solveImages.length > 0, reading.context, imageRefs,
       [initialReference.prompt,knowledge].filter(Boolean).join("\n\n"), policy),
     contractText,
+    evidenceSolverBrief(screenshotEvidence),
   ]
     .filter(Boolean)
     .join("\n\n---\n\n")+
@@ -3047,23 +3092,6 @@ export async function runCouncilJob(job) {
   const candidates = [];
   // Vision-qualified judges inspect literal screenshot examples while the
   // agents solve. Unconfirmed OCR never becomes authoritative E2B assertions.
-  const evidenceSeats = partitionByVision(
-    bench.keep(judges, judge => judge.model), judge => judge.model,
-    settings.probes, settings.councilModels
-  ).seeing.filter(judge => settings.probes?.[judge.model]?.vision === true && !bench.isBlind(judge.model)).slice(0, 2);
-  const evidenceReady = Promise.all(evidenceSeats.map(async judge => {
-    try {
-      return await tokenRouterGenerate({
-        settings, baseUrl, model: judge.model,
-        system: visionEvidenceSystemPrompt(),
-        user: "Read only the ORIGINAL screenshot pixels to transcribe visible literal input/output examples. Never use an OCR restatement or solver output as your reference.",
-        // Always use ORIGINAL downloaded screenshots, even when solvers use a trusted transcription.
-        images, maxTokens: 2400, reasoning: "off",
-      });
-    } catch { return ""; }
-  })).then(readings => reconcileProblemEvidence(
-    [reading.context, contractText].filter(Boolean).join("\n\n"), images.length > 0, readings
-  ));
   const earlyLanguages=contractSupportsEarlyHarness(
     [reading.context,contractText,question].filter(Boolean).join("\n"),inferredKind
   )?[primaryLanguage]:[];
@@ -3378,11 +3406,6 @@ export async function runCouncilJob(job) {
   const councilKnowledge = [initialReference.prompt,knowledge].filter(Boolean).join("\n\n");
 
   timer.enter("benchmark");
-  const screenshotEvidence = await evidenceReady;
-  await addEvent(job.id, screenshotEvidence.disagreements.length ? "warn" : "info",
-    "screenshot_evidence", "Independent screenshot example checks finished.",
-    {status:screenshotEvidence.status,confirmed:screenshotEvidence.fixtures.length,
-      reviewers:screenshotEvidence.reviewers,disagreements:screenshotEvidence.disagreements}).catch(()=>{});
   const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, screenshotEvidence.question, field, knowledge, bench, {preparedSuites,eagerRuns,warmPool});
   // All original candidates have finished. Do not pay for standby capacity
   // throughout later reviews, judges or language porting.
@@ -3508,12 +3531,9 @@ export async function runCouncilJob(job) {
   let field3 = field;
   let revisedRuns = {};
   // Repair genuine candidate failures as well as reviewer-raised concerns.
-  // `requiresRepair` deliberately excludes cancelled runs and a harness that
-  // could not even start: those are execution/harness incidents, not defects
-  // the model can responsibly repair. A candidate that compiled and failed
-  // actual test cases, however, must retain one bounded repair-and-retest
-  // opportunity. Otherwise a single correctable edge case turns a whole job
-  // into "no winner" even though the Council has the diagnostics to fix it.
+  // A test-failing solution gets at most three model repair generations, each
+  // followed by the same E2B suite. Harness/setup failures remain excluded:
+  // those are not defects the solver can responsibly repair.
   const revisionCandidates=field.filter(candidate=>{
     const run=benchmark.runs[candidate.letter];
     const reviewerFoundConcern=isVerified(run) && reviewsOf(reviewSets,candidate.letter).some(review=>
@@ -3522,98 +3542,110 @@ export async function runCouncilJob(job) {
     );
     return requiresRepair(run)||reviewerFoundConcern;
   });
-  // A candidate only incurs a second generation and sandbox pass when its
-  // executable evidence failed, or a reviewer found a substantive concern.
+  // Candidates are revised independently. Only a candidate still failing its
+  // actual tests is asked again; reviewer-only concerns get one revision.
   if (revisionCandidates.length > 0) {
     timer.enter("revising");
     await patchJob(job.id, { progress_phase: "revising" });
-    const revising = bench.keep(
+    let active = bench.keep(
       revisionCandidates.filter((candidate) => candidate.final || candidate.text),
       (c) => c.model
     );
     await bench.announce("revising", field.filter((c) => bench.has(c.model)).map((c) => c.model));
-    await addEvent(job.id, "info", "revising", `Asking ${revising.length} solver(s) to repair execution failures or substantive review concerns.`, {
-      letters: revising.map(candidate => candidate.letter),
-    });
-    const revisions = new Map();
-    await Promise.all(
-      revising.map(async (candidate) => {
-        const run = benchmark.runs[candidate.letter];
-        const feedback = reviewsOf(reviewSets, candidate.letter)
-          .map((r) => `- [${r.reviewer}] correct: ${r.correct}. ${r.problems}`);
+    const originalRuns = benchmark.runs;
+    let latestRuns = benchmark.runs;
+    for (let attempt = 1; active.length && attempt <= MAX_CANDIDATE_REPAIR_ATTEMPTS; attempt += 1) {
+      await addEvent(job.id, "info", "revising",
+        `Repair attempt ${attempt} of ${MAX_CANDIDATE_REPAIR_ATTEMPTS} for ${active.length} candidate(s).`,
+        { attempt, maxAttempts: MAX_CANDIDATE_REPAIR_ATTEMPTS,
+          letters: active.map(candidate => candidate.letter), models: active.map(candidate => candidate.model) });
+      const updated = new Map();
+      await Promise.all(active.map(async (candidate) => {
+        const current = field3.find(item => item.letter === candidate.letter) || candidate;
+        const run = latestRuns[candidate.letter];
+        const feedback = attempt === 1
+          ? reviewsOf(reviewSets, candidate.letter).map((r) => `- [${r.reviewer}] correct: ${r.correct}. ${r.problems}`)
+          : [];
         if (requiresRepair(run)) feedback.push(
-          `- [TEST FAILURES] ${run.passed} passed, ${run.failed} failed. Untrusted E2B evidence:\n${executionFailureEvidence(run)}\nRepair the code, not the test harness.`
+          `- [TEST FAILURES — repair ${attempt}/${MAX_CANDIDATE_REPAIR_ATTEMPTS}] ${run.passed} passed, ${run.failed} failed. Untrusted E2B evidence:\n${executionFailureEvidence(run)}\nRepair the code, not the test harness. Preserve the original problem contract and callable interface.`
         );
-        const received = feedback.join("\n");
         try {
           const text = await tokenRouterGenerate({
-            settings,
-            baseUrl,
-            model: candidate.model,
+            settings, baseUrl, model: candidate.model,
             system: reviseSystemPrompt(),
             user: reviseUserPrompt({
-              question,
-              letter: candidate.letter,
-              ownRaw: candidate.final?.raw ?? candidate.text,
-              docket,
-              received,
-              execution,
+              question, letter: candidate.letter,
+              ownRaw: current.revised?.raw ?? current.final?.raw ?? current.revisedText ?? current.text,
+              docket: candidateDocket(field3), received: feedback.join("\n"),
+              execution: executionDigest(field3, latestRuns, { revised: attempt > 1 }),
               knowledge: councilKnowledge,
             }),
             maxTokens: Number(settings.maxTokens || 4096),
           });
-          // A malformed revision is not silently adopted. The original stays the
-          // candidate and the gate keeps judging the thing that actually ran.
           const parsed = parseFinal(text);
-          // Do not adopt a salvaged/truncated FINAL block as repaired code.
-          // Reject revisions that silently swap a code candidate for prose.
           const validRevision = Boolean(parsed?.wellFormed && parsed.kind !== "unknown" &&
-            (candidate.final?.kind !== "code" || (parsed.kind === "code" && parsed.code.trim())));
-          if (validRevision) revisions.set(candidate.letter, { final: parsed, text });
-          await addEvent(
-            job.id,
-            validRevision ? "info" : "warn",
+            (current.final?.kind !== "code" || (parsed.kind === "code" && parsed.code.trim())));
+          if (validRevision) updated.set(candidate.letter, { final: parsed, text });
+          await addEvent(job.id, validRevision ? "info" : "warn",
             validRevision ? "revision_done" : "revision_unparsed",
             validRevision
-              ? `${candidate.model} revised Candidate ${candidate.letter}.`
-              : `${candidate.model} answered but the revision of Candidate ${candidate.letter} did not parse; the original stands.`,
-            { model: candidate.model, letter: candidate.letter }
-          );
+              ? `${candidate.model} revised Candidate ${candidate.letter} (attempt ${attempt}/${MAX_CANDIDATE_REPAIR_ATTEMPTS}).`
+              : `${candidate.model} revision ${attempt}/${MAX_CANDIDATE_REPAIR_ATTEMPTS} for Candidate ${candidate.letter} did not parse; the last valid candidate stands.`,
+            { model: candidate.model, letter: candidate.letter, attempt,
+              maxAttempts: MAX_CANDIDATE_REPAIR_ATTEMPTS });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           await bench.note(candidate.model, err, "revising");
-          await addEvent(job.id, "warn", "revision_failed", `${candidate.model} revision failed: ${message}`, {
-            model: candidate.model,
-            letter: candidate.letter,
-          });
+          await addEvent(job.id, "warn", "revision_failed",
+            `${candidate.model} repair attempt ${attempt}/${MAX_CANDIDATE_REPAIR_ATTEMPTS} failed: ${message}`,
+            { model: candidate.model, letter: candidate.letter, attempt,
+              maxAttempts: MAX_CANDIDATE_REPAIR_ATTEMPTS });
         }
-      })
-    );
+      }));
 
-    field3 = field.map((c) => {
-      const rev = revisions.get(c.letter);
-      return rev ? { ...c, revised: rev.final, revisedText: rev.text } : c;
-    });
-
-    if (benchmark.suites.length && field3.some((c) => c.revised)) {
-  timer.enter("reverifying");
-      await patchJob(job.id, { progress_phase: "reverifying" });
-      await addEvent(job.id, "info", "reverifying", "Re-running the revised field against the same harnesses.");
-      revisedRuns = await executeField(job, settings, benchmark.suites, field3, { revised: true });
-      // Distinguish a verified fix from a failed, regressed, or unverified
-      // revision. Judges must not treat generation of new code as success.
-      for (const c of field3.filter((item) => item.revised)) {
-        const outcome = repairOutcome(benchmark.runs[c.letter], revisedRuns[c.letter]);
-        await addEvent(job.id, outcome === "repaired" || outcome === "still_passing" ? "info" : "warn",
-          "repair_outcome", `Candidate ${c.letter}: ${outcome} after retest.`,
-          { letter: c.letter, originalExecutionId: benchmark.runs[c.letter]?.executionId ?? null,
-            revisedExecutionId: revisedRuns[c.letter]?.executionId ?? null,
-            outcome, originalPassed: benchmark.runs[c.letter]?.passed ?? 0,
-            originalFailed: benchmark.runs[c.letter]?.failed ?? 0,
-            revisedPassed: revisedRuns[c.letter]?.passed ?? 0,
-            revisedFailed: revisedRuns[c.letter]?.failed ?? 0 });
+      if (!updated.size) {
+        active = active.filter(candidate => requiresRepair(latestRuns[candidate.letter]));
+        continue;
       }
-
+      field3 = field3.map(candidate => {
+        const revision = updated.get(candidate.letter);
+        return revision ? { ...candidate, revised: revision.final, revisedText: revision.text } : candidate;
+      });
+      if (!benchmark.suites.length) break;
+      timer.enter("reverifying");
+      await patchJob(job.id, { progress_phase: "reverifying" });
+      const toRetest = field3.filter(candidate => updated.has(candidate.letter));
+      await addEvent(job.id, "info", "reverifying",
+        `Re-running ${toRetest.length} revised candidate(s) against the same E2B tests.`,
+        { attempt, letters: toRetest.map(candidate => candidate.letter) });
+      const previousRuns = latestRuns;
+      const attemptRuns = await executeField(job, settings, benchmark.suites, toRetest, { revised: true });
+      latestRuns = { ...previousRuns, ...attemptRuns };
+      revisedRuns = { ...revisedRuns, ...attemptRuns };
+      for (const candidate of toRetest) {
+        const before = previousRuns[candidate.letter] || originalRuns[candidate.letter];
+        const after = attemptRuns[candidate.letter];
+        const outcome = repairOutcome(before, after);
+        await addEvent(job.id, outcome === "repaired" || outcome === "still_passing" ? "info" : "warn",
+          "repair_outcome", `Candidate ${candidate.letter}: ${outcome} after repair attempt ${attempt}.`,
+          { letter: candidate.letter, attempt, maxAttempts: MAX_CANDIDATE_REPAIR_ATTEMPTS,
+            originalExecutionId: before?.executionId ?? null,
+            revisedExecutionId: after?.executionId ?? null,
+            outcome, originalPassed: before?.passed ?? 0,
+            originalFailed: before?.failed ?? 0,
+            revisedPassed: after?.passed ?? 0, revisedFailed: after?.failed ?? 0 });
+      }
+      const retestedLetters = new Set(toRetest.map(candidate => candidate.letter));
+      const stillFailingRetests = toRetest.filter(candidate => requiresRepair(attemptRuns[candidate.letter]));
+      const failedWithoutUsableRevision = active.filter(candidate =>
+        !retestedLetters.has(candidate.letter) && requiresRepair(previousRuns[candidate.letter])
+      );
+      active = [...stillFailingRetests, ...failedWithoutUsableRevision];
+      if (active.length && attempt === MAX_CANDIDATE_REPAIR_ATTEMPTS) {
+        await addEvent(job.id, "warn", "repair_exhausted",
+          `${active.length} candidate(s) still fail after ${MAX_CANDIDATE_REPAIR_ATTEMPTS} repair attempts. No failed revision will be marked verified.`,
+          { attempts: MAX_CANDIDATE_REPAIR_ATTEMPTS, letters: active.map(candidate => candidate.letter) });
+      }
     }
   }
 

@@ -81,10 +81,11 @@ import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord
 import { fingerprintCode } from "./codeFingerprint.ts";
 import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
 import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "./independentLanguageCouncil.ts";
-import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief } from "./problemEvidence.ts";
+import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief, evidenceSolverBrief } from "./problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "./judgeUpgradePolicy.ts";
 import { buildProvidedHarness, buildGeneratedPythonHarness, pythonHarnessJsonSystemPrompt, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
-import { needsCandidateRevision, classifyCandidateRun } from "./revisionPolicy.ts";
+import { needsCandidateRevision, classifyCandidateRun, MAX_CANDIDATE_REPAIR_ATTEMPTS } from "./revisionPolicy.ts";
+import { requiresRepair } from "../../scripts/lib/phase2Execution.mjs";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
 import { buildOverlayState } from "./overlayState.ts";
 import {
@@ -4981,6 +4982,32 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     settings.councilModels ?? [], m=>m.id, settings.probes ?? {},
     s0.images.length > 0, s0.images.length > 0 && route.path !== "standard" ? VISION_PREFERENCE : [],
   );
+  const allImages = s0.images.map(modelImage);
+  // Launch literal-example verification immediately, alongside the contract
+  // pass and capability/knowledge preparation. This is intentionally a
+  // separate evidence request: solvers still receive the original screenshots,
+  // and only two agreeing readers can promote screenshot examples to tests.
+  const evidenceRoster = [
+    ...settings.councilModels.map(model => ({ id: model.id })),
+    ...settings.councilJudges.map(seat => ({ id: seat.model })),
+  ];
+  const evidenceReaders = selectVerifiedContractReaders(evidenceRoster,
+    model => model.id, settings.probes, allImages.length > 0, VISION_PREFERENCE, 2);
+  const evidenceReadingsReady = allImages.length === 0
+    ? Promise.resolve([] as string[])
+    : Promise.all(evidenceReaders.map(async seat => {
+      try {
+        return await bridge.runOnce({
+          runId, agentId: "council-evidence:" + seat.id, attemptId: newAttemptId(),
+          provider: settings.gatewayId, model: seat.id,
+          endpoint: endpointForModel(settings, seat.id),
+          systemPrompt: visionEvidenceSystemPrompt(),
+          userText: "Independently read literal examples from ORIGINAL screenshot pixels only. No OCR transcription, code or model-generated expected outputs are given.",
+          images: allImages, maxTokens: 2400, temperature: 0,
+          baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+        });
+      } catch { return ""; }
+    }));
   let contract: ProblemContract | null = null;
   let contractAgreement: ContractAgreement | null = null;
   // A pair of independently verified, unambiguous readings already gives the
@@ -5147,24 +5174,12 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     settings.mode,
     resolveAnswerLanguage(primaryLanguage === "cpp" ? "C++" : primaryLanguage === "rust" ? "Rust" : "Python", "")
   );
-  const allImages = s0.images.map(modelImage);
-  const evidenceReaders = selectVerifiedContractReaders(settings.councilJudges,
-    judge => judge.model, settings.probes, allImages.length > 0, [], 2);
-  const evidenceReady = allImages.length === 0
-    ? Promise.resolve(reconcileProblemEvidence(problem, false, []))
-    : Promise.all(evidenceReaders.map(async seat => {
-      try {
-        return await bridge.runOnce({
-          runId, agentId: "council-evidence:" + seat.model, attemptId: newAttemptId(),
-          provider: settings.gatewayId, model: seat.model,
-          endpoint: endpointForModel(settings, seat.model),
-          systemPrompt: visionEvidenceSystemPrompt(),
-          userText: "Independently read literal examples from ORIGINAL screenshot pixels only. No OCR transcription, code or model-generated expected outputs are given.",
-          images: allImages, maxTokens: 2400, temperature: 0,
-          baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
-        });
-      } catch { return ""; }
-    })).then(readings => reconcileProblemEvidence(problem, true, readings));
+  const evidenceReady = evidenceReadingsReady.then(readings =>
+    reconcileProblemEvidence(problem, allImages.length > 0, readings));
+  // Screenshot-example readers are already running alongside the problem
+  // contract and documentation lookup. Await their exact-match check before
+  // solving so every selected model receives the same corroborated fixtures.
+  const screenshotEvidence = await evidenceReady;
   await Promise.all(
     solveSlots.map((slot, i) =>
       wait(i * COUNCIL_STEP_MS).then(() => {
@@ -5185,7 +5200,8 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
               s0.images,
               knowledge,
               solutionPolicy([primaryLanguage], settings.memoryTargetKb || 9 * 1024)
-            ) + "\n\n" + primaryFirstInstruction(primaryLanguage),
+            ) + "\n\n" + primaryFirstInstruction(primaryLanguage) +
+              "\n\n" + evidenceSolverBrief(screenshotEvidence),
             images: allImages,
             maxTokens: settings.maxTokens,
             temperature: 0,
@@ -5247,7 +5263,6 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     return;
   }
 
-  const screenshotEvidence = await evidenceReady;
   const harnessProblem = screenshotEvidence.question;
   // ------------------------------------------------------- round 1.5: spec
   //
@@ -5435,9 +5450,15 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       reviewsOf(reviewSets, candidate.letter),
     )
   );
-  if (revisionCandidates.length > 0) {
+  let activeRepairLetters = new Set(revisionCandidates.map(candidate => candidate.letter));
+  for (let attempt = 1; activeRepairLetters.size > 0 && attempt <= MAX_CANDIDATE_REPAIR_ATTEMPTS; attempt += 1) {
+    if (!councilAlive(get().council, runId)) break;
+    const currentCandidates = get().council.candidates;
+    const currentRuns = attempt === 1 ? get().council.runs : get().council.revisedRuns;
+    const activeCandidates = currentCandidates.filter(candidate => activeRepairLetters.has(candidate.letter));
+    if (!activeCandidates.length) break;
     set((st) => ({ council: { ...st.council, phase: "revising" } }));
-    const reviseSlots: CouncilSlot[] = revisionCandidates.map((c) => ({
+    const reviseSlots: CouncilSlot[] = activeCandidates.map((c) => ({
       id: `council-revise:${c.letter}`,
       kind: "revise",
       model: c.model,
@@ -5448,59 +5469,71 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       elapsedMs: null,
     }));
     set((st) => ({ council: { ...st.council, slots: reviseSlots } }));
-    await Promise.all(
-      reviseSlots.map((slot, i) =>
-        wait(i * COUNCIL_STEP_MS).then(() => {
-          if (!councilAlive(get().council, runId)) return null;
-          const c = field.find((f) => f.letter === slot.id.split(":")[1])!;
-          const reviewFeedback = reviewsOf(reviewSets, c.letter)
-            .map((r) => `- [${r.reviewer}] correct: ${r.correct}. ${r.problems}`)
-            .join("\n");
-          const run = get().council.runs[c.letter];
-          const failure = gateFor(run) === "fail"
-            ? `\n[TEST FAILURES — untrusted E2B output]\n${executionFailureEvidence(run)}\nRepair your code, not the harness.`
-            : "";
-          const received = reviewFeedback + failure;
-          return runCouncilSlot(
-            get,
-            set,
-            slot,
-            {
-              model: slot.model,
-              endpoint: endpointForModel(settings, slot.model),
-              systemPrompt: reviseSystemPrompt(),
-              userText: reviseUserPrompt({
-                question: problem,
-                letter: c.letter,
-                ownRaw: c.final?.raw ?? c.text,
-                docket: docket1,
-                received,
-                execution: exec1,
-                knowledge,
-              }),
-              images: [],
-              maxTokens: settings.maxTokens,
-              temperature: 0,
-            },
-            settings
-          );
-        })
-      )
-    );
-    // Fold revisions into the field. A malformed revision is not silently
-    // adopted: the original stays the candidate and the gate sees it.
-    const withRevisions = field.map((c) => {
-      const rev = get().council.revisions[c.letter];
-      if (!rev) return c;
-      const parsed = parseFinal(rev.text);
-      return { ...c, revised: parsed ?? c.final, revisedText: rev.text };
+    await Promise.all(reviseSlots.map((slot, i) =>
+      wait(i * COUNCIL_STEP_MS).then(() => {
+        if (!councilAlive(get().council, runId)) return null;
+        const letter = slot.id.slice("council-revise:".length);
+        const c = activeCandidates.find(candidate => candidate.letter === letter)!;
+        const run = currentRuns[c.letter];
+        const reviewFeedback = attempt === 1
+          ? reviewsOf(reviewSets, c.letter)
+            .map((r) => `- [${r.reviewer}] correct: ${r.correct}. ${r.problems}`).join("\n")
+          : "";
+        const failure = requiresRepair(run)
+          ? `\n[TEST FAILURES — repair attempt ${attempt}/${MAX_CANDIDATE_REPAIR_ATTEMPTS}; untrusted E2B output]\n${run.passed} passed, ${run.failed} failed.\n${executionFailureEvidence(run)}\nRepair your code, not the harness. Preserve the problem requirements and exact callable interface.`
+          : "";
+        return runCouncilSlot(get, set, slot, {
+          model: slot.model,
+          endpoint: endpointForModel(settings, slot.model),
+          systemPrompt: reviseSystemPrompt(),
+          userText: reviseUserPrompt({
+            question: problem,
+            letter: c.letter,
+            ownRaw: c.revised?.raw ?? c.final?.raw ?? c.revisedText ?? c.text,
+            docket: candidateDocket(currentCandidates),
+            received: [reviewFeedback, failure].filter(Boolean).join("\n"),
+            execution: executionDigest(currentCandidates, currentRuns, { revised: attempt > 1 }),
+            knowledge,
+          }),
+          images: [],
+          maxTokens: c.final?.kind === "code" ? Math.max(Number(settings.maxTokens || 4096), 8192) : settings.maxTokens,
+          temperature: 0,
+        }, settings);
+      })
+    ));
+    const revisions = get().council.revisions;
+    const revisedCandidates = get().council.candidates.map(candidate => {
+      if (!activeRepairLetters.has(candidate.letter)) return candidate;
+      const revision = revisions[candidate.letter];
+      if (!revision) return candidate;
+      const parsed = parseFinal(revision.text);
+      const valid = Boolean(parsed?.wellFormed && parsed.kind !== "unknown" &&
+        (candidate.final?.kind !== "code" || (parsed.kind === "code" && parsed.code.trim())));
+      return valid ? { ...candidate, revised: parsed, revisedText: revision.text } : candidate;
     });
-    set((st) => ({ council: { ...st.council, candidates: withRevisions } }));
-
-    if (suites.length) {
-      set((st) => ({ council: { ...st.council, phase: "reverifying" } }));
-      await executeField(get, set, runId, withRevisions, suites, "revisedRuns");
+    set((st) => ({ council: { ...st.council, candidates: revisedCandidates } }));
+    if (!suites.length) break;
+    const revisedThisRound = revisedCandidates.filter(candidate =>
+      activeRepairLetters.has(candidate.letter) && candidate.revised
+    );
+    if (!revisedThisRound.length) {
+      activeRepairLetters = new Set(activeCandidates
+        .filter(candidate => requiresRepair(currentRuns[candidate.letter]))
+        .map(candidate => candidate.letter));
+      continue;
     }
+    set((st) => ({ council: { ...st.council, phase: "reverifying" } }));
+    await executeField(get, set, runId, revisedThisRound, suites, "revisedRuns");
+    const nextRuns = get().council.revisedRuns;
+    const revisedLetters = new Set(revisedThisRound.map(candidate => candidate.letter));
+    activeRepairLetters = new Set([
+      ...revisedThisRound
+      .filter(candidate => requiresRepair(nextRuns[candidate.letter]))
+      .map(candidate => candidate.letter),
+      ...activeCandidates
+        .filter(candidate => !revisedLetters.has(candidate.letter) && requiresRepair(currentRuns[candidate.letter]))
+        .map(candidate => candidate.letter),
+    ]);
   }
 
   if (!councilAlive(get().council, runId)) {

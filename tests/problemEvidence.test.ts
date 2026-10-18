@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { reconcileProblemEvidence, stripExampleBlocks, visionEvidenceSystemPrompt } from "../src/lib/problemEvidence.ts";
+import { reconcileProblemEvidence, stripExampleBlocks, visionEvidenceSystemPrompt, evidenceSolverBrief } from "../src/lib/problemEvidence.ts";
 import { buildProvidedHarness } from "../src/lib/providedCaseHarness.ts";
 
 const original = "Find the sum of two numbers.\nExample 1:\nInput: nums = [1, 2]\nOutput: 3\nConstraints:\n1 <= nums.length <= 10";
@@ -32,6 +32,8 @@ const providedSuite = buildProvidedHarness(flattenedVerified.question, "python",
 assert.equal(providedSuite?.source, "provided",
   "corroborated screenshot cases must bypass model-authored expected outputs");
 assert.equal(providedSuite?.providedCaseCount, 2);
+assert.match(evidenceSolverBrief(flattenedVerified), /Independent vision readers agreed/);
+assert.match(evidenceSolverBrief(flattenedVerified), /Input \(literal\):[\s\S]*Expected output \(literal\):/);
 
 for (const readers of [[correct], [correct, incorrect], [correct, ""], ["", ""]]) {
   const uncertain = reconcileProblemEvidence(original, true, readers);
@@ -46,6 +48,8 @@ const whitespaceDisagreement = reconcileProblemEvidence("Task.", true, [
 ]);
 assert.equal(whitespaceDisagreement.fixtures.length, 0,
   "distinct literal string outputs must not be collapsed into agreement");
+assert.match(evidenceSolverBrief(whitespaceDisagreement), /UNCERTAIN/);
+assert.doesNotMatch(evidenceSolverBrief(whitespaceDisagreement), /Expected output \(literal\):/);
 assert.match(stripExampleBlocks(unordered), /Multiple valid outputs/,
   "non-unique output constraints must survive removal of the screenshot sample");
 assert.doesNotMatch(stripExampleBlocks(original), /Input:\s*nums/);

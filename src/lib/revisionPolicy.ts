@@ -5,6 +5,9 @@ import {
   requiresRepair,
 } from "../../scripts/lib/phase2Execution.mjs";
 
+/** Maximum repair generations after the original candidate has been tested. */
+export const MAX_CANDIDATE_REPAIR_ATTEMPTS = 3;
+
 /** Attach evidence-based failure labels before deciding whether code needs repair. */
 export function classifyCandidateRun(
   run: CandidateRun,

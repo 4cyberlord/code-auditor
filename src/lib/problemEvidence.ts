@@ -107,3 +107,24 @@ export function evidenceJudgeBrief(evidence: ProblemEvidence): string {
     "Evaluate code against the original screenshot when vision is verified. Only actual E2B runs establish test passes.",
   ].join("\n").slice(0, 6500);
 }
+
+/** A compact, evidence-labelled note given to solvers before they start. */
+export function evidenceSolverBrief(evidence: ProblemEvidence): string {
+  if (evidence.status === "text") {
+    return "QUESTION EVIDENCE: The user supplied text directly. Preserve its exact requirements and any explicitly provided examples.";
+  }
+  if (evidence.status === "corroborated") {
+    return [
+      "CORROBORATED SCREENSHOT EXAMPLES (supplemental authoritative facts):",
+      "Independent vision readers agreed on these literal input/output pairs. Preserve them exactly; do not reinterpret or replace their expected outputs.",
+      ...evidence.fixtures.map((fixture, index) =>
+        `Example ${index + 1}\nInput (literal):\n${fixture.input}\nExpected output (literal):\n${fixture.output}`),
+      "The full problem statement, constraints, requested behavior, and interface remain in the question/transcription above. Solve against both that statement and every confirmed pair.",
+    ].join("\n\n").slice(0, 6500);
+  }
+  return [
+    "SCREENSHOT EXAMPLE READBACK: UNCERTAIN.",
+    "No screenshot input/output pair passed independent exact-match corroboration. Do not treat an OCR guess or generated value as an expected answer. Inspect the original image yourself, use only unambiguous requirements, and flag any unreadable/conflicting detail rather than inventing it.",
+    ...evidence.disagreements.map(detail => `Uncertainty: ${detail}`),
+  ].join("\n").slice(0, 3000);
+}

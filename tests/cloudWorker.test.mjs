@@ -33,6 +33,8 @@ let cleanRateRetries = 0;
 // candidate the way a harness with a wrong expectation does.
 let HARNESS_WRONG = false;
 let REPAIRABLE_EDGE = false;
+let REPAIR_SUCCEEDS_ON_ATTEMPT = 1;
+const REPAIR_GENERATIONS = new Map();
 let EMPTY_SPEC_ONCE = true;
 let EMPTY_SPEC_ALWAYS = false;
 let EMPTY_SPEC_TRUNCATED_ONCE = false;
@@ -134,6 +136,9 @@ globalThis.fetch = async (url, init = {}) => {
     // first message. Answering the right shape here is the point of the test.
     const reply = (text) =>
       json({ output: [{ type: "message", content: [{ type: "output_text", text }] }] });
+    if (String(req.instructions).includes("You are an independent evidence reader, NOT a solver")) {
+      return reply("Example 1:\nInput: xs = [1, 2, 3]\nOutput: 3");
+    }
     if (String(req.instructions).includes("final synthesizer")) {
       return reply("VERDICT: Candidate A is the best supported answer.\nWINNER: A\nREJECTED: B - less evidence\nEVIDENCE: measured\nAPPROACH: direct\nFINAL ANSWER: ship A");
     }
@@ -155,6 +160,9 @@ globalThis.fetch = async (url, init = {}) => {
       return json({ error: { message: "Unsupported parameter: 'reasoning_effort'" } }, { status: 400 });
     }
     const system = req.messages[0].content;
+    if (system.includes("You are an independent evidence reader, NOT a solver")) {
+      return modelReply("Example 1:\nInput: xs = [1, 2, 3]\nOutput: 3");
+    }
     if (TRUNCATE_MODEL_ONCE && !TRUNCATE_SENT && req.model.includes(TRUNCATE_MODEL_ONCE) &&
       system.includes("one of four independent expert agents")) {
       TRUNCATE_SENT = true;
@@ -251,6 +259,11 @@ UNKNOWNS: none
 CONTRACT>>>`);
     }
     if (system.includes("senior engineer revising your own solution")) {
+      const generation = (REPAIR_GENERATIONS.get(req.model) || 0) + 1;
+      REPAIR_GENERATIONS.set(req.model, generation);
+      const repairedCode = REPAIRABLE_EDGE && generation < REPAIR_SUCCEEDS_ON_ATTEMPT
+        ? "export function solve(xs) { return xs.length; }"
+        : "export function solve(xs) { return xs ? xs.length : 0; }";
       return modelReply(`Having read the reviews:
 
 <<<FINAL
@@ -263,7 +276,7 @@ CLAIMS:
 - The empty case is explicit now.
 CODE:
 \`\`\`javascript
-export function solve(xs) { return xs ? xs.length : 0; }
+${repairedCode}
 \`\`\`
 FINAL>>>`);
     }
@@ -404,6 +417,10 @@ await runCouncilJob({
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
     ],
     councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
+    probes: {
+      "anthropic/claude-opus-5.5": { vision: true },
+      "moonshotai/kimi-k3": { vision: true },
+    },
   },
 });
 
@@ -507,6 +524,13 @@ check("two readers looked at it", (events.find((e) => e.phase === "reading_done"
 check("the readers were the ones shown the picture", modelCalls.some((c) => c.messages[0].content.includes("You are reading a screenshot") && c.messages[1].content.some?.((p) => p.type === "image_url")));
 check("the solvers are never downgraded to transcript-only", !events.some((e) => e.phase === "solving_from_reading"));
 check("so the reading reached the solver", solverText.includes("READING OF THE SCREENSHOT"), solverText.slice(0, 160));
+check("two configured vision-capable readers corroborated the literal sample before solving",
+  events.some(e => e.phase === "screenshot_evidence" && e.payload?.status === "corroborated" && e.payload?.confirmed === 1) &&
+    modelCalls.filter(c => c.messages[0].content.includes("independent evidence reader")).length >= 2,
+  JSON.stringify(events.find(e => e.phase === "screenshot_evidence")?.payload));
+check("selected solver calls receive the corroborated literal input and expected output",
+  modelCalls.filter(c => c.messages?.[0]?.content?.includes("one of four independent expert agents"))
+    .every(c => textOf(c).includes("xs = [1, 2, 3]") && textOf(c).includes("Expected output (literal):\n3")));
 check(
   "and the official image went with it",
   Array.isArray(solverCall?.messages?.[1]?.content) && solverCall.messages[1].content.some((p) => p.type === "image_url"),
@@ -660,8 +684,9 @@ check(
   JSON.stringify(events.map((e) => e.phase))
 );
 check(
-  "test-rejected candidates still receive one bounded repair attempt",
-  events.filter((e) => e.phase === "revision_done").length === 2,
+  "test-rejected candidates receive no more than three bounded repair attempts",
+  events.filter((e) => e.phase === "revision_done").length === 6 &&
+    events.filter((e) => e.phase === "revision_done").every(e => e.payload?.attempt >= 1 && e.payload?.attempt <= 3),
   JSON.stringify(events.filter((e) => e.phase === "revision_done").map((e) => e.payload?.letter))
 );
 check("the job never claimed completion", !patches.some((p) => p.status === "completed"));
@@ -700,6 +725,44 @@ check("judge-reviewed repairs were independently retested before publication",
   reports[0]?.report?.standing === "verified" &&
   patches.some(p => p.status === "completed"));
 REPAIRABLE_EDGE = false;
+
+// A difficult candidate may need more than one correction. The originating
+// solver receives the latest E2B evidence each time; only the third passing
+// retest may become the verified candidate.
+REPAIRABLE_EDGE = true;
+REPAIR_SUCCEEDS_ON_ATTEMPT = 3;
+REPAIR_GENERATIONS.clear();
+events.length = 0;
+patches.length = 0;
+reports.length = 0;
+modelCalls.length = 0;
+await runCouncilJob({
+  id: "job-repair-third-attempt",
+  session_id: "session-1",
+  settings_snapshot: {
+    mode: "auto", maxTokens: 2048,
+    gatewayBaseUrl: "https://api.tokenrouter.com/v1",
+    councilModels: [
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
+      { id: "moonshotai/kimi-k3", endpoint: "chat" },
+    ],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
+  },
+});
+const repairRequests = modelCalls.filter(c => c.messages?.[0]?.content?.includes("senior engineer revising your own solution"));
+const repairsByModel = new Map();
+for (const call of repairRequests) repairsByModel.set(call.model, (repairsByModel.get(call.model) || 0) + 1);
+check("each originating solver received at most three E2B repair rounds",
+  repairsByModel.size === 2 && [...repairsByModel.values()].every(count => count === 3) &&
+    repairRequests.every(call => textOf(call).includes("FAIL missing got=TypeError want=0")),
+  JSON.stringify({ byModel: Object.fromEntries(repairsByModel) }));
+check("third repair only becomes verified after passing the same E2B tests",
+  reports[0]?.report?.revisedRuns?.A?.passed === 9 &&
+    reports[0]?.report?.revisedRuns?.A?.failed === 0 &&
+    reports[0]?.report?.standing === "verified",
+  JSON.stringify(reports[0]?.report?.revisedRuns?.A));
+REPAIRABLE_EDGE = false;
+REPAIR_SUCCEEDS_ON_ATTEMPT = 1;
 
 // --- a route that never answers is asked once, not at every stage ----------
 console.log("\n3. a model that times out is benched for the rest of the job");
