@@ -5145,7 +5145,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
           provider: settings.gatewayId, model: seat.model,
           endpoint: endpointForModel(settings, seat.model),
           systemPrompt: visionEvidenceSystemPrompt(),
-          userText: "Inspect the original image independently. The text below is context, not verified examples:\n" + problem.slice(0, 4000),
+          userText: "Independently read literal examples from ORIGINAL screenshot pixels only. No OCR transcription, code or model-generated expected outputs are given.",
           images: allImages, maxTokens: 2400, temperature: 0,
           baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
         });
