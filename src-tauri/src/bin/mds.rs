@@ -4461,7 +4461,7 @@ fn overlay_html() -> &'static str {
                 verifying:'Running E2B verification',reviewing:'Reviewing candidates',
                 revising:'Repairing eligible solutions',reverifying:'Re-testing repaired code',
                 judging:'Independent Council judges',synthesizing:'Selecting verified winner',
-                porting:'Verifying language translations',completed:'Council completed'};
+                porting:'Independently solving other languages',completed:'Council completed'};
               const stage=stages[state.progressPhase]||waiting;
               const verifiedNames=Array.isArray(state.ports)?state.ports
                 .filter(port=>port&&port.status==='verified'&&String(port.code||'').trim())
@@ -4469,7 +4469,7 @@ fn overlay_html() -> &'static str {
                   canonicalPortLanguage(port.language)==='rust'?'Rust':'Python'):[];
               const primaryReady=Boolean(state.solution&&String(state.solution.code||'').trim());
               progress.textContent=state.phase==='done'
-                ? (verifiedNames.length?'Council completed. Primary verified; independently tested ports: '+verifiedNames.join(', ')+'.':primaryReady?'Council completed. The verified primary solution is available; no language ports are verified yet.':'Council finished without a verified primary solution.'):
+                ? (verifiedNames.length?'Council completed. Primary verified; independently verified languages: '+verifiedNames.join(', ')+'.':primaryReady?'Council completed. The verified primary solution is available; other languages have not been verified yet.':'Council finished without a verified primary solution.'):
                 state.phase==='error'?'Council needs attention. See the diagnostic below.':
                 stage+(state.progress&&stage!==state.progress?' · '+String(state.progress).slice(0,145):'');
               agents.after(progress);
@@ -4517,7 +4517,7 @@ fn overlay_html() -> &'static str {
               const validated=ports.filter(port=>port&&port.status==='verified'&&String(port.code||'').trim());
               const section=document.createElement('section');section.id='verified-language-ports';section.className='tests';
               const label=document.createElement('b');label.textContent='Verified languages';
-              const summary=document.createElement('span');summary.textContent=validated.length+' independent E2B ports';
+              const summary=document.createElement('span');summary.textContent=validated.length+' independently E2B-verified solutions';
               const header=document.createElement('div');header.className='tests-head';header.append(label,summary);section.append(header);
               const list=document.createElement('div');list.className='overlay-port-list';
               const desired=window.__overlayDesiredLanguage;
@@ -4570,7 +4570,7 @@ fn overlay_html() -> &'static str {
                 code.scrollTop=0;
               }
               if(title)title.textContent='solution.'+(desired==='cpp'?'cpp':desired==='python'?'py':'rs');
-              if(source)source.textContent=chosen===primary?'Council-verified primary':'Independently E2B-verified port';
+              if(source)source.textContent=chosen===primary?'Council-verified primary':'Independently E2B-verified solution';
               const cases=chosen===primary?state.tests:
                 (Array.isArray(state.portCases)?state.portCases.find(entry=>canonicalPortLanguage(entry.language)===desired)?.tests:[]);
               const caseTarget=document.getElementById('tests'),caseCount=document.getElementById('tests-count');
