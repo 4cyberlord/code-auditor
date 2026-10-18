@@ -29,7 +29,7 @@ const correct = [
 ].join("\n");
 const provided = extractProvidedFixtures(twoSum);
 assert.equal(provided.length, 3);
-assert.deepEqual(provided[0].kwargs, {nums: [2,7,11,15], target: 9});
+assert.deepEqual({...provided[0].kwargs}, {nums: [2,7,11,15], target: 9});
 assert.deepEqual(provided[2].expected, [0,1]);
 
 function runProgram(program: string) {
