@@ -45,6 +45,9 @@ function ProbeBadge({
   modelId?: string;
 }) {
   const setEndpointFor = useStore((s) => s.setEndpointFor);
+  if (probe.ok && probe.ms === 0) {
+    return <span className="badge" data-tone="warn" title="Catalogue assertion only; run a real image probe.">catalog only</span>;
+  }
   if (probe.ok) {
     return (
       <span className="badge" data-tone="good" title={`Answered in ${probe.ms}ms`}>
