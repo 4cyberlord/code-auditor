@@ -3671,6 +3671,8 @@ export async function runCouncilJob(job) {
             execution: executionBoth,
             knowledge: councilKnowledge,
           }),
+          // Only genuinely vision-probed judge routes see original pixels.
+          images: evidenceSeats.some(seat => seat.model === judge.model) ? solveImages : [],
           maxTokens: Number(settings.maxTokens || 4096),
         });
         judgeReports.push({ model: judge.model, emphasis: judge.emphasis || "correctness", text, error: null });
@@ -3964,16 +3966,20 @@ export async function runCouncilJob(job) {
     const ideas=corroboratedImprovementIdeas(judgeReadings.map(judge=>judge.improvement));
     const audited=agreedComplexityAudits(judgeReadings)[decision.winner];
     const previous=verifiedSource;
-    const independentReviewers=[...new Set(judges.map(judge=>judge.model))]
-      .filter(model=>model&&model!==synthesisModel).slice(0,2);
-    if(ideas.length>=2&&audited&&previous?.kind==="code"&&independentReviewers.length===2){
+    const independentReviewers=[...new Set(judges.map(judge=>judge.model))].filter(Boolean);
+    const proposalModel=[source?.model,synthesisModel]
+      .find(model=>model&&!independentReviewers.includes(model))||"";
+    // Every configured participating judge must be able to vote, including
+    // a third or fourth judge. A single rejection means the original wins.
+    if(ideas.length>=2&&audited&&previous?.kind==="code"&&
+        independentReviewers.length>=2&&proposalModel){
       await addEvent(job.id,"info","judge_upgrade_attempt",
         "Independent judges agreed on a concrete possible improvement; the published solution remains available during verification.",
         {winner:decision.winner,judgeIdeas:ideas.length}).catch(()=>{});
       let priorRevision=revisedRuns[decision.winner];
       try{
         const proposalText=await tokenRouterGenerate({
-          settings,baseUrl,model:synthesisModel,system:systemPrompt("code"),
+          settings,baseUrl,model:proposalModel,system:systemPrompt("code"),
           user:[
             "Make ONE optional judge-informed improvement to this already E2B-verified solution.",
             "Question and constraints:\n"+question,
