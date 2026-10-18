@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { primaryCodingLanguage, primaryFirstInstruction } from "../src/lib/primaryDeliveryPolicy.ts";
+import { configuredCodeLanguage, primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "../src/lib/primaryDeliveryPolicy.ts";
 import { reviewSystemPromptFor, parseReview } from "../src/lib/review.ts";
 
 assert.equal(primaryCodingLanguage("Find the optimal algorithm"), "python");
@@ -9,8 +9,16 @@ assert.equal(primaryCodingLanguage("Implement the solution in C++"), "cpp");
 assert.equal(primaryCodingLanguage("class Solution { public: int solve(int x); }"), "cpp");
 assert.equal(primaryCodingLanguage("fn main() {}"), "rust");
 
-const primaryPrompt = primaryFirstInstruction();
-assert.match(primaryPrompt, /Python unless the problem explicitly requires C\+\+ or Rust/);
+assert.equal(configuredCodeLanguage("C++"), "cpp");
+assert.equal(configuredCodeLanguage("Rust"), "rust");
+assert.equal(primaryCodingLanguage("Find the optimal algorithm", "C++"), "cpp");
+assert.equal(primaryCodingLanguage("Find the optimal algorithm", "Rust"), "rust");
+assert.equal(primaryCodingLanguage("Required language: Python", "C++"), "python");
+assert.match(providedTestBrief([{id:"provided_1",input:"[1,2]",output:"3"}]),/EXPECTED OUTPUT 3/);
+const primaryPrompt = primaryFirstInstruction("python");
+assert.match(primaryPrompt, /Code in Python only/);
+assert.match(primaryFirstInstruction("cpp"), /Code in C\+\+23 only/);
+assert.match(primaryFirstInstruction("rust"), /Code in Rust only/);
 assert.match(primaryPrompt, /Other language equivalents follow only after an execution-verified winner/);
 
 const reviewPrompt = reviewSystemPromptFor();
