@@ -18,6 +18,24 @@ export function secondaryCouncilLanguages(primary: string, available: readonly s
   }
   return result;
 }
+
+/**
+ * Carry the exact solver cohort selected for the primary Council into each
+ * independent language round. The winning model is only a legacy fallback
+ * when an older caller has no recorded solver cohort.
+ */
+export function independentLanguageSolverModels(
+  selectedModels: readonly string[] | null | undefined,
+  fallbackModel = "",
+): string[] {
+  const selected = [...new Set((Array.isArray(selectedModels) ? selectedModels : [])
+    .map(model => String(model || "").trim())
+    .filter(Boolean))];
+  if (selected.length) return selected;
+  const fallback = String(fallbackModel || "").trim();
+  return fallback ? [fallback] : [];
+}
+
 export function independentLanguageInstruction(language: string): string {
   const id = configuredCodeLanguage(language);
   const label = id === "cpp" ? "C++23" : id === "rust" ? "Rust" : "Python 3";

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { secondaryCouncilLanguages, independentLanguageInstruction, independentLanguageQuestion } from "../src/lib/independentLanguageCouncil.ts";
+import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion } from "../src/lib/independentLanguageCouncil.ts";
 
 assert.deepEqual(secondaryCouncilLanguages("python",["python","rust","cpp"]),["rust","cpp"]);
 assert.deepEqual(secondaryCouncilLanguages("rust",["python","rust","cpp"]),["python","cpp"]);
@@ -8,6 +8,9 @@ assert.deepEqual(secondaryCouncilLanguages("Python",["javascript","python","py",
 assert.deepEqual(secondaryCouncilLanguages("python",["python"]),["rust","cpp"]);
 assert.deepEqual(secondaryCouncilLanguages("python",undefined),["rust","cpp"]);
 assert.deepEqual(secondaryCouncilLanguages("rust",undefined),["python","cpp"]);
+assert.deepEqual(independentLanguageSolverModels(["adaptive-b", "adaptive-d", "adaptive-b"], "winner-model"), ["adaptive-b", "adaptive-d"]);
+assert.deepEqual(independentLanguageSolverModels([], "winner-model"), ["winner-model"]);
+assert.deepEqual(independentLanguageSolverModels([], ""), []);
 const problem="Return the sum of n integers.";
 for (const language of ["python","rust","cpp"]) {
   const instruction=independentLanguageInstruction(language);

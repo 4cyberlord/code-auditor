@@ -80,7 +80,7 @@ import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from ".
 import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
 import { fingerprintCode } from "./codeFingerprint.ts";
 import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
-import { secondaryCouncilLanguages, independentLanguageInstruction, independentLanguageQuestion } from "./independentLanguageCouncil.ts";
+import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion } from "./independentLanguageCouncil.ts";
 import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief } from "./problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "./judgeUpgradePolicy.ts";
 import { buildProvidedHarness, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
@@ -4608,7 +4608,7 @@ function executionFailureSummary(run: CandidateRun | undefined): string {
 async function generateVerifiedPorts(
   get: GetStore, set: SetStore, runId: string, source: Candidate, problem: string,
   knowledge: string, settings: Settings, _suites: TestSuite[],
-  originalImages: bridge.ImageInput[],
+  originalImages: bridge.ImageInput[], primarySolverModels: readonly string[],
 ): Promise<VerifiedPort[]> {
   const primary = source.revised ?? source.final;
   if (!primary || primary.kind !== "code" || !primary.code.trim()) return [];
@@ -4620,10 +4620,10 @@ async function generateVerifiedPorts(
   }));
   const stillActive = () => get().council.runId === runId && get().council.phase !== "cancelled";
   if (stillActive()) set(st => ({ council: { ...st.council, ports: [...ports] } }));
-  // Preserve the selected four independent solver seats, with the winning
-  // model only as fallback when an imported roster is empty.
-  const solverModels = [...new Set(settings.councilModels.map(seat => seat.id).filter(Boolean))].slice(0, 4);
-  if (!solverModels.length) solverModels.push(source.model);
+  // Reuse the exact pane + adaptive solver cohort that produced this primary
+  // Council field. Do not substitute the first entries of the saved roster:
+  // adaptive selection may have chosen different models for this question.
+  const solverModels = independentLanguageSolverModels(primarySolverModels, source.model);
   const judgeModels = [...new Set(settings.councilJudges.map(seat => seat.model).filter(Boolean))];
 
   for (const language of targets) {
@@ -5814,7 +5814,8 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       if (hasVerifiedCodeWinner && winnerCandidate && get().council.runId === runId &&
           get().council.phase !== "cancelled") {
         try {
-          await generateVerifiedPorts(get, set, runId, winnerCandidate, harnessProblem, knowledge, settings, suites, allImages);
+          await generateVerifiedPorts(get, set, runId, winnerCandidate, harnessProblem, knowledge, settings, suites,
+            allImages, field.map(candidate => candidate.model));
         } catch (portError) {
           console.warn("Optional language ports unavailable:", cleanError(String(portError)));
         }
