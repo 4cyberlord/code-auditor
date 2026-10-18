@@ -36,6 +36,18 @@ export function independentLanguageSolverModels(
   return fallback ? [fallback] : [];
 }
 
+/**
+ * Secondary-language winners must be evaluated by independent judges, not
+ * silently promoted only because one E2B run passed. A single configured
+ * judge is the minimum on restricted rosters; otherwise require at least two.
+ * Failed/invalid reports never count.
+ */
+export function independentJudgesReady(configured: number, accepted: number): boolean {
+  if (!Number.isInteger(configured) || !Number.isInteger(accepted) || configured < 1 || accepted < 0)
+    return false;
+  return accepted >= Math.min(configured, 2);
+}
+
 export function independentLanguageInstruction(language: string): string {
   const id = configuredCodeLanguage(language);
   const label = id === "cpp" ? "C++23" : id === "rust" ? "Rust" : "Python 3";
