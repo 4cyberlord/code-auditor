@@ -3067,7 +3067,7 @@ export async function runCouncilJob(job) {
   const evidenceSeats = partitionByVision(
     bench.keep(judges, judge => judge.model), judge => judge.model,
     settings.probes, settings.councilModels
-  ).seeing.filter(judge => !bench.isBlind(judge.model)).slice(0, 2);
+  ).seeing.filter(judge => settings.probes?.[judge.model]?.vision === true && !bench.isBlind(judge.model)).slice(0, 2);
   const evidenceReady = Promise.all(evidenceSeats.map(async judge => {
     try {
       return await tokenRouterGenerate({
@@ -3655,7 +3655,7 @@ export async function runCouncilJob(job) {
 
   const judging = bench.keep(judges, (j) => j.model);
   const visionJudgeIds = new Set(partitionByVision(judging, j => j.model,
-    settings.probes, settings.councilModels).seeing.filter(j => !bench.isBlind(j.model)).map(j => j.model));
+    settings.probes, settings.councilModels).seeing.filter(j => settings.probes?.[j.model]?.vision === true && !bench.isBlind(j.model)).map(j => j.model));
   await bench.announce("judging", judges.filter((j) => bench.has(j.model)).map((j) => j.model));
   await addEvent(job.id, "info", "judging", `Collecting ${judging.length} judge reports.`);
   await Promise.all(
