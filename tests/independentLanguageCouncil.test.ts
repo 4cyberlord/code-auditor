@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion } from "../src/lib/independentLanguageCouncil.ts";
+import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "../src/lib/independentLanguageCouncil.ts";
 
 assert.deepEqual(secondaryCouncilLanguages("python",["python","rust","cpp"]),["rust","cpp"]);
 assert.deepEqual(secondaryCouncilLanguages("rust",["python","rust","cpp"]),["python","cpp"]);
