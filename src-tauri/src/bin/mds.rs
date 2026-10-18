@@ -3850,6 +3850,7 @@ fn overlay_html() -> &'static str {
 	            .code-lines li{display:grid;grid-template-columns:48px minmax(0,1fr);min-height:24px;padding:0 17px 0 0;list-style:none;counter-increment:code-line}
 	            .code-lines li:before{content:counter(code-line);padding-right:12px;text-align:right;color:rgba(255,255,255,.3)}
 	            .code-lines code{display:block;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}
+            .code-lines .code-indent,#code-focus-code .code-indent{display:inline-block;white-space:pre;vertical-align:baseline;background:repeating-linear-gradient(90deg,rgba(123,165,208,.34) 0 1px,transparent 1px var(--indent-step,4ch));tab-size:4}
             .kw{color:var(--kw)}.fn{color:var(--fn)}.arg{color:var(--arg)}.num{color:var(--num)}.str{color:var(--str)}.built{color:var(--built)}.op{color:var(--op)}.cm{color:var(--cm)}
 	            .tests{box-sizing:border-box;width:100%;min-height:58px;max-height:180px;border:1px solid var(--panel-line);border-radius:9px;background:var(--tests-bg);overflow-y:auto;overflow-x:hidden}
 	            .case-list{display:grid;grid-template-columns:minmax(0,1fr);gap:7px;padding:9px}
@@ -3985,13 +3986,26 @@ fn overlay_html() -> &'static str {
                HUD, each in a monitor-anchored half-screen window. */
             body[data-code-focus="left"],body[data-code-focus="right"]{padding:0;gap:0}
             body[data-code-focus]:not([data-code-focus="normal"]) #panel{display:none!important}
-            #code-focus-sheet{position:fixed;inset:0;box-sizing:border-box;display:flex;min-width:0;min-height:0;border:1px solid rgba(255,255,255,.26);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(205,222,239,.10),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(255,255,255,.09),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);-webkit-backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
+            #code-focus-sheet{position:fixed;inset:0;box-sizing:border-box;display:flex;flex-direction:column;min-width:0;min-height:0;border:1px solid rgba(255,255,255,.26);border-radius:18px;background:radial-gradient(circle at 50% 18%,rgba(205,222,239,.10),transparent 28%),linear-gradient(135deg,var(--panel-a),var(--panel-b)),var(--panel-base);box-shadow:0 0 0 1px rgba(255,255,255,.09),inset 0 1px 0 rgba(255,255,255,.22),0 18px 48px var(--panel-shadow);backdrop-filter:blur(20px) saturate(1.22);-webkit-backdrop-filter:blur(20px) saturate(1.22);overflow:hidden}
             #code-focus-sheet[hidden]{display:none}
-            #code-focus-code{box-sizing:border-box;flex:1;min-width:0;min-height:0;margin:0;padding:24px 26px;color:var(--code-text);font:530 17px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;text-shadow:0 1px 3px rgba(0,0,0,.8);overflow:auto;counter-reset:code-line}
-            #code-focus-code li{display:grid;grid-template-columns:minmax(0,1fr);min-height:29px;padding:0 16px;list-style:none;counter-increment:code-line}
-            #code-focus-code li::before{display:none}
+            .code-focus-header{box-sizing:border-box;flex:0 0 auto;min-height:58px;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 21px;border-bottom:1px solid rgba(173,203,234,.18);background:rgba(8,15,25,.78)}
+            .code-focus-file{display:flex;align-items:center;gap:11px;min-width:0}
+            .code-focus-icon{flex:0 0 auto;width:30px;height:30px;display:grid;place-items:center;border:1px solid rgba(116,179,245,.35);border-radius:8px;background:rgba(76,143,220,.14);color:#8dc4ff;font:800 12px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
+            .code-focus-file-info{min-width:0;display:flex;flex-direction:column;gap:3px}
+            #code-focus-file{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#eff6ff;font:700 12px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+            #code-focus-lang{color:#8fa9c2;font-size:10px;font-weight:650;letter-spacing:.04em}
+            .code-focus-meta{display:flex;align-items:center;gap:11px;flex:0 0 auto;color:#98acc0;font:650 10px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+            .code-focus-status{display:inline-flex;align-items:center;gap:6px;padding:5px 8px;border:1px solid rgba(85,218,154,.28);border-radius:999px;background:rgba(44,166,108,.11);color:#a9f1c8}
+            .code-focus-status::before{content:"";width:6px;height:6px;border-radius:50%;background:#64dda0;box-shadow:0 0 8px rgba(100,221,160,.65)}
+            .code-focus-status[data-stage="provisional"]{border-color:rgba(112,184,255,.35);background:rgba(52,123,210,.13);color:#a9d7ff}
+            .code-focus-status[data-stage="provisional"]::before{background:#7dbdff;box-shadow:0 0 8px rgba(125,189,255,.62)}
+            #code-focus-code{box-sizing:border-box;flex:1;min-width:0;min-height:0;width:100%;margin:0;padding:15px 0 28px;background:rgba(3,9,17,.88);color:var(--code-text);font:530 14.5px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line;scrollbar-width:thin;scrollbar-color:rgba(147,180,214,.4) transparent}
+            #code-focus-code li{box-sizing:border-box;display:grid;grid-template-columns:58px max-content;min-width:100%;width:max-content;min-height:25px;padding-right:28px;list-style:none;counter-increment:code-line}
+            #code-focus-code li:nth-child(even){background:rgba(141,174,207,.025)}
+            #code-focus-code li::before{content:counter(code-line);position:sticky;left:0;z-index:1;box-sizing:border-box;width:58px;padding-right:13px;border-right:1px solid rgba(153,183,212,.12);background:#091522;color:#60758d;text-align:right;user-select:none}
+            #code-focus-code code{display:block;min-width:max-content;padding-left:19px;white-space:pre;overflow-wrap:normal;tab-size:4}
             @media(prefers-reduced-motion:reduce){body[data-code-focus] #panel{transition:none}}
-        </style></head><body><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><section id="code-focus-sheet" hidden><ol id="code-focus-code"></ol></section><script>
+        </style></head><body><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><section id="code-focus-sheet" hidden><div class="code-focus-header"><div class="code-focus-file"><span class="code-focus-icon" aria-hidden="true">{ }</span><div class="code-focus-file-info"><span id="code-focus-file">solution.py</span><span id="code-focus-lang">Python · read only</span></div></div><div class="code-focus-meta"><span id="code-focus-count">0 lines</span><span id="code-focus-status" class="code-focus-status">Verified</span></div></div><ol id="code-focus-code" aria-label="Solution code"></ol></section><script>
 	            // HUD labels come from the numeric command table handled by mac_shortcuts.
             // Keep the overlay's real capture controls, not generic demo shortcuts.
             // The reader always starts with the E2B-gated state selected by
@@ -4015,12 +4029,22 @@ fn overlay_html() -> &'static str {
               const chosen=focusVerified(state)?readerSelectedSolution(state):null;
               const code=chosen?String(chosen.code):'';
               const language=chosen?String(chosen.language||''):'';
+              const kind=canonicalPortLanguage(language);
+              const extension=kind==='rust'?'rs':kind==='cpp'?'cpp':'py';
+              const label=kind==='rust'?'Rust':kind==='cpp'?'C++':'Python';
+              document.getElementById('code-focus-file').textContent='solution.'+extension;
+              document.getElementById('code-focus-lang').textContent=label+' · read only';
+              const lines=code?code.split('\n').length:0;
+              document.getElementById('code-focus-count').textContent=lines+' line'+(lines===1?'':'s');
+              const status=document.getElementById('code-focus-status');
+              status.dataset.stage=chosen&&chosen.status==='provisional'?'provisional':'reviewed';
+              status.textContent=status.dataset.stage==='provisional'?'E2B tested':'Verified';
               const fingerprint=String(state&&state.runId||'')+'\u0000'+language+'\u0000'+code;
               // A 500ms cloud refresh must not keep jumping the reader back
               // to line one when the verified code itself has not changed.
               if(target.dataset.renderedCode===fingerprint)return;
               target.dataset.renderedCode=fingerprint;
-              if(code)renderCodeLines(target,code,language);
+              if(code)renderFocusCodeLines(target,code,language);
               else target.replaceChildren();
               target.scrollTop=0;
             };
@@ -4084,7 +4108,48 @@ fn overlay_html() -> &'static str {
             }
 		            function stateTone(status){if(status==='done')return'done';if(status==='streaming'||status==='reviewing'||status==='running')return'working';if(status==='error')return'error';if(status==='cancelled')return'cancelled';return'pending';}
             function codeWithReferenceComment(code,lang){return String(code||'');}
-		            function renderCodeLines(target,code,lang){target.innerHTML='';codeWithReferenceComment(code,lang).split('\n').forEach((line)=>{const li=document.createElement('li');const c=document.createElement('code');c.innerHTML=highlight(line||' ',lang);li.appendChild(c);target.appendChild(li);});}
+            function indentGuideStep(rows){
+              let step=4;
+              for(const line of rows){
+                const prefix=line.match(/^[ \t]*/)[0];
+                if(!line.trim()||!prefix)continue;
+                let width=0;
+                for(const char of prefix)width+=char==='\t'?4-width%4:1;
+                step=Math.min(step,Math.max(2,width));
+              }
+              return step;
+            }
+            function appendGuidedCode(content,line,lang,syntax=true){
+              // Guides paint the original leading whitespace; they never add
+              // or replace source characters in either code presentation.
+              const prefix=line.match(/^[ \t]*/)[0];
+              if(prefix){
+                const indent=document.createElement('span');
+                indent.className='code-indent';
+                indent.textContent=prefix;
+                content.appendChild(indent);
+              }
+              const source=document.createElement('span');
+              const rest=line.slice(prefix.length)||' ';
+              if(syntax)source.innerHTML=highlight(rest,lang);
+              else source.textContent=rest;
+              content.appendChild(source);
+            }
+            function renderCodeLines(target,code,lang){
+              const rows=codeWithReferenceComment(code,lang).split('\n');
+              target.style.setProperty('--indent-step',indentGuideStep(rows)+'ch');
+              target.replaceChildren();
+              const fragment=document.createDocumentFragment();
+              for(const line of rows){
+                const li=document.createElement('li');
+                const content=document.createElement('code');
+                appendGuidedCode(content,line,lang);
+                li.appendChild(content);
+                fragment.appendChild(li);
+              }
+              target.appendChild(fragment);
+            }
+            function renderFocusCodeLines(target,code,lang){renderCodeLines(target,code,lang);}
 		            function detectedFunctionNames(code){const found=[];String(code||'').replace(/\b([A-Za-z_]\w*)\s*\(/g,(_,name)=>{if(!found.includes(name)&&!['if','for','while','switch','return','def','function'].includes(name))found.push(name);return _;});return found;}
 		            function renderFunctionNotes(code){const target=document.getElementById('function-notes');if(!target)return;const meanings={set:'stores unique values for quick membership checks',sum:'adds numeric values together',max:'returns the largest value',min:'returns the smallest value',len:'counts items',range:'creates a numeric loop sequence',enumerate:'loops with index and value',append:'adds an item to a list',sort:'orders a list in place',sorted:'returns ordered values',print:'writes debug output',useState:'stores React component state',useEffect:'runs React side effects',fetch:'requests network data',map:'transforms each item',filter:'keeps matching items',reduce:'combines items into one result'};const found=detectedFunctionNames(code);target.innerHTML='';found.slice(0,5).forEach((name)=>{const row=document.createElement('div');row.textContent=name+': '+(meanings[name]||'function call used by the solution');target.appendChild(row);});if(!target.children.length){const row=document.createElement('div');row.textContent='No function calls detected yet.';target.appendChild(row);}}
 		            function functionExample(name){const examples={sum:'sum([18, 9]) -> 27',set:'set([18, 9, 18]) -> {18, 9}',max:'max([18, 9]) -> 18',min:'min([18, 9]) -> 9',len:'len([18, 9]) -> 2',range:'range(0, 5) -> 0..4',enumerate:'enumerate(items) -> index + value',append:'outliers.append(18) -> adds 18',sort:'values.sort() -> in-place order',sorted:'sorted(values) -> ordered copy',print:'print(result) -> console output',useState:'useState(false) -> state + setter',useEffect:'useEffect(fn, []) -> run side effect',fetch:'fetch(url) -> request data',map:'items.map(fn) -> transformed items',filter:'items.filter(fn) -> matching items',reduce:'items.reduce(fn, seed) -> one value'};return examples[name]||name+'(exampleInput) -> expected output';}
@@ -4136,10 +4201,16 @@ fn overlay_html() -> &'static str {
               const button=document.getElementById('overlay-diff-toggle');
               if(button){button.hidden=!changed;button.textContent=window.__overlayDiffHidden?'View changes':'Show final';}
               if(!changed||window.__overlayDiffHidden){renderCodeLines(target,current.code,current.language);return;}
+              const rows=overlayDiffRows(previous.code,final.code);
+              target.style.setProperty('--indent-step',indentGuideStep(rows.map(([,line])=>line))+'ch');
               target.replaceChildren();
-              overlayDiffRows(previous.code,final.code).forEach(([change,line])=>{
+              rows.forEach(([change,line])=>{
                 const li=document.createElement('li');li.dataset.change=change;
-                const code=document.createElement('code');code.textContent=(change==='remove'?'- ':change==='add'?'+ ':'  ')+line;
+                const code=document.createElement('code');
+                const marker=document.createElement('span');
+                marker.textContent=change==='remove'?'- ':change==='add'?'+ ':'  ';
+                code.appendChild(marker);
+                appendGuidedCode(code,line,current.language,false);
                 li.append(code);target.append(li);
               });
             }
