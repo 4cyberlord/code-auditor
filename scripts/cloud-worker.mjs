@@ -3654,6 +3654,8 @@ export async function runCouncilJob(job) {
   const judgeReports = [];
 
   const judging = bench.keep(judges, (j) => j.model);
+  const visionJudgeIds = new Set(partitionByVision(judging, j => j.model,
+    settings.probes, settings.councilModels).seeing.filter(j => !bench.isBlind(j.model)).map(j => j.model));
   await bench.announce("judging", judges.filter((j) => bench.has(j.model)).map((j) => j.model));
   await addEvent(job.id, "info", "judging", `Collecting ${judging.length} judge reports.`);
   await Promise.all(
@@ -3671,6 +3673,7 @@ export async function runCouncilJob(job) {
             execution: executionBoth,
             knowledge: councilKnowledge,
           }),
+          images: visionJudgeIds.has(judge.model) ? solveImages : [],
           maxTokens: Number(settings.maxTokens || 4096),
         });
         judgeReports.push({ model: judge.model, emphasis: judge.emphasis || "correctness", text, error: null });
@@ -3965,8 +3968,8 @@ export async function runCouncilJob(job) {
     const audited=agreedComplexityAudits(judgeReadings)[decision.winner];
     const previous=verifiedSource;
     const independentReviewers=[...new Set(judges.map(judge=>judge.model))]
-      .filter(model=>model&&model!==synthesisModel).slice(0,2);
-    if(ideas.length>=2&&audited&&previous?.kind==="code"&&independentReviewers.length===2){
+      .filter(model=>model&&model!==synthesisModel);
+    if(ideas.length>=2&&audited&&previous?.kind==="code"&&independentReviewers.length>=2){
       await addEvent(job.id,"info","judge_upgrade_attempt",
         "Independent judges agreed on a concrete possible improvement; the published solution remains available during verification.",
         {winner:decision.winner,judgeIdeas:ideas.length}).catch(()=>{});
@@ -4016,7 +4019,8 @@ export async function runCouncilJob(job) {
               }catch{return {accepted:false,time:"",space:"",reason:"Independent reviewer unavailable"};}
             }));
             if(canAdoptJudgeUpgrade({priorRun:gateRuns[decision.winner],proposedRun,
-              previousTime:audited.time,previousSpace:audited.space,approvals:opinions})){
+              previousTime:audited.time,previousSpace:audited.space,approvals:opinions,
+              requiredApprovals:independentReviewers.length})){
               const originalField=field3;
               const originalRevisedRuns=revisedRuns;
               const originalRun=gateRuns[decision.winner];
