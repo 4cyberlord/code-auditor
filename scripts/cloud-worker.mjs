@@ -3073,8 +3073,7 @@ export async function runCouncilJob(job) {
       return await tokenRouterGenerate({
         settings, baseUrl, model: judge.model,
         system: visionEvidenceSystemPrompt(),
-        user: "Read original screenshot examples independently; extracted context is not authoritative:\n" +
-          String(reading.context || "").slice(0, 4000),
+        user: "Read literal question examples from the original screenshots ONLY. Do not use OCR transcription or solver answers as expected-output evidence.",
         images: solveImages, maxTokens: 2400, reasoning: "off",
       });
     } catch { return ""; }
