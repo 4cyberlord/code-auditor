@@ -32,6 +32,7 @@
 import type { AgentFinal } from "./parse.ts";
 import { canonicalComplexityBound, compareComplexityBounds } from "./theoryBounds.ts";
 import { isPrimaryModel, listedPrimaryRoute, primaryModelId } from "./primaryModels.ts";
+import { MIN_GENERATED_HARNESS_CASES } from "./providedCaseHarness.ts";
 
 // ------------------------------------------------------------------ candidates
 
@@ -172,10 +173,17 @@ export interface TestSuite {
   harness: string;
   /** Independent reference supplied by a harness author for E2B self-check. */
   referenceCode?: string;
+  /** Verified user-supplied examples use a trusted deterministic adapter. */
+  source?: "provided" | "generated";
+  providedCaseCount?: number;
+  /** Original statement lets each candidate receive its own deterministic adapter. */
+  question?: string;
+  /** The deterministic fixture adapter runs in Python for all three languages. */
+  runnerLanguage?: "python";
 }
 
-/** A thin handful of examples is not enough evidence to publish a solution. */
-export const MIN_INDEPENDENT_HARNESS_CASES = 8;
+/** AI-authored suites retain the independent coverage floor; supplied samples use their exact count. */
+export const MIN_INDEPENDENT_HARNESS_CASES = MIN_GENERATED_HARNESS_CASES;
 
 /**
  * Static checks applied before a generated suite is allowed into E2B. These
@@ -327,8 +335,9 @@ export function spliceSuiteWithSourceMap(
   const startLine = (prefix.match(/\n/g)?.length ?? 0) + 1;
   const endLine = startLine + Math.max(0, candidate.split(/\r?\n/).length - 1);
   return {
-    program: `${prefix}${candidate}${suite.harness.slice(markerAt + SPLICE_MARKER.length)}`,
-    sourceMap: { startLine, endLine },
+    program: prefix + (suite.source === "provided" ? JSON.stringify(candidate) : candidate) +
+      suite.harness.slice(markerAt + SPLICE_MARKER.length),
+    sourceMap: { startLine, endLine: suite.source === "provided" ? startLine : endLine },
   };
 }
 
@@ -368,6 +377,9 @@ export interface CandidateRun {
   failureLocation?: { sourceLine: number; harnessLine: number } | null;
   /** SHA-256 of the exact candidate source submitted in this execution. */
   codeDigest?: string | null;
+  /** Shows sample evidence separately from broader independent test coverage. */
+  evidenceSource?: "provided" | "generated";
+  providedCaseCount?: number;
   timedOut?: boolean;
   truncated?: boolean;
   bootMs?: number | null;
@@ -643,7 +655,9 @@ export function answerStanding(winner: string, runs: Record<string, CandidateRun
     const run = runs[letter];
     return {
       standing: "verified",
-      reason: `Candidate ${letter} passed ${run.passed} generated test case(s) before being selected.`,
+      reason: run.evidenceSource === "provided"
+        ? `Candidate ${letter} passed ${run.passed} question-provided example(s). Hidden inputs and additional edge cases remain unverified.`
+        : `Candidate ${letter} passed ${run.passed} independent generated test case(s) before being selected.`,
     };
   }
 
@@ -1515,93 +1529,45 @@ export function contractBlock(contract: ProblemContract | null): string {
 
 export function testSpecSystemPrompt(): string {
   return [
-    "You write test harnesses for candidate solutions. You will be shown a problem and a",
-    "field of anonymised candidates. Write ONE harness per language that appears among the",
-    "candidates.",
-    "",
-    "A harness is a complete program with three parts:",
-    "1. A line containing exactly <<<SOLUTION>>> where the candidate's code will be spliced",
-    "   in, verbatim. Wrap or rename whatever the candidates disagree on (function names,",
-    "   signatures) so any of them drops in cleanly.",
-    "2. A thorough test battery. If the problem statement gives example inputs and expected",
-    "   outputs, reproduce every usable example as an executable test with that expected",
-    "   output. If it gives no examples, derive normal cases and their expected outputs",
-    "   independently from the specification; do not skip testing or invent a claimed",
-    "   statement example. Add applicable edge cases (empty, one element, duplicates,",
-    "   zeros, negatives, maximum values) and at least two adversarial cases designed to",
-    "   break a plausible-but-wrong approach. Do not assume every listed edge case is",
-    "   valid: respect the input constraints and the required function signature.",
-    "   Compute expected outputs from the stated rules or a simple independent reference",
-    "   implementation, never by running a candidate or copying its answer. For every",
-    "   synthetic, adversarial, randomized, or boundary case, calculate the expected",
-    "   value by calling that independent oracle inside the harness. Hard-code expected",
-    "   values only for exact examples printed in the problem statement. Never hand-derive",
-    "   a custom expected value when the harness already contains an oracle; that creates",
-    "   false failures when a path or boundary condition was overlooked.",
-    "   Include at least one performance-shaped case when constraints are available, so",
-    "   quadratic/brute-force candidates are exposed by size or structure.",
-    "   The battery must execute at least eight separately named, independent checks;",
-    "   do not count repeated copies of the same input as distinct coverage.",
-    "   Build a scenario matrix from the actual constraints and semantics: every usable",
-    "   statement example, applicable empty/singleton cases, boundaries, duplicates,",
-    "   zero/negative/extreme values, structural edge cases, and at least two adversarial",
-    "   patterns. Mark a category inapplicable only when the problem contract excludes it.",
-    "   If the valid domain is finite and small enough (at most 10,000 inputs), exhaustively",
-    "   enumerate it. Otherwise, add at least 64 deterministic seeded differential inputs",
-    "   from small valid domains and compare every result with the independent oracle; also",
-    "   include larger performance-shaped input where constraints warrant it.",
-    "   Emit one PASS/FAIL line for every curated or generated assertion, not one aggregate",
-    "   PASS for a batch. Test count is not a correctness proof: cover distinct scenario",
-    "   classes, and never include invalid inputs unless the contract defines their behavior.",
-    "   The reference self-check must execute at least eight of these same assertions",
-    "   before any candidate is tested.",
-    "3. One output line per case with a unique, stable name: `PASS <name>` on success,",
-    "   `FAIL <name> got=<x> want=<y>` on failure, and a non-zero process exit if anything",
-    "   failed. Never repeat a label to make the suite appear larger.",
-    "4. For the first 20 executed cases, emit one machine-readable stdout record:",
-    "   CA_CASE {\"id\":\"case name\",\"input\":<actual JSON input>,\"expected\":<oracle JSON result>,\"actual\":<candidate JSON result>,\"status\":\"passed\" or \"failed\"}",
-    "   Serialize this as a single JSON object on a line, e.g. Python:",
-    "   print(\"CA_CASE \" + json.dumps(dict(id=name,input=inp,expected=want,actual=got,status=(\"passed\" if got==want else \"failed\")),default=str))",
-    "   For C++/Rust, only print equivalent JSON when serialization is trivial and",
-    "   fully supported by their standard libraries. Never add an external JSON",
-    "   package, custom serializer, or fragile string escaping just for CA_CASE.",
-    "   If tracing risks breaking the harness, omit the CA_CASE line for that",
-    "   case while retaining its mandatory independent assertions and PASS/FAIL.",
-    "   The record MUST be computed from the values genuinely evaluated at runtime",
-    "   for that case, not from a guessed or hard-coded candidate output.",
-    "   Do not replace assertions or PASS/FAIL lines with these records.",
-    "   Stop emitting CA_CASE details after 20 tests to keep output bounded; continue",
-    "   executing, asserting and emitting ordinary PASS/FAIL for all remaining cases.",
-    "   For non-JSON-serializable values, omit the CA_CASE record instead of faking it.",
-    "",
-    "Java only: the entry class must be named exactly `Main` and hold `public static void",
-    "main(String[])`. Do not declare any other class `public` — the runner compiles the whole",
-    "harness as one Main.java, and a second public class in one file will not compile.",
-    "",
-    "Output one block, exactly once:\n\n<<<TESTS\nHARNESS: <language>\n```<language>",
-    "<complete program with the <<<SOLUTION>>> marker>\n```\nREFERENCE: <language>\n```<language>",
-    "<complete independent reference implementation>\n```\nHARNESS: <next language>\n```...```\nTESTS>>>",
-    "",
-    "Append REFERENCE: <language> and a fenced complete, independent reference",
-    "implementation using the same signature as the harness marker. This is mandatory",
-    "for every runnable harness: E2B will run it through the harness before candidates",
-    "are tested. Do not copy a candidate or its proposed expected values. The reference",
-    "and every in-harness oracle must agree with all hard-coded statement examples before",
-    "you emit the suite. If an independent reference cannot be established, output no",
-    "harness rather than an unvalidated one.",
-    "Every runnable case must assert its expected result, not merely call the code.",
-    "Before emitting the harness, perform a language-level self-review: every variable in a",
-    "comprehension, loop, closure, and expected-value expression must be defined in scope;",
-    "the harness must be syntactically valid for its stated language; and the harness itself",
-    "must not contain traceback text, placeholder variables, or code copied from a candidate",
-    "as an expected answer. Prefer a small independent oracle over a large fragile generator.",
-    "Python: use the actual comprehension variable (for example `for i in range(n)` when",
-    "the expression references i), and avoid relying on globals or implementation details.",
-    "Java: emit exactly one public Main class. C/C++/Rust/Go: keep the harness compilable",
-    "as a single standalone source file with imports/includes included.",
-    "If the statement is too ambiguous to derive expected outputs safely, do not",
-    "fabricate a passing harness; output the block empty so verification fails clearly.",
-    "Write no commentary. If no candidate is code, output the block empty.",
+    "You write test harnesses for candidate solutions. You do not write solutions.",
+    "PRIORITY ONE: if the problem statement supplies examples, sample inputs, expected outputs",
+    "or explicit test cases, reproduce ALL valid supplied cases as executable assertions FIRST.",
+    "Do not replace, alter, approximate or ignore their supplied expected outputs.",
+    "The problem statement outranks candidate guesses, model-generated test values and RAG.",
+    "If the statement provides only one or two examples, they are still valid sample evidence.",
+    "For this AI-authored fallback, add independently justified scenario checks until the",
+    "suite contains at least eight distinct checks. Establish every extra expected output",
+    "from the contract or an independent reference implementation.",
+    "Never invent expected outputs to increase the test count; never repeat a test to inflate coverage.",
+    "When examples do not exist, derive a thorough test battery from the exact constraints",
+    "and independent reference. The harness must exercise at least eight separately named,",
+    "distinct checks; a single check is never sufficient for an AI-authored suite.",
+    "Cover applicable boundaries, empty/singleton inputs, duplicates, zero/negative/extreme",
+    "values, structural edge cases, and at least two adversarial patterns. Include a",
+    "performance-shaped case when constraints warrant it. Never count duplicate inputs as",
+    "distinct coverage, and do not claim these checks prove correctness on hidden inputs.",
+    "Use exactly one line containing <<<SOLUTION>>> to splice any candidate verbatim.",
+    "Implement the correct callable signature or exact stdin/stdout interface stated in the problem.",
+    "Each assertion must emit a distinct PASS <name> or FAIL <name> record with nonzero exit on failure.",
+    "For JSON-compatible cases, optionally emit CA_CASE with runtime-computed input, expected,",
+    "actual and status fields; never hard-code a candidate's claimed result as the oracle.",
+    "Include an independent REFERENCE implementation with the same interface for the",
+    "E2B adapter preflight; do not copy or derive it from a candidate solution.",
+    "Write valid single-file source for the selected language; verify variables, imports,",
+    "function signatures, Python comprehension bindings and compilability before output.",
+    "When a reliable oracle or interface is unavailable, output an empty block instead of",
+    "fabricating a passing suite.",
+    "Return exactly one block and no commentary:",
+    "<<<TESTS",
+    "HARNESS: <language>",
+    "```<language>",
+    "<complete program containing <<<SOLUTION>>> marker>",
+    "```",
+    "REFERENCE: <language>",
+    "```<language>",
+    "<complete independent reference implementation>",
+    "```",
+    "TESTS>>>",
   ].join("\n");
 }
 
@@ -1656,7 +1622,7 @@ export function executionDigest(
       lines.push(`Candidate ${c.letter}${tag}: not executed — ${run?.note || "no code"}`);
     } else {
       lines.push(
-        `Candidate ${c.letter}${tag}: ${run.failed === 0 && run.ok ? "ALL PASSED" : "FAILED"} — ` +
+        `Candidate ${c.letter}${tag}: ${run.failed === 0 && run.ok ? "ALL PASSED" : "FAILED"}${run.evidenceSource === "provided" ? " [PROVIDED EXAMPLES ONLY — hidden tests unverified]" : ""} — ` +
           `${run.passed} passed, ${run.failed} failed, ${run.runtime}, ${run.durationMs}ms` +
           (run.remoteElapsedMs != null ? `, measured ${run.remoteElapsedMs}ms` : "") +
           (run.peakMemoryKb != null ? `, peak ${Math.round(run.peakMemoryKb / 1024 * 10) / 10}MB` : "") +

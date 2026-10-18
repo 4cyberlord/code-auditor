@@ -19,6 +19,7 @@
 import "./lib/config.mjs";
 
 import { createHash, createHmac, createSign } from "node:crypto";
+import { buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "../src/lib/providedCaseHarness.ts";
 import { executionId, validateExecution, e2bCommandFailure, parseExecutionOutput, executionStatus, classifyExecutionFailure, mapCandidateFailureLocation, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
@@ -1220,7 +1221,7 @@ function executionProvider(settings) {
 async function runVerification(settings, suite, program, options = {}) {
   const provider = executionProvider(settings);
   if (process.env.NODE_ENV === "test" && typeof globalThis.__COUNCIL_E2B_TEST_DOUBLE__ === "function") {
-    return globalThis.__COUNCIL_E2B_TEST_DOUBLE__(suite.language, program, options);
+    return globalThis.__COUNCIL_E2B_TEST_DOUBLE__(suite.runnerLanguage || suite.language, program, options);
   }
   if (provider !== "e2b" || !secret("E2B_API_KEY")) {
     throw new Error("No E2B key is saved for the account that owns this job.");
@@ -1229,7 +1230,7 @@ async function runVerification(settings, suite, program, options = {}) {
   let last;
   for (let attempt = 1; attempt <= E2B_TIMEOUT_ATTEMPTS; attempt += 1) {
     try {
-      const result = await runE2BCode(suite.language, program, timeoutMs,
+      const result = await runE2BCode(suite.runnerLanguage || suite.language, program, timeoutMs,
         attempt === 1 ? options : {...options, warmPool: null});
       if (!result.timedOut || attempt === E2B_TIMEOUT_ATTEMPTS) return result;
       last = new Error(`E2B execution timed out (attempt ${attempt})`);
@@ -1263,8 +1264,13 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
   await parallelMap(selected, limit, async (candidate) => {
     const final = revised ? (candidate.revised ?? null) : candidate.final;
     const lang = final?.kind === "code" ? candidateLanguage(final) : "";
-    const suite = suites.find((s) => s.language === lang);
     const code = final?.code || "";
+    const baseSuite = suites.find((s) => s.language === lang);
+    // The deterministic suite carries authoritative fixtures, but callable
+    // adapters must be bound to this candidate's own function/method name.
+    const suite = baseSuite?.source === "provided" && baseSuite.question
+      ? buildProvidedHarness(baseSuite.question, lang, code)
+      : baseSuite;
     if (!final || final.kind !== "code" || !code.trim()) {
       runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: final?.kind === "research" ? "research answer" : "no code", runtime: "" };
       return;
@@ -1302,14 +1308,15 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
             { executionId: id, letter: candidate.letter, state: "running" }).catch(() => {});
         },
       });
-      const localCases = countCases(local.stdout);
+      const localCases = suite.source === "provided"
+        ? providedCaseEvidence(local.stdout, requiredHarnessCases(suite)) : countCases(local.stdout);
       let remote;
       const backend = resolveBenchmarkBackend(settings);
       // Only a candidate that already passed locally is worth a remote machine.
       // Benchmarking something that fails its own tests measures how fast it is
       // wrong, and spends a runner minute to find that out.
-      const worthBenchmarking = local.ok && localCases.failed === 0 &&
-        localCases.passed >= MIN_INDEPENDENT_HARNESS_CASES;
+      const worthBenchmarking = suite.source !== "provided" && local.ok && localCases.failed === 0 &&
+        localCases.passed >= requiredHarnessCases(suite);
 
       if (worthBenchmarking && backend === "actions") {
         // Unique per candidate, not per job: the run is found again by its
@@ -1358,7 +1365,8 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
       const fullDiagnostic = String(local.stderr || "").trim().slice(0, 3000);
       const diagnostic = fullDiagnostic.split("\n").slice(0, 6).join("\n");
       const exercisedCases = localCases.passed + localCases.failed;
-      const insufficientCoverage = exercisedCases < MIN_INDEPENDENT_HARNESS_CASES;
+      const insufficientCoverage = exercisedCases < requiredHarnessCases(suite) ||
+        (suite.source === "provided" && !localCases.complete);
       // A program that never started did not fail its tests — the harness did.
       // Naming it distinctly keeps a build problem out of the evidence the
       // judges weigh, where it would read as "this candidate is wrong".
@@ -1373,6 +1381,8 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
       runs[candidate.letter] = {
         letter: candidate.letter,
         codeDigest: createHash("sha256").update(code).digest("hex"),
+        evidenceSource: suite.source || "generated",
+        providedCaseCount: suite.source === "provided" ? suite.providedCaseCount : 0,
         ran: true,
         ok: local.ok && !insufficientCoverage,
         passed: localCases.passed,
@@ -1383,7 +1393,7 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
           : local.exitVerified === false
             ? "E2B command ended before the benchmark trailer; runner evidence is incomplete"
           : insufficientCoverage
-            ? `test harness exercised only ${exercisedCases} distinct cases; at least ${MIN_INDEPENDENT_HARNESS_CASES} are required`
+            ? `test harness exercised only ${exercisedCases} distinct cases; ${requiredHarnessCases(suite)} are required`
           : brokenHarness
             ? "generated harness failed static preflight"
             : compileIssue ? "candidate/harness integration or compilation failed; inspect stderr"
@@ -1554,7 +1564,22 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
     // several gateway 200/empty responses, despite the same route succeeding
     // for the shorter solver request. Keep the most relevant material while
     // bounding the request well below the smallest supported context window.
+    // The original supplied cases take precedence over generated tests.
+    // A deterministic adapter avoids calling another model to write runnable
+    // harness code for well-defined Python callables and stdin programs.
+    const candidateSource = candidates.find(candidate =>
+      candidate?.final?.kind === "code" && candidateLanguage(candidate.final) === language &&
+      candidate.final.code?.trim())?.final?.code || "";
+    const provided = buildProvidedHarness(question, language, candidateSource);
+    if (provided) {
+      await addEvent(job.id, "info", "provided_harness_ready",
+        `${language}: compiled ${provided.providedCaseCount} question-supplied test case(s) without model-generated harness source.`,
+        {language, cases: provided.providedCaseCount, source: "provided", runner: "e2b"});
+      return provided;
+    }
+    const suppliedCases = extractProvidedFixtures(question);
     const languageKnowledge = [
+      suppliedCases.length ? `QUESTION-SUPPLIED TEST CASES: ${JSON.stringify(suppliedCases).slice(0, 2500)}. Test every supplied case first; optional extra edge cases must have independently established expected outputs.` : "",
       docs.prompt.slice(0, 1_800),
       String(knowledge || settings.knowledgeDigest || "").slice(0, 1_800),
       runtimeGuidanceFor(language).slice(0, 1_400),
@@ -1608,8 +1633,8 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
           if (!isReferenceValidated(key)) {
             const outcome=await runVerification(settings,suite,referenceProgram);
             const cases=countCases(outcome.stdout);
-            if (!outcome.ok || cases.failed!==0 || cases.passed<MIN_INDEPENDENT_HARNESS_CASES)
-              throw new Error(`Reference self-test failed: ${cases.passed} passed and ${cases.failed} failed; at least ${MIN_INDEPENDENT_HARNESS_CASES} independent cases are required; ${String(outcome.stderr||outcome.stdout||"no diagnostics").slice(0,600)}`);
+            if (!outcome.ok || cases.failed!==0 || cases.passed<requiredHarnessCases(suite))
+              throw new Error(`Reference self-test failed: ${cases.passed} passed and ${cases.failed} failed; at least ${requiredHarnessCases(suite)} validated case(s) are required; ${String(outcome.stderr||outcome.stdout||"no diagnostics").slice(0,600)}`);
             markReferenceValidated(key);
           }
           await addEvent(job.id,"info","harness_preflight_pass",
@@ -1621,14 +1646,17 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
         return suite;
       } catch (err) {
         lastError=err instanceof Error?err.message:String(err);
+        const emptyCompletion = /empty model response|gateway returned malformed JSON/i.test(lastError);
         // A failed E2B account, network or sandbox is not an invalid harness.
         // Do not spend two more provider generations on an infrastructure fault.
         if (/No E2B key|E2B_API_KEY|quota|rate limit|sandbox unavailable|ECONNREFUSED|ETIMEDOUT|deadline_exceeded/i.test(lastError))
           throw err;
         failures.set(language,`${model}: ${lastError}`);
         await bench.note(model,err,"speccing");
-        await addEvent(job.id,"warn","spec_retry",
-          `${model} generated an invalid ${language} harness: ${lastError}`);
+        await addEvent(job.id,"warn", emptyCompletion ? "harness_provider_failed" : "spec_retry",
+          emptyCompletion ? `${model} returned no usable harness response; retrying another route.` :
+            `${model} produced an invalid ${language} harness: ${lastError}`,
+          {language, model, failureKind: emptyCompletion ? "gateway" : "harness", detail: lastError.slice(0, 300)});
       }
     }
     return null;
