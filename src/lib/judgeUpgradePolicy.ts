@@ -1,4 +1,5 @@
-import { compareComplexityBounds, type CandidateRun } from "./council.ts";
+import type { CandidateRun } from "./council.ts";
+import { compareComplexityBounds } from "./theoryBounds.ts";
 
 export interface JudgeUpgradeVote {
   accepted: boolean;
