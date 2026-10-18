@@ -1022,7 +1022,7 @@ export interface CouncilReport {
   /** Optional language-native equivalents of the verified winner. */
   ports?: VerifiedPort[];
   /** Independently approved upgrade made after the judges selected a primary winner. */
-  postJudgeUpgrade?: {beforeCode:string;afterCode:string;reason:string;passed:number} | null;
+  postJudgeUpgrade?: {beforeCode:string;afterCode:string;reason:string;passed:number;time?:string;space?:string} | null;
 }
 
 // --------------------------------------------------------------------- prompts
@@ -2287,7 +2287,13 @@ export function buildPresentation(report: CouncilReport): Presentation {
 
   const winnerCandidate = report.candidates.find((c) => c.letter === report.winner);
   const winnerFinal = winnerCandidate?.revised ?? winnerCandidate?.final ?? null;
-  const winnerAudit = agreedComplexityAudits(report.dossier?.judges ?? [])[report.winner];
+  // A two-reviewer E2B-tested improvement supersedes the *old code's*
+  // complexity audit; the old auditors never analyzed the upgraded source.
+  const postUpgrade = report.postJudgeUpgrade?.afterCode === winnerFinal?.code
+    ? report.postJudgeUpgrade : null;
+  const winnerAudit = postUpgrade?.time && postUpgrade?.space
+    ? {time:postUpgrade.time,space:postUpgrade.space}
+    : agreedComplexityAudits(report.dossier?.judges ?? [])[report.winner];
   const claimedComplexity = splitComplexityClaim(winnerFinal?.complexity || "");
   const synth = report.dossier?.synthesis;
   return {
