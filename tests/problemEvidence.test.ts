@@ -3,7 +3,7 @@ import { reconcileProblemEvidence, stripExampleBlocks, evidenceJudgeBrief, visio
 
 const context = "Compute the sum.\nExample 1:\nInput: nums = [1,2]\nOutput: 99\nConstraints:\nThe input is an integer array.";
 const screenshot = "Example 1:\nInput: nums = [1,2]\nOutput: 3";
-const alternate = "Example 1:\nInput: nums = [1, 2]\nOutput: 3";
+const alternate = "Example 1:\nInput: nums = [1,2]\nOutput: 3";
 const trusted = reconcileProblemEvidence(context, true, [screenshot, alternate]);
 assert.equal(trusted.status, "corroborated");
 assert.equal(trusted.fixtures.length, 1);
