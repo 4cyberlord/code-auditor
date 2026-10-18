@@ -80,8 +80,8 @@ import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from ".
 import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
 import { structuralTranslationGuidanceFor } from "./structuralTranslationGuidance.ts";
 import { fingerprintCode } from "./codeFingerprint.ts";
-import { primaryCodingLanguage, primaryFirstInstruction } from "./primaryDeliveryPolicy.ts";
-import { buildProvidedHarness, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
+import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
+import { buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
 import { needsCandidateRevision, classifyCandidateRun } from "./revisionPolicy.ts";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
 import { buildOverlayState } from "./overlayState.ts";
@@ -3114,7 +3114,7 @@ export const useStore = create<State>((set, get) => ({
               plan.context,
               plan.sendImages ? images : [],
               knowledge
-            ) + "\n\n" + primaryFirstInstruction(),
+            ) + "\n\n" + primaryFirstInstruction(primaryCodingLanguage(note, settings.outputLanguage)),
             images: plan.sendImages ? allImages : [],
             maxTokens: settings.maxTokens,
             temperature: 0,
@@ -4983,7 +4983,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // only some prompts saw would be worse than none: the stages that read it and
   // the stages that did not would be answering different questions.
   const problem = contractText ? `${s0.note}\n\n---\n\n${contractText}` : s0.note;
-  const primaryLanguage = primaryCodingLanguage([problem, s0.extraction.context].filter(Boolean).join("\n\n"));
+  const primaryLanguage = primaryCodingLanguage([problem, s0.extraction.context].filter(Boolean).join("\n\n"), settings.outputLanguage);
 
   set((st) => ({ council: { ...st.council, phase: "solving" as const } }));
   const seats = Math.max(0, COUNCIL_SIZE.solversMax - paneAnswers.length);
@@ -5091,7 +5091,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
               s0.images,
               knowledge,
               solutionPolicy([primaryLanguage], settings.memoryTargetKb || 9 * 1024)
-            ) + "\n\n" + primaryFirstInstruction(),
+            ) + "\n\n" + primaryFirstInstruction(primaryLanguage),
             images: allImages,
             maxTokens: settings.maxTokens,
             temperature: 0,
@@ -5426,6 +5426,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       ? "=== REVISED RUNS ===\n" + executionDigest(fieldNow, get().council.revisedRuns, { revised: true })
       : "",
     oracleDigest(get().council.oracles),
+    providedTestBrief(extractProvidedFixtures(problem)),
     // Independent solutions do not usually fail in the same place. When they do,
     // the judges should hear that before they read the scores, not after.
     suspectHarness ? `NOTE ON THE HARNESS: ${suspectHarness}` : "",
