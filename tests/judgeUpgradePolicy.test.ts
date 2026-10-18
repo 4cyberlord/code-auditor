@@ -10,7 +10,7 @@ const vote = parseJudgeUpgradeVote("ACCEPT: yes\nTIME: O(n)\nSPACE: O(n)\nBASIS:
 assert.equal(vote.accepted, true);
 assert.equal(vote.time, "O(n)");
 assert.equal(parseJudgeUpgradeVote("ACCEPT: no\nTIME: UNKNOWN\nSPACE: UNKNOWN").accepted, false);
-const prior = { letter: "A", ran: true, ok: true, passed: 4, failed: 0, codeDigest: "orig", durationMs: 4, runtime: "python" };
+const prior = { letter: "A", ran: true, ok: true, passed: 4, failed: 0, codeDigest: "orig", durationMs: 4, runtime: "python", note: "" };
 const proposed = { ...prior, codeDigest: "new", durationMs: 3 };
 const accepted = { priorRun: prior, proposedRun: proposed, previousTime: "O(n log n)", previousSpace: "O(n)", approvals: [vote, vote] };
 assert.equal(canAdoptJudgeUpgrade(accepted), true);
