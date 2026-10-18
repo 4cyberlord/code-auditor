@@ -215,7 +215,10 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
 export function buildProvidedHarness(question: string, language: string, candidateCode: string): ProvidedSuite | null {
   if (!["python", "cpp", "rust"].includes(language)) return null;
   // Multiple acceptable answers require a property comparator, not example equality.
-  if (/\b(?:any order|any valid|multiple valid|in any order|any one|arbitrary order)\b/i.test(question)) return null;
+  if (/\b(?:any order|any valid|multiple valid|in any order|any one|arbitrary order|order does not matter|modify in.place|in.place modification|do not return anything)\b/i.test(question)) return null;
+  // Judge UI serializes trees/linked lists as arrays; a raw Python method
+  // expects real nodes, not that displayed serialization.
+  if (language === "python" && /\b(?:TreeNode|ListNode)\b/.test(candidateCode)) return null;
   const fixtures = extractProvidedFixtures(question);
   if (!fixtures.length) return null;
   const code = String(candidateCode || "");
