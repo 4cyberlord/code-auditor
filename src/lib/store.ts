@@ -4635,7 +4635,7 @@ async function generateVerifiedPorts(
             endpoint: endpointForModel(settings, model),
             systemPrompt: systemPrompt("code") + "\n" + independentLanguageInstruction(language),
             userText: independentLanguageQuestion(problem, language, knowledge),
-            images: settings.probes[model]?.vision === true ? originalImages : [],
+            images: isVerifiedImageProbe(settings.probes[model]) ? originalImages : [],
             maxTokens: Math.max(settings.maxTokens, 8192), temperature: 0,
             baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
           });
@@ -4712,7 +4712,7 @@ async function generateVerifiedPorts(
             systemPrompt: judgeSystemPrompt("correctness"),
             userText: judgeUserPrompt({ question: problem, docket: candidateDocket(candidates),
               reviews: "", execution: executionDigest(candidates, runs), knowledge }),
-            images: settings.probes[model]?.vision === true ? originalImages : [],
+            images: isVerifiedImageProbe(settings.probes[model]) ? originalImages : [],
             maxTokens: settings.maxTokens, temperature: 0,
             baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
           });
@@ -5635,7 +5635,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
             endpoint: endpointForModel(settings, seat.model),
             systemPrompt: judgeSystemPrompt(seat.emphasis),
             userText: judgeUserPrompt({ question: problem, docket: docketBoth, reviews: reviewsDigest, execution: execBoth, knowledge }),
-            images: settings.probes[seat.model]?.vision === true ? allImages : [],
+            images: isVerifiedImageProbe(settings.probes[seat.model]) ? allImages : [],
             maxTokens: settings.maxTokens,
             temperature: 0,
           },
