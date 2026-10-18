@@ -2923,6 +2923,8 @@ export async function runCouncilJob(job) {
   const evidenceCandidateIds = [...specialistRoutes, ...models.map(seat => seat.id),
     ...(settings.councilJudges || []).map(seat => seat.model)];
   const evidenceSeats = [...new Map(evidenceCandidateIds.filter(Boolean)
+    // Already-benched routes must not be called again by optional readers.
+    .filter(id => !bench.has(id) && !bench.isBlind(id))
     .filter(id => isSelectablePrimaryModel(id))
     .map(id => [primaryModelId(id), id])).values()]
     .sort((a, b) => {
