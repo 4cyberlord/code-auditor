@@ -18,7 +18,7 @@ export function primaryCodingLanguage(problem: string, configured = "Python"): C
 }
 export function primaryFirstInstruction(language: CodingLanguage): string {
   const label = language === "cpp" ? "C++23" : language === "rust" ? "Rust" : "Python";
-  return "FIRST STAGE: Code in " + label + " only. This language was selected in Settings for this question. " +
+  return "For CODING questions only, FIRST STAGE: Code in " + label + " only. This language was selected in Settings for this question. " +
     "Use the exact function signature / stdin interface required by the question. " +
     "All agents independently solve in this same primary language. " +
     "No other-language ports or port harnesses in this phase. " +
