@@ -17,6 +17,62 @@ export function validateExecution(language, code, timeoutMs) {
   return { language: name, timeoutMs: Math.min(Math.max(Math.round(requested), 1000), MAX_EXECUTION_MS) };
 }
 
+/**
+ * E2B throws CommandExitError for a non-zero command exit. In the installed
+ * JavaScript SDK its exitCode/stdout/stderr are getters on the error itself,
+ * not an enumerable `result` property. Preserve that evidence for Council
+ * repair while allowing network, quota and sandbox errors to still throw.
+ */
+export function e2bCommandFailure(error) {
+  const result = error?.result && typeof error.result === "object" ? error.result : error;
+  if (error?.name !== "CommandExitError" ||
+      !Number.isSafeInteger(result?.exitCode) || result.exitCode === 0 ||
+      typeof result.stdout !== "string" || typeof result.stderr !== "string") return null;
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    error: typeof result.error === "string" ? result.error : undefined,
+  };
+}
+
+/** Map common Python/JS/compiler diagnostics back into the inserted solution. */
+export function mapCandidateFailureLocation(stderr, sourceMap) {
+  if (!sourceMap || !Number.isSafeInteger(sourceMap.startLine) || !Number.isSafeInteger(sourceMap.endLine)) return null;
+  const text = String(stderr || "");
+  const found = [];
+  const patterns = [
+    /File ["'](?:\.\/)?(?:main|Main)\.(?:py|mjs|js|ts|cpp|cc|rs|go|java|php|rb|sh)["'], line (\d+)/gi,
+    /(?:^|[\s(])(?:\.\/)?(?:main|Main)\.(?:py|mjs|js|ts|cpp|cc|rs|go|java|php|rb|sh):(\d+)(?::\d+)?/gim,
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const line = Number(match[1]);
+      if (Number.isSafeInteger(line) && line > 0) found.push(line);
+    }
+  }
+  // Tracebacks place the failing frame last; diagnostics from compilers also
+  // tend to list the primary source location after any include/context lines.
+  const harnessLine = found.reverse().find(line => line >= sourceMap.startLine && line <= sourceMap.endLine);
+  return harnessLine == null ? null : { harnessLine, sourceLine: harnessLine - sourceMap.startLine + 1 };
+}
+
+/**
+ * Classify execution outcomes so code defects go to the solver, not users.
+ * @param {{run?: {ran?: boolean, timedOut?: boolean, failed?: number, exitVerified?: boolean, ok?: boolean, exitCode?: number|null, passed?: number, stderr?: string}, sourceMap?: {startLine: number, endLine: number}, harnessPreflightFailed?: boolean}} options
+ * @returns {"infrastructure"|"timeout"|"candidate"|"harness"|"unknown"|undefined}
+ */
+export function classifyExecutionFailure({ run, sourceMap, harnessPreflightFailed = false } = {}) {
+  if (!run?.ran) return "infrastructure";
+  if (run.timedOut) return "timeout";
+  if (run.failed > 0) return "candidate";
+  if (harnessPreflightFailed || run.exitVerified === false) return "harness";
+  if (run.ok && run.exitCode === 0) return undefined;
+  if (mapCandidateFailureLocation(run.stderr, sourceMap)) return "candidate";
+  if (!run.passed && run.exitCode !== 0) return "harness";
+  return "unknown";
+}
+
 export function parseExecutionOutput(raw) {
   const text = String(raw || "");
   const stdoutBegin = text.indexOf("CA_STDOUT_BEGIN\n");
@@ -66,7 +122,9 @@ export function executionStatus(result) {
 export function requiresRepair(run) {
   // Missing or invalid harnesses should be diagnosed, not attributed to bad code.
   // A user-canceled execution or broken harness is not a code defect.
-  if (!run?.ran || run.canceled || run.state === "canceled" || run.note === "the generated harness did not build or start") return false;
+  if (!run?.ran || run.exitVerified === false || run.failureKind === "harness" ||
+      run.failureKind === "infrastructure" ||
+      run.canceled || run.state === "canceled" || run.note === "the generated harness did not build or start") return false;
   return run.ok === false || run.failed > 0;
 }
 

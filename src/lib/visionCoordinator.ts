@@ -1,13 +1,13 @@
 /** A vision-capable coordinator is selected exclusively from the user's
  * ten approved models. Its advice never expands the model roster and it never
  * transcribes or solves the problem on behalf of the independent solvers. */
-import { primaryModelId } from "./primaryModels.ts";
+import { isSelectablePrimaryModel, primaryModelId } from "./primaryModels.ts";
 import { parseGatewayRouterChoice, type GatewayCandidate, type RouterChoice } from "./quickGatewayRouter.ts";
 
-const COORDINATOR_PRIORITY = [
+const COORDINATOR_PRIORITY: readonly string[] = [
   "gpt-5.6-sol", "claude-opus-5.5", "gemini-3.1-pro",
   "gpt-5.6-terra", "claude-fable-5.1", "qwen3.8-max",
-  "grok-4.6", "kimi-k3", "glm-5.3", "seed-2.1-pro",
+  "grok-4.6", "kimi-k3", "deepseek-v4-pro-max", "seed-2.1-pro",
 ] as const;
 
 export function coordinatorCandidates<Id extends string>(
@@ -16,7 +16,7 @@ export function coordinatorCandidates<Id extends string>(
   const unique = new Set<string>();
   return available.filter(candidate => {
     const canonical = primaryModelId(candidate.model);
-    if (!canonical || unique.has(canonical)) return false;
+    if (!canonical || !isSelectablePrimaryModel(candidate.model) || unique.has(canonical)) return false;
     unique.add(canonical);
     return true;
   }).sort((a, b) => {
@@ -55,7 +55,7 @@ export function verifyCoordinatorAssignment<Id extends string>(
   response: string, available: readonly GatewayCandidate<Id>[],
 ): RouterChoice<Id> | null {
   // All ID membership checks occur here, before routing any agent or image.
-  const known = available.filter(c=>primaryModelId(c.model)).map(c=>c.id);
+  const known = available.filter(c=>isSelectablePrimaryModel(c.model)).map(c=>c.id);
   return parseGatewayRouterChoice(response,known,4);
 }
 

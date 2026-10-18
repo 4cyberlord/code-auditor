@@ -29,7 +29,7 @@ import LoginScreen from "@/components/LoginScreen";
 import { inTauri, quitApplication } from "@/lib/bridge";
 import { gateFor, useAuth } from "@/lib/auth";
 import { devLog } from "@/lib/devLog";
-import { PRIMARY_MODEL_IDS } from "@/lib/primaryModels";
+import { SELECTABLE_PRIMARY_MODEL_IDS } from "@/lib/primaryModels";
 
 // The desktop session is stored in the system Keychain for thirty days. Do not
 // discard it after a short idle or sleep; doing so defeats saved sign-in and
@@ -254,7 +254,7 @@ function Workbench() {
             {running
               ? "running"
               : preparing ? "reading and selecting models"
-              : !storyRunId ? `${PRIMARY_MODEL_IDS.length} approved models · up to 4 per task`
+              : !storyRunId ? `${SELECTABLE_PRIMARY_MODEL_IDS.length} approved models · up to 4 per task`
               : `${panes.length} ${panes.length === 1 ? "model" : "models"}, one problem, one verdict`}
           </span>
         </span>

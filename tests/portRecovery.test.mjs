@@ -12,8 +12,9 @@ assert.equal(canRepairPort({...failure,failed:0,exitCode:0,note:""},"rust","agen
 assert.equal(canRepairPort({...failure,ok:true},"rust","agent"),false);
 assert.equal(canRepairPort(failure,"rust","solver-a",false),false);
 const prompt=portRepairPrompt({question:"find pair",sourceLanguage:"python",sourceCode:"return 1",
- targetLanguage:"rust",failedCode:"fn main() {}",stderr:"error[E0308]",note:"exit 1"});
+ targetLanguage:"rust",failedCode:"fn main() {}",stderr:"error[E0308]",stdout:"FAIL example got=1 want=2",note:"exit 1"});
 assert.match(prompt,/error\[E0308\]/);
+assert.match(prompt,/FAIL example got=1 want=2/);
 assert.match(prompt,/unchanged/);
 assert.match(portRepairSystem("cpp"),/Never modify or redefine tests/);
 console.log("PASS: bounded source-solver Rust/C++ repair eligibility and invariant-preserving prompt");

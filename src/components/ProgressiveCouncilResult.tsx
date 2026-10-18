@@ -5,6 +5,7 @@ import { codeLineDiff } from "@/lib/codeLineDiff";
 type Port = {
   language?:string;status?:string;code?:string;
   error?:string;run?:{remoteElapsedMs?:number|null;passed?:number;failed?:number};
+  repair?:{status?:string;beforeCode?:string;model?:string};
 };
 type EarlySolution = {
   status?:string;letter?:string;model?:string;language?:string;code?:string;
@@ -127,6 +128,18 @@ export function ProgressiveCouncilResult({
           {accepted
             ? <>
                 <pre className="progressive-result-code">{port.code}</pre>
+                {port.repair?.status==="verified"&&port.repair.beforeCode&&<details className="council-upgrade-diff">
+                  <summary>View tested repair as a GitHub-style diff</summary>
+                  <p className="progressive-result-note">The removed lines were from an unverified draft; only the corrected code above passed E2B.</p>
+                  <div className="council-diff-lines" role="region" aria-label={`${port.language||"Port"} repair changes`}>
+                    {codeLineDiff(port.repair.beforeCode,port.code||"").map((line,index)=><div key={index} className="council-diff-line" data-kind={line.kind}>
+                      <span className="council-diff-number">{line.beforeLine??""}</span>
+                      <span className="council-diff-number">{line.afterLine??""}</span>
+                      <span className="council-diff-marker">{line.kind==="removed"?"−":line.kind==="added"?"+":" "}</span>
+                      <code>{line.text||" "}</code>
+                    </div>)}
+                  </div>
+                </details>}
                 <p>{port.run?.passed??0} executable tests passed
                   {typeof port.run?.remoteElapsedMs==="number" && Number.isFinite(port.run.remoteElapsedMs)
                     ?" · Measured execution "+port.run?.remoteElapsedMs+" ms":""}

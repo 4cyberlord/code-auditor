@@ -43,9 +43,7 @@ export default function StoryResultWorkspace() {
     ? null : selectVerifiedStorySolution(agents, council, consensus().representative);
   const reviewData = report ? review.data : null;
   const reviewRunning = !preparing && review.status === "running";
-  const reviewError = preparing ? null : review.error;
   const councilPhase = preparing ? "idle" : council.phase;
-  const councilError = preparing ? null : council.error;
   const verifiedPorts = council.ports.filter(port => port.status === "verified");
   const chosenPort = language === "original" ? null : verifiedPorts.find(port => port.language === language) ?? null;
   const ports = verifiedPorts.map(port => port.language as keyof typeof PORT_LABELS);
@@ -75,9 +73,9 @@ export default function StoryResultWorkspace() {
     ? `${chosenPort.run.passed} passed / ${chosenPort.run.failed} failed for this ${chosenPort.language} implementation in E2B.`
     : awaitingCouncil
     ? "The Council is still testing and comparing candidates; no final measurement is available yet."
-    : councilPhase === "error" ? `Verification stopped: ${councilError || "unknown reason"}`
+    : councilPhase === "error" ? "Council verification did not finish successfully. Start a fresh analysis to try again."
     : !council.testSuites.length ? "No executable test suite was produced, so this solution has not been benchmarked."
-    : run && !run.ran ? `Execution did not complete: ${run.note || "the runner returned no result"}.`
+    : run && !run.ran ? "The execution environment is preparing another verification attempt."
     : run?.ran && run.remoteElapsedMs == null && run.peakMemoryKb == null
       ? `Tests executed${run.provider ? ` via ${run.provider}` : ""}, but this runner did not report per-process runtime or peak-memory telemetry. E2B measurements are not available for this desktop run.`
       : run?.ran ? `${run.passed} passed / ${run.failed} failed` : "No execution measurements are available for this exact solution.";
@@ -94,20 +92,6 @@ export default function StoryResultWorkspace() {
   const busyAgents = active.filter(a => ["queued","streaming"].includes(a.status));
   const failed = active.filter(a => a.status === "error");
   const actuallyWorking = active.filter(a => ["streaming", "done"].includes(a.status));
-  const diagnostics = [
-    ...Object.values(settings.routerModels).flatMap(model => {
-      const probe = settings.probes[model];
-      return settings.useGateway && probe && !probe.ok
-        ? [{ label: `${settings.gatewayId}: ${model}`, message: probe.error || "Live gateway check failed." }]
-        : [];
-    }),
-    ...failed.map(a => ({ label: a.model || a.provider, message: a.error || "Solver failed without a detailed response." })),
-    ...modelProgress.filter(item => item.lamp === "issue" && item.agent.status === "done")
-      .map(item => ({ label: item.agent.model, message: "The model finished but did not return a usable final answer." })),
-    councilPhase === "error" && councilError ? { label: "Council", message: councilError } : null,
-    !preparing && judge.status === "error" && judge.error ? { label: "Verdict", message: judge.error } : null,
-    !preparing && review.status === "error" && reviewError ? { label: "Solution review", message: reviewError } : null,
-  ].filter((entry): entry is { label: string; message: string } => Boolean(entry));
   const councilStage = councilStageText(councilPhase);
   const processText = preparing ? "Uploading screenshots to Azure and selecting the best approved agents." :
     active.length === 0 && running ? "Choosing verified models for this question." :
@@ -118,9 +102,9 @@ export default function StoryResultWorkspace() {
     allReady && councilPhase === "idle" ? "All selected answers are ready. Council verification is not active for this run." :
     finalReviewPending ? "Council selected an E2B-tested solution. Finishing its technical report." :
     councilPhase === "done" && report ? "Council selected an E2B-tested solution. The final report is ready." :
-    councilPhase === "done" && !report ? "Council finished without a verified coding solution. Check diagnostics." :
-    councilPhase === "error" ? "Council verification needs attention; unverified code remains hidden." :
-    issueCount ? `${issueCount} selected ${issueCount === 1 ? "model needs" : "models need"} attention. Open run diagnostics for details.` :
+    councilPhase === "done" && !report ? "Council completed its checks; no verified solution is ready yet." :
+    councilPhase === "error" ? "Council could not complete verification. You can start a fresh analysis to try again." :
+    issueCount ? "Council is checking the responses that need another pass." :
     report ? "The fully verified solution is ready." :
     "The working solution will appear only after Council verification succeeds.";
   const progress = preparing ? "Checking vision-capable models" :
@@ -129,7 +113,7 @@ export default function StoryResultWorkspace() {
     councilStage ? "Verifying and reviewing" :
     allReady && councilPhase === "idle" && councilCanStart ? "Starting council verification" :
     finalReviewPending || reviewRunning ? "Reviewing the solution" :
-    councilPhase === "error" ? "Verification needs attention" :
+    councilPhase === "error" ? "Verification could not be completed" :
     report ? language !== "original" ? "Translated port — testing pending" :
       report.provisional ? "Candidate ready — verification pending" : "Tested solution ready" :
     failed.length ? "Analysis needs attention" : running ? "Preparing analysis" : "Awaiting solution";
@@ -206,20 +190,19 @@ export default function StoryResultWorkspace() {
               )}</code></pre>
             </div> :
               <div className="story-code-empty"><div className="story-code-empty-icon">{"{ }"}</div><h2>{progress}</h2>
-                <p>{councilError || (failed.length ? failed.map(a => a.error || a.model + " failed").join("; ") :
-                  "The AI agents work in the background. Your finished code will appear here automatically.")}</p>
+                <p>{councilPhase === "error"
+                  ? "Council could not complete verification. Start a fresh analysis to try again."
+                  : councilPhase === "done"
+                    ? "Council completed its checks; a verified solution is not available for this run."
+                    : "The AI agents are working in the background. Your verified solution will appear here when ready."}</p>
+                {!running && !preparing && (failed.length > 0 || councilPhase === "error" || councilPhase === "done") &&
+                  <button type="button" className="story-subtle-button" onClick={() => void start({ adaptivePanels: true })}>
+                    Try this question again
+                  </button>}
               </div>}
           </div>
         </div>
         {report?.answer && <div className="story-solution-summary"><span className="story-eyebrow">SOLUTION SUMMARY</span><p>{report.answer}</p></div>}
-        {diagnostics.length > 0 && <details className="story-diagnostics" open={!report}>
-          <summary>Run diagnostics ({diagnostics.length})</summary>
-          {diagnostics.map((entry, index) => <p key={index}><strong>{entry.label}:</strong> {entry.message}</p>)}
-          {!running && !preparing && !report && (failed.length > 0 || diagnostics.length > 0) &&
-            <button type="button" className="story-subtle-button" onClick={() => void start({ adaptivePanels: true })}>
-              Retry analysis and verification
-            </button>}
-        </details>}
       </section>
       <aside className="story-report-column" aria-label="Technical solution report">
         <div className="story-section-heading"><div><span className="story-eyebrow">02 / TECHNICAL REPORT</span><h2>Solution insights</h2></div></div>
@@ -250,7 +233,7 @@ export default function StoryResultWorkspace() {
           <div className="story-compare"><span>Readability</span><b>{reviewData?.style.readability || "Not reviewed"}</b></div>
           <div className="story-compare"><span>Structure</span><b>{reviewData?.style.structure || "Not reviewed"}</b></div>
           {reviewData?.style.note && <p>{reviewData.style.note}</p>}
-          {reviewError && <p className="story-warning">{reviewError}</p>}
+          {review.status === "error" && <p className="story-muted">Technical review will be available after a later retry.</p>}
           {report && !viewingRunId && !reviewRunning && !reviewData && <button className="story-subtle-button" onClick={() => void runReview()}>Review solution</button>}
         </section>
         <section className="story-report-card">
@@ -264,9 +247,9 @@ export default function StoryResultWorkspace() {
           {run?.ran && run.durationMs > 0 && run.remoteElapsedMs == null &&
             <p className="story-muted">Test-process wall time: {run.durationMs} ms (includes startup and possibly compilation; not the algorithm runtime).</p>}
         </section>
-        {councilPhase === "error" && <p className="story-warning">{councilError}</p>}
-        {sessionsError && <p className="story-warning">History save needs attention: {sessionsError}</p>}
-        {!preparing && judge.status === "error" && <p className="story-warning">{judge.error}</p>}
+        {councilPhase === "error" && <p className="story-muted">Council could not complete verification for this run.</p>}
+        {sessionsError && <p className="story-muted">This run could not be saved to history yet.</p>}
+        {!preparing && judge.status === "error" && <p className="story-muted">Council is repeating its final review.</p>}
       </aside>
     </div>
   </main>;

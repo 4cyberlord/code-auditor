@@ -92,6 +92,18 @@ function parseClaims(body: string): string[] {
 
 function lastFence(text: string): string {
   const blocks = [...text.matchAll(FENCE)].map((m) => m[1]);
+  // A provider can hit its output limit after opening the FINAL code fence.
+  // Keep that partial source so the caller can make a bounded recovery call
+  // or let E2B return actionable compiler diagnostics; never treat it as a
+  // complete/verified answer (wellFormed remains false in parseFinal).
+  const openFence = /```[a-zA-Z0-9+#._-]*\s*\n/g;
+  let match: RegExpExecArray | null;
+  let trailing = "";
+  while ((match = openFence.exec(text))) {
+    const after = text.slice(openFence.lastIndex);
+    if (!after.includes("```")) trailing = after.replace(/\s*FINAL>>>\s*$/i, "");
+  }
+  if (trailing.trim()) blocks.push(trailing);
   if (!blocks.length) return "";
   // Prefer the longest fence: agents often show a tiny example before the solution.
   return blocks.reduce((a, b) => (b.trim().length > a.trim().length ? b : a)).trim();

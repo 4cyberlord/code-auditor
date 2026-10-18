@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { Sandbox } from "@e2b/code-interpreter";
+import { e2bCommandFailure } from "../../scripts/lib/phase2Execution.mjs";
 
 if (!process.env.E2B_API_KEY) {
   throw new Error("E2B_API_KEY secret is unavailable. Configure it in repository Actions secrets.");
@@ -16,8 +17,9 @@ try {
   // Keep the command's real result, but do not suppress transport/authentication errors.
   const failure = await sandbox.commands.run("python3 -c 'raise RuntimeError(\"EXPECTED_E2B_FAILURE\")'", { timeoutMs: 30_000 })
     .catch((error) => {
-      if (!error?.result || error.result.exitCode === 0) throw error;
-      return error.result;
+      const commandResult = e2bCommandFailure(error);
+      if (!commandResult) throw error;
+      return commandResult;
     });
   assert.notEqual(failure.exitCode, 0, "Failing program unexpectedly reported success");
   assert.match(failure.stderr ?? "", /EXPECTED_E2B_FAILURE/, "Missing failure diagnostics");

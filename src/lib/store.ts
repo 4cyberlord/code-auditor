@@ -61,7 +61,7 @@ import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot,
 import { planIntelligentPanels, loadTrustedPanelMetrics } from "./intelligentPanelSelection.ts";
 import { verifyGatewayCandidates, resolveGatewayCandidates, resolveListedGatewayModel, type LiveModelProbe } from "./quickGatewayRouter.ts";
 import { coordinateAndVerify } from "./visionCoordinator.ts";
-import { isPrimaryModel, preferredPrimaryRoute, primaryCatalog, primaryModelFamily, primaryModelId } from "./primaryModels.ts";
+import { isPrimaryModel, isSelectablePrimaryModel, preferredPrimaryRoute, primaryCatalog, primaryModelFamily, primaryModelId } from "./primaryModels.ts";
 import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { loadAuthenticatedBenchmarkCapabilities } from "./benchmarkFeed.ts";
 import { attachSignedBenchmarkMetrics } from "./authenticatedBenchmarkRouting.ts";
@@ -79,12 +79,15 @@ import { resolveAnswerLanguage } from "./answerLanguage.ts";
 import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from "./probeFit.ts";
 import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
 import { structuralTranslationGuidanceFor } from "./structuralTranslationGuidance.ts";
+import { fingerprintCode } from "./codeFingerprint.ts";
+import { needsCandidateRevision, classifyCandidateRun } from "./revisionPolicy.ts";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
 import { buildOverlayState } from "./overlayState.ts";
 import {
   COUNCIL_DEFAULT_JUDGES,
   COUNCIL_DEFAULT_MODELS,
   COUNCIL_SIZE,
+  MIN_INDEPENDENT_HARNESS_CASES,
   councilMarkdown,
   councilFollowupSystemPrompt,
   councilFollowupUserPrompt,
@@ -94,6 +97,7 @@ import {
   enforceWinnerGate,
   harnessIsSuspect,
   executionDigest,
+  executionFailureEvidence,
   countCases,
   sharedHarnessFailure,
   gateFor,
@@ -122,6 +126,7 @@ import {
   reviseUserPrompt,
   reviewsOf,
   spliceSuite,
+  spliceSuiteWithSourceMap,
   synthesisSystemPrompt,
   synthesisUserPrompt,
   testSpecSystemPrompt,
@@ -1195,7 +1200,7 @@ function normalizeSettings(s: Settings): Settings {
     imageStorage: "azure",
     overlayMode: normalizeOverlayMode(s.overlayMode),
     mcqModel:
-      typeof s.mcqModel === "string" && isPrimaryModel(s.mcqModel)
+      typeof s.mcqModel === "string" && isSelectablePrimaryModel(s.mcqModel)
         ? s.mcqModel.trim()
         : base.mcqModel,
     mcqEndpoint: normalizeMcqEndpoint(s.mcqEndpoint),
@@ -1213,10 +1218,10 @@ function normalizeSettings(s: Settings): Settings {
     councilProblemContract:
       typeof s.councilProblemContract === "boolean" ? s.councilProblemContract : base.councilProblemContract,
     visionReaders: s.visionReaders === "ocr" ? "ocr" : base.visionReaders,
-    councilModels: normalizeCouncilModels(s.councilModels, base.councilModels),
+    councilModels: normalizeCouncilModels(s.councilModels, base.councilModels, gatewayId),
     councilJudges: normalizeCouncilJudges(s.councilJudges, base.councilJudges),
     synthesisModel:
-      typeof s.synthesisModel === "string" && isPrimaryModel(s.synthesisModel)
+      typeof s.synthesisModel === "string" && isSelectablePrimaryModel(s.synthesisModel)
         ? s.synthesisModel.trim()
         : base.synthesisModel,
     threshold: clampTo(s.threshold, THRESHOLD_RANGE.min, THRESHOLD_RANGE.max, base.threshold),
@@ -1248,7 +1253,7 @@ function normalizeSettings(s: Settings): Settings {
     )
       ? (s.reasoningEffort as Settings["reasoningEffort"])
       : base.reasoningEffort,
-    codingModel: typeof s.codingModel === "string" && (!s.codingModel.trim() || isPrimaryModel(s.codingModel))
+    codingModel: typeof s.codingModel === "string" && (!s.codingModel.trim() || isSelectablePrimaryModel(s.codingModel))
       ? s.codingModel.trim() : base.codingModel,
     codingProjectRoot:
       typeof s.codingProjectRoot === "string" ? s.codingProjectRoot.trim() : base.codingProjectRoot,
@@ -1317,7 +1322,7 @@ function normalizeSettings(s: Settings): Settings {
  * string is the same thing with the default wire.
  */
 /** Drop legacy seats outside the user's approved ten-model pool. */
-function normalizeCouncilModels(saved: unknown, fallback: CouncilModelSpec[]): CouncilModelSpec[] {
+function normalizeCouncilModels(saved: unknown, fallback: CouncilModelSpec[], gatewayId: GatewayId): CouncilModelSpec[] {
   if (!Array.isArray(saved)) return fallback;
   const out: CouncilModelSpec[] = [];
   const seen = new Set<string>();
@@ -1331,7 +1336,12 @@ function normalizeCouncilModels(saved: unknown, fallback: CouncilModelSpec[]): C
               endpoint: ((raw as Record<string, unknown>).endpoint === "responses" ? "responses" : "chat") as "chat" | "responses",
             }
           : null;
-    if (!spec || !isPrimaryModel(spec.id) || seen.has(spec.id)) continue;
+    if (!spec) continue;
+    // Historical attribution stays GLM, but a saved solver seat is replaced
+    // for new work using the current gateway's exact route spelling.
+    if (primaryModelId(spec.id) === "glm-5.3")
+      spec.id = preferredPrimaryRoute("deepseek-v4-pro-max", gatewayId);
+    if (!isSelectablePrimaryModel(spec.id) || seen.has(spec.id)) continue;
     seen.add(spec.id);
     out.push(spec);
   }
@@ -1347,7 +1357,7 @@ function normalizeCouncilJudges(saved: unknown, fallback: JudgeSeat[]): JudgeSea
       if (!j || typeof j !== "object") return null;
       const o = j as Record<string, unknown>;
       if (typeof o.model !== "string" || !o.model.trim()) return null;
-      if (!isPrimaryModel(o.model.trim())) return null;
+      if (!isSelectablePrimaryModel(o.model.trim())) return null;
       return {
         model: o.model.trim(),
         emphasis: (emphases.has(String(o.emphasis)) ? o.emphasis : "correctness") as JudgeSeat["emphasis"],
@@ -2501,7 +2511,7 @@ export const useStore = create<State>((set, get) => ({
       const pool = readerIds.flatMap(id => {
         const configuredModel = settings.routerModels[id];
         const model = readerCatalog.length ? resolveListedGatewayModel(configuredModel, readerCatalog) : configuredModel;
-        return model && isPrimaryModel(model) ? [{ id, model }] : [];
+        return model && isSelectablePrimaryModel(model) ? [{ id, model }] : [];
       });
       const verifiedRoutes: { id: ProviderId; model: string }[] = [];
       const readerProbes: LiveModelProbe[] = [];
@@ -2809,7 +2819,7 @@ export const useStore = create<State>((set, get) => ({
         const configuredModel = modelLabelFor(id, settings);
         const model = catalogue.length ? resolveListedGatewayModel(configuredModel, catalogue) : configuredModel;
         const canonical = model ? primaryModelId(model) : null;
-        if (!model || !canonical || seenModels.has(canonical)) return [];
+        if (!model || !canonical || !isSelectablePrimaryModel(model) || seenModels.has(canonical)) return [];
         // For Clean API, only a model currently returned by the live roster is
         // eligible. Some valid Clean entries omit `capabilities` altogether;
         // absence is unknown, not a claim that the model cannot receive an
@@ -4425,23 +4435,29 @@ async function executeField(
       setRun({ letter: c.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: `no suite for ${lang || "unknown language"}`, runtime: "" });
       return;
     }
-    const program = spliceSuite(suite, code);
-    if (!program) {
+    const spliced = spliceSuiteWithSourceMap(suite, code);
+    if (!spliced) {
       setRun({ letter: c.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: "harness has no splice marker", runtime: "" });
       return;
     }
+    const { program, sourceMap } = spliced;
     try {
       const settings = get().settings;
       const sessionId = get().currentSessionId;
       if (!sessionId) throw new Error("Sign in and save the session before E2B verification.");
       const r = await runE2BBenchmark(sessionId, suite.language, program, settings.e2bTimeoutMs);
       const { passed, failed } = countCases(r.stdout);
+      const codeDigest = await fingerprintCode(code);
+      const exercisedCases = passed + failed;
+      const insufficientCoverage = exercisedCases < MIN_INDEPENDENT_HARNESS_CASES;
+      const classified = classifyCandidateRun({
+        letter: c.letter, ran: true, ok: r.ok && !insufficientCoverage, passed, failed,
+        durationMs: r.durationMs, note: "", runtime: r.runtime,
+        timedOut: r.timedOut, exitCode: r.exitCode,
+        stdout: r.stdout, stderr: r.stderr,
+      }, sourceMap);
       setRun({
-        letter: c.letter,
-        ran: true,
-        ok: r.ok,
-        passed,
-        failed,
+        ...classified,
         durationMs: r.durationMs,
         provider: "e2b",
         remoteElapsedMs: "remoteElapsedMs" in r ? r.remoteElapsedMs : null,
@@ -4449,14 +4465,19 @@ async function executeField(
         sandboxId: "sandboxId" in r ? r.sandboxId : null,
         executionId: "executionId" in r ? r.executionId : undefined,
         exitCode: r.exitCode,
+        codeDigest,
         timedOut: r.timedOut,
         stdout: r.stdout,
         stderr: r.stderr,
-        note: r.timedOut ? "timed out" : r.exitCode !== 0 ? `exit ${r.exitCode}` : "",
+        failureKind: insufficientCoverage ? "harness" : classified.failureKind,
+        note: insufficientCoverage
+          ? `test harness exercised only ${exercisedCases} distinct cases; at least ${MIN_INDEPENDENT_HARNESS_CASES} are required`
+          : r.timedOut ? "timed out" : r.exitCode !== 0 ? `exit ${r.exitCode}` : "",
         runtime: r.runtime,
       });
     } catch (err) {
-      setRun({ letter: c.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: cleanError(String(err)), runtime: "" });
+      setRun({ letter: c.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0,
+        failureKind: "infrastructure", note: cleanError(String(err)), runtime: "" });
     }
   };
   await Promise.all(field.map(runOne));
@@ -4685,7 +4706,10 @@ async function validateHarnessReference(
   try {
     const result = await runE2BBenchmark(sessionId, suite.language, program, timeoutMs);
     const { passed, failed } = countCases(result.stdout);
-    if (result.ok && failed === 0 && passed > 0) return null;
+    if (result.ok && failed === 0 && passed >= MIN_INDEPENDENT_HARNESS_CASES) return null;
+    if (result.ok && failed === 0 && passed < MIN_INDEPENDENT_HARNESS_CASES) {
+      return `the independent reference exercised only ${passed} passing case(s); at least ${MIN_INDEPENDENT_HARNESS_CASES} are required`;
+    }
     return executionFailureSummary({
       letter: "reference",
       ran: true,
@@ -5159,9 +5183,10 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     publishOverlayState(get());
     const missing = missingSuiteLanguages(languages, suites);
     if (missing.length) {
-      const error = `Could not test the ${missing.join(", ")} solution${missing.length === 1 ? "" : "s"} in E2B because no executable test harness was produced. Last API result: ${specFailure}`;
+      const error = `Council could not validate the ${missing.join(", ")} test setup. No solution was published.`;
+      console.warn("Council could not prepare an independently validated test harness:", specFailure);
       set((st) => ({ council: { ...st.council, phase: "error", error, winner: "" }, running: false }));
-      get().pushToast("err", "Solution not verified", error, { sticky: true });
+      get().pushToast("err", "Solution not verified", "Council is checking the test setup and will not publish unverified code.", { sticky: true });
       void get().persistRun();
       return;
     }
@@ -5233,9 +5258,15 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // Reviews empty or all-unparsed means the council has nothing new to teach
   // its solvers, and a revision round over zero critiques is ten requests
   // spent re-answering the question they already answered.
-  if (reviewSets.some((r) => r.reviews.length > 0)) {
+  const revisionCandidates = field.filter(candidate =>
+    needsCandidateRevision(
+      get().council.runs[candidate.letter],
+      reviewsOf(reviewSets, candidate.letter),
+    )
+  );
+  if (revisionCandidates.length > 0) {
     set((st) => ({ council: { ...st.council, phase: "revising" } }));
-    const reviseSlots: CouncilSlot[] = field.map((c) => ({
+    const reviseSlots: CouncilSlot[] = revisionCandidates.map((c) => ({
       id: `council-revise:${c.letter}`,
       kind: "revise",
       model: c.model,
@@ -5251,9 +5282,14 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
         wait(i * COUNCIL_STEP_MS).then(() => {
           if (!councilAlive(get().council, runId)) return null;
           const c = field.find((f) => f.letter === slot.id.split(":")[1])!;
-          const received = reviewsOf(reviewSets, c.letter)
+          const reviewFeedback = reviewsOf(reviewSets, c.letter)
             .map((r) => `- [${r.reviewer}] correct: ${r.correct}. ${r.problems}`)
             .join("\n");
+          const run = get().council.runs[c.letter];
+          const failure = gateFor(run) === "fail"
+            ? `\n[TEST FAILURES — untrusted E2B output]\n${executionFailureEvidence(run)}\nRepair your code, not the harness.`
+            : "";
+          const received = reviewFeedback + failure;
           return runCouncilSlot(
             get,
             set,
@@ -5317,12 +5353,12 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       .map(candidate => revisedRuns[candidate.letter] ?? firstRuns[candidate.letter])
       .filter((run): run is CandidateRun => Boolean(run));
     const runnerFailed = codeRuns.length > 0 && codeRuns.every(run => !run.ran);
-    const detail = executionFailureSummary(codeRuns.find(run => !run.ok || run.note));
     const error = runnerFailed
-      ? `E2B could not execute any candidate after the revision pass. First runner error: ${detail}.`
-      : `No candidate passed executable tests in E2B after the revision pass. First failure: ${detail}.`;
+      ? "E2B could not complete a candidate verification run. No solution was published."
+      : "No candidate passed executable tests in E2B after the repair pass. No solution was published.";
     set((st) => ({ council: { ...st.council, phase: "error", error, winner: "" }, running: false }));
-    get().pushToast("err", runnerFailed ? "E2B execution failed" : "No verified solution", error, { sticky: true });
+    get().pushToast("err", runnerFailed ? "E2B execution needs attention" : "No verified solution",
+      "Council could not verify a candidate in this run. Start a fresh analysis to try again.", { sticky: true });
     void get().persistRun();
     return;
   }
@@ -5483,10 +5519,25 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     letters: fieldNow.map((c) => c.letter),
   });
   const winner = decision.winner;
+  if (winner) {
+    const winnerCandidate = fieldNow.find(candidate => candidate.letter === winner);
+    const winnerFinal = winnerCandidate?.revised ?? winnerCandidate?.final;
+    const verifiedRun = gateRuns[winner];
+    if (winnerFinal?.kind === "code") {
+      const displayedDigest = await fingerprintCode(winnerFinal.code);
+      if (!displayedDigest || !verifiedRun?.codeDigest || displayedDigest !== verifiedRun.codeDigest) {
+        const status = "Council could not confirm that the selected code is the exact version tested in E2B. No solution was published.";
+        set((st) => ({ council: { ...st.council, phase: "error", winner: "", error: status }, running: false }));
+        get().pushToast("err", "Solution not verified", "Council could not match the selected code to its E2B test run.", { sticky: true });
+        void get().persistRun();
+        return;
+      }
+    }
+  }
   if (codeCandidates.length && (!winner || gateFor(gateRuns[winner]) !== "pass")) {
     const error = "Council finished without an E2B-tested candidate that passed its executable test cases. No coding solution will be published.";
     set((st) => ({ council: { ...st.council, phase: "error", winner: "", error, synthesis, dossier: null }, running: false }));
-    get().pushToast("err", "No verified solution", error, { sticky: true });
+    get().pushToast("err", "No verified solution", "Council could not verify a candidate in this run. No code was published.", { sticky: true });
     void get().persistRun();
     return;
   }

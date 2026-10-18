@@ -9,10 +9,21 @@ export const PRIMARY_MODEL_IDS = [
   "qwen3.8-max",
   "kimi-k3",
   "glm-5.3",
+  "deepseek-v4-pro-max",
   "seed-2.1-pro",
 ] as const;
 
 export type PrimaryModelId = (typeof PRIMARY_MODEL_IDS)[number];
+
+// GLM remains a known identity so saved answers and in-flight results retain
+// their attribution. It is retired from *new* solver selection. The configured
+// key lists DeepSeek V4 Pro Max; GPT 6.1 Sol can only be enabled when listed.
+export const SELECTABLE_PRIMARY_MODEL_IDS = PRIMARY_MODEL_IDS.filter(id => id !== "glm-5.3");
+
+export function isSelectablePrimaryModel(route: unknown): boolean {
+  const id = primaryModelId(route);
+  return id !== null && id !== "glm-5.3";
+}
 
 const MODEL_LABELS: Record<PrimaryModelId, string> = {
   "claude-opus-5.5": "Claude Opus 5.5", "claude-fable-5.1": "Claude Fable 5.1",
@@ -20,6 +31,7 @@ const MODEL_LABELS: Record<PrimaryModelId, string> = {
   "grok-4.6": "Grok 4.6", "gpt-5.6-terra": "GPT 5.6 Terra",
   "qwen3.8-max": "Qwen 3.8 Max", "kimi-k3": "Kimi K3",
   "glm-5.3": "GLM 5.3", "seed-2.1-pro": "Seed 2.1 Pro",
+  "deepseek-v4-pro-max": "DeepSeek V4 Pro Max",
 };
 
 // Explicit aliases prevent a same-vendor fallback from silently changing the
@@ -34,6 +46,7 @@ const ROUTE_ALIASES: Record<PrimaryModelId, readonly string[]> = {
   "qwen3.8-max": ["qwen3.8-max", "qwen/qwen3.8-max", "qwen/qwen3-8-max"],
   "kimi-k3": ["kimi-k3", "moonshotai/kimi-k3", "moonshot/kimi-k3"],
   "glm-5.3": ["glm-5.3", "z-ai/glm-5.3", "zai/glm-5-3", "glm/5-3", "glm/5.3"],
+  "deepseek-v4-pro-max": ["deepseek-v4-pro-max", "deepseek/deepseek-v4-pro-max"],
   "seed-2.1-pro": ["seed-2.1-pro", "bytedance/seed-v2-1-pro", "bytedance/seed-2.1-pro"],
 };
 
@@ -66,6 +79,7 @@ export function primaryModelFamily(route: string): string | null {
     case "qwen3.8-max": return "qwen";
     case "kimi-k3": return "moonshot";
     case "glm-5.3": return "glm";
+    case "deepseek-v4-pro-max": return "deepseek";
     case "seed-2.1-pro": return "bytedance";
     default: return null;
   }
@@ -82,7 +96,7 @@ export function primaryCatalog(catalogue: readonly string[]): string[] {
   const seen = new Set<PrimaryModelId>();
   return catalogue.filter(route => {
     const id = primaryModelId(route);
-    if (!id || seen.has(id)) return false;
+    if (!id || id === "glm-5.3" || seen.has(id)) return false;
     seen.add(id);
     return true;
   });
@@ -93,7 +107,7 @@ export function preferredPrimaryRoute(id: PrimaryModelId, gateway: "tokenrouter"
   if (gateway === "cleanapis") return id;
   const aliases = ROUTE_ALIASES[id];
   if (gateway === "wiro") {
-    return aliases.find(alias => /^(?:claude|openai|google|xai|qwen|moonshotai|glm|bytedance)\//.test(alias) &&
+    return aliases.find(alias => /^(?:claude|openai|google|xai|qwen|moonshotai|glm|deepseek|bytedance)\//.test(alias) &&
       !alias.includes(".") && !alias.startsWith("qwen/qwen3.8")) ?? aliases[1] ?? id;
   }
   return aliases.find(alias => alias.includes("/") && alias.includes(".")) ?? aliases[1] ?? id;

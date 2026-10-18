@@ -7,6 +7,7 @@ import {
   countCases,
   sharedHarnessFailure,
   executionDigest,
+  executionFailureEvidence,
   gateFor,
   selectVerifiedCandidate,
   decideWinner,
@@ -29,6 +30,9 @@ import {
   oracleDigest,
   reviewsOf,
   spliceSuite,
+  spliceSuiteWithSourceMap,
+  MIN_INDEPENDENT_HARNESS_CASES,
+  testSpecSystemPrompt,
   type Candidate,
   type CandidateRun,
 } from "../src/lib/council.ts";
@@ -114,6 +118,13 @@ console.log("\n3. a solver sees only the reviews addressed to it");
 }
 
 console.log("\n4. the test-spec block parses, harnesses must carry the splice marker");
+check("independent references must exercise at least eight cases", MIN_INDEPENDENT_HARNESS_CASES === 8);
+const testSpecInstructions = testSpecSystemPrompt().replace(/\s+/g, " ");
+check("the harness author is instructed to cover scenario classes, exhaustive small domains, and seeded fuzzing",
+  testSpecInstructions.includes("at least eight separately named") &&
+  testSpecInstructions.includes("exhaustively enumerate it") &&
+  testSpecInstructions.includes("64 deterministic seeded differential inputs") &&
+  testSpecInstructions.includes("adversarial patterns"));
 {
   const spec = `<<<TESTS
 HARNESS: python
@@ -147,12 +158,18 @@ console.log("\n5. splicing puts the candidate's code at the marker, verbatim");
   const h = "def run():\n<<<SOLUTION>>>\nprint('done')";
   const out = spliceSuite({ language: "python", harness: h }, "x = 1\nx += 1");
   check("spliced", out !== null && out.includes("x += 1") && !out.includes("<<<SOLUTION>>>"));
+  const mapped = spliceSuiteWithSourceMap({ language: "python", harness: "setup()\n<<<SOLUTION>>>\ncheck()" }, "x = 1\nx += 1");
+  check("source lines map to inserted candidate", mapped?.sourceMap.startLine === 2 && mapped.sourceMap.endLine === 3);
+  check("mapped program contains candidate source", mapped?.program.includes("x += 1") === true);
   check("no marker, no splice", spliceSuite({ language: "python", harness: "x=1" }, "y=2") === null);
 }
 
 console.log("\n6. PASS/FAIL counting, and the gate that outranks opinion");
 {
   check("mixed", JSON.stringify(countCases("PASS a\nFAIL b got=1\nPASS c")) === JSON.stringify({ passed: 2, failed: 1 }));
+  check("duplicate labels cannot inflate distinct scenario coverage",
+    JSON.stringify(countCases("PASS duplicate\nPASS duplicate\nPASS unique")) === JSON.stringify({ passed: 2, failed: 0 }));
+  check("unnamed assertions do not count as independent test cases", countCases("PASS\nPASS case-a").passed === 1);
   check("junk counts nothing", countCases("hello world").passed === 0);
 
   const run = (p: Partial<CandidateRun>): CandidateRun => ({
@@ -191,6 +208,11 @@ console.log("\n7. the execution digest the reviewers read");
   check("passed reads as passed", d.includes("ALL PASSED"));
   check("a rejected candidate is labelled rejected", d.includes("FAILED") && d.includes("[GATE: rejected]"));
   check("no model names leak into the digest", !d.includes("m-A") && !d.includes("m-B"));
+  const failure = executionFailureEvidence({ ...runs.B, stdout: "PASS sample\nFAIL boundary got=2 want=3", stderr: "SyntaxError: broken" });
+  check("repair feedback includes the failed case", failure.includes("FAIL boundary got=2 want=3"));
+  check("repair feedback includes compiler output", failure.includes("SyntaxError: broken"));
+  const mappedFailure = executionFailureEvidence({ ...runs.B, failureKind: "candidate", failureLocation: { sourceLine: 7, harnessLine: 19 } });
+  check("repair feedback includes candidate-relative source location", mappedFailure.includes("Candidate source line 7 (generated harness line 19)"));
 }
 
 console.log("\n8. language normalisation and the report");
@@ -228,7 +250,7 @@ console.log("\n9. defaults hold the shape the design specifies");
   check(
     "the requested solver roster is installed",
     COUNCIL_DEFAULT_MODELS.map((m) => m.id).join(",") ===
-      "moonshotai/kimi-k3,z-ai/glm-5.3,x-ai/grok-4.6,qwen/qwen3.8-max"
+      "moonshotai/kimi-k3,deepseek/deepseek-v4-pro-max,x-ai/grok-4.6,qwen/qwen3.8-max"
   );
   check(
     "the requested judge roster is installed",

@@ -1,5 +1,22 @@
 import type { CandidateReview, CandidateRun } from "./council.ts";
-import { requiresRepair } from "../../scripts/lib/phase2Execution.mjs";
+import {
+  classifyExecutionFailure,
+  mapCandidateFailureLocation,
+  requiresRepair,
+} from "../../scripts/lib/phase2Execution.mjs";
+
+/** Attach evidence-based failure labels before deciding whether code needs repair. */
+export function classifyCandidateRun(
+  run: CandidateRun,
+  sourceMap?: { startLine: number; endLine: number },
+): CandidateRun {
+  const failureLocation = mapCandidateFailureLocation(run.stderr, sourceMap);
+  return {
+    ...run,
+    failureKind: classifyExecutionFailure({ run, sourceMap }),
+    failureLocation,
+  };
+}
 
 /**
  * A revision is expensive: it costs another model call and another sandbox

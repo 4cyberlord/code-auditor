@@ -54,8 +54,11 @@ This is a programming problem. Work it as a senior engineer would:
 2. Note edge cases before you write code — empty input, single element, duplicates,
    overflow, off-by-one boundaries, and whatever else the problem invites.
 3. Write a complete, runnable solution. Not pseudocode, not a sketch.
-4. Trace your solution by hand against at least one example and any edge case that
-   worries you. If the trace fails, fix the code and say what you changed.
+4. Before submission, check your code against every explicit example or test case
+   in the user's question, including exact expected outputs, and trace relevant
+   edge cases. If any check fails, fix the code and check it again. Do not claim
+   you ran a compiler or executable tests unless actual tool results were supplied;
+   an independent E2B run is the authoritative verification step.
 5. Derive worst-case time and auxiliary-space complexity from your ACTUAL code:
    name every input dimension (including V, E, queries, capacity, or output size),
    identify loop bounds and dependent iteration counts, resolve all callees,

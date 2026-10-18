@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { executionId, validateExecution, parseExecutionOutput, executionStatus, requiresRepair, repairOutcome, withSandboxLifecycle } from "../scripts/lib/phase2Execution.mjs";
+import { CommandExitError } from "e2b";
+import { executionId, validateExecution, e2bCommandFailure, parseExecutionOutput, executionStatus, mapCandidateFailureLocation, classifyExecutionFailure, requiresRepair, repairOutcome, withSandboxLifecycle } from "../scripts/lib/phase2Execution.mjs";
 assert.match(executionId(), /^[a-f0-9-]{36}$/);
 assert.notEqual(executionId(), executionId());
 for (const lang of ["python","javascript","typescript","rust","go","php","java","cpp"]) {
@@ -10,6 +11,19 @@ assert.throws(() => validateExecution("unknown","x",1000),/Unsupported/);
 assert.throws(() => validateExecution("c","x",1000),/Unsupported/);
 assert.throws(() => validateExecution("python","x".repeat(262145),1000),/256 KiB/);
 assert.throws(() => validateExecution("python","",1000),/No program/);
+const commandExit = Object.assign(new Error("Command exited with status 1"), {
+  name: "CommandExitError", exitCode: 1,
+  stdout: "CA_STDOUT_BEGIN\nFAIL edge got=2 want=3\nCA_STDOUT_END\nCA_STDERR_BEGIN\nTraceback: assertion\nCA_STDERR_END\nCA_EXIT:1\nCA_RUNTIME:e2b python3\n",
+  stderr: "",
+});
+assert.equal(e2bCommandFailure(commandExit)?.exitCode, 1);
+assert.match(e2bCommandFailure(commandExit)?.stdout || "", /FAIL edge/);
+const sdkExit = new CommandExitError({exitCode: 1, stdout: commandExit.stdout, stderr: "candidate traceback"});
+assert.equal(e2bCommandFailure(sdkExit)?.exitCode, 1);
+assert.equal(e2bCommandFailure(sdkExit)?.stderr, "candidate traceback");
+assert.equal(parseExecutionOutput(e2bCommandFailure(sdkExit).stdout).exitCode, 1);
+assert.equal(e2bCommandFailure(Object.assign(new Error("quota"), { name: "RateLimitError" })), null);
+assert.equal(e2bCommandFailure(Object.assign(new Error("network"), { name: "CommandExitError" })), null);
 const output="CA_STDOUT_BEGIN\nPASS test\nCA_STDOUT_END\nCA_STDERR_BEGIN\nCA_METRICS elapsed_s=0.013 maxrss_kb=2048\nCA_STDERR_END\nCA_EXIT:0\nCA_RUNTIME:e2b python3\n";
 const parsed=parseExecutionOutput(output + '\n');
 assert.equal(parsed.complete,true);
@@ -33,6 +47,21 @@ assert.equal(executionStatus({ok:true,exitCode:0}),"completed");
 assert.equal(executionStatus({timedOut:true}),"timed_out");
 assert.equal(requiresRepair({ran:true,ok:false,failed:2}),true);
 assert.equal(requiresRepair({ran:false,ok:false,failed:0}),false);
+assert.equal(requiresRepair({ran:true,ok:false,failed:0,exitVerified:false}),false);
+const candidateRange = { startLine: 10, endLine: 14 };
+const pyLocation = mapCandidateFailureLocation('Traceback (most recent call last):\n  File "main.py", line 12, in solve\nValueError: bad input', candidateRange);
+assert.deepEqual(pyLocation, { harnessLine: 12, sourceLine: 3 });
+assert.equal(classifyExecutionFailure({
+  run: { ran: true, ok: false, exitCode: 1, passed: 0, failed: 0, stderr: 'File "main.py", line 12, in solve' },
+  sourceMap: candidateRange,
+}), "candidate");
+assert.equal(classifyExecutionFailure({
+  run: { ran: true, ok: false, exitCode: 1, passed: 0, failed: 0, stderr: 'File "main.py", line 2, in test_harness' },
+  sourceMap: candidateRange,
+}), "harness");
+assert.equal(classifyExecutionFailure({ run: { ran: false, ok: false } }), "infrastructure");
+assert.equal(classifyExecutionFailure({ run: { ran: true, ok: false, timedOut: true } }), "timeout");
+assert.equal(requiresRepair({ ran: true, ok: false, failed: 0, failureKind: "harness" }), false);
 console.log("Phase 2 sandbox evidence and policy tests passed.");
 
 const lifecycle=[];

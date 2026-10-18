@@ -323,6 +323,7 @@ export const EXTRA_AGENTS: readonly ExtraAgent[] = [
   { id: "grok", label: "Grok", vendor: "xAI", model: "grok-4.6", accent: "#a2a4aa", vision: true },
   { id: "qwen", label: "Qwen", vendor: "Alibaba", model: "qwen3.8-max", accent: "#8465dc", vision: true },
   { id: "glm", label: "GLM", vendor: "Zhipu AI", model: "glm-5.3", accent: "#52a0e8", vision: true },
+  { id: "deepseek", label: "DeepSeek", vendor: "DeepSeek", model: "deepseek-v4-pro-max", accent: "#4b7cf5", vision: true },
   { id: "seed", label: "Seed", vendor: "ByteDance", model: "seed-2.1-pro", accent: "#ef9050", vision: true },
 ];
 
@@ -334,7 +335,7 @@ export type AgentId = ProviderId | ExtraAgentId;
 /** Every pane the panel can show, in display order. */
 export const ALL_AGENTS: AgentId[] = [
   ...PROVIDER_ORDER,
-  ...EXTRA_AGENTS.map((e) => e.id),
+  ...EXTRA_AGENTS.filter(e => e.id !== "glm").map((e) => e.id),
 ];
 
 export const isExtraAgent = (id: AgentId): id is ExtraAgentId =>

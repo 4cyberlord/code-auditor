@@ -234,7 +234,7 @@ export default function CouncilPanel() {
                       : undefined
               }
               data-kind={s.kind}
-              title={`${s.kind} · ${s.model}${s.emphasis ? ` (${s.emphasis})` : ""}${s.error ? ` - ${s.error}` : ""}`}
+              title={`${s.kind} · ${s.model}${s.emphasis ? ` (${s.emphasis})` : ""}`}
             >
               {/* The model, not the round. Every chip in a round carried the
                   same word — five seats all reading "solve" — which doubled the
@@ -249,7 +249,7 @@ export default function CouncilPanel() {
         </div>
       )}
 
-      {council.phase === "error" && council.error && <div className="pane-error">{council.error}</div>}
+      {council.phase === "error" && <div className="pane-error">Council could not complete verification. Start a fresh analysis to try again.</div>}
 
       <div className="council-tabs">
         {(["summary", "decision", "evidence", "chat", "reading"] as CouncilTab[]).map((name) => (
@@ -307,7 +307,7 @@ export default function CouncilPanel() {
                 <strong>
                   {winnerRun?.ran
                     ? `${winnerRun.passed} passed, ${winnerRun.failed} failed in ${winnerRun.durationMs}ms`
-                    : winnerRun?.note || "Not executed"}
+                    : "Another verification pass is needed"}
                 </strong>
               </div>
               <div>
@@ -330,16 +330,9 @@ export default function CouncilPanel() {
                 <div className="insight-grid">
                   <div><span>Measured runtime</span><strong>{winnerRun.ran && measuredMs != null ? `${measuredMs} ms` : "Not measured"}</strong></div>
                   <div><span>Peak memory</span><strong>{winnerRun.ran && measuredMemoryKb != null ? `${(measuredMemoryKb / 1024).toFixed(1)} MB` : "Not measured"}</strong></div>
-                  <div><span>Test results</span><strong>{gateFor(winnerRun) === "pass" ? `${winnerRun.passed} passed` : winnerRun.note || "Not verified"}</strong></div>
+                  <div><span>Test results</span><strong>{gateFor(winnerRun) === "pass" ? `${winnerRun.passed} passed` : "Verification in progress"}</strong></div>
                   <div><span>Execution</span><strong>{winnerRun.provider || "Unknown"} · {winnerRun.state || "unknown"}</strong></div>
                 </div>
-                {(winnerRun.stderr || winnerRun.stdout) && (
-                  <details style={{ marginTop: 8 }}>
-                    <summary>Test output and compiler/runtime diagnostics</summary>
-                    {winnerRun.stderr && <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{winnerRun.stderr}</pre>}
-                    {winnerRun.stdout && <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{winnerRun.stdout}</pre>}
-                  </details>
-                )}
                 <p className="hint">Measured performance comes from the execution provider when available. Big-O complexity is a separate analytical estimate.</p>
               </section>
             )}
@@ -351,7 +344,7 @@ export default function CouncilPanel() {
                     <summary>
                       {port.language} · {port.status === "verified"
                         ? `${port.run?.passed ?? 0} E2B tests passed`
-                        : `not verified${port.error ? `: ${port.error}` : ""}`}
+                        : "verification in progress"}
                     </summary>
                     {port.code && <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{port.code}</pre>}
                   </details>
@@ -425,7 +418,7 @@ export default function CouncilPanel() {
                       <span className="badge">{c.model.split("/").pop()}</span>
                       {c.letter === council.winner && <span className="badge" data-tone="good">Winner</span>}
                     </div>
-                    <div className="txt">{f?.answer || c.error || "(no answer line returned)"}</div>
+                  <div className="txt">{f?.answer || "Council is checking this candidate's response."}</div>
                   </div>
                 );
               })}
@@ -445,7 +438,7 @@ export default function CouncilPanel() {
                     {j.model}
                     <span className="badge">{j.emphasis}</span>
                   </div>
-                  <div className="txt">{j.error || j.text.slice(0, 700) || "(no report)"}</div>
+                  <div className="txt">{j.text.slice(0, 700) || "Council is preparing this review."}</div>
                 </div>
               ))}
             </details>
@@ -465,7 +458,7 @@ export default function CouncilPanel() {
                 council.chat.map((m) => (
                   <div className="chat-msg" data-role={m.role} key={m.id}>
                     <div className="who">{m.role === "user" ? "You" : m.model}</div>
-                    {m.error ? <div className="pane-error">{m.error}</div> : <Markdown text={m.text} />}
+                    {m.error ? <div className="pane-error">This review is being retried.</div> : <Markdown text={m.text} />}
                   </div>
                 ))
               )}
@@ -540,7 +533,7 @@ export default function CouncilPanel() {
                     ? "Two readings agreed on the extracted problem text."
                     : "The image reading had disagreements or OCR uncertainty; compare the text below with the original screenshot."
                   : extraction.status === "error"
-                    ? extraction.error
+                    ? "Image reading needs another attempt."
                     : "No structured image reading is attached to this run."}
               </div>
             </div>

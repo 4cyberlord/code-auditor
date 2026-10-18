@@ -23,7 +23,7 @@ import * as bridge from "@/lib/bridge";
 import AccountCard from "./AccountCard";
 import HelperCard from "./HelperCard";
 import { classifyProbeResult } from "@/lib/probeFit";
-import { PRIMARY_MODEL_IDS, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "@/lib/primaryModels";
+import { SELECTABLE_PRIMARY_MODEL_IDS, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "@/lib/primaryModels";
 import { PIN_LENGTH, authReauthenticate, reason, sanitizePin } from "@/lib/auth";
 import { refreshOfficialLanguageSources, type LanguageRefreshResult } from "@/lib/languageKnowledge";
 
@@ -1033,7 +1033,7 @@ function GatewayCard() {
 
           {/* The free panes have fixed ids, so they get a result line rather
               than an editable field. */}
-          {EXTRA_AGENTS.map((e) => {
+          {EXTRA_AGENTS.filter(e => e.id !== "glm").map((e) => {
             const id = primaryModelId(e.model);
             const routeModel = id ? preferredPrimaryRoute(id, gatewayId) : e.model;
             const probe = probes[routeModel];
@@ -1745,7 +1745,7 @@ function CouncilCard() {
           onChange={(e) => patch({ synthesisModel: e.target.value })}
           style={{ flex: 1 }}
         >
-          {Array.from(new Set([settings.synthesisModel, ...PRIMARY_MODEL_IDS.map(id => preferredPrimaryRoute(id, settings.gatewayId))])).map(model =>
+          {Array.from(new Set([settings.synthesisModel, ...SELECTABLE_PRIMARY_MODEL_IDS.map(id => preferredPrimaryRoute(id, settings.gatewayId))])).map(model =>
             <option key={model} value={model}>{model}</option>)}
         </select>
       </div>
@@ -1987,7 +1987,7 @@ function CaptureCard() {
             value={mcqModel}
             onChange={(e) => patch({ mcqModel: e.target.value })}
           >
-            {Array.from(new Set([mcqModel, ...(availableModels.length ? availableModels : PRIMARY_MODEL_IDS.map(id => preferredPrimaryRoute(id, gatewayId)))])).map((model) => (
+            {Array.from(new Set([mcqModel, ...(availableModels.length ? availableModels : SELECTABLE_PRIMARY_MODEL_IDS.map(id => preferredPrimaryRoute(id, gatewayId)))])).map((model) => (
               <option key={model} value={model}>{model}</option>
             ))}
           </select>

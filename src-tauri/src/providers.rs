@@ -1635,6 +1635,7 @@ fn approved_model(model: &str) -> bool {
         "qwen3.8-max" | "qwen/qwen3.8-max" | "qwen/qwen3-8-max" |
         "kimi-k3" | "moonshotai/kimi-k3" | "moonshot/kimi-k3" |
         "glm-5.3" | "z-ai/glm-5.3" | "zai/glm-5-3" | "glm/5-3" | "glm/5.3" |
+        "deepseek-v4-pro-max" | "deepseek/deepseek-v4-pro-max" |
         "seed-2.1-pro" | "bytedance/seed-v2-1-pro" | "bytedance/seed-2.1-pro")
 }
 

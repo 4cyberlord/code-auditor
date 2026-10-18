@@ -21,6 +21,7 @@
     "ghost:install": "node scripts/ghost-install.mjs",
     "ghost:uninstall": "node scripts/ghost-uninstall.mjs",
     "ghost:detect": "node scripts/ghost-detect.mjs",
+    "test:correctness": "node tests/revisionPolicy.test.ts && node tests/codeFingerprint.test.ts",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml --all-targets",
     "api:deploy": "node scripts/deploy-api.mjs",
     "knowledge:publish": "node scripts/seed-knowledge.mjs",

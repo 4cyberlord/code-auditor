@@ -169,6 +169,7 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_Y: u32 = 0x1C;
     const HID_USAGE_KEYBOARD_S: u32 = 0x16;
     const HID_USAGE_KEYBOARD_RETURN: u32 = 0x28;
+    const HID_USAGE_KEYBOARD_BACKSLASH: u32 = 0x31;
     const HID_USAGE_KEYBOARD_RIGHT_ARROW: u32 = 0x4F;
     const HID_USAGE_KEYBOARD_LEFT_ARROW: u32 = 0x50;
     const HID_USAGE_KEYBOARD_DOWN_ARROW: u32 = 0x51;
@@ -190,6 +191,10 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_EQUAL: u32 = 0x2E;
     const HID_USAGE_KEYBOARD_CAPS_LOCK: u32 = 0x39;
 
+    fn history_open_key(usage: u32, shifted: bool) -> bool {
+        usage == HID_USAGE_KEYBOARD_BACKSLASH && !shifted
+    }
+
     // The HID observer deliberately does not consume keys, preserving typing
     // in every foreground app. On an empty Stage Manager space macOS has no
     // key window, so it sounds the alert for those same overlay commands.
@@ -204,6 +209,8 @@ mod mac_shortcuts {
             8 | 46 | 4 | 1 | 37 | 15 | 35 | 16 => true,
             // The number-pair capture commands do not accept Shift.
             29 | 18 | 19 | 20 | 21 | 23 => !shifted,
+            // ANSI backslash opens a saved result only while History is up.
+            42 => !shifted && HISTORY_VISIBLE.load(Ordering::SeqCst),
             _ => false,
         }
     }
@@ -441,6 +448,13 @@ mod mac_shortcuts {
             assert!(!quiet_desktop_key(19, true, false));
             assert!(!quiet_desktop_key(0, false, false)); // a
         }
+
+        #[test]
+        fn history_opens_with_backslash_not_right_arrow() {
+            assert!(history_open_key(HID_USAGE_KEYBOARD_BACKSLASH, false));
+            assert!(!history_open_key(HID_USAGE_KEYBOARD_RIGHT_ARROW, false));
+            assert!(!history_open_key(HID_USAGE_KEYBOARD_BACKSLASH, true));
+        }
     }
 
     extern "C" fn input_value_callback(
@@ -596,9 +610,9 @@ mod mac_shortcuts {
                 // Back is intentionally local to the read-only History
                 // surface: it never moves the click-through overlay window.
                 (HID_USAGE_KEYBOARD_LEFT_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_BACK.store(true, Ordering::SeqCst),
-                // Right-arrow selects the highlighted saved run and opens its
+                // Backslash selects the highlighted saved run and opens its
                 // full read-only Council result in the overlay.
-                (HID_USAGE_KEYBOARD_RIGHT_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_OPEN.store(true, Ordering::SeqCst),
+                (key, shifted) if HISTORY_VISIBLE.load(Ordering::SeqCst) && history_open_key(key, shifted) => HISTORY_OPEN.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_MINUS, false) => FADE_DOWN.store(true, Ordering::SeqCst),
                 (HID_USAGE_KEYBOARD_EQUAL, false) => FADE_UP.store(true, Ordering::SeqCst),
                 _ => {}
@@ -1559,7 +1573,7 @@ fn run() -> Result<(), String> {
                     }
                 }
                 // Read the selected saved result ahead of an explicit open.
-                // This leaves the History list visible, but makes → immediate
+                // This leaves the History list visible, but makes backslash immediate
                 // for recently selected rows.  A new arrow selection cancels
                 // only its own stale fetch; it never touches a live Council run.
                 if !history_detail_open {
@@ -1604,7 +1618,7 @@ fn run() -> Result<(), String> {
             let focus_command=mac_shortcuts::take_code_focus_command();
             // A verified coding result opened from HH is just as safe to read
             // as the current live result. The history list itself is not: a
-            // person must first open a result with →.
+            // person must first open a result with backslash.
             // These are Coding-solution-only controls. They may be triggered
             // globally while Coding is the selected surface, but must never
             // hijack an active MCQ view; History permits them only after a
@@ -3405,17 +3419,26 @@ fn coding_sidebar_evidence(body:&Value)->Value {
 }
 
 fn coding_overlay_state(job: &SubmittedJob) -> Value {
-    let progress = job_progress_message(job);
-    let phase = match job.status.as_str() {
-        "failed" | "needs_attention" | "cancelled" => "error",
-        "completed" => "done",
-        _ => "running",
-    };
     let body = job.report.as_ref().map(|r| r.get("report").unwrap_or(r));
     let candidates: Vec<Value> = body.and_then(|b| b.get("candidates"))
         .and_then(Value::as_array).cloned().unwrap_or_default();
     let winner = body.and_then(|b| b.get("winner")).and_then(Value::as_str)
         .unwrap_or("").trim();
+    let solution = body.and_then(|b| coding_solution_from_report(b, winner, &candidates));
+    let completed_without_solution = job.status == "completed" && solution.is_none();
+    let phase = match job.status.as_str() {
+        "failed" | "needs_attention" | "cancelled" => "error",
+        "completed" if completed_without_solution => "error",
+        "completed" => "done",
+        _ => "running",
+    };
+    let fallback_error = completed_without_solution.then_some(
+        "Council finished without producing a verified primary solution. No unverified code is being shown.");
+    let progress = if completed_without_solution {
+        fallback_error.unwrap_or_default().to_string()
+    } else {
+        job_progress_message(job)
+    };
     let agents = if candidates.is_empty() {
         coding_agents_from_events(job)
     } else {
@@ -3430,9 +3453,17 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
                 .and_then(Value::as_array).into_iter().flatten()
                 .find(|row|row.get("letter").and_then(Value::as_str)==Some(letter))
                 .and_then(|row|row.get("gate").and_then(Value::as_str)).unwrap_or("untested");
-            let status = if error.is_some() || gate=="fail" { "error" }
+            let candidate_error = if completed_without_solution && !has_code {
+                Some("No complete runnable code returned")
+            } else if completed_without_solution && error.is_none() && gate!="fail" {
+                Some("No candidate passed verification")
+            } else { error };
+            let status = if error.is_some() || gate=="fail" || completed_without_solution { "error" }
                 else if has_code { "done" } else { "pending" };
             let detail = if error.is_some() { "Solver failed" }
+                else if completed_without_solution && !has_code { "No complete runnable code returned" }
+                else if completed_without_solution && gate=="fail" { "Candidate generated · E2B verification failed" }
+                else if completed_without_solution { "Candidate not verified · no solution is shown" }
                 else if gate=="pass" && letter.eq_ignore_ascii_case(winner) {"Council winner · E2B passed"}
                 else if gate=="pass" {"E2B tests passed · Council reviewed"}
                 else if gate=="fail" {"Answer generated · E2B failed"}
@@ -3440,12 +3471,11 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
                 else {"Awaiting model answer"};
             serde_json::json!({
                 "id": letter, "label": model.rsplit('/').next().unwrap_or(model),
-                "model": model, "status": status, "error": error,
-                "detail": detail, "gate": gate
+                "model": model, "status": status, "error": candidate_error,
+                "detail": detail, "gate": gate,
             })
         }).collect()
     };
-    let solution = body.and_then(|b| coding_solution_from_report(b, winner, &candidates));
     let tests = body.map(|body| coding_tests_from_report(body, winner)).unwrap_or_default();
     // Every selected port owns its own independent test evidence. Do not
     // present Python cases as if a Rust/C++ translation had run them.
@@ -3466,8 +3496,8 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
         .collect();
     serde_json::json!({
         "runId": job.id, "updatedAt": now(), "kind": "coding",
-        "phase": phase, "status": job.status,
-        "progress": progress, "error": job.error,
+        "phase": phase, "status": if completed_without_solution { "needs_attention" } else { job.status.as_str() },
+        "progress": progress, "error": job.error.as_deref().or(fallback_error),
         "agents": agents, "solution": solution, "tests": tests,
         "portCases": port_cases,
         "presentation": body.and_then(|b| b.get("presentation")).cloned(),
@@ -3513,6 +3543,8 @@ fn coding_agents_from_events(job: &SubmittedJob) -> Vec<Value> {
         }).filter(|models| !models.is_empty())
     });
     let Some(models) = models else { return vec![]; };
+    let coding_recovery_exhausted = job.events.iter().any(|event|
+        event.get("phase").and_then(Value::as_str) == Some("coding_no_usable_solution"));
 
     models.into_iter().take(4).enumerate().map(|(index, model)| {
         let event = job.events.iter().rev().find(|event| {
@@ -3522,8 +3554,14 @@ fn coding_agents_from_events(job: &SubmittedJob) -> Vec<Value> {
         let failed = event.is_some_and(|event| event.get("phase").and_then(Value::as_str) == Some("solver_failed"));
         let done = event.is_some_and(|event| event.get("phase").and_then(Value::as_str) == Some("solver_done"));
         let error = failed.then(|| event.and_then(|event| event.get("message").and_then(Value::as_str)).unwrap_or("Model failed.").to_string());
-        let status = if failed { "error" } else if done { "done" } else if job.status == "queued" { "pending" } else { "running" };
-        let detail = if failed { error.clone().unwrap_or_default() } else if done { "Answer ready; Council is continuing review.".to_string() } else if job.status == "queued" { "Waiting for Council to select eligible agents.".to_string() } else { "Generating candidate answer.".to_string() };
+        let no_code = coding_recovery_exhausted && done && !failed;
+        let status = if failed || no_code { "error" } else if done { "done" } else if job.status == "queued" { "pending" } else { "running" };
+        let detail = if no_code { "No complete runnable code returned.".to_string() }
+            else if failed { error.clone().unwrap_or_default() }
+            else if done { "Answer ready; Council is continuing review.".to_string() }
+            else if job.status == "queued" { "Waiting for Council to select eligible agents.".to_string() }
+            else { "Generating candidate answer.".to_string() };
+        let error = if no_code { Some("No complete runnable code returned.".to_string()) } else { error };
         let label = model.rsplit('/').next().unwrap_or(&model).replace('-', " ");
         serde_json::json!({ "id": format!("seat-{}", index + 1), "label": label, "model": model,
             "status": status, "detail": detail, "error": error })
@@ -4206,7 +4244,7 @@ fn overlay_html() -> &'static str {
             function overlayDiffRows(before,after){
               const a=String(before||'').split('\n'),b=String(after||'').split('\n'),out=[];
               if(a.length*b.length>90000||String(before||'').length+String(after||'').length>98304)
-                return [['summary','The provisional and final solutions differ. This diff is too large to render safely; use Show final to view the verified code.']];
+                return [['summary','The code versions differ. This diff is too large to render safely; use the button to view verified code.']];
               const dp=Array.from({length:a.length+1},()=>new Uint16Array(b.length+1));
               for(let i=a.length-1;i>=0;i--)for(let j=b.length-1;j>=0;j--)
                 dp[i][j]=a[i]===b[j]?dp[i+1][j+1]+1:Math.max(dp[i+1][j],dp[i][j+1]);
@@ -4217,6 +4255,20 @@ fn overlay_html() -> &'static str {
                 else out.push(['add',b[j++]]);
               }
               return out;
+            }
+            function renderOverlayDiff(target,before,after,language){
+              const rows=overlayDiffRows(before,after);
+              target.style.setProperty('--indent-step',indentGuideStep(rows.map(([,line])=>line))+'ch');
+              target.replaceChildren();
+              rows.forEach(([change,line])=>{
+                const li=document.createElement('li');li.dataset.change=change;
+                const code=document.createElement('code');
+                const marker=document.createElement('span');
+                marker.textContent=change==='remove'?'- ':change==='add'?'+ ':'  ';
+                code.appendChild(marker);
+                appendGuidedCode(code,line,language,false);
+                li.append(code);target.append(li);
+              });
             }
             function renderOverlayCodeResult(target,state){
               const current=state.solution||{},history=Array.isArray(state.solutionHistory)?state.solutionHistory:[];
@@ -4230,24 +4282,14 @@ fn overlay_html() -> &'static str {
               const button=document.getElementById('overlay-diff-toggle');
               if(button){button.hidden=!changed;button.textContent=window.__overlayDiffHidden?'View changes':'Show final';}
               if(!changed||window.__overlayDiffHidden){renderCodeLines(target,current.code,current.language);return;}
-              const rows=overlayDiffRows(previous.code,final.code);
-              target.style.setProperty('--indent-step',indentGuideStep(rows.map(([,line])=>line))+'ch');
-              target.replaceChildren();
-              rows.forEach(([change,line])=>{
-                const li=document.createElement('li');li.dataset.change=change;
-                const code=document.createElement('code');
-                const marker=document.createElement('span');
-                marker.textContent=change==='remove'?'- ':change==='add'?'+ ':'  ';
-                code.appendChild(marker);
-                appendGuidedCode(code,line,current.language,false);
-                li.append(code);target.append(li);
-              });
+              renderOverlayDiff(target,previous.code,final.code,current.language);
             }
             window.toggleOverlayCodeDiff=function(){
               const state=window.__overlayCurrentState;
               if(!state||!state.solution)return;
               window.__overlayDiffHidden=!window.__overlayDiffHidden;
               renderOverlayCodeResult(document.getElementById('solution-code'),state);
+              renderVerifiedPorts(state);
             };
             document.addEventListener('click',function(event){
               if(event.target&&event.target.id==='overlay-diff-toggle')window.toggleOverlayCodeDiff();
@@ -4309,7 +4351,7 @@ fn overlay_html() -> &'static str {
               if(!root){
                 root=document.createElement('section');
                 root.id='shared-history-sheet';root.className='history-sheet';
-                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Coding Overlay</div><div class="history-title">History</div><div class="history-description">Coding overlay results only</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate · → Open result</span><span>cc Coding · hh History</span></footer>';
+                root.innerHTML='<header class="history-heading"><div><div class="history-eyebrow">Council Editor / Coding Overlay</div><div class="history-title">History</div><div class="history-description">Coding overlay results only</div></div><div class="history-counter" id="history-counter">0 sessions</div></header><div class="history-list" id="history-list"></div><footer class="history-footer"><span>↑ / ↓ Navigate · \\ Open result</span><span>cc Coding · hh History</span></footer>';
                 panel.appendChild(root);
               }
               root.hidden=false;
@@ -4386,6 +4428,8 @@ fn overlay_html() -> &'static str {
                 .replace(/\s+/g,' ').trim();
               if(/(?:\b524\b|upstream model timed out)/i.test(raw))return 'Model timed out upstream; Council retried it.';
               if(/empty model response/i.test(raw))return 'Model returned no usable answer.';
+              if(/no complete runnable code|no usable .*code after recovery/i.test(raw))return 'Model returned no usable solution code.';
+              if(/no verified primary solution|no candidate passed verification/i.test(raw))return 'No candidate passed verification; unverified code remains hidden.';
               if(/timed out|timeout/i.test(raw))return 'Model timed out.';
               return raw?('Model failed: '+raw.slice(0,160)):'Model failed.';
             }
@@ -4423,13 +4467,14 @@ fn overlay_html() -> &'static str {
                 .filter(port=>port&&port.status==='verified'&&String(port.code||'').trim())
                 .map(port=>canonicalPortLanguage(port.language)==='cpp'?'C++':
                   canonicalPortLanguage(port.language)==='rust'?'Rust':'Python'):[];
+              const primaryReady=Boolean(state.solution&&String(state.solution.code||'').trim());
               progress.textContent=state.phase==='done'
-                ? (verifiedNames.length?'Council completed. Primary verified; independently tested ports: '+verifiedNames.join(', ')+'.':'Council completed. Only the verified primary is available; requested ports did not pass verification.'):
+                ? (verifiedNames.length?'Council completed. Primary verified; independently tested ports: '+verifiedNames.join(', ')+'.':primaryReady?'Council completed. The verified primary solution is available; no language ports are verified yet.':'Council finished without a verified primary solution.'):
                 state.phase==='error'?'Council needs attention. See the diagnostic below.':
                 stage+(state.progress&&stage!==state.progress?' · '+String(state.progress).slice(0,145):'');
               agents.after(progress);
               const failures=selected.filter((agent)=>agent.error).map((agent)=>(agent.label||agent.id||'Council agent')+': '+friendlyModelFailure(agent.error));
-              if(failures.length||state.phase==='error'){const diagnostic=document.createElement('div');diagnostic.className='overlay-diagnostics';const label=document.createElement('b');label.textContent='Run diagnostics';const message=document.createElement('span');message.textContent=failures.join(' · ')||'The Council run reported an issue. The captured images and any available answer remain available.';diagnostic.append(label,message);progress.after(diagnostic);}
+              if(failures.length||state.phase==='error'){const diagnostic=document.createElement('div');diagnostic.className='overlay-diagnostics';const label=document.createElement('b');label.textContent='Run diagnostics';const message=document.createElement('span');message.textContent=failures.join(' · ')||friendlyModelFailure(state.error)||'The Council run reported an issue. The captured images and any available answer remain available.';diagnostic.append(label,message);progress.after(diagnostic);}
             }
             function renderHistoryContext(state){
               const old=document.getElementById('overlay-history-context');if(old)old.remove();
@@ -4455,6 +4500,7 @@ fn overlay_html() -> &'static str {
               const desired=canonicalPortLanguage(language);
               if(!['python','rust','cpp'].includes(desired))return false;
               window.__overlayDesiredLanguage=desired;
+              window.__overlayDiffHidden=false;
               renderVerifiedPorts(state);
               if(reading)window.renderCodeFocusSheet();
               return true;
@@ -4510,8 +4556,17 @@ fn overlay_html() -> &'static str {
                 return;
               }
               const code=document.getElementById('solution-code');
+              const repaired=chosen!==primary&&chosen.repair&&chosen.repair.status==='verified'&&
+                String(chosen.repair.beforeCode||'').trim()&&chosen.repair.beforeCode!==chosen.code;
+              const diffButton=document.getElementById('overlay-diff-toggle');
+              if(diffButton&&chosen!==primary){
+                diffButton.hidden=!repaired;
+                diffButton.textContent=window.__overlayDiffHidden?'View repair changes':'Show corrected code';
+              }
               if(code){
-                renderCodeLines(code,String(chosen.code||''),String(chosen.language||desired));
+                if(repaired&&!window.__overlayDiffHidden)
+                  renderOverlayDiff(code,chosen.repair.beforeCode,chosen.code,chosen.language||desired);
+                else renderCodeLines(code,String(chosen.code||''),String(chosen.language||desired));
                 code.scrollTop=0;
               }
               if(title)title.textContent='solution.'+(desired==='cpp'?'cpp':desired==='python'?'py':'rs');
@@ -4692,13 +4747,15 @@ mod tests {
                 },
                 "suites":[{"language":"python","harness":
                     "assert solve([]) == []\nassert solve([1]) == [1]\nassert solve([1,1]) == [1,1]"}],
-                "ports":[{"language":"rust","status":"verified","code":"fn main() {}"}]
+                "ports":[{"language":"rust","status":"verified","code":"fn main() {}",
+                    "repair":{"status":"verified","beforeCode":"fn main() { broken() }"}}]
             }})),
         };
         let projected=coding_overlay_state(&job);
         assert_eq!(projected["agents"][0]["status"],"done");
         assert_eq!(projected["agents"][0]["gate"],"pass");
         assert_eq!(projected["ports"][0]["language"],"rust");
+        assert_eq!(projected["ports"][0]["repair"]["beforeCode"],"fn main() { broken() }");
         assert_eq!(projected["insights"]["edgeCases"].as_array().map(Vec::len),Some(3));
         assert_eq!(projected["insights"]["summary"],"Return the given value unchanged.");
         let mut no_evidence=job.clone();

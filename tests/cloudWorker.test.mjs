@@ -1,5 +1,7 @@
 // Hermetic: config now comes from the database, and this test must not inherit
 // whatever is in a developer's .development.env.
+import { createHash } from "node:crypto";
+
 process.env.CODE_AUDITOR_CONFIG = "off";
 process.env.NODE_ENV = "test";
 process.env.SUPABASE_URL = "https://project.supabase.co";
@@ -30,6 +32,7 @@ let cleanRateRetries = 0;
 // Flipped for the second scenario, so the generated harness rejects every
 // candidate the way a harness with a wrong expectation does.
 let HARNESS_WRONG = false;
+let REPAIRABLE_EDGE = false;
 let EMPTY_SPEC_ONCE = true;
 let EMPTY_SPEC_ALWAYS = false;
 // Scenario 3: one route answers nothing, ever, the way a dead endpoint does.
@@ -265,7 +268,14 @@ HARNESS: javascript
 let failed = 0;
 const cases = [
   { name: "empty", input: [], want: ${HARNESS_WRONG ? 99 : 0} },
+  { name: "singleton", input: [1], want: 1 },
   { name: "three", input: [1, 2, 3], want: ${HARNESS_WRONG ? 99 : 3} },
+  { name: "duplicates", input: [4, 4], want: 2 },
+  { name: "negative", input: [-1, -2], want: 2 },
+  { name: "zeros", input: [0, 0], want: 2 },
+  { name: "boundary", input: [7], want: 1 },
+  { name: "larger", input: [1, 2, 3, 4], want: 4 },
+  ${REPAIRABLE_EDGE ? '{ name: "missing", input: null, want: 0 },' : ''}
 ];
 for (const c of cases) {
   const got = solve(c.input);
@@ -273,6 +283,11 @@ for (const c of cases) {
   else { console.log("FAIL " + c.name + " got=" + got + " want=" + c.want); failed++; }
 }
 if (failed) process.exit(1);
+\`\`\`
+REFERENCE: javascript
+\`\`\`javascript
+/* independent reference */
+export function solve(xs) { return xs == null ? 0 : xs.length; }
 \`\`\`
 TESTS>>>`);
     }
@@ -324,6 +339,10 @@ const { runCouncilJob: runWorkerJob, remoteScript } = await import("../scripts/c
 const javaScript = remoteScript("java", "class Main {}", "e2b");
 check("Java E2B command is concrete, not an undefined template variable",
   javaScript.includes("command='javac Main.java && java Main'") && !javaScript.includes("JAVA_COMMAND"));
+check("E2B execution streams output while preserving bounded final evidence",
+  javaScript.includes("tee >(head -c 65536 > stdout.txt)") &&
+  javaScript.includes("tee >(head -c 65536 > stderr.txt)") &&
+  javaScript.includes("CA_E2B_EXECUTION_STARTED"));
 check("every supported E2B language builds a runner script",
   ["python", "javascript", "typescript", "bash", "ruby", "php", "c", "cpp", "java", "go", "rust"]
     .every((language) => remoteScript(language, "// smoke", "e2b").includes("CA_EXIT:")));
@@ -333,10 +352,17 @@ const runCouncilJob = job => runWorkerJob({ ...job,
 let EXECUTIONS = 0;
 globalThis.__COUNCIL_E2B_TEST_DOUBLE__ = async (_language, program) => {
   EXECUTIONS++;
-  const wrong = /want:\s*99/.test(program);
-  const stdout = wrong
-    ? "FAIL empty got=0 want=99\nFAIL three got=3 want=99\n"
-    : "PASS empty\nPASS three\n";
+  const isReference = program.includes("/* independent reference */");
+  const wrongHarness = /want:\s*99/.test(program);
+  const needsRepair = /name:\s*"missing"/.test(program) && !/return xs \? xs\.length : 0/.test(program);
+  const wrong = !isReference && (wrongHarness || needsRepair);
+  const stdout = isReference
+    ? "PASS empty\nPASS singleton\nPASS three\nPASS duplicates\nPASS negative\nPASS zeros\nPASS boundary\nPASS larger\n"
+    : wrongHarness
+    ? "FAIL empty got=0 want=99\nPASS singleton\nFAIL three got=3 want=99\nPASS duplicates\nPASS negative\nPASS zeros\nPASS boundary\nPASS larger\n"
+    : needsRepair
+      ? "PASS empty\nPASS singleton\nPASS three\nPASS duplicates\nPASS negative\nPASS zeros\nPASS boundary\nPASS larger\nFAIL missing got=TypeError want=0\n"
+      : `PASS empty\nPASS singleton\nPASS three\nPASS duplicates\nPASS negative\nPASS zeros\nPASS boundary\nPASS larger\n${REPAIRABLE_EDGE ? 'PASS missing\n' : ''}`;
   return {
     ok: !wrong, exitCode: wrong ? 1 : 0, stdout, stderr: "", durationMs: 12,
     remoteElapsedMs: 2, peakMemoryKb: 8192, runtime: "e2b test double",
@@ -371,7 +397,12 @@ check("report has judges", reports[0]?.report?.judges?.length === 1, String(repo
 check("report has benchmark suite", reports[0]?.report?.suites?.length === 1, String(reports[0]?.report?.suites?.length));
 check("empty harness response was retried with another route",
   modelCalls.filter(c => c.messages?.[0]?.content?.includes("You write test harnesses for candidate solutions")).length >= 2);
-check("report has passing E2B runs", reports[0]?.report?.runs?.A?.passed === 2 && reports[0]?.report?.runs?.B?.passed === 2, JSON.stringify(reports[0]?.report?.runs));
+check("report has passing E2B runs", reports[0]?.report?.runs?.A?.passed === 8 && reports[0]?.report?.runs?.B?.passed === 8, JSON.stringify(reports[0]?.report?.runs));
+check(
+  "published winner fingerprint matches the exact E2B-tested source",
+  reports[0]?.report?.runs?.A?.codeDigest === createHash("sha256").update(reports[0]?.report?.candidates?.[0]?.final?.code || "").digest("hex"),
+  String(reports[0]?.report?.runs?.A?.codeDigest)
+);
 check("downloaded image for model calls", modelCalls.some((c) => Array.isArray(c.messages[1].content) && c.messages[1].content.some((p) => p.type === "image_url")));
 check("benchmark phase event recorded", events.some((e) => e.phase === "benchmark_done"));
 check("review phase event recorded", events.some((e) => e.phase === "review_done"));
@@ -385,7 +416,7 @@ check("only the candidate with a substantive concern was asked to revise",
   events.some((e) => e.phase === "revision_done" && e.payload?.letter === "B"));
 check(
   "only the revised candidate was re-executed",
-  Object.keys(reports[0]?.report?.revisedRuns || {}).length === 1 && reports[0]?.report?.revisedRuns?.B?.passed === 2,
+  Object.keys(reports[0]?.report?.revisedRuns || {}).length === 1 && reports[0]?.report?.revisedRuns?.B?.passed === 8,
   JSON.stringify(reports[0]?.report?.revisedRuns)
 );
 check(
@@ -548,6 +579,11 @@ try { await runCouncilJob({
 
 check("both candidates were executed and rejected", events.filter(e => e.phase === "benchmark_done").length >= 2,
   JSON.stringify(events.map(e => e.phase)));
+check("failed candidates and E2B evidence reached Council reviewers",
+  events.filter(e => e.phase === "review_done").length >= 2 &&
+  modelCalls.some(c => String(c.messages?.[0]?.content).includes("senior engineer on a review council") &&
+    textOf(c).includes("FAIL empty got=0 want=99") && textOf(c).includes("Candidate A")),
+  JSON.stringify(events.filter(e => e.phase === "review_done").map(e => e.payload?.model)));
 check("no unverified coding solution was published", rejectedUnverified && reports.length === 0,
   JSON.stringify({ rejectedUnverified, reports: reports.length }));
 check(
@@ -561,6 +597,41 @@ check(
   JSON.stringify(events.filter((e) => e.phase === "revision_done").map((e) => e.payload?.letter))
 );
 check("the job never claimed completion", !patches.some((p) => p.status === "completed"));
+
+// A real code defect must travel E2B -> reviewers -> solver revision -> E2B
+// retest before the final result can be published.
+HARNESS_WRONG = false;
+REPAIRABLE_EDGE = true;
+events.length = 0;
+patches.length = 0;
+reports.length = 0;
+modelCalls.length = 0;
+await runCouncilJob({
+  id: "job-repairable",
+  session_id: "session-1",
+  settings_snapshot: {
+    mode: "auto", maxTokens: 2048,
+    gatewayBaseUrl: "https://api.tokenrouter.com/v1",
+    councilModels: [
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
+      { id: "moonshotai/kimi-k3", endpoint: "chat" },
+    ],
+    councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
+  },
+});
+check("repairable E2B case reached Council reviewers",
+  modelCalls.some(c => String(c.messages?.[0]?.content).includes("senior engineer on a review council") &&
+    textOf(c).includes("FAIL missing got=TypeError want=0")));
+check("repairable E2B case reached the revising solver",
+  modelCalls.some(c => String(c.messages?.[0]?.content).includes("senior engineer revising your own solution") &&
+    textOf(c).includes("FAIL missing got=TypeError want=0")));
+check("judge-reviewed repairs were independently retested before publication",
+  reports[0]?.report?.runs?.A?.failed === 1 &&
+  reports[0]?.report?.revisedRuns?.A?.passed === 9 &&
+  reports[0]?.report?.revisedRuns?.A?.failed === 0 &&
+  reports[0]?.report?.standing === "verified" &&
+  patches.some(p => p.status === "completed"));
+REPAIRABLE_EDGE = false;
 
 // --- a route that never answers is asked once, not at every stage ----------
 console.log("\n3. a model that times out is benched for the rest of the job");
@@ -905,7 +976,7 @@ await runCouncilJob({
     councilModels: [
       { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
-      { id: "z-ai/glm-5.3", endpoint: "chat" },
+      { id: "deepseek/deepseek-v4-pro-max", endpoint: "chat" },
     ],
     councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
@@ -942,7 +1013,7 @@ await runCouncilJob({
     councilModels: [
       { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
       { id: "moonshotai/kimi-k3", endpoint: "chat" },
-      { id: "z-ai/glm-5.3", endpoint: "chat" },
+      { id: "deepseek/deepseek-v4-pro-max", endpoint: "chat" },
     ],
     councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
   },
@@ -985,7 +1056,7 @@ check("gateway aliases became exact Clean model IDs", apiRoutes.length > 0 &&
 check("the unapproved model was never called", !apiRoutes.some(route => route.model === "unapproved-model"));
 check("Clean API received the screenshot", modelCalls.some(call =>
   call.messages?.[1]?.content?.some?.(part => part.type === "image_url")));
-check("Clean API produced a tested final solution", reports[0]?.winner === "A" && reports[0]?.report?.runs?.A?.passed === 2);
+check("Clean API produced a tested final solution", reports[0]?.winner === "A" && reports[0]?.report?.runs?.A?.passed === 8);
 
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall cloud worker checks passed\n");
 process.exit(fail ? 1 : 0);
