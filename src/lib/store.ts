@@ -4655,7 +4655,7 @@ async function generateVerifiedPorts(
         ? providedCaseEvidence(result.stdout, requiredHarnessCases(suite)) : countCases(result.stdout);
       const run: CandidateRun = { letter: `port:${language}`, ran: true,
         ok: result.ok && counts.passed >= requiredHarnessCases(suite) && counts.failed === 0 &&
-          (suite.source !== "provided" || ("complete" in counts && counts.complete)),
+          (suite.source !== "provided" || Boolean("complete" in counts && counts.complete)),
         evidenceSource: suite.source || "generated",
         providedCaseCount: suite.source === "provided" ? suite.providedCaseCount : 0,
         passed: counts.passed, failed: counts.failed, durationMs: result.durationMs, provider: "e2b",
