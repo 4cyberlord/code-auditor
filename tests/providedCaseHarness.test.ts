@@ -46,7 +46,7 @@ assert.equal(suite.providedCaseCount, 3);
 assert.equal(requiredHarnessCases(suite), 3);
 const program = spliceSuite(suite, correct);
 assert.ok(program?.includes("CA_CASE"));
-const success = runProgram(program);
+const success = runProgram(program!);
 assert.equal(success.status, 0, success.stderr);
 assert.deepEqual(providedCaseEvidence(success.stdout, 3), {passed: 3, failed: 0, complete: true});
 assert.equal(countCases(success.stdout).passed, 3);
