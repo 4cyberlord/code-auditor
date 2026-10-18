@@ -80,6 +80,7 @@ import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from ".
 import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
 import { structuralTranslationGuidanceFor } from "./structuralTranslationGuidance.ts";
 import { fingerprintCode } from "./codeFingerprint.ts";
+import { primaryCodingLanguage, primaryFirstInstruction } from "./primaryDeliveryPolicy.ts";
 import { buildProvidedHarness, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
 import { needsCandidateRevision, classifyCandidateRun } from "./revisionPolicy.ts";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
@@ -3113,7 +3114,7 @@ export const useStore = create<State>((set, get) => ({
               plan.context,
               plan.sendImages ? images : [],
               knowledge
-            ),
+            ) + "\n\n" + primaryFirstInstruction(),
             images: plan.sendImages ? allImages : [],
             maxTokens: settings.maxTokens,
             temperature: 0,
@@ -4620,6 +4621,8 @@ async function generateVerifiedPorts(
   const model = settings.synthesisModel || source.model;
   const ports: VerifiedPort[] = [];
   for (const language of targets) {
+    // A new Council run must not receive late ports from an earlier question.
+    if (get().council.runId !== runId || get().council.phase === "cancelled") break;
     try {
       const request = [
         `Port Candidate ${source.letter}'s already verified algorithm into ${language}.`,
@@ -4678,7 +4681,9 @@ async function generateVerifiedPorts(
       ports.push({ language, sourceLetter: source.letter, model, code: "", status: "failed",
         error: cleanError(String(error)) });
     }
-    set(st => ({ council: { ...st.council, ports: [...ports] } }));
+    if (get().council.runId === runId && get().council.phase !== "cancelled") {
+      set(st => ({ council: { ...st.council, ports: [...ports] } }));
+    }
   }
   return ports;
 }
@@ -4978,6 +4983,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // only some prompts saw would be worse than none: the stages that read it and
   // the stages that did not would be answering different questions.
   const problem = contractText ? `${s0.note}\n\n---\n\n${contractText}` : s0.note;
+  const primaryLanguage = primaryCodingLanguage([problem, s0.extraction.context].filter(Boolean).join("\n\n"));
 
   set((st) => ({ council: { ...st.council, phase: "solving" as const } }));
   const seats = Math.max(0, COUNCIL_SIZE.solversMax - paneAnswers.length);
@@ -5084,11 +5090,8 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
               extractionCtx,
               s0.images,
               knowledge,
-              solutionPolicy(
-                settings.solutionLanguages?.length ? settings.solutionLanguages : undefined,
-                settings.memoryTargetKb || 9 * 1024
-              )
-            ),
+              solutionPolicy([primaryLanguage], settings.memoryTargetKb || 9 * 1024)
+            ) + "\n\n" + primaryFirstInstruction(),
             images: allImages,
             maxTokens: settings.maxTokens,
             temperature: 0,
@@ -5122,6 +5125,16 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       text,
       error: doneSlot?.error ?? null,
     });
+  }
+  // A foreign-language answer cannot demand a C++/Rust verification harness
+  // before we have selected the primary solution. Keep it as an errored seat.
+  if (field.some(c => c.final?.kind === "code")) {
+    for (const c of field) {
+      if (c.final?.kind === "code" && candidateLanguage(c.final) !== primaryLanguage) {
+        c.error = `Not selected for first-stage ${primaryLanguage} verification: returned ${candidateLanguage(c.final) || "unknown"}.`;
+        c.final = null;
+      }
+    }
   }
   set((st) => ({
     council: { ...st.council, candidates: field },
@@ -5591,29 +5604,30 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // result; they are optional, language-native implementations of that exact
   // already-verified solution and each carries independent E2B evidence.
   const winnerCandidate = fieldNow.find(candidate => candidate.letter === winner);
-  let ports: VerifiedPort[] = [];
-  if (winnerCandidate) {
-    // Publish the verified primary-language result immediately. Optional
-    // language ports are deliberately downstream work and must never keep the
-    // user waiting for code that already passed the shared E2B suite.
-    set(st => ({ council: { ...st.council, phase: "porting", synthesis, winner, dossier, ports: [] } }));
-    // The technical report is also downstream work. Start it alongside the
-    // optional language ports so time/space, suggested bounds, functions, and
-    // style are ready with the primary verified answer instead of remaining
-    // "Pending review" until every translation has finished.
-    void get().runReview();
-    ports = await generateVerifiedPorts(get, set, runId, winnerCandidate, problem, knowledge, settings, suites);
-  }
-
+  // Publish exactly the fingerprint-matched E2B winner NOW. Auxiliary reference
+  // implementations may use additional model calls and independent harnesses,
+  // but none of those calls may hold the primary result or change its verdict.
   set((st) => ({
-    council: { ...st.council, phase: error ? "error" : "done", synthesis, winner, dossier, ports, error },
+    council: { ...st.council, phase: error ? "error" : "done",
+      synthesis, winner, dossier, ports: [], error },
     running: false,
   }));
   void get().autoTitle();
-  // The visible solution may have changed from a provisional pane answer to
-  // the measured council winner. Review that exact code, not the old pane.
   if (winner) void get().runReview();
   void get().persistRun();
+
+  if (winnerCandidate && !error) {
+    void generateVerifiedPorts(get, set, runId, winnerCandidate, problem, knowledge, settings, suites)
+      .then(() => {
+        if (get().council.runId === runId && get().council.phase === "done") {
+          void get().persistRun();
+        }
+      })
+      .catch((portError) => {
+        // Ports are optional aids; their failures cannot revoke an E2B winner.
+        console.warn("Optional language ports unavailable:", cleanError(String(portError)));
+      });
+  }
 }
 
 /**
