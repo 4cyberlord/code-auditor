@@ -4,6 +4,7 @@ import { reconcileProblemEvidence, stripExampleBlocks, visionEvidenceSystemPromp
 const original = "Find the sum of two numbers.\nExample 1:\nInput: nums = [1, 2]\nOutput: 3\nConstraints:\n1 <= nums.length <= 10";
 const correct = "Example 1:\nInput: nums = [1, 2]\nOutput: 3";
 const incorrect = "Example 1:\nInput: nums = [1, 2]\nOutput: 7";
+const unordered = "Task.\nExample 1:\nInput: x = [1, 2]\nOutput: [2, 1]\nExplanation: Output may be in any order.";
 
 const typed = reconcileProblemEvidence(original, false, []);
 assert.equal(typed.status, "text");
@@ -22,6 +23,14 @@ for (const readers of [[correct], [correct, incorrect], [correct, ""], ["", ""]]
   assert.equal(uncertain.question.includes("Output: 3"), false,
     "uncorroborated OCR expected answers must never reach the executable harness");
 }
+const whitespaceDisagreement = reconcileProblemEvidence("Task.", true, [
+  "Example 1:\nInput: x = 1\nOutput: ['a  b']",
+  "Example 1:\nInput: x = 1\nOutput: ['a b']",
+]);
+assert.equal(whitespaceDisagreement.fixtures.length, 0,
+  "distinct literal string outputs must not be collapsed into agreement");
+assert.match(stripExampleBlocks(unordered), /Multiple valid outputs/,
+  "non-unique output constraints must survive removal of the screenshot sample");
 assert.doesNotMatch(stripExampleBlocks(original), /Input:\s*nums/);
 assert.match(visionEvidenceSystemPrompt(), /ORIGINAL screenshots/);
 assert.match(visionEvidenceSystemPrompt(), /Never solve the problem/);
