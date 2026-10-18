@@ -3024,7 +3024,7 @@ export const useStore = create<State>((set, get) => ({
     const knowledge = solverKnowledgePack(get, [note, coordinatorTopic].filter(Boolean).join(" "));
     const sys = systemPrompt(
       settings.mode,
-      resolveAnswerLanguage(settings.outputLanguage || "Python", "")
+      resolveAnswerLanguage(primaryCodingLanguage(note, settings.outputLanguage) === "cpp" ? "C++" : primaryCodingLanguage(note, settings.outputLanguage) === "rust" ? "Rust" : "Python", "")
     );
 
     if (options?.adaptivePanels) {
@@ -5075,7 +5075,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     [s0.note, extractionCtx, contractQuery(contract)].filter((x) => x && x.trim()).join("\n\n"));
   const sys = systemPrompt(
     settings.mode,
-    resolveAnswerLanguage(settings.outputLanguage || "Python", get().extraction.agreement?.merged.language ?? "")
+    resolveAnswerLanguage(primaryLanguage === "cpp" ? "C++" : primaryLanguage === "rust" ? "Rust" : "Python", "")
   );
   const allImages = s0.images.map(modelImage);
   await Promise.all(
