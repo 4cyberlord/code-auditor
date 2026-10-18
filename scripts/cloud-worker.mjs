@@ -3222,7 +3222,8 @@ export async function runCouncilJob(job) {
   // the original model selection.
   if (inferredKind === "code") {
     const recoveryTargets = candidates.filter((candidate) =>
-      !(candidate?.final?.kind === "code" && candidate.final.code?.trim()) &&
+      !(candidate?.final?.kind === "code" && candidate.final.code?.trim() &&
+        candidateLanguage(candidate.final) === primaryLanguage) &&
       (candidate?.text || /empty model response/i.test(candidate?.error || ""))).slice(0, 2);
     if (recoveryTargets.length) {
       await addEvent(job.id, "warn", "solver_code_recovery_started",
@@ -3246,7 +3247,7 @@ export async function runCouncilJob(job) {
             reasoning: "high",
           });
           const retryFinal = parseFinal(retryText);
-          if (retryFinal?.kind === "code" && retryFinal.code?.trim()) {
+          if (retryFinal?.kind === "code" && retryFinal.code?.trim() && candidateLanguage(retryFinal) === primaryLanguage) {
             candidate.final = retryFinal;
             candidate.text = retryText;
             candidate.error = null;
@@ -3274,6 +3275,18 @@ export async function runCouncilJob(job) {
     }
   }
 
+  // Ignore foreign-language candidate code during primary verification. The
+  // source remains in the audit log; ports start only after the final winner.
+  if (inferredKind === "code") {
+    for (const candidate of candidates.filter(Boolean)) {
+      if (candidate.final?.kind === "code" && candidateLanguage(candidate.final) !== primaryLanguage) {
+        await addEvent(job.id, "warn", "non_primary_solution",
+          "Candidate " + candidate.letter + " returned an incompatible first-stage language.",
+          {letter:candidate.letter, model:candidate.model, expected:primaryLanguage}).catch(()=>{});
+        candidate.final = null;
+      }
+    }
+  }
   const answered = candidates.filter((candidate) => candidate?.text || candidate?.final);
   if (answered.length < 1) {
     const errors = candidates.filter(Boolean).map((candidate) => candidate.error || "").filter(Boolean);
