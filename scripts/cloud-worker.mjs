@@ -2930,12 +2930,7 @@ export async function runCouncilJob(job) {
   // manifest, and the house preference for what to write it in.
   const timer = phaseTimer();
   timer.enter("contract");
-  const policy = solutionPolicy(
-    Array.isArray(settings.solutionLanguages) && settings.solutionLanguages.length
-      ? settings.solutionLanguages
-      : ["Python","Rust","C++"],
-    Number(settings.memoryTargetKb || 20 * 1024)
-  );
+  const policy = solutionPolicy(["Python"], Number(settings.memoryTargetKb || 20 * 1024));
   // No knowledge argument here on purpose. `knowledgePackFor` retrieves against
   // text, and before anybody has answered there is no text — only a picture.
   // The library arrives the moment the panel produces words, which is also the
@@ -2993,7 +2988,6 @@ export async function runCouncilJob(job) {
   const inferredKind = questionLooksLikeCode
     ? "code"
     : (contracting.contract?.kind || reading.extraction?.kind || "");
-  const orderedLanguages=preferredLanguages(settings.solutionLanguages);
   const primaryLanguage=requiredProblemLanguage(question)||"python";
   const documentationQuery = [question, reading.extraction?.problemSummary,
     reading.extraction?.code].filter(Boolean).join("\n");
