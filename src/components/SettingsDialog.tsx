@@ -23,6 +23,7 @@ import * as bridge from "@/lib/bridge";
 import AccountCard from "./AccountCard";
 import HelperCard from "./HelperCard";
 import { classifyProbeResult } from "@/lib/probeFit";
+import { isVerifiedImageProbe } from "@/lib/visionModelPolicy";
 import { SELECTABLE_PRIMARY_MODEL_IDS, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "@/lib/primaryModels";
 import { PIN_LENGTH, authReauthenticate, reason, sanitizePin } from "@/lib/auth";
 import { refreshOfficialLanguageSources, type LanguageRefreshResult } from "@/lib/languageKnowledge";
@@ -1015,7 +1016,8 @@ function GatewayCard() {
                       {roles.length > 0 && <span className="role-tag">{roles.join(" + ")}</span>}
                       {probe && <ProbeBadge probe={probe} modelId={m} />}
                       <VisionBadge advertised={advertisedVision[m]}
-                        vision={probe?.vision} note={probe?.visionNote} />
+                        vision={isVerifiedImageProbe(probe) ? true : probe?.vision === false ? false : null}
+                        note={probe?.visionNote} />
                     </div>
                   );
                 })}
@@ -1048,7 +1050,8 @@ function GatewayCard() {
                 </span>
                 {probe && <ProbeBadge probe={probe} modelId={routeModel} />}
                 <VisionBadge advertised={advertisedVision[routeModel]}
-                  vision={probe?.vision} note={probe?.visionNote} />
+                  vision={isVerifiedImageProbe(probe) ? true : probe?.vision === false ? false : null}
+                  note={probe?.visionNote} />
               </div>
             );
           })}
