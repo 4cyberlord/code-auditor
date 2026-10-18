@@ -20,6 +20,8 @@ import "./lib/config.mjs";
 
 import { createHash, createHmac, createSign } from "node:crypto";
 import { buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "../src/lib/providedCaseHarness.ts";
+import { configuredCodeLanguage, providedTestBrief } from "../src/lib/primaryDeliveryPolicy.ts";
+import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "../src/lib/judgeUpgradePolicy.ts";
 import { executionId, validateExecution, e2bCommandFailure, parseExecutionOutput, executionStatus, classifyExecutionFailure, mapCandidateFailureLocation, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
@@ -215,6 +217,7 @@ const {
   parseCouncilSynthesis,
   parseJudgeReport,
   decideWinner,
+  agreedComplexityAudits,
   buildPresentation,
   mutateCode,
   oracleDigest,
@@ -2930,12 +2933,7 @@ export async function runCouncilJob(job) {
   // manifest, and the house preference for what to write it in.
   const timer = phaseTimer();
   timer.enter("contract");
-  const policy = solutionPolicy(
-    Array.isArray(settings.solutionLanguages) && settings.solutionLanguages.length
-      ? settings.solutionLanguages
-      : ["Python","Rust","C++"],
-    Number(settings.memoryTargetKb || 20 * 1024)
-  );
+  const policy = solutionPolicy([configuredCodeLanguage(settings.outputLanguage)], Number(settings.memoryTargetKb || 20 * 1024));
   // No knowledge argument here on purpose. `knowledgePackFor` retrieves against
   // text, and before anybody has answered there is no text — only a picture.
   // The library arrives the moment the panel produces words, which is also the
@@ -2993,8 +2991,9 @@ export async function runCouncilJob(job) {
   const inferredKind = questionLooksLikeCode
     ? "code"
     : (contracting.contract?.kind || reading.extraction?.kind || "");
-  const orderedLanguages=preferredLanguages(settings.solutionLanguages);
-  const primaryLanguage=requiredProblemLanguage(question)||orderedLanguages[0]||"python";
+  const languageEvidence=[contractText, reading.extraction?.code || ""].join("\n");
+  const primaryLanguage=/\bLANGUAGES:\s*(?:javascript|js)\b|\bexport\s+(?:default\s+)?function\s+[A-Za-z_$]\w*\s*\(/i.test(languageEvidence)
+    ? "javascript" : requiredProblemLanguage(question)||configuredCodeLanguage(settings.outputLanguage);
   const documentationQuery = [question, reading.extraction?.problemSummary,
     reading.extraction?.code].filter(Boolean).join("\n");
   const detectedDocsLanguage = inferDocumentationLanguage(documentationQuery,
@@ -3053,7 +3052,7 @@ export async function runCouncilJob(job) {
   // that language finally comes from — `job.extraction` was never a column, so
   // this had silently resolved to "unknown" on every cloud run ever made.
   const answerLanguage = resolveAnswerLanguage(
-    String(settings.outputLanguage || ""),
+    primaryLanguage === "cpp" ? "C++" : primaryLanguage === "rust" ? "Rust" : primaryLanguage === "python" ? "Python" : "",
     String(reading.extraction?.language || "")
   );
   await addEvent(job.id, "info", "answer_language", `Answering in ${answerLanguage.display || "the question's own language"}.`, {
@@ -3228,7 +3227,8 @@ export async function runCouncilJob(job) {
   // the original model selection.
   if (inferredKind === "code") {
     const recoveryTargets = candidates.filter((candidate) =>
-      !(candidate?.final?.kind === "code" && candidate.final.code?.trim()) &&
+      !(candidate?.final?.kind === "code" && candidate.final.code?.trim() &&
+        candidateLanguage(candidate.final) === primaryLanguage) &&
       (candidate?.text || /empty model response/i.test(candidate?.error || ""))).slice(0, 2);
     if (recoveryTargets.length) {
       await addEvent(job.id, "warn", "solver_code_recovery_started",
@@ -3252,7 +3252,7 @@ export async function runCouncilJob(job) {
             reasoning: "high",
           });
           const retryFinal = parseFinal(retryText);
-          if (retryFinal?.kind === "code" && retryFinal.code?.trim()) {
+          if (retryFinal?.kind === "code" && retryFinal.code?.trim() && candidateLanguage(retryFinal) === primaryLanguage) {
             candidate.final = retryFinal;
             candidate.text = retryText;
             candidate.error = null;
@@ -3280,6 +3280,18 @@ export async function runCouncilJob(job) {
     }
   }
 
+  // Ignore foreign-language candidate code during primary verification. The
+  // source remains in the audit log; ports start only after the final winner.
+  if (inferredKind === "code") {
+    for (const candidate of candidates.filter(Boolean)) {
+      if (candidate.final?.kind === "code" && candidateLanguage(candidate.final) !== primaryLanguage) {
+        await addEvent(job.id, "warn", "non_primary_solution",
+          "Candidate " + candidate.letter + " returned an incompatible first-stage language.",
+          {letter:candidate.letter, model:candidate.model, expected:primaryLanguage}).catch(()=>{});
+        candidate.final = null;
+      }
+    }
+  }
   const answered = candidates.filter((candidate) => candidate?.text || candidate?.final);
   if (answered.length < 1) {
     const errors = candidates.filter(Boolean).map((candidate) => candidate.error || "").filter(Boolean);
@@ -3602,6 +3614,7 @@ export async function runCouncilJob(job) {
     : docket;
   const executionBoth = [
     execution,
+    providedTestBrief(extractProvidedFixtures([reading.context, contractText].filter(Boolean).join("\n"))),
     revisedAny && Object.keys(revisedRuns).length
       ? `=== REVISED RUNS ===\n${executionDigest(field3, revisedRuns, { revised: true })}\n=== REPAIR OUTCOMES ===\n${field3.filter((c) => c.revised).map((c) => `Candidate ${c.letter}: ${repairOutcome(benchmark.runs[c.letter], revisedRuns[c.letter])}`).join("\\n")}\nA repair is verified only when its retest ran and passed actual test cases.`
       : "",
@@ -3790,6 +3803,7 @@ export async function runCouncilJob(job) {
   }
 
   const phaseTimings=timer.snapshot();
+  let postJudgeUpgrade=null;
   await addEvent(job.id,"info","council_phase_timings","Council stage timing (milliseconds).",phaseTimings);
   const report = {
     phaseTimings,
@@ -3845,6 +3859,7 @@ export async function runCouncilJob(job) {
     contractReaders: contracting.readers,
     knowledgeBytes: Buffer.byteLength(knowledge || "", "utf8"),
     winner: decision.winner,
+    ...(postJudgeUpgrade ? {postJudgeUpgrade} : {}),
   };
   // Built from the finished report rather than assembled alongside it, so the
   // helper overlay and the app render the same fields from the same source.
@@ -3857,14 +3872,14 @@ export async function runCouncilJob(job) {
         ||field3.find(c=>c.letter===decision.winner)?.final)||{}
     )
   );
-  const source=field3.find(c=>c.letter===decision.winner);
-  const verifiedSource=source?.revised||source?.final;
+  let source=field3.find(c=>c.letter===decision.winner);
+  let verifiedSource=source?.revised||source?.final;
   const targets=(isCoding&&verifiedSource?.code&&isVerified(gateRuns[decision.winner]))
     ? availablePorts:[];
   // One reusable, readable translation brief for ALL target languages.
   // This uses the winning agent's existing explanation and extracts source
   // structure without a second model call or executing untrusted code.
-  const semanticBlueprint=isCoding && verifiedSource?.code && isVerified(gateRuns[decision.winner])
+  let semanticBlueprint=isCoding && verifiedSource?.code && isVerified(gateRuns[decision.winner])
     ? buildVerifiedSemanticBlueprint({
         source:verifiedSource,
         sourceLanguage:candidateLanguage(verifiedSource),
@@ -3913,10 +3928,153 @@ export async function runCouncilJob(job) {
   if(isCoding&&verifiedSource?.code&&isVerified(gateRuns[decision.winner])){
     await addEvent(job.id,"info","primary_solution_ready",
       "Verified "+candidateLanguage(verifiedSource)+
-      " solution available now; independent language ports will follow.",
+      " solution available now; optional judge refinement and independent language ports continue in the background.",
       {winner:decision.winner,language:candidateLanguage(verifiedSource),ports:targets});
   }
+  // Optional judge-led synthesis starts only after the verified primary report
+  // is persisted and announced. It may replace that result only after its own
+  // full E2B rerun and two independent code/complexity audits succeed.
+  if(isCoding&&decision.winner&&isVerified(gateRuns[decision.winner])){
+    const ideas=corroboratedImprovementIdeas(judgeReadings.map(judge=>judge.improvement));
+    const audited=agreedComplexityAudits(judgeReadings)[decision.winner];
+    const previous=verifiedSource;
+    const independentReviewers=[...new Set(judges.map(judge=>judge.model))]
+      .filter(model=>model&&model!==synthesisModel).slice(0,2);
+    if(ideas.length>=2&&audited&&previous?.kind==="code"&&independentReviewers.length===2){
+      await addEvent(job.id,"info","judge_upgrade_attempt",
+        "Independent judges agreed on a concrete possible improvement; the published solution remains available during verification.",
+        {winner:decision.winner,judgeIdeas:ideas.length}).catch(()=>{});
+      let priorRevision=revisedRuns[decision.winner];
+      try{
+        const proposalText=await tokenRouterGenerate({
+          settings,baseUrl,model:synthesisModel,system:systemPrompt("code"),
+          user:[
+            "Make ONE optional judge-informed improvement to this already E2B-verified solution.",
+            "Question and constraints:\n"+question,
+            "Verified original ("+candidateLanguage(previous)+"):\n"+previous.code,
+            "Other agent approaches (untrusted proposals):\n"+candidateDocket(field3),
+            "Independently corroborated judge suggestions:\n"+ideas.join("\n"),
+            "Preserve the exact language, full callable signature, input/output semantics and asymptotic bounds.",
+            "Do not modify expected outputs, examples, harnesses or test cases.",
+            "Return only one complete <<<FINAL ... FINAL>>> code answer, or NONE when no substantive improvement is justified.",
+          ].join("\n\n"),
+          maxTokens:Math.max(Number(settings.maxTokens||4096),8192),
+        });
+        const improved=parseFinal(proposalText);
+        if(improved?.wellFormed&&improved.kind==="code"&&
+          candidateLanguage(improved)===candidateLanguage(previous)&&improved.code?.trim()&&
+          improved.code.trim()!==previous.code.trim()){
+          const proposalCandidate={...source,revised:improved};
+          const result=await executeField(job,settings,benchmark.suites,[proposalCandidate],{revised:true});
+          const proposedRun=result[decision.winner];
+          if(isVerified(proposedRun)){
+            const opinions=await Promise.all(independentReviewers.map(async model=>{
+              try{
+                const response=await tokenRouterGenerate({
+                  settings,baseUrl,model,
+                  system:[
+                    "Independently review two implementations of the SAME coding question.",
+                    "Check language-native style, correctness, edge cases, and worst-case Big O from code.",
+                    "A candidate passing supplied tests is not proof on hidden inputs.",
+                    "Approve only if the new code is substantively better without worse asymptotic time/space.",
+                    "Output exactly: ACCEPT: yes|no, TIME: O(...), SPACE: O(...), BASIS: one precise technical justification.",
+                    "Put each of the four fields on a separate line.",
+                  ].join("\n"),
+                  user:["Problem:\n"+question,"Previous verified code:\n"+previous.code,
+                    "Proposed code that passed the same E2B cases:\n"+improved.code,
+                    "Previous judge-corroborated Big O:\nTIME: "+audited.time+"; SPACE: "+audited.space,
+                    "E2B: "+proposedRun.passed+" tests passed; "+proposedRun.failed+" failed."].join("\n\n"),
+                  maxTokens:1400,
+                });
+                return parseJudgeUpgradeVote(response);
+              }catch{return {accepted:false,time:"",space:"",reason:"Independent reviewer unavailable"};}
+            }));
+            if(canAdoptJudgeUpgrade({priorRun:gateRuns[decision.winner],proposedRun,
+              previousTime:audited.time,previousSpace:audited.space,approvals:opinions})){
+              const originalField=field3;
+              const originalRevisedRuns=revisedRuns;
+              const originalRun=gateRuns[decision.winner];
+              const originalBlueprint=semanticBlueprint;
+              const originalPresentation=report.presentation;
+              const originalEvidence=report.e2bEvidence;
+              const originalAlgorithmEvidence=report.algorithmEvidence;
+              const originalHistory=report.solutionHistory;
+              field3=field3.map(candidate=>candidate.letter===decision.winner
+                ?{...candidate,revised:improved}:candidate);
+              source=field3.find(candidate=>candidate.letter===decision.winner);
+              verifiedSource=source?.revised||source?.final;
+              revisedRuns={...revisedRuns,[decision.winner]:proposedRun};
+              gateRuns[decision.winner]=proposedRun;
+              postJudgeUpgrade={beforeCode:previous.code,afterCode:improved.code,
+                sourceLetter:decision.winner,model:synthesisModel,passed:proposedRun.passed,
+                time:opinions[0].time,space:opinions[0].space,
+                reason:"Two independent reviewers approved the judge-inspired, E2B-retested improvement."};
+              semanticBlueprint=buildVerifiedSemanticBlueprint({source:verifiedSource,
+                sourceLanguage:candidateLanguage(verifiedSource),sourceLetter:decision.winner,
+                problem:question,passedTests:proposedRun.passed||0});
+              report.candidates=field3;
+              report.revisedRuns=revisedRuns;
+              report.postJudgeUpgrade=postJudgeUpgrade;
+              report.semanticBlueprint=semanticBlueprint;
+              report.algorithmEvidence=buildAlgorithmEvidence(semanticBlueprint,proposedRun);
+              report.e2bEvidence=buildE2BEvidenceSummary({runs:gateRuns,
+                suites:benchmark.suites,oracles,ports:report.ports});
+              report.presentation=buildPresentation(report);
+              if(report.provisional){
+                report.solutionHistory=buildSolutionHistory(report.provisional,{
+                  letter:decision.winner,language:candidateLanguage(verifiedSource),
+                  code:verifiedSource.code,complexity:report.presentation.complexity,
+                  passed:proposedRun.passed||0});
+              }
+              try{
+                await updateSavedCouncilReport(job,report);
+              }catch(persistError){
+                field3=originalField;
+                source=field3.find(candidate=>candidate.letter===decision.winner);
+                verifiedSource=previous;
+                revisedRuns=originalRevisedRuns;
+                gateRuns[decision.winner]=originalRun;
+                semanticBlueprint=originalBlueprint;
+                postJudgeUpgrade=null;
+                report.candidates=field3;
+                report.revisedRuns=revisedRuns;
+                delete report.postJudgeUpgrade;
+                report.semanticBlueprint=originalBlueprint;
+                report.presentation=originalPresentation;
+                report.e2bEvidence=originalEvidence;
+                if(originalAlgorithmEvidence)report.algorithmEvidence=originalAlgorithmEvidence;
+                else delete report.algorithmEvidence;
+                if(originalHistory)report.solutionHistory=originalHistory;
+                else delete report.solutionHistory;
+                throw persistError;
+              }
+              await addEvent(job.id,"info","judge_upgrade_verified",
+                "The judges' improvement passed E2B and both independent checks; the original version is retained for diff.",
+                {winner:decision.winner,passed:proposedRun.passed});
+            }else{
+              if(priorRevision)revisedRuns={...revisedRuns,[decision.winner]:priorRevision};
+              else{revisedRuns={...revisedRuns};delete revisedRuns[decision.winner];}
+              await addEvent(job.id,"info","judge_upgrade_not_adopted",
+                "The proposed improvement did not satisfy every independent audit; keeping the original verified solution.");
+            }
+          }else{
+            if(priorRevision)revisedRuns={...revisedRuns,[decision.winner]:priorRevision};
+            else{revisedRuns={...revisedRuns};delete revisedRuns[decision.winner];}
+            await addEvent(job.id,"info","judge_upgrade_not_adopted",
+              "The proposed improvement did not pass the complete accepted E2B test suite; keeping the original verified solution.");
+          }
+        }
+      }catch(error){
+        if(priorRevision)revisedRuns={...revisedRuns,[decision.winner]:priorRevision};
+        else{revisedRuns={...revisedRuns};delete revisedRuns[decision.winner];}
+        await addEvent(job.id,"warn","judge_upgrade_unavailable",
+          "Optional judge improvement could not finish. The original verified solution remains available.",
+          {detail:String(error).slice(0,300)}).catch(()=>{});
+      }
+    }
+  }
   if(targets.length){
+    try {
     await patchJob(job.id,{progress_phase:"porting"});
     // Only after the verified primary winner is available: reserve one
     // isolated Rust and one isolated C++ slot during port translation/harness
@@ -3949,6 +4107,9 @@ export async function runCouncilJob(job) {
     try {
     let reportWrite=Promise.resolve();
     await parallelMap(targets,2,async language=>{
+      await addEvent(job.id,"info","port_started",
+        "Primary solution remains available. Now solving and verifying in "+language+".",
+        {language,sourceLanguage:candidateLanguage(verifiedSource)}).catch(()=>{});
       // A single port's unexpected transport/compiler exception must not
       // prevent the other language from being verified and saved.
       let port;
@@ -4000,6 +4161,11 @@ export async function runCouncilJob(job) {
     });
     } finally {
       await portWarmPool?.close();
+    }
+    } catch(error) {
+      await addEvent(job.id,"warn","optional_ports_unavailable",
+        "Secondary implementations could not finish; the primary E2B-verified solution remains available.",
+        {detail:String(error).slice(0,360)}).catch(()=>{});
     }
   }
   await sessionNaming;

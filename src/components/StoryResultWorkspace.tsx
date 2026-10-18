@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { highlight } from "@/lib/highlight";
+import { codeLineDiff } from "@/lib/codeLineDiff";
 import { describeCodeLanguage } from "@/lib/solutionLanguage";
 import { agentSpec, gatewayPreset } from "@/lib/models";
 import { primaryModelLabel } from "@/lib/primaryModels";
@@ -29,7 +30,12 @@ export default function StoryResultWorkspace() {
   const gatewayKey = useStore(s => s.gatewayKey);
   const runReview = useStore(s => s.runReview);
   const start = useStore(s => s.start);
-  const [language, setLanguage] = useState("original");
+  // Language choices are scoped to the currently displayed question, not
+  // carried across submissions or reopened history items.
+  const shownRunKey = viewingRunId || council.runId || runId || "idle";
+  const [selectedLanguage, setSelectedLanguage] = useState({runKey: "", value: "original"});
+  const language = selectedLanguage.runKey === shownRunKey ? selectedLanguage.value : "original";
+  const setLanguage = (value: string) => setSelectedLanguage({runKey: shownRunKey, value});
   // A new run can spend time in live model checks before it gets a new runId.
   // Never show the previous run's answer under that new run's progress text.
   // A solver's first answer is not the Council's choice. Keep the final-code
@@ -39,11 +45,14 @@ export default function StoryResultWorkspace() {
     (council.phase !== "idle" && council.phase !== "done" && council.phase !== "error" && council.phase !== "cancelled"));
   const finalReviewPending = !viewingRunId && settings.councilEnabled && council.phase === "done" &&
     review.status !== "done" && review.status !== "error";
-  const report = preparing || awaitingCouncil || finalReviewPending || !settings.councilEnabled
+  // The E2B-confirmed winner is already final. Optional technical commentary
+  // must never make a ready-to-copy primary solution disappear.
+  const report = preparing || awaitingCouncil || !settings.councilEnabled
     ? null : selectVerifiedStorySolution(agents, council, consensus().representative);
   const reviewData = report ? review.data : null;
   const reviewRunning = !preparing && review.status === "running";
   const councilPhase = preparing ? "idle" : council.phase;
+  const pendingPort = council.ports.find(port => port.status === "preparing");
   const verifiedPorts = council.ports.filter(port => port.status === "verified");
   const chosenPort = language === "original" ? null : verifiedPorts.find(port => port.language === language) ?? null;
   const ports = verifiedPorts.map(port => port.language as keyof typeof PORT_LABELS);
@@ -59,8 +68,11 @@ export default function StoryResultWorkspace() {
     ? agreedComplexityAudits(council.dossier?.judges ?? [])[council.winner]
     : undefined;
   const reportedComplexity = splitComplexityClaim(report?.complexity || "");
-  const displayedTime = complexityAudit?.time || reviewData?.efficiency.currentTime || reportedComplexity.time || "—";
-  const displayedSpace = complexityAudit?.space || reviewData?.efficiency.currentSpace || reportedComplexity.space || "—";
+  // Post-judge changes have their OWN two independent complexity audits.
+  // Do not show the original candidate's bound as an audit of different code.
+  const upgradedAudit = council.postJudgeUpgrade?.afterCode === report?.code ? council.postJudgeUpgrade : null;
+  const displayedTime = upgradedAudit?.time || complexityAudit?.time || reviewData?.efficiency.currentTime || reportedComplexity.time || "—";
+  const displayedSpace = upgradedAudit?.space || complexityAudit?.space || reviewData?.efficiency.currentSpace || reportedComplexity.space || "—";
   // Once a tested winner is available, no card should remain permanently
   // "Pending" merely because the optional technical reviewer has not replied.
   // We do not invent a lower bound: the fallback says that none is verified.
@@ -114,7 +126,7 @@ export default function StoryResultWorkspace() {
     allReady && councilPhase === "idle" && councilCanStart ? "Starting council verification" :
     finalReviewPending || reviewRunning ? "Reviewing the solution" :
     councilPhase === "error" ? "Verification could not be completed" :
-    report ? language !== "original" ? "Translated port — testing pending" :
+    report ? language !== "original" ? "Selected verified language port" :
       report.provisional ? "Candidate ready — verification pending" : "Tested solution ready" :
     failed.length ? "Analysis needs attention" : running ? "Preparing analysis" : "Awaiting solution";
 
@@ -168,9 +180,14 @@ export default function StoryResultWorkspace() {
         </section>}
         <div className="story-section-heading">
           <div><span className="story-eyebrow">01 / SOLUTION</span><h1>Code solution</h1></div>
-          {report && <span className="story-outcome" data-provisional={report.provisional || language !== "original"}>{language !== "original" ? "Port untested" : report.provisional ? "Provisional" : "Completed"}</span>}
+          {report && <span className="story-outcome" data-provisional={Boolean(report.provisional)}>{language !== "original" ? "Verified port" : report.provisional ? "Provisional" : "Completed"}</span>}
         </div>
         {report && <div className="story-code-source">Selected solution <strong>{report.source}</strong></div>}
+        {report && pendingPort && <p className="story-process-text" role="status">
+          Primary {report.language || "language"} solution is verified and ready.
+          Proceeding to solving in {PORT_LABELS[pendingPort.language as keyof typeof PORT_LABELS] || pendingPort.language} and verifying it independently.
+          The displayed code stays here until you select another verified language.
+        </p>}
         <div className="story-code-window">
           <div className="story-code-toolbar">
             <div className="story-code-file"><span className="story-code-dot" /><span>{code ? syntax.label : "AWAITING CODE"}</span>{code && syntax.extension && <span className="story-code-extension">{syntax.extension}</span>}</div>
@@ -203,6 +220,19 @@ export default function StoryResultWorkspace() {
           </div>
         </div>
         {report?.answer && <div className="story-solution-summary"><span className="story-eyebrow">SOLUTION SUMMARY</span><p>{report.answer}</p></div>}
+        {report && council.postJudgeUpgrade?.afterCode === report.code && <details className="council-upgrade-diff">
+          <summary>Judges upgraded the verified solution · View GitHub-style diff</summary>
+          <p>{council.postJudgeUpgrade.reason} {council.postJudgeUpgrade.passed} E2B tests passed.</p>
+          <div className="council-diff-lines" role="region" aria-label="Judge upgrade source diff">
+            {codeLineDiff(council.postJudgeUpgrade.beforeCode,council.postJudgeUpgrade.afterCode).map((line,index)=>
+              <div className="council-diff-line" data-kind={line.kind} key={index}>
+                <span className="council-diff-number">{line.beforeLine??""}</span>
+                <span className="council-diff-number">{line.afterLine??""}</span>
+                <span className="council-diff-marker">{line.kind==="removed"?"−":line.kind==="added"?"+":" "}</span>
+                <code>{line.text||" "}</code>
+              </div>)}
+          </div>
+        </details>}
       </section>
       <aside className="story-report-column" aria-label="Technical solution report">
         <div className="story-section-heading"><div><span className="story-eyebrow">02 / TECHNICAL REPORT</span><h2>Solution insights</h2></div></div>

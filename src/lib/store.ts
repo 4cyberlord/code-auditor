@@ -80,7 +80,9 @@ import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from ".
 import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
 import { structuralTranslationGuidanceFor } from "./structuralTranslationGuidance.ts";
 import { fingerprintCode } from "./codeFingerprint.ts";
-import { buildProvidedHarness, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
+import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
+import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "./judgeUpgradePolicy.ts";
+import { buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
 import { needsCandidateRevision, classifyCandidateRun } from "./revisionPolicy.ts";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
 import { buildOverlayState } from "./overlayState.ts";
@@ -111,6 +113,7 @@ import {
   parseCouncilSynthesis,
   parseJudgeReport,
   decideWinner,
+  agreedComplexityAudits,
   buildPresentation,
   mutateCode,
   oracleDigest,
@@ -288,6 +291,8 @@ export interface CouncilState {
   oracles: OracleSignal[];
   /** Verified language-native equivalents generated from the winning code. */
   ports: VerifiedPort[];
+  /** Retained Git-style before/after record for the E2B-retested judge upgrade. */
+  postJudgeUpgrade: {beforeCode:string;afterCode:string;reason:string;passed:number;time?:string;space?:string} | null;
   error: string | null;
   chat: CouncilChatMessage[];
   chatSending: boolean;
@@ -327,6 +332,7 @@ const IDLE_COUNCIL: CouncilState = {
   contractAgreement: null,
   oracles: [],
   ports: [],
+  postJudgeUpgrade: null,
   error: null,
   chat: [],
   chatSending: false,
@@ -3023,7 +3029,7 @@ export const useStore = create<State>((set, get) => ({
     const knowledge = solverKnowledgePack(get, [note, coordinatorTopic].filter(Boolean).join(" "));
     const sys = systemPrompt(
       settings.mode,
-      resolveAnswerLanguage(settings.outputLanguage || "Python", "")
+      resolveAnswerLanguage(primaryCodingLanguage(note, settings.outputLanguage) === "cpp" ? "C++" : primaryCodingLanguage(note, settings.outputLanguage) === "rust" ? "Rust" : "Python", "")
     );
 
     if (options?.adaptivePanels) {
@@ -3113,7 +3119,7 @@ export const useStore = create<State>((set, get) => ({
               plan.context,
               plan.sendImages ? images : [],
               knowledge
-            ),
+            ) + "\n\n" + primaryFirstInstruction(primaryCodingLanguage(note, settings.outputLanguage)),
             images: plan.sendImages ? allImages : [],
             maxTokens: settings.maxTokens,
             temperature: 0,
@@ -4618,8 +4624,15 @@ async function generateVerifiedPorts(
   if (!sessionId) return targets.map(language => ({ language, sourceLetter: source.letter, model: source.model,
     code: "", status: "failed" as const, error: "No signed-in session for E2B verification." }));
   const model = settings.synthesisModel || source.model;
-  const ports: VerifiedPort[] = [];
+  const ports: VerifiedPort[] = targets.map(language => ({
+    language, sourceLetter: source.letter, model: "", code: "", status: "preparing",
+  }));
+  if (get().council.runId === runId && ["done", "porting"].includes(get().council.phase)) {
+    set(st => ({ council: { ...st.council, ports: [...ports] } }));
+  }
   for (const language of targets) {
+    // A new Council run must not receive late ports from an earlier question.
+    if (get().council.runId !== runId || get().council.phase === "cancelled") break;
     try {
       const request = [
         `Port Candidate ${source.letter}'s already verified algorithm into ${language}.`,
@@ -4671,14 +4684,18 @@ async function generateVerifiedPorts(
         sandboxId: "sandboxId" in result ? result.sandboxId : null,
         note: result.timedOut ? "timed out" : result.exitCode !== 0 ? `exit ${result.exitCode}` : "",
         runtime: result.runtime };
-      ports.push({ language, sourceLetter: source.letter, model, code: parsed.code,
+      ports.splice(ports.findIndex(item => item.language === language), 1,
+        {language, sourceLetter: source.letter, model, code: run.ok ? parsed.code : "",
         status: run.ok && run.failed === 0 && run.passed > 0 ? "verified" : "failed", run,
         error: run.ok && run.failed === 0 && run.passed > 0 ? undefined : run.note || "E2B tests failed." });
     } catch (error) {
-      ports.push({ language, sourceLetter: source.letter, model, code: "", status: "failed",
+      ports.splice(ports.findIndex(item => item.language === language), 1,
+        {language, sourceLetter: source.letter, model, code: "", status: "failed",
         error: cleanError(String(error)) });
     }
-    set(st => ({ council: { ...st.council, ports: [...ports] } }));
+    if (get().council.runId === runId && get().council.phase !== "cancelled") {
+      set(st => ({ council: { ...st.council, ports: [...ports] } }));
+    }
   }
   return ports;
 }
@@ -4820,6 +4837,7 @@ function councilReportFrom(c: CouncilState): CouncilReport {
     contractAgreement: c.contractAgreement,
     oracles: c.oracles,
     ports: c.ports,
+    ...(c.postJudgeUpgrade ? {postJudgeUpgrade:c.postJudgeUpgrade} : {}),
   };
   return { ...report, presentation: buildPresentation(report) };
 }
@@ -4978,6 +4996,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // only some prompts saw would be worse than none: the stages that read it and
   // the stages that did not would be answering different questions.
   const problem = contractText ? `${s0.note}\n\n---\n\n${contractText}` : s0.note;
+  const primaryLanguage = primaryCodingLanguage([problem, s0.extraction.context].filter(Boolean).join("\n\n"), settings.outputLanguage);
 
   set((st) => ({ council: { ...st.council, phase: "solving" as const } }));
   const seats = Math.max(0, COUNCIL_SIZE.solversMax - paneAnswers.length);
@@ -5062,7 +5081,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     [s0.note, extractionCtx, contractQuery(contract)].filter((x) => x && x.trim()).join("\n\n"));
   const sys = systemPrompt(
     settings.mode,
-    resolveAnswerLanguage(settings.outputLanguage || "Python", get().extraction.agreement?.merged.language ?? "")
+    resolveAnswerLanguage(primaryLanguage === "cpp" ? "C++" : primaryLanguage === "rust" ? "Rust" : "Python", "")
   );
   const allImages = s0.images.map(modelImage);
   await Promise.all(
@@ -5084,11 +5103,8 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
               extractionCtx,
               s0.images,
               knowledge,
-              solutionPolicy(
-                settings.solutionLanguages?.length ? settings.solutionLanguages : undefined,
-                settings.memoryTargetKb || 9 * 1024
-              )
-            ),
+              solutionPolicy([primaryLanguage], settings.memoryTargetKb || 9 * 1024)
+            ) + "\n\n" + primaryFirstInstruction(primaryLanguage),
             images: allImages,
             maxTokens: settings.maxTokens,
             temperature: 0,
@@ -5122,6 +5138,16 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       text,
       error: doneSlot?.error ?? null,
     });
+  }
+  // A foreign-language answer cannot demand a C++/Rust verification harness
+  // before we have selected the primary solution. Keep it as an errored seat.
+  if (field.some(c => c.final?.kind === "code")) {
+    for (const c of field) {
+      if (c.final?.kind === "code" && candidateLanguage(c.final) !== primaryLanguage) {
+        c.error = `Not selected for first-stage ${primaryLanguage} verification: returned ${candidateLanguage(c.final) || "unknown"}.`;
+        c.final = null;
+      }
+    }
   }
   set((st) => ({
     council: { ...st.council, candidates: field },
@@ -5397,7 +5423,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
 
   // ---------------------------------------------------------- round 4: judge
   set((st) => ({ council: { ...st.council, phase: "judging" } }));
-  const fieldNow = get().council.candidates;
+  let fieldNow = get().council.candidates;
   const docketBoth =
     candidateDocket(fieldNow) +
     (fieldNow.some((c) => c.revised) ? "\n\n=== REVISED ===\n\n" + candidateDocket(fieldNow, { revised: true }) : "");
@@ -5413,6 +5439,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       ? "=== REVISED RUNS ===\n" + executionDigest(fieldNow, get().council.revisedRuns, { revised: true })
       : "",
     oracleDigest(get().council.oracles),
+    providedTestBrief(extractProvidedFixtures(problem)),
     // Independent solutions do not usually fail in the same place. When they do,
     // the judges should hear that before they read the scores, not after.
     suspectHarness ? `NOTE ON THE HARNESS: ${suspectHarness}` : "",
@@ -5590,30 +5617,149 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // The winner is fixed before ports begin. Ports cannot influence the Council
   // result; they are optional, language-native implementations of that exact
   // already-verified solution and each carries independent E2B evidence.
-  const winnerCandidate = fieldNow.find(candidate => candidate.letter === winner);
-  let ports: VerifiedPort[] = [];
-  if (winnerCandidate) {
-    // Publish the verified primary-language result immediately. Optional
-    // language ports are deliberately downstream work and must never keep the
-    // user waiting for code that already passed the shared E2B suite.
-    set(st => ({ council: { ...st.council, phase: "porting", synthesis, winner, dossier, ports: [] } }));
-    // The technical report is also downstream work. Start it alongside the
-    // optional language ports so time/space, suggested bounds, functions, and
-    // style are ready with the primary verified answer instead of remaining
-    // "Pending review" until every translation has finished.
-    void get().runReview();
-    ports = await generateVerifiedPorts(get, set, runId, winnerCandidate, problem, knowledge, settings, suites);
-  }
-
+  let winnerCandidate = fieldNow.find(candidate => candidate.letter === winner);
+  const hasVerifiedCodeWinner = Boolean(winnerCandidate &&
+    (winnerCandidate.revised ?? winnerCandidate.final)?.kind === "code" &&
+    gateFor(gateRuns[winner]) === "pass");
+  // Publish exactly the fingerprint-matched E2B winner NOW. Auxiliary reference
+  // implementations may use additional model calls and independent harnesses,
+  // but none of those calls may hold the primary result or change its verdict.
   set((st) => ({
-    council: { ...st.council, phase: error ? "error" : "done", synthesis, winner, dossier, ports, error },
+    council: { ...st.council, phase: error ? "error" : hasVerifiedCodeWinner ? "porting" : "done",
+      synthesis, winner, dossier, ports: [], error },
     running: false,
   }));
   void get().autoTitle();
-  // The visible solution may have changed from a provisional pane answer to
-  // the measured council winner. Review that exact code, not the old pane.
   if (winner) void get().runReview();
   void get().persistRun();
+
+  if (winnerCandidate && !error) {
+    // The E2B-confirmed primary result is already visible above. Optional
+    // judge-led refinement and other-language ports run only after publication.
+    // A slow model or sandbox can update the result later, never hold it back.
+    void (async () => {
+      if (hasVerifiedCodeWinner && winner) {
+        const ideas = corroboratedImprovementIdeas(judgeReadings.map(judge => judge.improvement));
+        const baselineAudit = agreedComplexityAudits(judgeReadings)[winner];
+        const sourceCandidate = winnerCandidate!;
+        const sourceFinal = sourceCandidate.revised ?? sourceCandidate.final;
+        const upgradeModel = synthModel || sourceCandidate.model || "";
+        const independentModels = [...new Set(judges.map(judge => judge.model))]
+          .filter(model => model && model !== upgradeModel).slice(0, 2);
+        if (ideas.length >= 2 && baselineAudit && sourceFinal?.kind === "code" &&
+            independentModels.length === 2 && upgradeModel) {
+          const previousRevision = get().council.revisedRuns[winner];
+          const restorePreviousRevision = () => set(st => {
+            if (st.council.runId !== runId) return {};
+            const restored = { ...st.council.revisedRuns };
+            if (previousRevision) restored[winner] = previousRevision;
+            else delete restored[winner];
+            return { council: { ...st.council, revisedRuns: restored } };
+          });
+          try {
+            const response = await bridge.runOnce({
+              runId, agentId: "council-judge-upgrade", attemptId: newAttemptId(),
+              provider: settings.gatewayId, model: upgradeModel,
+              systemPrompt: systemPrompt("code"),
+              userText: [
+                "Offer one substantive improvement to the existing verified code, using evidence from two or more independent judges.",
+                "Do not invent expected outputs or adjust any test harness. Preserve the exact language and interface.",
+                "If the approach cannot be improved without introducing risk, reply NONE instead of source.",
+                "Problem:\n" + problem,
+                "Original verified code:\n" + sourceFinal.code,
+                "Other independently developed approaches:\n" + candidateDocket(fieldNow),
+                "Judge findings:\n" + ideas.join("\n"),
+                "Return a complete Council FINAL code block with the exact same language.",
+              ].join("\n\n"),
+              images: [], maxTokens: Math.max(settings.maxTokens, 8192), temperature: 0,
+              baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+              endpoint: endpointForModel(settings, upgradeModel),
+            });
+            const upgraded = parseFinal(response);
+            if (councilAlive(get().council, runId) && upgraded?.wellFormed &&
+                upgraded.kind === "code" && candidateLanguage(upgraded) === candidateLanguage(sourceFinal) &&
+                upgraded.code.trim() && upgraded.code.trim() !== sourceFinal.code.trim()) {
+              const candidate = { ...sourceCandidate, revised: upgraded } as Candidate;
+              await executeField(get, set, runId, [candidate], suites, "revisedRuns");
+              if (!councilAlive(get().council, runId)) return;
+              const proposedRun = get().council.revisedRuns[winner];
+              if (proposedRun && gateFor(proposedRun) === "pass") {
+                const audits = await Promise.all(independentModels.map(async model => {
+                  try {
+                    const reply = await bridge.runOnce({
+                      runId, agentId: "council-upgrade-audit:" + model, attemptId: newAttemptId(),
+                      provider: settings.gatewayId, model,
+                      systemPrompt: [
+                        "Independently review a proposed improvement to E2B-tested code.",
+                        "Reject if correctness, language-native readability, edge cases or worst-case time/space regress.",
+                        "Tests alone do not prove hidden-case correctness. Base complexity audits on actual code.",
+                        "Output EXACTLY four lines: ACCEPT: yes|no, TIME: O(...), SPACE: O(...), BASIS: specific code-based reason.",
+                      ].join("\n"),
+                      userText: [
+                        "Problem:\n" + problem, "Original code:\n" + sourceFinal.code,
+                        "Proposed E2B-retested code:\n" + upgraded.code,
+                        "Original judge-audited TIME: " + baselineAudit.time + " SPACE: " + baselineAudit.space,
+                        "New run: " + proposedRun.passed + " passing, " + proposedRun.failed + " failing test cases.",
+                      ].join("\n\n"),
+                      images: [], maxTokens: 1400, temperature: 0,
+                      baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+                      endpoint: endpointForModel(settings, model),
+                    });
+                    return parseJudgeUpgradeVote(reply);
+                  } catch {
+                    return { accepted: false, time: "", space: "", reason: "Independent reviewer unavailable" };
+                  }
+                }));
+                if (!councilAlive(get().council, runId)) return;
+                if (councilAlive(get().council, runId) && canAdoptJudgeUpgrade({
+                  priorRun: gateRuns[winner], proposedRun,
+                  previousTime: baselineAudit.time, previousSpace: baselineAudit.space, approvals: audits,
+                })) {
+                  fieldNow = fieldNow.map(item => item.letter === winner ? candidate : item);
+                  winnerCandidate = candidate;
+                  set(st => ({ council: { ...st.council, candidates: fieldNow,
+                    postJudgeUpgrade: {
+                      beforeCode: sourceFinal.code, afterCode: upgraded.code,
+                      reason: "Two independent auditors confirmed the E2B-retested improvement.",
+                      passed: proposedRun.passed, time: audits[0].time, space: audits[0].space,
+                    } } }));
+                  void get().runReview();
+                  void get().persistRun();
+                } else {
+                  restorePreviousRevision();
+                }
+              } else {
+                restorePreviousRevision();
+              }
+            }
+          } catch (upgradeError) {
+            restorePreviousRevision();
+            console.warn("Optional judge upgrade unavailable:", cleanError(String(upgradeError)));
+          }
+        }
+      }
+
+      if (hasVerifiedCodeWinner && winnerCandidate && get().council.runId === runId &&
+          get().council.phase !== "cancelled") {
+        try {
+          await generateVerifiedPorts(get, set, runId, winnerCandidate, problem, knowledge, settings, suites);
+        } catch (portError) {
+          console.warn("Optional language ports unavailable:", cleanError(String(portError)));
+        }
+      }
+      if (get().council.runId === runId && get().council.phase !== "cancelled") {
+        set(st => ({ council: { ...st.council, phase: "done" } }));
+        void get().persistRun();
+      }
+    })().catch(backgroundError => {
+      // Background optional work never changes the already-published verdict.
+      console.warn("Optional post-delivery Council work unavailable:", cleanError(String(backgroundError)));
+      if (get().council.runId === runId && get().council.phase !== "cancelled") {
+        set(st => ({ council: { ...st.council, phase: "done" } }));
+        void get().persistRun();
+      }
+    });
+  }
 }
 
 /**

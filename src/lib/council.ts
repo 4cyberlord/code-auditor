@@ -411,7 +411,7 @@ export interface VerifiedPort {
   sourceLetter: string;
   model: string;
   code: string;
-  status: "verified" | "failed";
+  status: "preparing" | "verified" | "failed";
   run?: CandidateRun;
   error?: string;
 }
@@ -1021,6 +1021,8 @@ export interface CouncilReport {
   oracles?: OracleSignal[];
   /** Optional language-native equivalents of the verified winner. */
   ports?: VerifiedPort[];
+  /** Independently approved upgrade made after the judges selected a primary winner. */
+  postJudgeUpgrade?: {beforeCode:string;afterCode:string;reason:string;passed:number;time?:string;space?:string} | null;
 }
 
 // --------------------------------------------------------------------- prompts
@@ -1168,7 +1170,7 @@ export function judgeSystemPrompt(emphasis: Emphasis): string {
     "",
     "Report:\nVERDICT: <one line>\nRANKING: <letters, best first>\nCORRECT: <letters you",
     "verified correct yourself>\nWHY: <what separates the winner>\nDEFECTS: <per letter, the",
-    "failures you found>\nCOMPLEXITY AUDIT:\n<one line per coding candidate:",
+    "failures you found>\nIMPROVEMENT: none | a concrete, better algorithmic combination of approaches from the field, naming which candidates demonstrate it. Do not propose cosmetic edits.\nCOMPLEXITY AUDIT:\n<one line per coding candidate:",
     "A | TIME: O(n) | SPACE: O(1) | BASIS: one scan, fixed counters>",
     "Use UNKNOWN for any bound you cannot justify.\nBEST ANSWER: <the answer you would ship, in full - corrected code",
     "if relevant>",
@@ -1785,6 +1787,7 @@ export interface JudgeReading {
   correct: string[];
   why: string;
   defects: string;
+  improvement: string;
   complexityAudits?: ComplexityAudit[];
   best: string;
   preamble: string;
@@ -1805,6 +1808,7 @@ const JUDGE_LABELS: [string, string[]][] = [
   ["correct", ["CORRECT"]],
   ["why", ["WHY"]],
   ["defects", ["DEFECTS"]],
+  ["improvement", ["IMPROVEMENT"]],
   ["complexityAudit", ["COMPLEXITY AUDIT"]],
   ["best", ["BEST ANSWER", "BEST"]],
 ];
@@ -1828,6 +1832,7 @@ export function parseJudgeReport(text: string): JudgeReading {
     correct: lettersInOrder(fields.correct.split("\n")[0] || ""),
     why: fields.why,
     defects: fields.defects,
+    improvement: fields.improvement || "",
     complexityAudits: parseComplexityAudits(fields.complexityAudit || ""),
     best: fields.best,
     preamble,
@@ -2282,7 +2287,13 @@ export function buildPresentation(report: CouncilReport): Presentation {
 
   const winnerCandidate = report.candidates.find((c) => c.letter === report.winner);
   const winnerFinal = winnerCandidate?.revised ?? winnerCandidate?.final ?? null;
-  const winnerAudit = agreedComplexityAudits(report.dossier?.judges ?? [])[report.winner];
+  // A two-reviewer E2B-tested improvement supersedes the *old code's*
+  // complexity audit; the old auditors never analyzed the upgraded source.
+  const postUpgrade = report.postJudgeUpgrade?.afterCode === winnerFinal?.code
+    ? report.postJudgeUpgrade : null;
+  const winnerAudit = postUpgrade?.time && postUpgrade?.space
+    ? {time:postUpgrade.time,space:postUpgrade.space}
+    : agreedComplexityAudits(report.dossier?.judges ?? [])[report.winner];
   const claimedComplexity = splitComplexityClaim(winnerFinal?.complexity || "");
   const synth = report.dossier?.synthesis;
   return {
