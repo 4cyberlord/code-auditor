@@ -3075,11 +3075,12 @@ export async function runCouncilJob(job) {
         system: visionEvidenceSystemPrompt(),
         user: "Read original screenshot examples independently; extracted context is not authoritative:\n" +
           String(reading.context || "").slice(0, 4000),
-        images: solveImages, maxTokens: 2400, reasoning: "off",
+        // Always use ORIGINAL downloaded screenshots, even when solvers use a trusted transcription.
+        images, maxTokens: 2400, reasoning: "off",
       });
     } catch { return ""; }
   })).then(readings => reconcileProblemEvidence(
-    [reading.context, contractText].filter(Boolean).join("\n\n"), solveImages.length > 0, readings
+    [reading.context, contractText].filter(Boolean).join("\n\n"), images.length > 0, readings
   ));
   const earlyLanguages=contractSupportsEarlyHarness(
     [reading.context,contractText,question].filter(Boolean).join("\n"),inferredKind
@@ -3672,7 +3673,7 @@ export async function runCouncilJob(job) {
             knowledge: councilKnowledge,
           }),
           // Only genuinely vision-probed judge routes see original pixels.
-          images: evidenceSeats.some(seat => seat.model === judge.model) ? solveImages : [],
+          images: evidenceSeats.some(seat => seat.model === judge.model) ? images : [],
           maxTokens: Number(settings.maxTokens || 4096),
         });
         judgeReports.push({ model: judge.model, emphasis: judge.emphasis || "correctness", text, error: null });
