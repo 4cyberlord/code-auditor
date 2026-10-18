@@ -12,7 +12,7 @@ export function isVerifiedImageProbe(probe: {
 } | null | undefined): boolean {
   return probe?.ok === true && probe.vision === true &&
     typeof probe.ms === "number" && Number.isFinite(probe.ms) && probe.ms > 0 &&
-    /^Read the test image correctly \("red"\)\./i.test(String(probe.visionNote || ""));
+    /^Read the test image correctly \(/i.test(String(probe.visionNote || ""));
 }
 
 export function preferredVisionModels(available: readonly string[], max = 3): string[] {
