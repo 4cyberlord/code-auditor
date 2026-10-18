@@ -1526,7 +1526,7 @@ export function contractBlock(contract: ProblemContract | null): string {
 
 export function testSpecSystemPrompt(): string {
   return [
-    "You write an independent testing harness for a coding question, never the answer itself.",
+    "You write test harnesses for candidate solutions. You do not write solutions.",
     "PRIORITY ONE: if the problem statement supplies examples, sample inputs, expected outputs",
     "or explicit test cases, reproduce ALL valid supplied cases as executable assertions FIRST.",
     "Do not replace, alter, approximate or ignore their supplied expected outputs.",
