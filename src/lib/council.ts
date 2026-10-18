@@ -374,6 +374,9 @@ export interface CandidateRun {
   failureLocation?: { sourceLine: number; harnessLine: number } | null;
   /** SHA-256 of the exact candidate source submitted in this execution. */
   codeDigest?: string | null;
+  /** Shows sample evidence separately from broader independent test coverage. */
+  evidenceSource?: "provided" | "generated";
+  providedCaseCount?: number;
   timedOut?: boolean;
   truncated?: boolean;
   bootMs?: number | null;
@@ -649,7 +652,9 @@ export function answerStanding(winner: string, runs: Record<string, CandidateRun
     const run = runs[letter];
     return {
       standing: "verified",
-      reason: `Candidate ${letter} passed ${run.passed} generated test case(s) before being selected.`,
+      reason: run.evidenceSource === "provided"
+        ? `Candidate ${letter} passed ${run.passed} question-provided example(s). Hidden inputs and additional edge cases remain unverified.`
+        : `Candidate ${letter} passed ${run.passed} independent generated test case(s) before being selected.`,
     };
   }
 
@@ -1609,7 +1614,7 @@ export function executionDigest(
       lines.push(`Candidate ${c.letter}${tag}: not executed — ${run?.note || "no code"}`);
     } else {
       lines.push(
-        `Candidate ${c.letter}${tag}: ${run.failed === 0 && run.ok ? "ALL PASSED" : "FAILED"} — ` +
+        `Candidate ${c.letter}${tag}: ${run.failed === 0 && run.ok ? "ALL PASSED" : "FAILED"}${run.evidenceSource === "provided" ? " [PROVIDED EXAMPLES ONLY — hidden tests unverified]" : ""} — ` +
           `${run.passed} passed, ${run.failed} failed, ${run.runtime}, ${run.durationMs}ms` +
           (run.remoteElapsedMs != null ? `, measured ${run.remoteElapsedMs}ms` : "") +
           (run.peakMemoryKb != null ? `, peak ${Math.round(run.peakMemoryKb / 1024 * 10) / 10}MB` : "") +
