@@ -24,4 +24,10 @@ assert.equal(canAdoptJudgeUpgrade({...accepted, proposedRun:{...proposed, passed
 assert.equal(canAdoptJudgeUpgrade({...accepted, proposedRun:{...proposed, codeDigest:"orig"}}), false);
 assert.equal(canAdoptJudgeUpgrade({...accepted, approvals:[vote,{...vote,time:"O(n^2)"}]}), false);
 assert.equal(canAdoptJudgeUpgrade({...accepted, approvals:[vote,{...vote,accepted:false}]}), false);
+assert.equal(canAdoptJudgeUpgrade({...accepted, approvals:[vote,vote,vote]}),true,
+  "all three participating judges may approve the change");
+assert.equal(canAdoptJudgeUpgrade({...accepted, approvals:[vote,vote,{...vote,accepted:false}]}),false,
+  "the third judge's veto must never be ignored");
+assert.equal(canAdoptJudgeUpgrade({...accepted, approvals:[vote,vote,{...vote,time:"O(n^2)"}]}),false,
+  "a late judge's asymptotic regression audit must reject promotion");
 console.log("PASS: judge code upgrades need consensus, E2B proof and corroborated no-worse complexity");

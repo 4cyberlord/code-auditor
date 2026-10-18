@@ -21,6 +21,7 @@ import "./lib/config.mjs";
 import { createHash, createHmac, createSign } from "node:crypto";
 import { buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "../src/lib/providedCaseHarness.ts";
 import { configuredCodeLanguage, providedTestBrief } from "../src/lib/primaryDeliveryPolicy.ts";
+import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief } from "../src/lib/problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "../src/lib/judgeUpgradePolicy.ts";
 import { executionId, validateExecution, e2bCommandFailure, parseExecutionOutput, executionStatus, classifyExecutionFailure, mapCandidateFailureLocation, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
@@ -3061,6 +3062,26 @@ export async function runCouncilJob(job) {
   });
   const solverSystem = systemPrompt(inferredKind === "code" ? "code" : (settings.mode || "auto"), answerLanguage);
   const candidates = [];
+  // Vision-qualified judges inspect literal screenshot examples while the
+  // agents solve. Unconfirmed OCR never becomes authoritative E2B assertions.
+  const evidenceSeats = partitionByVision(
+    bench.keep(judges, judge => judge.model), judge => judge.model,
+    settings.probes, settings.councilModels
+  ).seeing.filter(judge => !bench.isBlind(judge.model)).slice(0, 2);
+  const evidenceReady = Promise.all(evidenceSeats.map(async judge => {
+    try {
+      return await tokenRouterGenerate({
+        settings, baseUrl, model: judge.model,
+        system: visionEvidenceSystemPrompt(),
+        user: "Read original screenshot examples independently; extracted context is not authoritative:\n" +
+          String(reading.context || "").slice(0, 4000),
+        // Always use ORIGINAL downloaded screenshots, even when solvers use a trusted transcription.
+        images, maxTokens: 2400, reasoning: "off",
+      });
+    } catch { return ""; }
+  })).then(readings => reconcileProblemEvidence(
+    [reading.context, contractText].filter(Boolean).join("\n\n"), images.length > 0, readings
+  ));
   const earlyLanguages=contractSupportsEarlyHarness(
     [reading.context,contractText,question].filter(Boolean).join("\n"),inferredKind
   )?[primaryLanguage]:[];
@@ -3077,9 +3098,9 @@ export async function runCouncilJob(job) {
     const language = candidateLanguage(candidate.final);
     if (!earlyLanguages.includes(language)) return;
     earlyHarnessStarted = true;
-    preparedSuites = prepareProblemHarnesses(
-      job, settings, baseUrl, models, judges, question, [candidate], [language], knowledge, bench
-    ).catch(async (err) => {
+    preparedSuites = evidenceReady.then(evidence => prepareProblemHarnesses(
+      job, settings, baseUrl, models, judges, evidence.question, [candidate], [language], knowledge, bench
+    )).catch(async (err) => {
       await addEvent(job.id,"warn","early_harness_fallback","Early candidate-aware E2B harness unavailable; the complete field will be retried.",
         {detail:String(err).slice(0,180), language, model:candidate.model}).catch(()=>{});
       return [];
@@ -3372,7 +3393,12 @@ export async function runCouncilJob(job) {
   const councilKnowledge = [initialReference.prompt,knowledge].filter(Boolean).join("\n\n");
 
   timer.enter("benchmark");
-  const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, question, field, knowledge, bench, {preparedSuites,eagerRuns,warmPool});
+  const screenshotEvidence = await evidenceReady;
+  await addEvent(job.id, screenshotEvidence.disagreements.length ? "warn" : "info",
+    "screenshot_evidence", "Independent screenshot example checks finished.",
+    {status:screenshotEvidence.status,confirmed:screenshotEvidence.fixtures.length,
+      reviewers:screenshotEvidence.reviewers,disagreements:screenshotEvidence.disagreements}).catch(()=>{});
+  const benchmark = await benchmarkCandidates(job, settings, baseUrl, models, judges, screenshotEvidence.question, field, knowledge, bench, {preparedSuites,eagerRuns,warmPool});
   // All original candidates have finished. Do not pay for standby capacity
   // throughout later reviews, judges or language porting.
   await warmPool?.close();
@@ -3614,7 +3640,8 @@ export async function runCouncilJob(job) {
     : docket;
   const executionBoth = [
     execution,
-    providedTestBrief(extractProvidedFixtures([reading.context, contractText].filter(Boolean).join("\n"))),
+    providedTestBrief(screenshotEvidence.fixtures),
+    evidenceJudgeBrief(screenshotEvidence),
     revisedAny && Object.keys(revisedRuns).length
       ? `=== REVISED RUNS ===\n${executionDigest(field3, revisedRuns, { revised: true })}\n=== REPAIR OUTCOMES ===\n${field3.filter((c) => c.revised).map((c) => `Candidate ${c.letter}: ${repairOutcome(benchmark.runs[c.letter], revisedRuns[c.letter])}`).join("\\n")}\nA repair is verified only when its retest ran and passed actual test cases.`
       : "",
@@ -3645,6 +3672,8 @@ export async function runCouncilJob(job) {
             execution: executionBoth,
             knowledge: councilKnowledge,
           }),
+          // Only genuinely vision-probed judge routes see original pixels.
+          images: evidenceSeats.some(seat => seat.model === judge.model) ? images : [],
           maxTokens: Number(settings.maxTokens || 4096),
         });
         judgeReports.push({ model: judge.model, emphasis: judge.emphasis || "correctness", text, error: null });
@@ -3938,16 +3967,20 @@ export async function runCouncilJob(job) {
     const ideas=corroboratedImprovementIdeas(judgeReadings.map(judge=>judge.improvement));
     const audited=agreedComplexityAudits(judgeReadings)[decision.winner];
     const previous=verifiedSource;
-    const independentReviewers=[...new Set(judges.map(judge=>judge.model))]
-      .filter(model=>model&&model!==synthesisModel).slice(0,2);
-    if(ideas.length>=2&&audited&&previous?.kind==="code"&&independentReviewers.length===2){
+    const independentReviewers=[...new Set(judges.map(judge=>judge.model))].filter(Boolean);
+    const proposalModel=[source?.model,synthesisModel]
+      .find(model=>model&&!independentReviewers.includes(model))||"";
+    // Every configured participating judge must be able to vote, including
+    // a third or fourth judge. A single rejection means the original wins.
+    if(ideas.length>=2&&audited&&previous?.kind==="code"&&
+        independentReviewers.length>=2&&proposalModel){
       await addEvent(job.id,"info","judge_upgrade_attempt",
         "Independent judges agreed on a concrete possible improvement; the published solution remains available during verification.",
         {winner:decision.winner,judgeIdeas:ideas.length}).catch(()=>{});
       let priorRevision=revisedRuns[decision.winner];
       try{
         const proposalText=await tokenRouterGenerate({
-          settings,baseUrl,model:synthesisModel,system:systemPrompt("code"),
+          settings,baseUrl,model:proposalModel,system:systemPrompt("code"),
           user:[
             "Make ONE optional judge-informed improvement to this already E2B-verified solution.",
             "Question and constraints:\n"+question,

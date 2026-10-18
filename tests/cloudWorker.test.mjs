@@ -724,11 +724,12 @@ check("solvers went down the chat wire", solverIds.length > 0 && !solverIds.incl
 check("the shipped solvers were used", solverIds.some((id) => COUNCIL_DEFAULT_MODELS.some((m) => m.id === id)), solverIds.join(", "));
 check("gpt-5.6-sol went down the responses wire", responsesCalls.length > 0, `${responsesCalls.length} calls`);
 check("every responses call named that model", responsesCalls.every((c) => c.model === "openai/gpt-5.6-sol"), responsesCalls.map((c) => c.model).join(", "));
-// The Responses wire spells reasoning differently and does not accept the
-// chat spelling, so this is not the same assertion twice.
+// The Responses wire spells solve-time reasoning differently and does not
+// accept the chat spelling. Bounded screenshot-evidence transcription uses no
+// reasoning budget, so the absence of a reasoning block is also expected.
 check(
   "the responses wire got its own reasoning shape",
-  responsesCalls.every((c) => c.reasoning?.effort === "high" && c.reasoning_effort === undefined),
+  responsesCalls.every((c) => (c.reasoning?.effort === "high" || c.reasoning == null) && c.reasoning_effort === undefined),
   JSON.stringify(responsesCalls.map((c) => c.reasoning))
 );
 check("the judge answered", events.some((e) => e.phase === "judge_done"));
