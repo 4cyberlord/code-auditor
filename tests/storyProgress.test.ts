@@ -12,6 +12,7 @@ assert.equal(modelLamp({ status: "error", final: null }), "issue");
 assert.equal(modelLamp({ status: "cancelled", final: null }), "cancelled");
 assert.match(councilStageText("verifying") ?? "", /executing candidates/i);
 assert.match(councilStageText("synthesizing") ?? "", /final answer/i);
+assert.match(councilStageText("porting") ?? "", /primary solution is ready/i);
 assert.equal(councilStageText("idle"), null);
 assert.equal(councilStageText("done"), null);
 

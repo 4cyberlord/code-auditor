@@ -6,6 +6,10 @@ const ideas = corroboratedImprovementIdeas([
 ]);
 assert.equal(ideas.length, 2);
 assert.deepEqual(corroboratedImprovementIdeas(["none", "No change", "Optimize the algorithm"]), []);
+assert.deepEqual(corroboratedImprovementIdeas([
+  "Use a heap to select the next available interval.",
+  "A binary search finds the first valid partition in logarithmic time.",
+]), []);
 const vote = parseJudgeUpgradeVote("ACCEPT: yes\nTIME: O(n)\nSPACE: O(n)\nBASIS: single map scan preserves all output semantics");
 assert.equal(vote.accepted, true);
 assert.equal(vote.time, "O(n)");
