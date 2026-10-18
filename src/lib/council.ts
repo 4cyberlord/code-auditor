@@ -1021,6 +1021,8 @@ export interface CouncilReport {
   oracles?: OracleSignal[];
   /** Optional language-native equivalents of the verified winner. */
   ports?: VerifiedPort[];
+  /** Independently approved upgrade made after the judges selected a primary winner. */
+  postJudgeUpgrade?: {beforeCode:string;afterCode:string;reason:string;passed:number} | null;
 }
 
 // --------------------------------------------------------------------- prompts
