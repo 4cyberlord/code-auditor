@@ -33,7 +33,7 @@ export function councilStageText(phase: CouncilPhase): string | null {
     case "reverifying": return "Council is retesting revised candidates.";
     case "judging": return "Council judges are comparing the tested solutions.";
     case "synthesizing": return "Council is preparing the final answer.";
-    case "porting": return "Verified primary solution is ready; preparing the other selected languages.";
+    case "porting": return "Verified primary solution is ready; optional review and language versions continue in the background.";
     default: return null;
   }
 }

@@ -3928,7 +3928,7 @@ export async function runCouncilJob(job) {
   if(isCoding&&verifiedSource?.code&&isVerified(gateRuns[decision.winner])){
     await addEvent(job.id,"info","primary_solution_ready",
       "Verified "+candidateLanguage(verifiedSource)+
-      " solution available now; independent language ports will follow.",
+      " solution available now; optional judge refinement and independent language ports continue in the background.",
       {winner:decision.winner,language:candidateLanguage(verifiedSource),ports:targets});
   }
   // Optional judge-led synthesis starts only after the verified primary report
