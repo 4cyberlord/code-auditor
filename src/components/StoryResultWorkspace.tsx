@@ -51,6 +51,7 @@ export default function StoryResultWorkspace() {
   const reviewData = report ? review.data : null;
   const reviewRunning = !preparing && review.status === "running";
   const councilPhase = preparing ? "idle" : council.phase;
+  const pendingPort = council.ports.find(port => port.status === "preparing");
   const verifiedPorts = council.ports.filter(port => port.status === "verified");
   const chosenPort = language === "original" ? null : verifiedPorts.find(port => port.language === language) ?? null;
   const ports = verifiedPorts.map(port => port.language as keyof typeof PORT_LABELS);
@@ -178,6 +179,11 @@ export default function StoryResultWorkspace() {
           {report && <span className="story-outcome" data-provisional={Boolean(report.provisional)}>{language !== "original" ? "Verified port" : report.provisional ? "Provisional" : "Completed"}</span>}
         </div>
         {report && <div className="story-code-source">Selected solution <strong>{report.source}</strong></div>}
+        {report && pendingPort && <p className="story-process-text" role="status">
+          Primary {report.language || "language"} solution is verified and ready.
+          Proceeding to solving in {PORT_LABELS[pendingPort.language as keyof typeof PORT_LABELS] || pendingPort.language} and verifying it independently.
+          The displayed code stays here until you select another verified language.
+        </p>}
         <div className="story-code-window">
           <div className="story-code-toolbar">
             <div className="story-code-file"><span className="story-code-dot" /><span>{code ? syntax.label : "AWAITING CODE"}</span>{code && syntax.extension && <span className="story-code-extension">{syntax.extension}</span>}</div>
