@@ -25,6 +25,13 @@ assert.equal(single.status, "uncertain");
 assert.equal(single.fixtures.length, 0);
 const unreadable = reconcileProblemEvidence(context, true, ["NO_CONFIRMED_EXAMPLES", "NO_CONFIRMED_EXAMPLES"]);
 assert.equal(unreadable.fixtures.length, 0);
+const whitespace = reconcileProblemEvidence(context, true, [
+  "Example 1:\\nInput: x = 1\\nOutput: a  b",
+  "Example 1:\\nInput: x = 1\\nOutput: a b",
+]);
+assert.equal(whitespace.fixtures.length, 0, "whitespace-sensitive output cannot be normalized into agreement");
+const unordered = stripExampleBlocks("Task.\\nExample 1:\\nInput: x = [1,2]\\nOutput: [2,1]\\nExplanation: Output may be in any order.");
+assert.match(unordered, /Multiple valid outputs/);
 const typed = reconcileProblemEvidence(context, false, []);
 assert.equal(typed.status, "text");
 assert.equal(typed.fixtures[0].output, "99");
