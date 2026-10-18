@@ -80,6 +80,7 @@ import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from ".
 import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
 import { structuralTranslationGuidanceFor } from "./structuralTranslationGuidance.ts";
 import { fingerprintCode } from "./codeFingerprint.ts";
+import { buildProvidedHarness, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
 import { needsCandidateRevision, classifyCandidateRun } from "./revisionPolicy.ts";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
 import { buildOverlayState } from "./overlayState.ts";
@@ -4445,11 +4446,14 @@ async function executeField(
       const settings = get().settings;
       const sessionId = get().currentSessionId;
       if (!sessionId) throw new Error("Sign in and save the session before E2B verification.");
-      const r = await runE2BBenchmark(sessionId, suite.language, program, settings.e2bTimeoutMs);
-      const { passed, failed } = countCases(r.stdout);
+      const r = await runE2BBenchmark(sessionId, suite.runnerLanguage || suite.language, program, settings.e2bTimeoutMs);
+      const evidence = suite.source === "provided"
+        ? providedCaseEvidence(r.stdout, requiredHarnessCases(suite)) : countCases(r.stdout);
+      const { passed, failed } = evidence;
       const codeDigest = await fingerprintCode(code);
       const exercisedCases = passed + failed;
-      const insufficientCoverage = exercisedCases < MIN_INDEPENDENT_HARNESS_CASES;
+      const insufficientCoverage = exercisedCases < requiredHarnessCases(suite) ||
+        (suite.source === "provided" && !("complete" in evidence && evidence.complete));
       const classified = classifyCandidateRun({
         letter: c.letter, ran: true, ok: r.ok && !insufficientCoverage, passed, failed,
         durationMs: r.durationMs, note: "", runtime: r.runtime,
@@ -4466,12 +4470,14 @@ async function executeField(
         executionId: "executionId" in r ? r.executionId : undefined,
         exitCode: r.exitCode,
         codeDigest,
+        evidenceSource: suite.source || "generated",
+        providedCaseCount: suite.source === "provided" ? suite.providedCaseCount : 0,
         timedOut: r.timedOut,
         stdout: r.stdout,
         stderr: r.stderr,
         failureKind: insufficientCoverage ? "harness" : classified.failureKind,
         note: insufficientCoverage
-          ? `test harness exercised only ${exercisedCases} distinct cases; at least ${MIN_INDEPENDENT_HARNESS_CASES} are required`
+          ? `test harness exercised only ${exercisedCases} distinct cases; ${requiredHarnessCases(suite)} are required`
           : r.timedOut ? "timed out" : r.exitCode !== 0 ? `exit ${r.exitCode}` : "",
         runtime: r.runtime,
       });
@@ -4504,6 +4510,9 @@ async function recoverSharedHarnessFailures(
   for (let index = 0; index < suites.length; index += 1) {
     if (!councilAlive(get().council, runId)) return;
     const suite = suites[index];
+    // User-supplied expected outputs are authoritative; never let a model
+    // silently rewrite them during shared-failure recovery.
+    if (suite.source === "provided") continue;
     const candidates = field.filter((candidate) =>
       candidate.final?.kind === "code" && candidateLanguage(candidate.final) === suite.language
     );
@@ -4626,6 +4635,7 @@ async function generateVerifiedPorts(
       if (!parsed || parsed.kind !== "code" || !parsed.code.trim() || candidateLanguage(parsed) !== language)
         throw new Error(`The generated ${language} port was missing valid ${language} code.`);
       let suite = suites.find(item => item.language === language);
+      if (!suite) suite = buildProvidedHarness(problem, language, parsed.code) || undefined;
       if (!suite) {
         const spec = await bridge.runOnce({ runId, agentId: `council-port-spec:${language}`, attemptId: newAttemptId(),
           provider: settings.gatewayId, model, systemPrompt: testSpecSystemPrompt(),
@@ -4640,9 +4650,14 @@ async function generateVerifiedPorts(
       if (referenceError) throw new Error(`The ${language} harness did not validate its independent reference: ${referenceError}`);
       const program = spliceSuite(suite, parsed.code);
       if (!program) throw new Error(`The ${language} harness has no solution splice marker.`);
-      const result = await runE2BBenchmark(sessionId, suite.language, program, settings.e2bTimeoutMs);
-      const counts = countCases(result.stdout);
-      const run: CandidateRun = { letter: `port:${language}`, ran: true, ok: result.ok,
+      const result = await runE2BBenchmark(sessionId, suite.runnerLanguage || suite.language, program, settings.e2bTimeoutMs);
+      const counts = suite.source === "provided"
+        ? providedCaseEvidence(result.stdout, requiredHarnessCases(suite)) : countCases(result.stdout);
+      const run: CandidateRun = { letter: `port:${language}`, ran: true,
+        ok: result.ok && counts.passed >= requiredHarnessCases(suite) && counts.failed === 0 &&
+          (suite.source !== "provided" || ("complete" in counts && counts.complete)),
+        evidenceSource: suite.source || "generated",
+        providedCaseCount: suite.source === "provided" ? suite.providedCaseCount : 0,
         passed: counts.passed, failed: counts.failed, durationMs: result.durationMs, provider: "e2b",
         remoteElapsedMs: "remoteElapsedMs" in result ? result.remoteElapsedMs : null,
         peakMemoryKb: "peakMemoryKb" in result ? result.peakMemoryKb : null,
@@ -4698,6 +4713,9 @@ async function validateHarnessReference(
   suite: TestSuite,
   timeoutMs: number,
 ): Promise<string | null> {
+  // The fixture compiler's expected outputs come verbatim from the question,
+  // not from a model reference; execution itself verifies the candidate.
+  if (suite.source === "provided") return null;
   if (!suite.referenceCode?.trim()) return "the harness omitted its required independent reference";
   const program = spliceSuite(suite, suite.referenceCode);
   if (!program) return "the harness reference could not be spliced";
@@ -5135,6 +5153,13 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     // exhaust a model's output budget and return no content at all. A second
     // route can recover from one gateway/model's empty answer.
     for (const language of languages) {
+      const candidateCode = field.find(candidate =>
+        candidate.final?.kind === "code" && candidateLanguage(candidate.final) === language)?.final?.code || "";
+      const providedSuite = buildProvidedHarness(problem, language, candidateCode);
+      if (providedSuite) {
+        suites.push(providedSuite);
+        continue;
+      }
       // Stay with the models that already completed this question wherever
       // possible. A transient gateway failure from one harness author must not
       // turn into an E2B error when another selected solver can write the same
