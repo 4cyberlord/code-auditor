@@ -4029,6 +4029,7 @@ export async function runCouncilJob(job) {
       {winner:decision.winner,language:candidateLanguage(verifiedSource),ports:targets});
   }
   if(targets.length){
+    try {
     await patchJob(job.id,{progress_phase:"porting"});
     // Only after the verified primary winner is available: reserve one
     // isolated Rust and one isolated C++ slot during port translation/harness
@@ -4115,6 +4116,11 @@ export async function runCouncilJob(job) {
     });
     } finally {
       await portWarmPool?.close();
+    }
+    } catch(error) {
+      await addEvent(job.id,"warn","optional_ports_unavailable",
+        "Secondary implementations could not finish; the primary E2B-verified solution remains available.",
+        {detail:String(error).slice(0,360)}).catch(()=>{});
     }
   }
   await sessionNaming;
