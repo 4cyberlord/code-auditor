@@ -2988,7 +2988,8 @@ export async function runCouncilJob(job) {
   const inferredKind = questionLooksLikeCode
     ? "code"
     : (contracting.contract?.kind || reading.extraction?.kind || "");
-  const primaryLanguage=requiredProblemLanguage(question)||"python";
+  const primaryLanguage=/\bLANGUAGES:\s*(?:javascript|js)\b/i.test(contractText)
+    ? "javascript" : requiredProblemLanguage(question)||"python";
   const documentationQuery = [question, reading.extraction?.problemSummary,
     reading.extraction?.code].filter(Boolean).join("\n");
   const detectedDocsLanguage = inferDocumentationLanguage(documentationQuery,
