@@ -1,11 +1,13 @@
 import { configuredCodeLanguage, type CodingLanguage } from "./primaryDeliveryPolicy.ts";
 
 /** Secondary Council rounds run after the chosen primary code is published. */
-export function secondaryCouncilLanguages(primary: string, available: readonly string[]): CodingLanguage[] {
+export function secondaryCouncilLanguages(primary: string, available: readonly string[] | null | undefined): CodingLanguage[] {
   const origin = configuredCodeLanguage(primary);
   const seen = new Set<string>([origin]);
   const result: CodingLanguage[] = [];
-  for (const value of available) {
+  // Old cloud job snapshots have no saved language list. Regardless of
+  // per-user preferences, every coding question supports all three rounds.
+  for (const value of [...(Array.isArray(available) ? available : []), "python", "rust", "cpp"]) {
     const raw = String(value || "").trim().toLowerCase();
     if (!["python", "py", "python3", "rust", "rs", "cpp", "c++", "c++23"].includes(raw)) continue;
     const language = raw === "rs" ? "rust" : configuredCodeLanguage(raw);
