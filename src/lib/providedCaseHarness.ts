@@ -214,6 +214,8 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
 
 export function buildProvidedHarness(question: string, language: string, candidateCode: string): ProvidedSuite | null {
   if (!["python", "cpp", "rust"].includes(language)) return null;
+  // Multiple acceptable answers require a property comparator, not example equality.
+  if (/\b(?:any order|any valid|multiple valid|in any order|any one|arbitrary order)\b/i.test(question)) return null;
   const fixtures = extractProvidedFixtures(question);
   if (!fixtures.length) return null;
   const code = String(candidateCode || "");
@@ -224,7 +226,7 @@ export function buildProvidedHarness(question: string, language: string, candida
   const isStandalone = language === "python"
     ? /\b(?:input\s*\(|sys\.stdin|readline\s*\()/i.test(code)
     : language === "cpp" ? /\bint\s+main\s*\(/.test(code) : /\bfn\s+main\s*\(/.test(code);
-  const stdin = !callable && stdinContract && isStandalone && fixtures.every(f => !/\b\w+\s*=\s*[\[{"]/.test(f.input));
+  const stdin = !callable && stdinContract && isStandalone && fixtures.every(f => !/(?:^|,)\s*[A-Za-z_]\w*\s*=/.test(f.input));
   if (!callable && !stdin) return null;
   return {
     language, runnerLanguage: "python", source: "provided",
