@@ -8,7 +8,7 @@ export interface ProblemEvidence {
   disagreements: string[];
   reviewers: number;
 }
-const norm = (value: string) => value.replace(/\s+/g, " ").trim();
+const norm = (value: string) => value.replace(/\r\n/g, "\n").trim();
 /**
  * Remove unlabeled/uncorroborated sample blocks before any model may construct
  * expected values for a test harness. Never send an ambiguous screenshot example
@@ -24,6 +24,11 @@ export function stripExampleBlocks(question: string): string {
     if (inExample) continue;
     if (/^\s*(?:input|output|expected\s*output|explanation)\s*:/i.test(line)) continue;
     out.push(line);
+  }
+  // Preserve non-unique answer semantics even if the warning appeared only in
+  // a screenshot's Example/Explanation block. Exact equality would be unsafe.
+  if (/\b(?:any order|any valid|multiple valid|in any order|arbitrary order|order does not matter|in.place modification|do not return anything)\b/i.test(question)) {
+    out.push("Multiple valid outputs may exist; do not impose exact sample-output equality.");
   }
   return out.join("\n").trim();
 }
