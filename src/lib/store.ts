@@ -291,7 +291,7 @@ export interface CouncilState {
   /** Verified language-native equivalents generated from the winning code. */
   ports: VerifiedPort[];
   /** Retained Git-style before/after record for the E2B-retested judge upgrade. */
-  postJudgeUpgrade: {beforeCode:string;afterCode:string;reason:string;passed:number} | null;
+  postJudgeUpgrade: {beforeCode:string;afterCode:string;reason:string;passed:number;time?:string;space?:string} | null;
   error: string | null;
   chat: CouncilChatMessage[];
   chatSending: boolean;
@@ -5583,7 +5583,8 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
               {[candidateWinner]:proposedRun},{revised:true});
             set(st => ({council:{...st.council,candidates:fieldNow,
               postJudgeUpgrade:{beforeCode:sourceFinal.code,afterCode:upgraded.code,
-                reason:"Two independent auditors confirmed the E2B-retested improvement.",passed:proposedRun.passed}}}));
+                reason:"Two independent auditors confirmed the E2B-retested improvement.",passed:proposedRun.passed,
+                time:audits[0].time,space:audits[0].space}}}));
           } else {
             set(st => {
               const restored = {...st.council.revisedRuns};
