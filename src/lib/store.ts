@@ -81,6 +81,7 @@ import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord
 import { structuralTranslationGuidanceFor } from "./structuralTranslationGuidance.ts";
 import { fingerprintCode } from "./codeFingerprint.ts";
 import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
+import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "./judgeUpgradePolicy.ts";
 import { buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
 import { needsCandidateRevision, classifyCandidateRun } from "./revisionPolicy.ts";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
@@ -289,6 +290,8 @@ export interface CouncilState {
   oracles: OracleSignal[];
   /** Verified language-native equivalents generated from the winning code. */
   ports: VerifiedPort[];
+  /** Retained Git-style before/after record for the E2B-retested judge upgrade. */
+  postJudgeUpgrade: {beforeCode:string;afterCode:string;reason:string;passed:number} | null;
   error: string | null;
   chat: CouncilChatMessage[];
   chatSending: boolean;
@@ -328,6 +331,7 @@ const IDLE_COUNCIL: CouncilState = {
   contractAgreement: null,
   oracles: [],
   ports: [],
+  postJudgeUpgrade: null,
   error: null,
   chat: [],
   chatSending: false,
@@ -4832,6 +4836,7 @@ function councilReportFrom(c: CouncilState): CouncilReport {
     contractAgreement: c.contractAgreement,
     oracles: c.oracles,
     ports: c.ports,
+    ...(c.postJudgeUpgrade ? {postJudgeUpgrade:c.postJudgeUpgrade} : {}),
   };
   return { ...report, presentation: buildPresentation(report) };
 }
@@ -5417,8 +5422,8 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
 
   // ---------------------------------------------------------- round 4: judge
   set((st) => ({ council: { ...st.council, phase: "judging" } }));
-  const fieldNow = get().council.candidates;
-  const docketBoth =
+  let fieldNow = get().council.candidates;
+  let docketBoth =
     candidateDocket(fieldNow) +
     (fieldNow.some((c) => c.revised) ? "\n\n=== REVISED ===\n\n" + candidateDocket(fieldNow, { revised: true }) : "");
   const suspectHarness = [
@@ -5427,7 +5432,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   ]
     .filter(Boolean)
     .join("\n\n");
-  const execBoth = [
+  let execBoth = [
     executionDigest(fieldNow, get().council.runs),
     fieldNow.some((c) => c.revised)
       ? "=== REVISED RUNS ===\n" + executionDigest(fieldNow, get().council.revisedRuns, { revised: true })
@@ -5490,6 +5495,122 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       error: x.error,
     }));
   set((st) => ({ council: { ...st.council, judges } }));
+
+  // Optional post-judge improvement: only two substantive independent ideas
+  // may launch another solver request. E2B tests the exact modified code, and
+  // two OTHER judges must corroborate its non-regressing time/space bounds.
+  // A bad proposal restores the original revision and never replaces the winner.
+  const judgeReadingsForUpgrade = judges.map(judge => parseJudgeReport(judge.text));
+  const preliminaryRuns: Record<string,CandidateRun> = {};
+  for (const candidate of fieldNow) {
+    const run = candidate.revised ? get().council.revisedRuns[candidate.letter] : get().council.runs[candidate.letter];
+    if (run) preliminaryRuns[candidate.letter] = run;
+  }
+  const candidateWinner = decideWinner({claimed:"",judges:judgeReadingsForUpgrade,
+    runs:preliminaryRuns,letters:fieldNow.map(candidate => candidate.letter)}).winner;
+  const judgeIdeas = corroboratedImprovementIdeas(judgeReadingsForUpgrade.map(judge => judge.improvement));
+  const baselineAudit = agreedComplexityAudits(judgeReadingsForUpgrade)[candidateWinner];
+  const sourceCandidate = fieldNow.find(candidate => candidate.letter === candidateWinner);
+  const sourceFinal = sourceCandidate?.revised ?? sourceCandidate?.final;
+  const upgradeModel = settings.synthesisModel || sourceCandidate?.model || "";
+  const independentModels = [...new Set(judges.map(judge => judge.model))]
+    .filter(model => model && model !== upgradeModel).slice(0,2);
+  if (councilAlive(get().council,runId) && judgeIdeas.length >= 2 &&
+      candidateWinner && gateFor(preliminaryRuns[candidateWinner]) === "pass" &&
+      sourceFinal?.kind === "code" && baselineAudit && independentModels.length === 2 &&
+      upgradeModel) {
+    const previousRevision = get().council.revisedRuns[candidateWinner];
+    try {
+      const response = await bridge.runOnce({
+        runId,agentId:"council-judge-upgrade",attemptId:newAttemptId(),
+        provider:settings.gatewayId,model:upgradeModel,
+        systemPrompt:systemPrompt("code"),
+        userText:[
+          "Offer one substantive improvement to the existing verified code, using evidence from two or more independent judges.",
+          "Do not invent expected outputs or adjust any test harness. Preserve the exact language and interface.",
+          "If the approach cannot be improved without introducing risk, reply NONE instead of source.",
+          "Problem:\n"+problem,
+          "Original verified code:\n"+sourceFinal.code,
+          "Other independently developed approaches:\n"+candidateDocket(fieldNow),
+          "Judge findings:\n"+judgeIdeas.join("\n"),
+          "Return a complete Council FINAL code block with the exact same language.",
+        ].join("\n\n"),
+        images:[],maxTokens:Math.max(settings.maxTokens,8192),temperature:0,
+        baseUrl:settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+        endpoint:endpointForModel(settings,upgradeModel),
+      });
+      const upgraded = parseFinal(response);
+      if (councilAlive(get().council,runId) && upgraded?.wellFormed &&
+          upgraded.kind === "code" && candidateLanguage(upgraded) === candidateLanguage(sourceFinal) &&
+          upgraded.code.trim() && upgraded.code.trim() !== sourceFinal.code.trim()) {
+        const candidate = {...sourceCandidate,revised:upgraded} as Candidate;
+        await executeField(get,set,runId,[candidate],suites,"revisedRuns");
+        const proposedRun = get().council.revisedRuns[candidateWinner];
+        if (proposedRun && gateFor(proposedRun) === "pass") {
+          const audits = await Promise.all(independentModels.map(async model => {
+            try {
+              const reply = await bridge.runOnce({
+                runId,agentId:"council-upgrade-audit:"+model,attemptId:newAttemptId(),
+                provider:settings.gatewayId,model,
+                systemPrompt:[
+                  "Independently review a proposed improvement to E2B-tested code.",
+                  "Reject if correctness, language-native readability, edge cases or worst-case time/space regress.",
+                  "Tests alone do not prove hidden-case correctness. Base complexity audits on actual code.",
+                  "Output EXACTLY four lines: ACCEPT: yes|no, TIME: O(...), SPACE: O(...), BASIS: specific code-based reason.",
+                ].join("\n"),
+                userText:[
+                  "Problem:\n"+problem,"Original code:\n"+sourceFinal.code,
+                  "Proposed E2B-retested code:\n"+upgraded.code,
+                  "Original judge-audited TIME: "+baselineAudit.time+" SPACE: "+baselineAudit.space,
+                  "New run: "+proposedRun.passed+" passing, "+proposedRun.failed+" failing test cases.",
+                ].join("\n\n"),
+                images:[],maxTokens:1400,temperature:0,
+                baseUrl:settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+                endpoint:endpointForModel(settings,model),
+              });
+              return parseJudgeUpgradeVote(reply);
+            } catch {
+              return {accepted:false,time:"",space:"",reason:"Reviewer did not return an independent audit"};
+            }
+          }));
+          if (councilAlive(get().council,runId) && canAdoptJudgeUpgrade({
+            priorRun:preliminaryRuns[candidateWinner],proposedRun,
+            previousTime:baselineAudit.time,previousSpace:baselineAudit.space,approvals:audits,
+          })) {
+            fieldNow = fieldNow.map(item => item.letter === candidateWinner ? candidate : item);
+            docketBoth += "\n\n=== JUDGE-VERIFIED UPGRADE ===\n"+candidateDocket([candidate],{revised:true});
+            execBoth += "\n\n=== JUDGE-VERIFIED E2B RERUN ===\n"+executionDigest([candidate],
+              {[candidateWinner]:proposedRun},{revised:true});
+            set(st => ({council:{...st.council,candidates:fieldNow,
+              postJudgeUpgrade:{beforeCode:sourceFinal.code,afterCode:upgraded.code,
+                reason:"Two independent auditors confirmed the E2B-retested improvement.",passed:proposedRun.passed}}}));
+          } else {
+            set(st => {
+              const restored = {...st.council.revisedRuns};
+              if (previousRevision) restored[candidateWinner] = previousRevision;
+              else delete restored[candidateWinner];
+              return {council:{...st.council,revisedRuns:restored}};
+            });
+          }
+        } else {
+          set(st => {
+            const restored = {...st.council.revisedRuns};
+            if (previousRevision) restored[candidateWinner] = previousRevision;
+            else delete restored[candidateWinner];
+            return {council:{...st.council,revisedRuns:restored}};
+          });
+        }
+      }
+    } catch (err) {
+      set(st => {
+        const restored = {...st.council.revisedRuns};
+        if (previousRevision) restored[candidateWinner] = previousRevision;
+        else delete restored[candidateWinner];
+        return {council:{...st.council,revisedRuns:restored}};
+      });
+      console.warn("Optional judge upgrade unavailable:", cleanError(String(err)));
+    }
+  }
 
   // ------------------------------------------------------- round 5: synthesize
   set((st) => ({ council: { ...st.council, phase: "synthesizing" } }));
