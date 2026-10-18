@@ -68,8 +68,11 @@ export default function StoryResultWorkspace() {
     ? agreedComplexityAudits(council.dossier?.judges ?? [])[council.winner]
     : undefined;
   const reportedComplexity = splitComplexityClaim(report?.complexity || "");
-  const displayedTime = complexityAudit?.time || reviewData?.efficiency.currentTime || reportedComplexity.time || "—";
-  const displayedSpace = complexityAudit?.space || reviewData?.efficiency.currentSpace || reportedComplexity.space || "—";
+  // Post-judge changes have their OWN two independent complexity audits.
+  // Do not show the original candidate's bound as an audit of different code.
+  const upgradedAudit = council.postJudgeUpgrade?.afterCode === report?.code ? council.postJudgeUpgrade : null;
+  const displayedTime = upgradedAudit?.time || complexityAudit?.time || reviewData?.efficiency.currentTime || reportedComplexity.time || "—";
+  const displayedSpace = upgradedAudit?.space || complexityAudit?.space || reviewData?.efficiency.currentSpace || reportedComplexity.space || "—";
   // Once a tested winner is available, no card should remain permanently
   // "Pending" merely because the optional technical reviewer has not replied.
   // We do not invent a lower bound: the fallback says that none is verified.
