@@ -2920,9 +2920,9 @@ export async function runCouncilJob(job) {
   // The first two independent evidence readers prefer the three available
   // CleanAPI specialist families. No source code or previous answer is shared.
   const specialistRoutes = preferredVisionModels(settings.availableModels || []);
-  const roster = [...specialistRoutes, ...models.map(seat => seat.id),
+  const evidenceCandidateIds = [...specialistRoutes, ...models.map(seat => seat.id),
     ...(settings.councilJudges || []).map(seat => seat.model)];
-  const evidenceSeats = [...new Map(roster.filter(Boolean)
+  const evidenceSeats = [...new Map(evidenceCandidateIds.filter(Boolean)
     .filter(id => isSelectablePrimaryModel(id))
     .map(id => [primaryModelId(id), id])).values()]
     .sort((a, b) => {
