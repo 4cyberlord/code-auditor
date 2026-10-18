@@ -126,7 +126,7 @@ export default function StoryResultWorkspace() {
     allReady && councilPhase === "idle" && councilCanStart ? "Starting council verification" :
     finalReviewPending || reviewRunning ? "Reviewing the solution" :
     councilPhase === "error" ? "Verification could not be completed" :
-    report ? language !== "original" ? "Selected verified language port" :
+    report ? language !== "original" ? "Selected independent language solution" :
       report.provisional ? "Candidate ready — verification pending" : "Tested solution ready" :
     failed.length ? "Analysis needs attention" : running ? "Preparing analysis" : "Awaiting solution";
 
@@ -180,7 +180,7 @@ export default function StoryResultWorkspace() {
         </section>}
         <div className="story-section-heading">
           <div><span className="story-eyebrow">01 / SOLUTION</span><h1>Code solution</h1></div>
-          {report && <span className="story-outcome" data-provisional={Boolean(report.provisional)}>{language !== "original" ? "Verified port" : report.provisional ? "Provisional" : "Completed"}</span>}
+          {report && <span className="story-outcome" data-provisional={Boolean(report.provisional)}>{language !== "original" ? "Independently verified" : report.provisional ? "Provisional" : "Completed"}</span>}
         </div>
         {report && <div className="story-code-source">Selected solution <strong>{report.source}</strong></div>}
         {report && pendingPort && <p className="story-process-text" role="status">

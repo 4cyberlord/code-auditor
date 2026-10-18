@@ -78,12 +78,12 @@ import { titleFor, placeholderTitle, isPlaceholder } from "./title.ts";
 import { resolveAnswerLanguage } from "./answerLanguage.ts";
 import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from "./probeFit.ts";
 import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
-import { structuralTranslationGuidanceFor } from "./structuralTranslationGuidance.ts";
 import { fingerprintCode } from "./codeFingerprint.ts";
 import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
+import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion } from "./independentLanguageCouncil.ts";
 import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief } from "./problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "./judgeUpgradePolicy.ts";
-import { buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
+import { buildProvidedHarness, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
 import { needsCandidateRevision, classifyCandidateRun } from "./revisionPolicy.ts";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
 import { buildOverlayState } from "./overlayState.ts";
@@ -4596,106 +4596,155 @@ function executionFailureSummary(run: CandidateRun | undefined): string {
   return [run.note || "test failed", detail?.slice(0, 360)].filter(Boolean).join(" — ");
 }
 
-const PORT_LANGUAGE_ALIASES: Record<string, string> = {
-  "c++": "cpp", cpp: "cpp", c: "c", python: "python", py: "python",
-  rust: "rust", rs: "rust", javascript: "javascript", js: "javascript",
-  typescript: "typescript", ts: "typescript", java: "java", go: "go", golang: "go",
-};
-
-function portLanguageId(language: string): string {
-  return PORT_LANGUAGE_ALIASES[language.trim().toLowerCase()] ?? language.trim().toLowerCase();
-}
-
 /**
- * Derive optional language-native equivalents from the already selected winner.
- * These are ports of one proven algorithm, never new Council candidates, and
- * each must pass its own language harness before it is published.
+ * Secondary-language rounds are NEW Council competitions, not translations.
+ * Every configured solver sees only the original verified problem and target
+ * language; no Python winner, semantic blueprint, or translated source enters
+ * their prompts. Each answer receives its own language-native E2B verification.
+ * Judges then rank only E2B-passing candidates for that secondary language.
+ *
+ * The primary Council result and on-screen language never change here.
  */
 async function generateVerifiedPorts(
   get: GetStore, set: SetStore, runId: string, source: Candidate, problem: string,
-  knowledge: string, settings: Settings, suites: TestSuite[],
+  knowledge: string, settings: Settings, _suites: TestSuite[],
+  originalImages: bridge.ImageInput[], primarySolverModels: readonly string[],
 ): Promise<VerifiedPort[]> {
-  const final = source.revised ?? source.final;
-  if (!final || final.kind !== "code" || !final.code.trim()) return [];
-  const sourceLanguage = candidateLanguage(final);
-  const targets = [...new Set(settings.solutionLanguages.map(portLanguageId).filter(Boolean))]
-    .filter(language => language !== sourceLanguage);
-  if (!targets.length) return [];
+  const primary = source.revised ?? source.final;
+  if (!primary || primary.kind !== "code" || !primary.code.trim()) return [];
+  const targets = secondaryCouncilLanguages(candidateLanguage(primary), settings.solutionLanguages);
   const sessionId = get().currentSessionId;
-  if (!sessionId) return targets.map(language => ({ language, sourceLetter: source.letter, model: source.model,
-    code: "", status: "failed" as const, error: "No signed-in session for E2B verification." }));
-  const model = settings.synthesisModel || source.model;
+  if (!targets.length) return [];
   const ports: VerifiedPort[] = targets.map(language => ({
     language, sourceLetter: source.letter, model: "", code: "", status: "preparing",
   }));
-  if (get().council.runId === runId && ["done", "porting"].includes(get().council.phase)) {
-    set(st => ({ council: { ...st.council, ports: [...ports] } }));
-  }
+  const stillActive = () => get().council.runId === runId && get().council.phase !== "cancelled";
+  if (stillActive()) set(st => ({ council: { ...st.council, ports: [...ports] } }));
+  // Reuse the exact pane + adaptive solver cohort that produced this primary
+  // Council field. Do not substitute the first entries of the saved roster:
+  // adaptive selection may have chosen different models for this question.
+  const solverModels = independentLanguageSolverModels(primarySolverModels, source.model);
+  const judgeModels = [...new Set(settings.councilJudges.map(seat => seat.model).filter(Boolean))];
+
   for (const language of targets) {
-    // A new Council run must not receive late ports from an earlier question.
-    if (get().council.runId !== runId || get().council.phase === "cancelled") break;
+    if (!stillActive()) break;
+    const index = ports.findIndex(p => p.language === language);
+    if (!sessionId) {
+      ports[index] = { ...ports[index], status: "failed", error: "No signed-in session for E2B." };
+      if (stillActive()) set(st => ({ council: { ...st.council, ports: [...ports] } }));
+      continue;
+    }
     try {
-      const request = [
-        `Port Candidate ${source.letter}'s already verified algorithm into ${language}.`,
-        "Preserve the exact input/output contract, edge-case behavior, and asymptotic complexity.",
-        "This is an equivalent implementation, not a new algorithm. Use idiomatic syntax for the target language.",
-        "Return exactly one valid FINAL block with KIND: code and LANGUAGE set to the target language.",
-        `ORIGINAL VERIFIED IMPLEMENTATION (${sourceLanguage}):\n\`\`\`${sourceLanguage}\n${final.code}\n\`\`\``,
-        problem,
-        structuralTranslationGuidanceFor(sourceLanguage, language),
-        knowledge ? `LOCAL LANGUAGE AND ALGORITHM KNOWLEDGE:\n${knowledge}` : "",
-      ].filter(Boolean).join("\n\n");
-      const text = await bridge.runOnce({ runId, agentId: `council-port:${language}`, attemptId: newAttemptId(),
-        provider: settings.gatewayId, model, systemPrompt: systemPrompt("code"), userText: request,
-        images: [], maxTokens: settings.maxTokens, temperature: 0,
-        baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
-        endpoint: endpointForModel(settings, model) });
-      const parsed = parseFinal(text);
-      if (!parsed || parsed.kind !== "code" || !parsed.code.trim() || candidateLanguage(parsed) !== language)
-        throw new Error(`The generated ${language} port was missing valid ${language} code.`);
-      // A port may expose a different Python callable than the source
-      // candidate; bind authoritative fixtures to the port's actual API.
-      let suite = buildProvidedHarness(problem, language, parsed.code) ||
-        suites.find(item => item.language === language && item.source !== "provided");
+      // Full new solver field: one independent solve per model, in the target
+      // language, with NO source code or translation instruction.
+      const answers = await Promise.all(solverModels.map(async (model, number) => {
+        const letter = letterFor(number);
+        try {
+          const text = await bridge.runOnce({
+            runId, agentId: "council-independent:" + language + ":" + letter,
+            attemptId: newAttemptId(), provider: settings.gatewayId, model,
+            endpoint: endpointForModel(settings, model),
+            systemPrompt: systemPrompt("code") + "\n" + independentLanguageInstruction(language),
+            userText: independentLanguageQuestion(problem, language, knowledge),
+            images: settings.probes[model]?.vision === true ? originalImages : [],
+            maxTokens: Math.max(settings.maxTokens, 8192), temperature: 0,
+            baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+          });
+          const final = parseFinal(text);
+          return { letter, model, final: final?.kind === "code" &&
+            candidateLanguage(final) === language && final.code?.trim() ? final : null, text, error: null } as Candidate;
+        } catch (error) {
+          return { letter, model, final: null, text: "",
+            error: cleanError(String(error)) } as Candidate;
+        }
+      }));
+      if (!stillActive()) break;
+      const candidates = answers.filter(item => item.final?.kind === "code" && item.final.code.trim());
+      if (!candidates.length) throw new Error("No independent solver returned complete " + language + " code.");
+      // Build the accepted E2B suite against this language's REAL interfaces.
+      const first = candidates[0].final!;
+      let suite: TestSuite | undefined = buildProvidedHarness(problem, language, first.kind === "code" ? first.code : "") || undefined;
       if (!suite) {
-        const spec = await bridge.runOnce({ runId, agentId: `council-port-spec:${language}`, attemptId: newAttemptId(),
-          provider: settings.gatewayId, model, systemPrompt: testSpecSystemPrompt(),
-          userText: testSpecUserPrompt({ question: problem, docket: candidateDocket([{ ...source, final: parsed }]), languages: [language], knowledge }),
-          images: [], maxTokens: Math.max(settings.maxTokens, 8192), temperature: 0,
+        const author = settings.synthesisModel || judgeModels[0] || candidates[0].model;
+        const spec = await bridge.runOnce({
+          runId, agentId: "council-independent-spec:" + language, attemptId: newAttemptId(),
+          provider: settings.gatewayId, model: author, endpoint: endpointForModel(settings, author),
+          systemPrompt: testSpecSystemPrompt(),
+          userText: testSpecUserPrompt({ question: problem, docket: candidateDocket(candidates),
+            languages: [language], knowledge }), images: [],
+          maxTokens: Math.max(settings.maxTokens, 8192), temperature: 0,
           baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
-          endpoint: endpointForModel(settings, model) });
+        });
         suite = parseTestSuites(spec).find(item => item.language === language);
       }
-      if (!suite) throw new Error(`No executable ${language} harness was produced.`);
-      const referenceError = await validateHarnessReference(get, suite, settings.e2bTimeoutMs);
-      if (referenceError) throw new Error(`The ${language} harness did not validate its independent reference: ${referenceError}`);
-      const program = spliceSuite(suite, parsed.code);
-      if (!program) throw new Error(`The ${language} harness has no solution splice marker.`);
-      const result = await runE2BBenchmark(sessionId, suite.runnerLanguage || suite.language, program, settings.e2bTimeoutMs);
-      const counts = suite.source === "provided"
-        ? providedCaseEvidence(result.stdout, requiredHarnessCases(suite)) : countCases(result.stdout);
-      const run: CandidateRun = { letter: `port:${language}`, ran: true,
-        ok: result.ok && counts.passed >= requiredHarnessCases(suite) && counts.failed === 0 &&
-          (suite.source !== "provided" || Boolean("complete" in counts && counts.complete)),
-        evidenceSource: suite.source || "generated",
-        providedCaseCount: suite.source === "provided" ? suite.providedCaseCount : 0,
-        passed: counts.passed, failed: counts.failed, durationMs: result.durationMs, provider: "e2b",
-        remoteElapsedMs: "remoteElapsedMs" in result ? result.remoteElapsedMs : null,
-        peakMemoryKb: "peakMemoryKb" in result ? result.peakMemoryKb : null,
-        sandboxId: "sandboxId" in result ? result.sandboxId : null,
-        note: result.timedOut ? "timed out" : result.exitCode !== 0 ? `exit ${result.exitCode}` : "",
-        runtime: result.runtime };
-      ports.splice(ports.findIndex(item => item.language === language), 1,
-        {language, sourceLetter: source.letter, model, code: run.ok ? parsed.code : "",
-        status: run.ok && run.failed === 0 && run.passed > 0 ? "verified" : "failed", run,
-        error: run.ok && run.failed === 0 && run.passed > 0 ? undefined : run.note || "E2B tests failed." });
+      if (!suite) throw new Error("No independent " + language + " E2B harness was produced.");
+      const preflightError = await validateHarnessReference(get, suite, settings.e2bTimeoutMs);
+      if (preflightError) throw new Error("Independent " + language + " harness failed preflight: " + preflightError);
+      const runs: Record<string, CandidateRun> = {};
+      await Promise.all(candidates.map(async candidate => {
+        const final = candidate.final!;
+        if (final.kind !== "code") return;
+        try {
+          const executable = spliceSuite(suite!, final.code);
+          if (!executable) throw new Error("No harness splice marker");
+          const result = await runE2BBenchmark(sessionId, suite!.runnerLanguage || suite!.language,
+            executable, settings.e2bTimeoutMs);
+          const counts = suite!.source === "provided"
+            ? providedCaseEvidence(result.stdout, requiredHarnessCases(suite!))
+            : countCases(result.stdout);
+          const ok = result.ok && counts.passed >= requiredHarnessCases(suite!) && counts.failed === 0 &&
+            (suite!.source !== "provided" || Boolean("complete" in counts && counts.complete));
+          runs[candidate.letter] = { letter: candidate.letter, ran: true, ok,
+            passed: counts.passed, failed: counts.failed, durationMs: result.durationMs,
+            runtime: result.runtime, provider: "e2b", codeDigest: await fingerprintCode(final.code),
+            evidenceSource: suite!.source || "generated",
+            note: result.timedOut ? "timed out" : result.exitCode !== 0 ? "exit " + result.exitCode : "" };
+        } catch (error) {
+          runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false,
+            passed: 0, failed: 0, durationMs: 0, runtime: "e2b",
+            note: cleanError(String(error)) };
+        }
+      }));
+      if (!stillActive()) break;
+      // Secondary judges see the original question and the independent code
+      // field plus measured E2B outcomes, never the primary winner.
+      const judgeReadings = await Promise.all(judgeModels.map(async model => {
+        try {
+          const text = await bridge.runOnce({
+            runId, agentId: "council-independent-judge:" + language + ":" + model,
+            attemptId: newAttemptId(), provider: settings.gatewayId, model,
+            endpoint: endpointForModel(settings, model),
+            systemPrompt: judgeSystemPrompt("correctness"),
+            userText: judgeUserPrompt({ question: problem, docket: candidateDocket(candidates),
+              reviews: "", execution: executionDigest(candidates, runs), knowledge }),
+            images: settings.probes[model]?.vision === true ? originalImages : [],
+            maxTokens: settings.maxTokens, temperature: 0,
+            baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+          });
+          return { ...parseJudgeReport(text), model };
+        } catch { return null; }
+      }));
+      if (!stillActive()) break;
+      const validJudges = judgeReadings.filter((judge): judge is NonNullable<typeof judge> => judge !== null);
+      const choice = decideWinner({ claimed: "", judges: validJudges, runs,
+        letters: candidates.map(item => item.letter) });
+      const chosen = candidates.find(item => item.letter === choice.winner);
+      const chosenCode = chosen?.final?.kind === "code" ? chosen.final.code : "";
+      if (!chosen || !chosenCode || gateFor(runs[chosen.letter]) !== "pass" ||
+        runs[chosen.letter]?.codeDigest !== await fingerprintCode(chosenCode))
+        throw new Error("No fingerprint-matched E2B-verified independent " + language + " winner.");
+      ports[index] = { language, sourceLetter: chosen.letter, model: chosen.model,
+        code: chosenCode, status: "verified", run: runs[chosen.letter],
+        independentCouncil: { solvers: solverModels.length,
+          candidates: candidates.length, judges: validJudges.length,
+          winner: chosen.letter, selection: choice.disagreement || "E2B evidence-first" } };
     } catch (error) {
-      ports.splice(ports.findIndex(item => item.language === language), 1,
-        {language, sourceLetter: source.letter, model, code: "", status: "failed",
-        error: cleanError(String(error)) });
+      ports[index] = { ...ports[index], code: "", status: "failed",
+        error: cleanError(String(error)) };
     }
-    if (get().council.runId === runId && get().council.phase !== "cancelled") {
+    if (stillActive()) {
       set(st => ({ council: { ...st.council, ports: [...ports] } }));
+      void get().persistRun();
     }
   }
   return ports;
@@ -5096,7 +5145,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
           provider: settings.gatewayId, model: seat.model,
           endpoint: endpointForModel(settings, seat.model),
           systemPrompt: visionEvidenceSystemPrompt(),
-          userText: "Inspect the original image independently. The text below is context, not verified examples:\n" + problem.slice(0, 4000),
+          userText: "Independently read literal examples from ORIGINAL screenshot pixels only. No OCR transcription, code or model-generated expected outputs are given.",
           images: allImages, maxTokens: 2400, temperature: 0,
           baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
         });
@@ -5765,7 +5814,8 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       if (hasVerifiedCodeWinner && winnerCandidate && get().council.runId === runId &&
           get().council.phase !== "cancelled") {
         try {
-          await generateVerifiedPorts(get, set, runId, winnerCandidate, problem, knowledge, settings, suites);
+          await generateVerifiedPorts(get, set, runId, winnerCandidate, harnessProblem, knowledge, settings, suites,
+            allImages, field.map(candidate => candidate.model));
         } catch (portError) {
           console.warn("Optional language ports unavailable:", cleanError(String(portError)));
         }

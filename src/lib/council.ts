@@ -414,6 +414,11 @@ export interface VerifiedPort {
   status: "preparing" | "verified" | "failed";
   run?: CandidateRun;
   error?: string;
+  /** This language was independently solved and judged, never translated. */
+  independentCouncil?: {
+    solvers: number; candidates: number; judges: number;
+    winner: string; selection: string;
+  };
 }
 
 /**
