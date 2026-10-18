@@ -8,7 +8,7 @@ export function secondaryCouncilLanguages(primary: string, available: readonly s
   for (const value of available) {
     const raw = String(value || "").trim().toLowerCase();
     if (!["python", "py", "python3", "rust", "rs", "cpp", "c++", "c++23"].includes(raw)) continue;
-    const language = configuredCodeLanguage(raw);
+    const language = raw === "rs" ? "rust" : configuredCodeLanguage(raw);
     if (!seen.has(language)) {
       seen.add(language);
       result.push(language);
