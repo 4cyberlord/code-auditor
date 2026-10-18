@@ -1623,7 +1623,7 @@ function CouncilCard() {
       <details className="settings-inline-help"><summary>How Council mode works</summary><p>The council re-solves the problem, tests each code candidate, reviews the results, and produces a final recommendation. Failed tests cannot win. Expect about 36 extra requests per run, so low gateway limits make council runs slower.</p></details>
 
       <div className="row">
-        <label htmlFor="default-solution-language">Default solution language</label>
+        <label htmlFor="default-solution-language">Code in · primary language</label>
         <select
           id="default-solution-language"
           className="field mono"
@@ -1635,7 +1635,7 @@ function CouncilCard() {
           <option value="Rust">Rust</option>
         </select>
       </div>
-      <p className="settings-form-caption">This is the first solution shown. Other languages remain available as separately tested ports.</p>
+      <p className="settings-form-caption">Python by default. This choice is saved before your next question is submitted, so all four solvers and E2B tests use that language first. C++ and Rust remain available as separately verified versions afterward. A question with an explicit judge language or code stub keeps its required interface.</p>
 
       <div className="row">
         <label htmlFor="memory-target">Memory goal</label>
