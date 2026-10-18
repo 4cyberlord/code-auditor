@@ -29,7 +29,12 @@ export default function StoryResultWorkspace() {
   const gatewayKey = useStore(s => s.gatewayKey);
   const runReview = useStore(s => s.runReview);
   const start = useStore(s => s.start);
-  const [language, setLanguage] = useState("original");
+  // Language choices are scoped to the currently displayed question, not
+  // carried across submissions or reopened history items.
+  const shownRunKey = viewingRunId || council.runId || runId || "idle";
+  const [selectedLanguage, setSelectedLanguage] = useState({runKey: "", value: "original"});
+  const language = selectedLanguage.runKey === shownRunKey ? selectedLanguage.value : "original";
+  const setLanguage = (value: string) => setSelectedLanguage({runKey: shownRunKey, value});
   // A new run can spend time in live model checks before it gets a new runId.
   // Never show the previous run's answer under that new run's progress text.
   // A solver's first answer is not the Council's choice. Keep the final-code
@@ -39,7 +44,9 @@ export default function StoryResultWorkspace() {
     (council.phase !== "idle" && council.phase !== "done" && council.phase !== "error" && council.phase !== "cancelled"));
   const finalReviewPending = !viewingRunId && settings.councilEnabled && council.phase === "done" &&
     review.status !== "done" && review.status !== "error";
-  const report = preparing || awaitingCouncil || finalReviewPending || !settings.councilEnabled
+  // The E2B-confirmed winner is already final. Optional technical commentary
+  // must never make a ready-to-copy primary solution disappear.
+  const report = preparing || awaitingCouncil || !settings.councilEnabled
     ? null : selectVerifiedStorySolution(agents, council, consensus().representative);
   const reviewData = report ? review.data : null;
   const reviewRunning = !preparing && review.status === "running";
@@ -114,7 +121,7 @@ export default function StoryResultWorkspace() {
     allReady && councilPhase === "idle" && councilCanStart ? "Starting council verification" :
     finalReviewPending || reviewRunning ? "Reviewing the solution" :
     councilPhase === "error" ? "Verification could not be completed" :
-    report ? language !== "original" ? "Translated port — testing pending" :
+    report ? language !== "original" ? "Selected verified language port" :
       report.provisional ? "Candidate ready — verification pending" : "Tested solution ready" :
     failed.length ? "Analysis needs attention" : running ? "Preparing analysis" : "Awaiting solution";
 
@@ -168,7 +175,7 @@ export default function StoryResultWorkspace() {
         </section>}
         <div className="story-section-heading">
           <div><span className="story-eyebrow">01 / SOLUTION</span><h1>Code solution</h1></div>
-          {report && <span className="story-outcome" data-provisional={report.provisional || language !== "original"}>{language !== "original" ? "Port untested" : report.provisional ? "Provisional" : "Completed"}</span>}
+          {report && <span className="story-outcome" data-provisional={Boolean(report.provisional)}>{language !== "original" ? "Verified port" : report.provisional ? "Provisional" : "Completed"}</span>}
         </div>
         {report && <div className="story-code-source">Selected solution <strong>{report.source}</strong></div>}
         <div className="story-code-window">
