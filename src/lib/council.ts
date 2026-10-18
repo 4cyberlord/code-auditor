@@ -411,7 +411,7 @@ export interface VerifiedPort {
   sourceLetter: string;
   model: string;
   code: string;
-  status: "verified" | "failed";
+  status: "preparing" | "verified" | "failed";
   run?: CandidateRun;
   error?: string;
 }
