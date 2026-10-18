@@ -17,6 +17,7 @@ type Published = {
   stage?:string;winner?:string;standing?:string;
   provisional?:EarlySolution;
   upgrade?:{changed?:boolean;from?:string;to?:string;reason?:string};
+  postJudgeUpgrade?:{beforeCode?:string;afterCode?:string;sourceLetter?:string;reason?:string;passed?:number};
   solutionHistory?:Array<{version?:string;letter?:string;code?:string;at?:string}>;
   presentation?:{code?:string;language?:string;complexity?:string};
   ports?:Port[];
@@ -102,6 +103,24 @@ export function ProgressiveCouncilResult({
           Council decision: {details.upgrade.reason}
         </p>}
       </>}
+      {details.postJudgeUpgrade?.beforeCode &&
+        details.postJudgeUpgrade.afterCode === primary?.code && <details open className="council-upgrade-diff">
+        <summary>Judge-approved improvement · View verified code diff</summary>
+        <p className="progressive-result-note">
+          The Council retested the modified solution in E2B
+          {typeof details.postJudgeUpgrade.passed === "number" ? " · " + details.postJudgeUpgrade.passed + " passing cases" : ""}.
+          {details.postJudgeUpgrade.reason ? " " + details.postJudgeUpgrade.reason : ""}
+        </p>
+        <div className="council-diff-lines" role="region" aria-label="Judge-approved algorithm upgrade changes">
+          {codeLineDiff(details.postJudgeUpgrade.beforeCode,primary?.code||"").map((line,index)=>
+            <div key={index} className="council-diff-line" data-kind={line.kind}>
+              <span className="council-diff-number">{line.beforeLine??""}</span>
+              <span className="council-diff-number">{line.afterLine??""}</span>
+              <span className="council-diff-marker">{line.kind==="removed"?"−":line.kind==="added"?"+":" "}</span>
+              <code>{line.text||" "}</code>
+            </div>)}
+        </div>
+      </details>}
       {earlyReady&&<details>
         <summary>{upgraded?"View previous provisional version":"View earlier provisional evidence"}</summary>
         <pre className="progressive-result-code">{early?.code}</pre>
