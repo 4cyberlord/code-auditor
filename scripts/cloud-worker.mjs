@@ -2149,7 +2149,7 @@ async function updateSavedCouncilReport(job,report){
 async function independentLanguageCouncil(job,settings,baseUrl,models,judges,question,
   target,knowledge,bench,originalImages=[],warmPool=null){
   const started=Date.now();
-  const roster=[...new Set(models.map(seat=>seat.id).filter(Boolean))].slice(0,4);
+  const roster=[...new Set(bench.keep(models,seat=>seat.id).map(seat=>seat.id).filter(Boolean))].slice(0,4);
   const candidates=await Promise.all(roster.map(async(model,index)=>{
     const letter=letterFor(index);
     try{
