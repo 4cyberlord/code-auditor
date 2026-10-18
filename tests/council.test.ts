@@ -118,12 +118,13 @@ console.log("\n3. a solver sees only the reviews addressed to it");
 }
 
 console.log("\n4. the test-spec block parses, harnesses must carry the splice marker");
-check("provided cases may be tested without inventing eight others", MIN_INDEPENDENT_HARNESS_CASES === 1);
+check("AI-authored harnesses retain an eight-case minimum", MIN_INDEPENDENT_HARNESS_CASES === 8);
 const testSpecInstructions = testSpecSystemPrompt().replace(/\s+/g, " ");
 check("spec prioritizes question supplied examples and bounds additional tests",
   testSpecInstructions.includes("PRIORITY ONE") &&
-  testSpecInstructions.includes("at most two independently justified edge cases") &&
-  testSpecInstructions.includes("Never invent expected outputs"));
+  testSpecInstructions.includes("at least eight distinct checks") &&
+  testSpecInstructions.includes("Never invent expected outputs") &&
+  testSpecInstructions.includes("at least eight separately named"));
 
 {
   const spec = `<<<TESTS

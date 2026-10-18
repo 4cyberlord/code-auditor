@@ -23,12 +23,15 @@ export type ProvidedSuite = {
   runnerLanguage: "python";
   source: "provided";
   providedCaseCount: number;
+  /** Retained so each candidate can get an adapter for its own callable API. */
+  question: string;
   harness: string;
 };
 
 const MAX_CASES = 16;
 const MAX_SOURCE_CHARS = 6000;
 const LABEL = /^\s*(?:sample\s+)?(?:input|output|expected\s+output)\s*:\s*(.*)$/i;
+export const MIN_GENERATED_HARNESS_CASES = 8;
 
 function splitTopLevel(text: string): string[] {
   const result: string[] = [];
@@ -148,8 +151,16 @@ export function extractProvidedFixtures(question: string): ProvidedFixture[] {
 
 function callableName(code: string): string | null {
   if (/^\s*from\s+__future__\s+import\s+/m.test(code)) return null;
-  const inClass = /\bclass\s+Solution\s*(?:\([^)]*\))?\s*:\s*[\s\S]*?\n[ \t]+def\s+([A-Za-z_]\w*)\s*\(/.exec(code);
-  if (inClass) return inClass[1];
+  const lines = code.split(/\r?\n/);
+  const classIndex = lines.findIndex(line => /^\s*class\s+Solution\s*(?:\([^)]*\))?\s*:\s*(?:#.*)?$/.test(line));
+  if (classIndex >= 0) {
+    const classIndent = lines[classIndex].match(/^\s*/)?.[0].length ?? 0;
+    for (const line of lines.slice(classIndex + 1)) {
+      if (line.trim() && !/^\s*#/.test(line) && (line.match(/^\s*/)?.[0].length ?? 0) <= classIndent) break;
+      const method = /^([ \t]+)def\s+([A-Za-z_]\w*)\s*\(/.exec(line);
+      if (method && method[2] !== "__init__" && !method[2].startsWith("_")) return method[2];
+    }
+  }
   const standalone = /(?:^|\n)def\s+([a-zA-Z_]\w*)\s*\(/.exec(code);
   return standalone && !standalone[1].startsWith("_") ? standalone[1] : null;
 }
@@ -234,13 +245,16 @@ export function buildProvidedHarness(question: string, language: string, candida
   return {
     language, runnerLanguage: "python", source: "provided",
     providedCaseCount: fixtures.length,
+    question,
     harness: pythonDriver(fixtures, callable ? "callable" : "stdin", language, name || undefined),
   };
 }
 
-/** Fixture-first tests need every supplied example, not eight invented cases. */
+/** Supplied examples require exact coverage; generated suites retain the broader gate. */
 export function requiredHarnessCases(suite: { source?: string; providedCaseCount?: number }): number {
-  return suite.source === "provided" ? Math.max(1, Number(suite.providedCaseCount) || 0) : 1;
+  return suite.source === "provided"
+    ? Math.max(1, Number(suite.providedCaseCount) || 0)
+    : MIN_GENERATED_HARNESS_CASES;
 }
 
 /** Only accepted fixture IDs count; extra PASS text is not verification. */

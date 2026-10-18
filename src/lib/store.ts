@@ -4421,8 +4421,13 @@ async function executeField(
     if (!councilAlive(get().council, runId)) return;
     const f = which === "revisedRuns" ? (c.revised ?? c.final) : c.final;
     const lang = f?.kind === "code" ? candidateLanguage(f) : "";
-    const suite = lang ? suites.find((s) => s.language === lang) : undefined;
     const code = which === "revisedRuns" && c.revised ? c.revised.code : (f?.code ?? "");
+    const baseSuite = lang ? suites.find((s) => s.language === lang) : undefined;
+    // Preserve the same question-provided fixtures while adapting the Python
+    // callable name independently for each original or revised candidate.
+    const suite = baseSuite?.source === "provided" && baseSuite.question
+      ? buildProvidedHarness(baseSuite.question, lang, code) || undefined
+      : baseSuite;
     const setRun = (run: CandidateRun) =>
       set((st) => ({
         council: { ...st.council, [which]: { ...st.council[which], [c.letter]: run } },
@@ -4634,8 +4639,10 @@ async function generateVerifiedPorts(
       const parsed = parseFinal(text);
       if (!parsed || parsed.kind !== "code" || !parsed.code.trim() || candidateLanguage(parsed) !== language)
         throw new Error(`The generated ${language} port was missing valid ${language} code.`);
-      let suite = suites.find(item => item.language === language);
-      if (!suite) suite = buildProvidedHarness(problem, language, parsed.code) || undefined;
+      // A port may expose a different Python callable than the source
+      // candidate; bind authoritative fixtures to the port's actual API.
+      let suite = buildProvidedHarness(problem, language, parsed.code) ||
+        suites.find(item => item.language === language && item.source !== "provided");
       if (!suite) {
         const spec = await bridge.runOnce({ runId, agentId: `council-port-spec:${language}`, attemptId: newAttemptId(),
           provider: settings.gatewayId, model, systemPrompt: testSpecSystemPrompt(),

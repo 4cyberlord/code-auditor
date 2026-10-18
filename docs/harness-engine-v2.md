@@ -15,9 +15,13 @@
     CA_CASE evidence, not self-reported PASS text.
 - A sample-only result is identified as "provided examples", not a claim about
   hidden inputs or general algorithmic correctness.
-- If the question has one supplied test, the application can honestly report one
-  tested case. It no longer forces eight synthetic examples with possibly invented
-  expectations. Up to two independent edge cases are optional, not required.
+- If the deterministic adapter can safely execute the supplied contract, it tests
+  every distinct supplied example and reports exactly that sample evidence; one
+  supplied case is not misrepresented as hidden-test assurance.
+- If the deterministic adapter cannot handle the contract, the AI-authored fallback
+  still requires at least eight distinct named checks, including the supplied examples
+  and independently justified scenarios. It must derive synthetic expected outputs
+  from its independent reference rather than inventing them.
 - A malformed model/gateway response is separately reported as a provider/route
   failure instead of claiming the model wrote an invalid Python harness.
 - E2B, independent review, mutation signals, code-digest checks and the existing
@@ -34,7 +38,7 @@ uses an independent reference, and limits additional guesses.
 
 The deterministic stdin wrapper uses standard subprocess compilation and runs inside
 E2B with its existing timeout/resource boundaries; it never executes untrusted
-candidate code in the user-facing macOS process. Passing 1–2 samples is weak
+candidate code in the user-facing macOS process. Passing 1–2 supplied samples is weak
 evidence, not a proof. Problems without independently verifiable expected values
 must fail closed rather than invent an answer.
 

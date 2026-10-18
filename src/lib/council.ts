@@ -32,6 +32,7 @@
 import type { AgentFinal } from "./parse.ts";
 import { canonicalComplexityBound, compareComplexityBounds } from "./theoryBounds.ts";
 import { isPrimaryModel, listedPrimaryRoute, primaryModelId } from "./primaryModels.ts";
+import { MIN_GENERATED_HARNESS_CASES } from "./providedCaseHarness.ts";
 
 // ------------------------------------------------------------------ candidates
 
@@ -175,12 +176,14 @@ export interface TestSuite {
   /** Verified user-supplied examples use a trusted deterministic adapter. */
   source?: "provided" | "generated";
   providedCaseCount?: number;
+  /** Original statement lets each candidate receive its own deterministic adapter. */
+  question?: string;
   /** The deterministic fixture adapter runs in Python for all three languages. */
   runnerLanguage?: "python";
 }
 
-/** One successful authentic case is valid sample evidence, not a hidden-test proof. */
-export const MIN_INDEPENDENT_HARNESS_CASES = 1;
+/** AI-authored suites retain the independent coverage floor; supplied samples use their exact count. */
+export const MIN_INDEPENDENT_HARNESS_CASES = MIN_GENERATED_HARNESS_CASES;
 
 /**
  * Static checks applied before a generated suite is allowed into E2B. These
@@ -1532,12 +1535,17 @@ export function testSpecSystemPrompt(): string {
     "Do not replace, alter, approximate or ignore their supplied expected outputs.",
     "The problem statement outranks candidate guesses, model-generated test values and RAG.",
     "If the statement provides only one or two examples, they are still valid sample evidence.",
-    "You may add at most two independently justified edge cases, and only when their",
-    "expected outputs are established from the contract or an independent oracle.",
+    "For this AI-authored fallback, add independently justified scenario checks until the",
+    "suite contains at least eight distinct checks. Establish every extra expected output",
+    "from the contract or an independent reference implementation.",
     "Never invent expected outputs to increase the test count; never repeat a test to inflate coverage.",
-    "When examples do not exist, derive a small test battery from the exact constraints",
-    "and the independent reference. One valid test is the absolute minimum for execution,",
-    "but passing those tests is NOT a proof of correctness on hidden inputs.",
+    "When examples do not exist, derive a thorough test battery from the exact constraints",
+    "and independent reference. The harness must exercise at least eight separately named,",
+    "distinct checks; a single check is never sufficient for an AI-authored suite.",
+    "Cover applicable boundaries, empty/singleton inputs, duplicates, zero/negative/extreme",
+    "values, structural edge cases, and at least two adversarial patterns. Include a",
+    "performance-shaped case when constraints warrant it. Never count duplicate inputs as",
+    "distinct coverage, and do not claim these checks prove correctness on hidden inputs.",
     "Use exactly one line containing <<<SOLUTION>>> to splice any candidate verbatim.",
     "Implement the correct callable signature or exact stdin/stdout interface stated in the problem.",
     "Each assertion must emit a distinct PASS <name> or FAIL <name> record with nonzero exit on failure.",

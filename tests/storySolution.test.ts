@@ -27,7 +27,8 @@ assert.deepEqual(missingSuiteLanguages(["c++20", "python3"], [{language:"cpp",ha
   "partial harness output cannot verify an untested language");
 const specInstructions=testSpecSystemPrompt();
 assert.match(specInstructions,/reproduce ALL valid supplied cases as executable assertions/i);
-assert.match(specInstructions,/When examples do not exist, derive a small test battery/i);
+assert.match(specInstructions,/When examples do not exist, derive a thorough test battery/i);
+assert.match(specInstructions,/at least eight distinct checks/i);
 assert.match(specInstructions,/Never invent expected outputs/i);
 assert.match(specInstructions,/independent REFERENCE implementation/i);
 assert.match(testSpecUserPrompt({question:"Example 1: input [1, 2], output 3",docket:"Candidate A",languages:["python"]}),/Example 1: input \[1, 2\], output 3/);

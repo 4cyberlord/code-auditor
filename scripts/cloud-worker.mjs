@@ -1264,8 +1264,13 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
   await parallelMap(selected, limit, async (candidate) => {
     const final = revised ? (candidate.revised ?? null) : candidate.final;
     const lang = final?.kind === "code" ? candidateLanguage(final) : "";
-    const suite = suites.find((s) => s.language === lang);
     const code = final?.code || "";
+    const baseSuite = suites.find((s) => s.language === lang);
+    // The deterministic suite carries authoritative fixtures, but callable
+    // adapters must be bound to this candidate's own function/method name.
+    const suite = baseSuite?.source === "provided" && baseSuite.question
+      ? buildProvidedHarness(baseSuite.question, lang, code)
+      : baseSuite;
     if (!final || final.kind !== "code" || !code.trim()) {
       runs[candidate.letter] = { letter: candidate.letter, ran: false, ok: false, passed: 0, failed: 0, durationMs: 0, note: final?.kind === "research" ? "research answer" : "no code", runtime: "" };
       return;

@@ -65,6 +65,22 @@ const single = buildProvidedHarness(one, "python", correct)!;
 assert.equal(requiredHarnessCases(single), 1);
 const singleResult = runProgram(spliceSuite(single, correct)!);
 assert.deepEqual(providedCaseEvidence(singleResult.stdout, 1), {passed: 1, failed: 0, complete: true});
+assert.equal(requiredHarnessCases({source: "generated"}), 8,
+  "AI-authored suites keep the independent coverage floor");
+
+// The same supplied fixtures must adapt to each model's own valid callable
+// name; one model's signature must not make another candidate fail E2B.
+const renamed = "class Solution:\n    def solve(self, nums, target):\n        seen = {}\n        for i, value in enumerate(nums):\n            if target - value in seen: return [seen[target-value], i]\n            seen[value] = i\n        return []\n";
+const renamedSuite = buildProvidedHarness(twoSum, "python", renamed)!;
+assert.match(renamedSuite.harness, /CA_METHOD = "solve"/);
+const renamedRun = runProgram(spliceSuite(renamedSuite, renamed)!);
+assert.equal(renamedRun.status, 0, renamedRun.stderr);
+assert.deepEqual(providedCaseEvidence(renamedRun.stdout, 3), {passed: 3, failed: 0, complete: true});
+
+// A constructor is not the problem's callable, even when it appears first.
+const withConstructor = "class Solution:\n    def __init__(self):\n        pass\n    def twoSum(self, nums, target):\n        return [0, 1]\n";
+const constructorSuite = buildProvidedHarness(one, "python", withConstructor)!;
+assert.match(constructorSuite.harness, /CA_METHOD = "twoSum"/);
 
 // Reject missing/ambiguous source evidence; never let AI fabricate an oracle.
 assert.deepEqual(extractProvidedFixtures("Example 1:\nInput: [1,2]\nExplanation: no output supplied"), []);
