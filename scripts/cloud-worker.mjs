@@ -39,7 +39,7 @@ import { fetchLanguageViaGateway } from "./lib/supabaseLanguageGateway.mjs";
 import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
 import { phaseTimer } from "./lib/phaseTimings.mjs";
 import { MAX_CANDIDATE_REPAIR_ATTEMPTS } from "../src/lib/revisionPolicy.ts";
-import { preferredVisionModels } from "../src/lib/visionModelPolicy.ts";
+import { isVerifiedImageProbe, preferredVisionModels } from "../src/lib/visionModelPolicy.ts";
 import { requiredProblemLanguage, contractSupportsEarlyHarness, isVerified, evidenceStatus, createBoundedExecutor } from "./lib/specFirstDelivery.mjs";
 import { buildVerifiedSemanticBlueprint } from "./lib/verifiedSemanticBlueprint.mjs";
 import { screenProvisionalCandidate, createProvisionalRecord, buildSolutionHistory } from "./lib/provisionalCouncil.mjs";
@@ -3700,7 +3700,10 @@ export async function runCouncilJob(job) {
             knowledge: councilKnowledge,
           }),
           // Only genuinely vision-probed judge routes see original pixels.
-          images: evidenceSeats.some(seat => seat.model === judge.model) ? images : [],
+          // Evidence readers are model-ID strings, not objects with a .model.
+          // Judges get original pixels only with a real successful image probe;
+          // other judges still receive the transcription, samples and E2B runs.
+          images: isVerifiedImageProbe(settings.probes?.[judge.model]) ? images : [],
           maxTokens: Number(settings.maxTokens || 4096),
         });
         judgeReports.push({ model: judge.model, emphasis: judge.emphasis || "correctness", text, error: null });
