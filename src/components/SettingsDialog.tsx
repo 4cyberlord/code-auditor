@@ -23,6 +23,7 @@ import * as bridge from "@/lib/bridge";
 import AccountCard from "./AccountCard";
 import HelperCard from "./HelperCard";
 import { classifyProbeResult } from "@/lib/probeFit";
+import { isVerifiedImageProbe } from "@/lib/visionModelPolicy";
 import { SELECTABLE_PRIMARY_MODEL_IDS, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "@/lib/primaryModels";
 import { PIN_LENGTH, authReauthenticate, reason, sanitizePin } from "@/lib/auth";
 import { refreshOfficialLanguageSources, type LanguageRefreshResult } from "@/lib/languageKnowledge";
@@ -44,6 +45,9 @@ function ProbeBadge({
   modelId?: string;
 }) {
   const setEndpointFor = useStore((s) => s.setEndpointFor);
+  if (probe.ok && probe.ms === 0) {
+    return <span className="badge" data-tone="warn" title="Catalogue assertion only; run a real image probe.">catalog only</span>;
+  }
   if (probe.ok) {
     return (
       <span className="badge" data-tone="good" title={`Answered in ${probe.ms}ms`}>
@@ -1015,7 +1019,8 @@ function GatewayCard() {
                       {roles.length > 0 && <span className="role-tag">{roles.join(" + ")}</span>}
                       {probe && <ProbeBadge probe={probe} modelId={m} />}
                       <VisionBadge advertised={advertisedVision[m]}
-                        vision={probe?.vision} note={probe?.visionNote} />
+                        vision={isVerifiedImageProbe(probe) ? true : probe?.vision === false ? false : null}
+                        note={probe?.visionNote} />
                     </div>
                   );
                 })}
@@ -1048,7 +1053,8 @@ function GatewayCard() {
                 </span>
                 {probe && <ProbeBadge probe={probe} modelId={routeModel} />}
                 <VisionBadge advertised={advertisedVision[routeModel]}
-                  vision={probe?.vision} note={probe?.visionNote} />
+                  vision={isVerifiedImageProbe(probe) ? true : probe?.vision === false ? false : null}
+                  note={probe?.visionNote} />
               </div>
             );
           })}

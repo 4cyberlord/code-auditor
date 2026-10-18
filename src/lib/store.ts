@@ -61,6 +61,7 @@ import { selectAdaptiveModels, selectAdaptiveJudges, verifiedTextOnlyScreenshot,
 import { planIntelligentPanels, loadTrustedPanelMetrics } from "./intelligentPanelSelection.ts";
 import { verifyGatewayCandidates, resolveGatewayCandidates, resolveListedGatewayModel, type LiveModelProbe } from "./quickGatewayRouter.ts";
 import { coordinateAndVerify } from "./visionCoordinator.ts";
+import { isVerifiedImageProbe, preferredVisionModels, verifiedImageProbes } from "./visionModelPolicy.ts";
 import { isPrimaryModel, isSelectablePrimaryModel, preferredPrimaryRoute, primaryCatalog, primaryModelFamily, primaryModelId } from "./primaryModels.ts";
 import { type VerifiedModelOutcome } from "./verifiedModelAnalytics.ts";
 import { loadAuthenticatedBenchmarkCapabilities } from "./benchmarkFeed.ts";
@@ -1580,7 +1581,7 @@ async function probeGatewayWithRecentSuccess(
   for (const model of models) {
     const probe = settings.probes[model];
     if (probe?.ok && now - probe.at >= 0 && now - probe.at < 5 * 60_000 &&
-        (!vision || probe.vision === true)) {
+        (!vision || isVerifiedImageProbe(probe))) {
       cached.push({ model, ok: true, ms: probe.ms, error: null,
         vision: probe.vision ?? null, visionNote: probe.visionNote });
     } else missing.push(model);
@@ -1616,8 +1617,8 @@ async function probeGatewayWithRecentSuccess(
 export function canSeeVia(agentId: AgentId, route: Route | null, s: Settings): boolean {
   const declared = agentSpec(agentId).vision;
   if (!route || !route.viaGateway) return declared;
-  const measured = s.probes[route.model]?.vision;
-  return measured == null ? declared : measured;
+  const probe = s.probes[route.model];
+  return isVerifiedImageProbe(probe);
 }
 
 /**
@@ -2853,28 +2854,10 @@ export const useStore = create<State>((set, get) => ({
         candidates, catalogue, note, screenshotCount: images.length,
         fallbackOrder: shortlist.selected,
         probe: (models, vision) => {
-          // Clean API explicitly advertises image input in its live catalogue.
-          // For an approved route returned by the live catalogue, the first
-          // *real* solver call carrying the submitted Azure URLs is the useful
-          // end-to-end verification. Clean API leaves the capability field
-          // absent for several valid vision routes; never make a job wait on
-          // synthetic image probes merely because that optional field is
-          // missing. An explicit `vision: false` remains disallowed above.
-          if (vision && settings.gatewayId === "cleanapis") {
-            const listed = new Set(catalogue);
-            const declared = models.filter(model =>
-              listed.has(model) && advertisedVision[model] !== false);
-            const unknown = models.filter(model => !declared.includes(model));
-            return Promise.all([
-              Promise.resolve(declared.map(model => ({
-                model, ok: true, ms: 0, error: null, vision: true,
-                visionNote: "Approved Clean API roster route; the real solver request validates this submission's Azure URLs.",
-              } satisfies LiveModelProbe))),
-              unknown.length
-                ? probeGatewayWithRecentSuccess(unknown, true, get().settings)
-                : Promise.resolve([] as LiveModelProbe[]),
-            ]).then(parts => parts.flat());
-          }
+          // Never manufacture successful 0ms probes from a model catalogue.
+          // Native probes send an actual PNG through the selected gateway.
+          // For CleanAPI, use the same signed Azure image transport as the
+          // incoming screenshot; unsuccessful/unknown routes are excluded.
           return probeGatewayWithRecentSuccess(models, vision, get().settings);
         },
         ask: async (model, prompt) => Promise.race([
@@ -4652,7 +4635,7 @@ async function generateVerifiedPorts(
             endpoint: endpointForModel(settings, model),
             systemPrompt: systemPrompt("code") + "\n" + independentLanguageInstruction(language),
             userText: independentLanguageQuestion(problem, language, knowledge),
-            images: settings.probes[model]?.vision === true ? originalImages : [],
+            images: isVerifiedImageProbe(settings.probes[model]) ? originalImages : [],
             maxTokens: Math.max(settings.maxTokens, 8192), temperature: 0,
             baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
           });
@@ -4729,7 +4712,7 @@ async function generateVerifiedPorts(
             systemPrompt: judgeSystemPrompt("correctness"),
             userText: judgeUserPrompt({ question: problem, docket: candidateDocket(candidates),
               reviews: "", execution: executionDigest(candidates, runs), knowledge }),
-            images: settings.probes[model]?.vision === true ? originalImages : [],
+            images: isVerifiedImageProbe(settings.probes[model]) ? originalImages : [],
             maxTokens: settings.maxTokens, temperature: 0,
             baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
           });
@@ -4978,8 +4961,9 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   const readers = s0.extraction.readings.map(r=>r.extraction);
   const route = readers.length ? reconcileProblemReadings(readers)
     : reading ? routeProblem(reading) : routeUnparsedProblem(s0.note, s0.images.length > 0);
+  const verifiedProbes = verifiedImageProbes(settings.probes ?? {});
   const contractSeats = selectVerifiedContractReaders(
-    settings.councilModels ?? [], m=>m.id, settings.probes ?? {},
+    settings.councilModels ?? [], m=>m.id, verifiedProbes,
     s0.images.length > 0, s0.images.length > 0 && route.path !== "standard" ? VISION_PREFERENCE : [],
   );
   const allImages = s0.images.map(modelImage);
@@ -4987,15 +4971,19 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // pass and capability/knowledge preparation. This is intentionally a
   // separate evidence request: solvers still receive the original screenshots,
   // and only two agreeing readers can promote screenshot examples to tests.
+  // Evidence readers are separate from the four independent solving seats.
+  // Prefer distinct CleanAPI families present in the live saved catalogue,
+  // but require an actual successful image probe before accessing pixels.
   const evidenceRoster = [
+    ...preferredVisionModels(settings.availableModels ?? []).map(id => ({ id })),
     ...settings.councilModels.map(model => ({ id: model.id })),
     ...settings.councilJudges.map(seat => ({ id: seat.model })),
   ];
   const evidenceReaders = selectVerifiedContractReaders(evidenceRoster,
-    model => model.id, settings.probes, allImages.length > 0, VISION_PREFERENCE, 2);
+    model => model.id, verifiedProbes, allImages.length > 0, VISION_PREFERENCE, 3);
   const evidenceReadingsReady = allImages.length === 0
     ? Promise.resolve([] as string[])
-    : Promise.all(evidenceReaders.map(async seat => {
+    : Promise.all(evidenceReaders.slice(0, 2).map(async seat => {
       try {
         return await bridge.runOnce({
           runId, agentId: "council-evidence:" + seat.id, attemptId: newAttemptId(),
@@ -5005,6 +4993,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
           userText: "Independently read literal examples from ORIGINAL screenshot pixels only. No OCR transcription, code or model-generated expected outputs are given.",
           images: allImages, maxTokens: 2400, temperature: 0,
           baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+          jsonMode: settings.gatewayId === "cleanapis",
         });
       } catch { return ""; }
     }));
@@ -5121,8 +5110,8 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       id: m.id,
       families: m.expertise,
       // An actual image probe overrides a user's manually configured guess.
-      vision: typeof probe?.vision === "boolean" ? probe.vision : m.vision,
-      verifiedVisual: probe?.vision === true,
+      vision: isVerifiedImageProbe(probe),
+      verifiedVisual: isVerifiedImageProbe(probe),
       availability: probe && !probe.ok ? "unknown" : "available",
       verifiedAccuracy: undefined,
       evaluatedSamples: undefined,
@@ -5174,8 +5163,29 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     settings.mode,
     resolveAnswerLanguage(primaryLanguage === "cpp" ? "C++" : primaryLanguage === "rust" ? "Rust" : "Python", "")
   );
-  const evidenceReady = evidenceReadingsReady.then(readings =>
-    reconcileProblemEvidence(problem, allImages.length > 0, readings));
+  const evidenceReady = evidenceReadingsReady.then(async readings => {
+    let evidence = reconcileProblemEvidence(problem, allImages.length > 0, readings);
+    // One independent third reader only when the first two disagree about
+    // examples; never convert a disputed output into an authoritative fixture.
+    const third = evidenceReaders[2];
+    if (allImages.length > 0 && third &&
+        (evidence.status !== "corroborated" || evidence.disagreements.length)) {
+      try {
+        const reply = await bridge.runOnce({
+          runId, agentId: "council-evidence-tiebreak:" + third.id,
+          attemptId: newAttemptId(), provider: settings.gatewayId, model: third.id,
+          endpoint: endpointForModel(settings, third.id),
+          systemPrompt: visionEvidenceSystemPrompt(),
+          userText: "Independently verify the literal screenshot examples from the ORIGINAL pixels. Do not copy an OCR or another reader.",
+          images: allImages, maxTokens: 2400, temperature: 0,
+          baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+          jsonMode: settings.gatewayId === "cleanapis",
+        });
+        evidence = reconcileProblemEvidence(problem, true, [...readings, reply]);
+      } catch { /* No third vote: disputed examples remain unconfirmed. */ }
+    }
+    return evidence;
+  });
   // Screenshot-example readers are already running alongside the problem
   // contract and documentation lookup. Await their exact-match check before
   // solving so every selected model receives the same corroborated fixtures.
@@ -5625,7 +5635,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
             endpoint: endpointForModel(settings, seat.model),
             systemPrompt: judgeSystemPrompt(seat.emphasis),
             userText: judgeUserPrompt({ question: problem, docket: docketBoth, reviews: reviewsDigest, execution: execBoth, knowledge }),
-            images: settings.probes[seat.model]?.vision === true ? allImages : [],
+            images: isVerifiedImageProbe(settings.probes[seat.model]) ? allImages : [],
             maxTokens: settings.maxTokens,
             temperature: 0,
           },

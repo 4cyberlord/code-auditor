@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { reconcileProblemEvidence, stripExampleBlocks, visionEvidenceSystemPrompt, evidenceSolverBrief } from "../src/lib/problemEvidence.ts";
+import { reconcileProblemEvidence, stripExampleBlocks, visionEvidenceSystemPrompt, evidenceSolverBrief, parseVisionExampleFixtures } from "../src/lib/problemEvidence.ts";
 import { buildProvidedHarness } from "../src/lib/providedCaseHarness.ts";
 
 const original = "Find the sum of two numbers.\nExample 1:\nInput: nums = [1, 2]\nOutput: 3\nConstraints:\n1 <= nums.length <= 10";
@@ -56,3 +56,20 @@ assert.doesNotMatch(stripExampleBlocks(original), /Input:\s*nums/);
 assert.match(visionEvidenceSystemPrompt(), /ORIGINAL screenshots/);
 assert.match(visionEvidenceSystemPrompt(), /Never solve the problem/);
 console.log("PASS: screenshot examples require independently corroborated vision evidence");
+
+
+// JSON-mode readers must produce exact visible strings, not prose or generated
+// expected outputs. A third image reader can corroborate two-of-three pairs.
+const structured = JSON.stringify({examples:[{input:"nums = [1, 2]",output:"3"}],uncertainties:[]});
+const wrongStructured = JSON.stringify({examples:[{input:"nums = [1, 2]",output:"7"}],uncertainties:[]});
+assert.equal(parseVisionExampleFixtures(structured).length,1);
+assert.equal(reconcileProblemEvidence(original,true,[structured,structured]).status,"corroborated");
+const majority = reconcileProblemEvidence(original,true,[structured,wrongStructured,structured]);
+assert.equal(majority.status,"corroborated");
+assert.equal(majority.fixtures[0].output,"3");
+assert.ok(majority.disagreements.length>0,"outvoted reader's error stays visible");
+assert.equal(reconcileProblemEvidence(original,true,[structured,wrongStructured]).status,"uncertain");
+assert.equal(parseVisionExampleFixtures('{"examples":[{"input":"x = 1","output":42}]}').length,0);
+assert.equal(parseVisionExampleFixtures('{"examples":[{"input":"x","output":""}]}').length,0);
+assert.equal(parseVisionExampleFixtures('{"examples":[]}').length,0);
+assert.match(visionEvidenceSystemPrompt(),/JSON object/);

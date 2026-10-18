@@ -39,6 +39,7 @@ import { fetchLanguageViaGateway } from "./lib/supabaseLanguageGateway.mjs";
 import { referenceKey, isReferenceValidated, markReferenceValidated } from "./lib/harnessCache.mjs";
 import { phaseTimer } from "./lib/phaseTimings.mjs";
 import { MAX_CANDIDATE_REPAIR_ATTEMPTS } from "../src/lib/revisionPolicy.ts";
+import { isVerifiedImageProbe, preferredVisionModels } from "../src/lib/visionModelPolicy.ts";
 import { requiredProblemLanguage, contractSupportsEarlyHarness, isVerified, evidenceStatus, createBoundedExecutor } from "./lib/specFirstDelivery.mjs";
 import { buildVerifiedSemanticBlueprint } from "./lib/verifiedSemanticBlueprint.mjs";
 import { screenProvisionalCandidate, createProvisionalRecord, buildSolutionHistory } from "./lib/provisionalCouncil.mjs";
@@ -1885,7 +1886,11 @@ async function readScreenshots({ job, settings, baseUrl, models, images, imageRe
   // you want doing it. The third strongest is held back: it is asked only if
   // the first two disagree, and asking one of the two whether it was wrong is
   // not an answer.
-  const pool = bench.keep(models, (m) => m.id);
+  // Separate screenshot specialists need not occupy a solver seat.
+  // Each one still has to complete a real image-reading inference.
+  const specialistSeats = preferredVisionModels(settings.availableModels || []).map(id => ({id}));
+  const pool = bench.keep([...new Map([...specialistSeats, ...models]
+    .map(seat => [seat.id, seat])).values()], m => m.id);
   const { readers, tieBreaker } = chooseReaders(
     pool,
     (m) => m.id,
@@ -1915,6 +1920,7 @@ async function readScreenshots({ job, settings, baseUrl, models, images, imageRe
           images,
           maxTokens: Number(settings.maxTokens || 4096),
           reasoning: "off",
+          ...(gatewayId(settings) === "cleanapis" ? {responseFormat: {type: "json_object"}} : {}),
         });
         const parsed = parseExtraction(text);
         if (!parsed) {
@@ -2911,37 +2917,34 @@ export async function runCouncilJob(job) {
     );
   }
 
-  // Start the independent screenshot-example pass as soon as the solver seats
-  // are known. It runs alongside the contract, knowledge, and documentation
-  // lookups below, so harness evidence is ready (or nearly ready) when the
-  // first candidate arrives instead of beginning after those preparation steps.
-  // Use only approved, configured routes: the selected solver pool plus the
-  // configured Council judge seats. This lets the strongest available vision
-  // reader (for example GPT-5.6 when configured) corroborate literal examples
-  // without changing which four models solve the problem.
-  const evidenceRoster = [...models, ...(settings.councilJudges || []).map(seat => ({
-    id: seat.model,
-    model: seat.model,
-  }))];
-  const evidenceSeats = partitionByVision(
-    bench.keep(evidenceRoster, model => model.id), model => model.id,
-    settings.probes, settings.councilModels
-  ).seeing.filter(model => settings.probes?.[model.id]?.vision === true && !bench.isBlind(model.id))
+  // The first two independent evidence readers prefer the three available
+  // CleanAPI specialist families. No source code or previous answer is shared.
+  const specialistRoutes = preferredVisionModels(settings.availableModels || []);
+  const evidenceCandidateIds = [...specialistRoutes, ...models.map(seat => seat.id),
+    ...(settings.councilJudges || []).map(seat => seat.model)];
+  const evidenceSeats = [...new Map(evidenceCandidateIds.filter(Boolean)
+    // Already-benched routes must not be called again by optional readers.
+    .filter(id => !bench.has(id) && !bench.isBlind(id))
+    .filter(id => isSelectablePrimaryModel(id))
+    .map(id => [primaryModelId(id), id])).values()]
     .sort((a, b) => {
-      const ai = VISION_PREFERENCE.indexOf(a.id), bi = VISION_PREFERENCE.indexOf(b.id);
-      return (ai < 0 ? Number.MAX_SAFE_INTEGER : ai) - (bi < 0 ? Number.MAX_SAFE_INTEGER : bi);
-    }).slice(0, 2);
-  const evidenceReadingsReady = Promise.all(evidenceSeats.map(async judge => {
+      const ar = VISION_PREFERENCE.findIndex(v => primaryModelId(v) === primaryModelId(a));
+      const br = VISION_PREFERENCE.findIndex(v => primaryModelId(v) === primaryModelId(b));
+      return (ar < 0 ? 999 : ar) - (br < 0 ? 999 : br);
+    }).slice(0,3);
+  const readOriginalExamples = async model => {
     try {
       return await tokenRouterGenerate({
-        settings, baseUrl, model: judge.id,
-        system: visionEvidenceSystemPrompt(),
-        user: "Read only the ORIGINAL screenshot pixels to transcribe visible literal input/output examples. Never use an OCR restatement or solver output as your reference.",
-        // Always use ORIGINAL downloaded screenshots, even when solvers use a trusted transcription.
-        images, maxTokens: 2400, reasoning: "off",
+        settings, baseUrl, model, system: visionEvidenceSystemPrompt(),
+        user: "Independently transcribe only labelled examples from the ORIGINAL pixels into strict JSON; never infer an expected answer.",
+        images, maxTokens: 3600, reasoning: "off",
+        ...(gatewayId(settings) === "cleanapis" ? {responseFormat: {type: "json_object"}} : {}),
       });
     } catch { return ""; }
-  }));
+  };
+  const evidenceReadingsReady = images.length > 0
+    ? Promise.all(evidenceSeats.slice(0,2).map(readOriginalExamples))
+    : Promise.resolve([]);
 
   await patchJob(job.id, { progress_phase: "solving" });
 
@@ -2990,9 +2993,16 @@ export async function runCouncilJob(job) {
       });
   const contractText = contractBlock(contracting.contract);
   const question = contractText ? `${baseQuestion}\n\n---\n\n${contractText}` : baseQuestion;
-  const evidenceReady = evidenceReadingsReady.then(readings => reconcileProblemEvidence(
-    [reading.context, contractText].filter(Boolean).join("\n\n"), images.length > 0, readings
-  ));
+  const evidenceReady = evidenceReadingsReady.then(async readings => {
+    const originalContext = [reading.context, contractText].filter(Boolean).join("\n\n");
+    let evidence = reconcileProblemEvidence(originalContext, images.length > 0, readings);
+    if (images.length > 0 && evidenceSeats[2] &&
+        (evidence.status !== "corroborated" || evidence.disagreements.length > 0)) {
+      const third = await readOriginalExamples(evidenceSeats[2]);
+      evidence = reconcileProblemEvidence(originalContext, true, [...readings, third]);
+    }
+    return evidence;
+  });
 
   // The library, before the first attempt rather than after it.
   //
@@ -3690,7 +3700,10 @@ export async function runCouncilJob(job) {
             knowledge: councilKnowledge,
           }),
           // Only genuinely vision-probed judge routes see original pixels.
-          images: evidenceSeats.some(seat => seat.model === judge.model) ? images : [],
+          // Evidence readers are model-ID strings, not objects with a .model.
+          // Judges get original pixels only with a real successful image probe;
+          // other judges still receive the transcription, samples and E2B runs.
+          images: isVerifiedImageProbe(settings.probes?.[judge.model]) ? images : [],
           maxTokens: Number(settings.maxTokens || 4096),
         });
         judgeReports.push({ model: judge.model, emphasis: judge.emphasis || "correctness", text, error: null });
