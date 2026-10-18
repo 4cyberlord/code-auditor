@@ -3050,7 +3050,7 @@ export async function runCouncilJob(job) {
   // that language finally comes from — `job.extraction` was never a column, so
   // this had silently resolved to "unknown" on every cloud run ever made.
   const answerLanguage = resolveAnswerLanguage(
-    String(settings.outputLanguage || ""),
+    primaryLanguage === "cpp" ? "C++" : primaryLanguage === "rust" ? "Rust" : primaryLanguage === "python" ? "Python" : "",
     String(reading.extraction?.language || "")
   );
   await addEvent(job.id, "info", "answer_language", `Answering in ${answerLanguage.display || "the question's own language"}.`, {
