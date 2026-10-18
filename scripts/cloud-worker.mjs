@@ -21,7 +21,7 @@ import "./lib/config.mjs";
 import { createHash, createHmac, createSign } from "node:crypto";
 import { buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "../src/lib/providedCaseHarness.ts";
 import { configuredCodeLanguage, providedTestBrief } from "../src/lib/primaryDeliveryPolicy.ts";
-import { secondaryCouncilLanguages, independentLanguageInstruction, independentLanguageQuestion } from "../src/lib/independentLanguageCouncil.ts";
+import { secondaryCouncilLanguages, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "../src/lib/independentLanguageCouncil.ts";
 import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief } from "../src/lib/problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "../src/lib/judgeUpgradePolicy.ts";
 import { executionId, validateExecution, e2bCommandFailure, parseExecutionOutput, executionStatus, classifyExecutionFailure, mapCandidateFailureLocation, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
@@ -2200,7 +2200,11 @@ async function independentLanguageCouncil(job,settings,baseUrl,models,judges,que
       return null;
     }
   }));
-  const valid=reports.filter(Boolean);
+  const valid=reports.filter(report=>report?.wellFormed===true);
+  if(!independentJudgesReady(judging.length,valid.length)){
+    return {language:target,sourceLetter:"",model:"",code:"",status:"failed",
+      error:"Independent "+target+" Council lacked enough complete judge evaluations; no solution promoted."};
+  }
   const decision=decideWinner({
     claimed:"",judges:valid,runs,letters:field.map(item=>item.letter),
   });
@@ -3997,9 +4001,9 @@ export async function runCouncilJob(job) {
   if(targets.length){
     try {
     await patchJob(job.id,{progress_phase:"porting"});
-    // Only after the verified primary winner is available: reserve one
-    // isolated Rust and one isolated C++ slot during port translation/harness
-    // generation. Never allocate these before the primary result is saved.
+    // Only after the verified primary winner is available, optional language
+    // Councils independently solve, verify, and judge from the original question.
+    // Standby E2B sandboxes never allocate before primary result persistence.
     const portProblem = screenshotEvidence.question; // No previous winner or Python source is passed to secondary solvers.
     let portWarmPool = null;
     const portStandbyCount=standbyBudget(E2B_CAPACITY.snapshot(),targets.length);
@@ -4027,8 +4031,8 @@ export async function runCouncilJob(job) {
       await addEvent(job.id,"info","port_started",
         "Primary solution remains available. New independent Council: solving and verifying in "+language+".",
         {language,sourceLanguage:candidateLanguage(verifiedSource)}).catch(()=>{});
-      // A single port's unexpected transport/compiler exception must not
-      // prevent the other language from being verified and saved.
+      // One secondary Council failure must never invalidate the published
+      // primary winner or prevent the next independent language from solving.
       let port;
       try {
         port=await independentLanguageCouncil(job,settings,baseUrl,models,judges,
