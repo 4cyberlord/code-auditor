@@ -728,7 +728,9 @@ check("every responses call named that model", responsesCalls.every((c) => c.mod
 // chat spelling, so this is not the same assertion twice.
 check(
   "the responses wire got its own reasoning shape",
-  responsesCalls.every((c) => c.reasoning?.effort === "high" && c.reasoning_effort === undefined),
+  responsesCalls.every((c) => c.reasoning_effort === undefined &&
+    (c.reasoning?.effort === "high" ||
+      (c.reasoning == null && String(c.instructions).includes("independent evidence reader")))),
   JSON.stringify(responsesCalls.map((c) => c.reasoning))
 );
 check("the judge answered", events.some((e) => e.phase === "judge_done"));

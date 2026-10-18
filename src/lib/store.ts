@@ -81,8 +81,9 @@ import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord
 import { structuralTranslationGuidanceFor } from "./structuralTranslationGuidance.ts";
 import { fingerprintCode } from "./codeFingerprint.ts";
 import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
+import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief } from "./problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "./judgeUpgradePolicy.ts";
-import { buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
+import { buildProvidedHarness, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
 import { needsCandidateRevision, classifyCandidateRun } from "./revisionPolicy.ts";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
 import { buildOverlayState } from "./overlayState.ts";
@@ -4995,7 +4996,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // One string, handed to every later stage as "the problem". A contract that
   // only some prompts saw would be worse than none: the stages that read it and
   // the stages that did not would be answering different questions.
-  const problem = contractText ? `${s0.note}\n\n---\n\n${contractText}` : s0.note;
+  const problem = [s0.note, s0.extraction.context, contractText].filter(value => value && value.trim()).join("\n\n---\n\n");
   const primaryLanguage = primaryCodingLanguage([problem, s0.extraction.context].filter(Boolean).join("\n\n"), settings.outputLanguage);
 
   set((st) => ({ council: { ...st.council, phase: "solving" as const } }));
@@ -5084,6 +5085,23 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     resolveAnswerLanguage(primaryLanguage === "cpp" ? "C++" : primaryLanguage === "rust" ? "Rust" : "Python", "")
   );
   const allImages = s0.images.map(modelImage);
+  const evidenceReaders = selectVerifiedContractReaders(settings.councilJudges,
+    judge => judge.model, settings.probes, allImages.length > 0, [], 2);
+  const evidenceReady = allImages.length === 0
+    ? Promise.resolve(reconcileProblemEvidence(problem, false, []))
+    : Promise.all(evidenceReaders.map(async seat => {
+      try {
+        return await bridge.runOnce({
+          runId, agentId: "council-evidence:" + seat.model, attemptId: newAttemptId(),
+          provider: settings.gatewayId, model: seat.model,
+          endpoint: endpointForModel(settings, seat.model),
+          systemPrompt: visionEvidenceSystemPrompt(),
+          userText: "Read literal question examples from the original screenshots ONLY. Do not use any OCR transcription or solver response as a source of expected outputs.",
+          images: allImages, maxTokens: 2400, temperature: 0,
+          baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+        });
+      } catch { return ""; }
+    })).then(readings => reconcileProblemEvidence(problem, true, readings));
   await Promise.all(
     solveSlots.map((slot, i) =>
       wait(i * COUNCIL_STEP_MS).then(() => {
@@ -5166,6 +5184,8 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     return;
   }
 
+  const screenshotEvidence = await evidenceReady;
+  const harnessProblem = screenshotEvidence.question;
   // ------------------------------------------------------- round 1.5: spec
   //
   // A model writes the harness. Any answer that is not code skips straight
@@ -5188,7 +5208,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     for (const language of languages) {
       const candidateCode = field.find(candidate =>
         candidate.final?.kind === "code" && candidateLanguage(candidate.final) === language)?.final?.code || "";
-      const providedSuite = buildProvidedHarness(problem, language, candidateCode);
+      const providedSuite = buildProvidedHarness(harnessProblem, language, candidateCode);
       if (providedSuite) {
         suites.push(providedSuite);
         continue;
@@ -5209,7 +5229,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
             provider: settings.gatewayId,
             model,
             systemPrompt: testSpecSystemPrompt(),
-            userText: testSpecUserPrompt({ question: `${problem}\n\n${routingGuidance(route)}`, docket: candidateDocket(field), languages: [language], knowledge }),
+            userText: testSpecUserPrompt({ question: `${harnessProblem}\n\n${routingGuidance(route)}`, docket: candidateDocket(field), languages: [language], knowledge }),
             images: [],
             maxTokens: Math.max(settings.maxTokens, 8192),
             temperature: 0,
@@ -5439,7 +5459,8 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       ? "=== REVISED RUNS ===\n" + executionDigest(fieldNow, get().council.revisedRuns, { revised: true })
       : "",
     oracleDigest(get().council.oracles),
-    providedTestBrief(extractProvidedFixtures(problem)),
+    providedTestBrief(screenshotEvidence.fixtures),
+    evidenceJudgeBrief(screenshotEvidence),
     // Independent solutions do not usually fail in the same place. When they do,
     // the judges should hear that before they read the scores, not after.
     suspectHarness ? `NOTE ON THE HARNESS: ${suspectHarness}` : "",
@@ -5478,7 +5499,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
             endpoint: endpointForModel(settings, seat.model),
             systemPrompt: judgeSystemPrompt(seat.emphasis),
             userText: judgeUserPrompt({ question: problem, docket: docketBoth, reviews: reviewsDigest, execution: execBoth, knowledge }),
-            images: [],
+            images: settings.probes[seat.model]?.vision === true ? allImages : [],
             maxTokens: settings.maxTokens,
             temperature: 0,
           },

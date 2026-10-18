@@ -63,13 +63,15 @@ export function canAdoptJudgeUpgrade(args: {
   previousTime: string;
   previousSpace: string;
   approvals: JudgeUpgradeVote[];
+  requiredApprovals?: number;
 }): boolean {
   const { priorRun, proposedRun, previousTime, previousSpace, approvals } = args;
+  const required = Math.max(2, args.requiredApprovals ?? approvals.length);
   if (!priorRun.ran || !priorRun.ok || priorRun.failed !== 0 || priorRun.passed < 1 ||
     !proposedRun.ran || !proposedRun.ok || proposedRun.failed !== 0 ||
     proposedRun.passed < priorRun.passed || !proposedRun.codeDigest ||
-    proposedRun.codeDigest === priorRun.codeDigest || approvals.length < 2) return false;
-  const reviewers = approvals.slice(0, 2);
+    proposedRun.codeDigest === priorRun.codeDigest || approvals.length !== required) return false;
+  const reviewers = approvals;
   if (reviewers.some(row => !row.accepted || row.reason.length < 12)) return false;
   for (const row of reviewers) {
     const time = compareComplexityBounds(row.time, previousTime).relation;
@@ -77,7 +79,7 @@ export function canAdoptJudgeUpgrade(args: {
     if (!["equivalent", "left-no-worse"].includes(time) ||
       !["equivalent", "left-no-worse"].includes(space)) return false;
   }
-  if (compareComplexityBounds(reviewers[0].time, reviewers[1].time).relation !== "equivalent") return false;
-  if (compareComplexityBounds(reviewers[0].space, reviewers[1].space).relation !== "equivalent") return false;
+  if (reviewers.some(row => compareComplexityBounds(row.time, reviewers[0].time).relation !== "equivalent" ||
+    compareComplexityBounds(row.space, reviewers[0].space).relation !== "equivalent")) return false;
   return true;
 }
