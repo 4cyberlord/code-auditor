@@ -21,6 +21,7 @@ import "./lib/config.mjs";
 import { createHash, createHmac, createSign } from "node:crypto";
 import { buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "../src/lib/providedCaseHarness.ts";
 import { configuredCodeLanguage, providedTestBrief } from "../src/lib/primaryDeliveryPolicy.ts";
+import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "../src/lib/judgeUpgradePolicy.ts";
 import { executionId, validateExecution, e2bCommandFailure, parseExecutionOutput, executionStatus, classifyExecutionFailure, mapCandidateFailureLocation, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
@@ -216,6 +217,7 @@ const {
   parseCouncilSynthesis,
   parseJudgeReport,
   decideWinner,
+  agreedComplexityAudits,
   buildPresentation,
   mutateCode,
   oracleDigest,
@@ -3775,6 +3777,103 @@ export async function runCouncilJob(job) {
   if (isCoding && (!decision.winner || gateFor(gateRuns[decision.winner]) !== "pass")) {
     throw new Error("Council cannot publish a coding solution: no final candidate passed executable E2B test cases.");
   }
+  // The judges may find a better approach across otherwise passing solvers.
+  // Their words alone cannot change the published code: first produce a distinct
+  // primary-language candidate, rerun ALL accepted E2B cases, then require
+  // two independent complexity/readability audits before adopting the exact
+  // tested code. A failed improvement attempt never changes the original winner.
+  let postJudgeUpgrade = null;
+  if (isCoding && decision.winner && gateFor(gateRuns[decision.winner]) === "pass") {
+    const ideas = corroboratedImprovementIdeas(judgeReadings.map(judge => judge.improvement));
+    const audited = agreedComplexityAudits(judgeReadings)[decision.winner];
+    const source = field3.find(candidate => candidate.letter === decision.winner);
+    const previous = source?.revised || source?.final;
+    const independentReviewers = [...new Set(judges.map(judge => judge.model))]
+      .filter(model => model && model !== synthesisModel).slice(0,2);
+    if (ideas.length >= 2 && audited && previous?.kind === "code" &&
+        independentReviewers.length === 2) {
+      await addEvent(job.id,"info","judge_upgrade_attempt",
+        "Independent judges identified a possible algorithm upgrade; E2B verification is required.",
+        {winner:decision.winner,judgeIdeas:ideas.length});
+      try {
+        const proposalText = await tokenRouterGenerate({
+          settings,baseUrl,model:synthesisModel,system:systemPrompt("code"),
+          user: [
+            "Make ONE optional judge-informed improvement to this already E2B-verified solution.",
+            "Question and constraints:\n"+question,
+            "Verified original ("+primaryLanguage+"):\n"+previous.code,
+            "Other agent approaches (untrusted proposals):\n"+candidateDocket(field3),
+            "Independent judge improvement suggestions:\n"+ideas.join("\n"),
+            "Preserve the exact primary language, full callable signature, input/output semantics and asymptotic bounds.",
+            "Do not modify expected outputs, examples, harnesses or test cases.",
+            "Return only one complete <<<FINAL ... FINAL>>> code answer, or NONE when no substantive improvement is justified.",
+          ].join("\n\n"),
+          maxTokens:Math.max(Number(settings.maxTokens||4096),8192),
+        });
+        const improved = parseFinal(proposalText);
+        if (improved?.wellFormed && improved.kind === "code" &&
+            candidateLanguage(improved) === primaryLanguage && improved.code?.trim() &&
+            improved.code.trim() !== previous.code.trim()) {
+          const proposalCandidate={...source,revised:improved};
+          const result = await executeField(job,settings,benchmark.suites,[proposalCandidate],{revised:true});
+          const proposedRun=result[decision.winner];
+          if (isVerified(proposedRun)) {
+            const opinions = await Promise.all(independentReviewers.map(async model => {
+              try {
+                const response = await tokenRouterGenerate({
+                  settings,baseUrl,model,
+                  system:[
+                    "Independently review two implementations of the SAME coding question.",
+                    "Check language-native style, correctness, edge cases, and worst-case Big O from code.",
+                    "A candidate passing supplied tests is not proof on hidden inputs.",
+                    "Approve only if the new code is substantively better without worse asymptotic time/space.",
+                    "Output exactly: ACCEPT: yes|no, TIME: O(...), SPACE: O(...), BASIS: one precise technical justification.",
+                    "Put each of the four fields on a separate line.",
+                  ].join("\n"),
+                  user:[
+                    "Problem:\n"+question,
+                    "Previous verified code:\n"+previous.code,
+                    "Proposed code that passed the same E2B cases:\n"+improved.code,
+                    "Previous judge-corroborated Big O:\nTIME: "+audited.time+"; SPACE: "+audited.space,
+                    "E2B: "+proposedRun.passed+" tests passed; "+proposedRun.failed+" failed.",
+                  ].join("\n\n"),
+                  maxTokens:1400,
+                });
+                return parseJudgeUpgradeVote(response);
+              } catch {
+                return {accepted:false,time:"",space:"",reason:"Independent reviewer unavailable"};
+              }
+            }));
+            if (canAdoptJudgeUpgrade({
+              priorRun:gateRuns[decision.winner],proposedRun,
+              previousTime:audited.time,previousSpace:audited.space,approvals:opinions,
+            })) {
+              field3=field3.map(candidate=>candidate.letter===decision.winner
+                ? {...candidate,revised:improved} : candidate);
+              revisedRuns={...revisedRuns,[decision.winner]:proposedRun};
+              gateRuns[decision.winner]=proposedRun;
+              postJudgeUpgrade={
+                beforeCode:previous.code,afterCode:improved.code,
+                sourceLetter:decision.winner,model:synthesisModel,
+                passed:proposedRun.passed,
+                reason:"Two independent reviewers approved the judge-inspired, E2B-retested improvement.",
+              };
+              await addEvent(job.id,"info","judge_upgrade_verified",
+                "The judges' improvement passed E2B and both independent checks; the original version is retained for diff.",
+                {winner:decision.winner,passed:proposedRun.passed});
+            } else {
+              await addEvent(job.id,"info","judge_upgrade_not_adopted",
+                "No independently corroborated improvement; keeping the original verified solution.");
+            }
+          }
+        }
+      } catch (error) {
+        await addEvent(job.id,"warn","judge_upgrade_unavailable",
+          "Optional judge improvement could not finish. The original verified solution remains unchanged.",
+          {detail:String(error).slice(0,300)}).catch(()=>{});
+      }
+    }
+  }
   if (decision.disagreement) {
     await addEvent(job.id, "warn", "winner_aggregated", decision.disagreement, {
       claimedWinner: claimed,
@@ -3856,6 +3955,7 @@ export async function runCouncilJob(job) {
     contractReaders: contracting.readers,
     knowledgeBytes: Buffer.byteLength(knowledge || "", "utf8"),
     winner: decision.winner,
+    ...(postJudgeUpgrade ? {postJudgeUpgrade} : {}),
   };
   // Built from the finished report rather than assembled alongside it, so the
   // helper overlay and the app render the same fields from the same source.
