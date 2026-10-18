@@ -19,7 +19,7 @@ const primaryPrompt = primaryFirstInstruction("python");
 assert.match(primaryPrompt, /Code in Python only/);
 assert.match(primaryFirstInstruction("cpp"), /Code in C\+\+23 only/);
 assert.match(primaryFirstInstruction("rust"), /Code in Rust only/);
-assert.match(primaryPrompt, /Other language equivalents follow only after an execution-verified winner/);
+assert.match(primaryPrompt, /Other language versions follow only after E2B verification and Council selection/);
 
 const reviewPrompt = reviewSystemPromptFor();
 assert.match(reviewPrompt, /Review only the already verified primary solution/);
