@@ -1465,10 +1465,15 @@ fn run() -> Result<(), String> {
                 overlay.set_outer_position(overlay_position);
                 hud.set_outer_position(hud_position(overlay_position));
             }
-            if overlay_visible && !history_open && active_view == "coding" && mac_shortcuts::take_scroll_up() {
+            // Match ordinary Solution scrolling exactly: ↑/↓ send the same
+            // scroll function, which chooses the docked code reader whenever
+            // SL/SR is active. No WebView focus or mouse interaction needed.
+            let can_scroll_solution = overlay_visible && !history_open
+                && (active_view == "coding" || code_focus_mode != 0);
+            if can_scroll_solution && mac_shortcuts::take_scroll_up() {
                 let _ = webview.evaluate_script("window.scrollSolutionBy(-260)");
             }
-            if overlay_visible && !history_open && active_view == "coding" && mac_shortcuts::take_scroll_down() {
+            if can_scroll_solution && mac_shortcuts::take_scroll_down() {
                 let _ = webview.evaluate_script("window.scrollSolutionBy(260)");
             }
             if overlay_visible && mac_shortcuts::take_fade_down() {
@@ -1634,6 +1639,7 @@ fn run() -> Result<(), String> {
                     } else if let Some((point,size)) = code_focus_geometry(&overlay, event_loop_target, next) {
                         overlay.set_inner_size(size);
                         overlay.set_outer_position(point);
+                        hud.set_outer_position(docked_hud_position(point, size, next, overlay.scale_factor()));
                     }
                     active_view = "coding".to_string();
                     history_open = false;
@@ -1683,7 +1689,8 @@ fn run() -> Result<(), String> {
             // The command pill is a second native click-through window. Its
             // controls follow the active surface, but its DOM and glass frame
             // never sit inside the Coding/MCQ/History content window.
-            let hud_view = if history_open { "history" }
+            let hud_view = if code_focus_mode != 0 { "docked" }
+                else if history_open { "history" }
                 else if overlay_refresh.rendered_view == "mcq" { "mcq" }
                 else { active_view.as_str() };
             if hud_view != last_hud_view {
@@ -1724,6 +1731,25 @@ fn overlay_position<T>(event_loop: &tao::event_loop::EventLoop<T>) -> LogicalPos
 
 fn hud_position(content_position: LogicalPosition<f64>) -> LogicalPosition<f64> {
     LogicalPosition::new(content_position.x - HUD_GAP - HUD_WIDTH, content_position.y)
+}
+
+// The code reader keeps its existing half-screen geometry. Place its
+// click-through shortcut pill just outside that half (on the opposite side)
+// so it never covers a line of verified code.
+fn docked_hud_position(
+    code_position: PhysicalPosition<i32>,
+    code_size: PhysicalSize<u32>,
+    side: u8,
+    scale: f64,
+) -> PhysicalPosition<i32> {
+    let gap = (HUD_GAP * scale).round() as i32;
+    let width = (HUD_WIDTH * scale).round() as i32;
+    let x = if side == 2 {
+        code_position.x.saturating_add(code_size.width as i32).saturating_add(gap)
+    } else {
+        code_position.x.saturating_sub(width).saturating_sub(gap)
+    };
+    PhysicalPosition::new(x, code_position.y)
 }
 
 fn hud_height(view: &str) -> f64 {
@@ -1912,13 +1938,14 @@ fn show_overlay(window: &Window, visible: bool) -> Result<(), String> {
 }
 
 fn show_overlay_pair(content: &Window, hud: &Window, visible: bool, code_focus_mode: u8) -> Result<(), String> {
-    // Hide the command window before capture or the standalone code reader;
-    // it must not remain floating after its content window is gone.
-    if !visible || code_focus_mode != 0 {
+    // A separate click-through command pill follows both the ordinary overlay
+    // and the SL/SR code reader, with view-specific labels. Hide both on capture.
+    let show_hud = visible && matches!(code_focus_mode, 0 | 2 | 3);
+    if !show_hud {
         show_overlay(hud, false)?;
     }
     show_overlay(content, visible)?;
-    if visible && code_focus_mode == 0 {
+    if show_hud {
         show_overlay(hud, true)?;
     }
     Ok(())
@@ -3790,7 +3817,9 @@ fn hud_html() -> &'static str {
     </style></head><body><div id="hudbar"><div class="hud-head"><span class="hud-logo">CA</span><span class="hud-pause">||</span><span class="hud-meter"><i></i><i></i><i></i></span></div><div id="hud-shortcuts"></div></div><script>
       window.setOverlayControls=function(view){
         const host=document.getElementById('hud-shortcuts');if(!host)return;
-        const controls=view==='history'
+        const controls=view==='docked'
+          ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll code','↑↓'],['Ports','rr/cp/py'],['Left / Back','sl'],['Right / Back','sr']]
+          : view==='history'
           ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
           : view==='mcq'
           ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31'],['Left','32'],['Right','33'],['Region','34'],['Submit','35']]
@@ -4554,6 +4583,26 @@ mod tests {
         assert_eq!(point.x, 250.0 - HUD_GAP - HUD_WIDTH);
         assert_eq!(point.y, 20.0);
         assert!(hud_height("history") < hud_height("coding"));
+    }
+
+    #[test]
+    fn docked_code_reader_uses_regular_arrow_scrolling_and_shows_its_shortcuts() {
+        let content = overlay_html();
+        let controls = hud_html();
+        assert!(content.contains("reading?'code-focus-code':'solution-code'"),
+            "the same solution scroll helper must choose the docked code reader");
+        assert!(controls.contains("view==='docked'"));
+        assert!(controls.contains("['Scroll code','↑↓']"));
+        assert!(controls.contains("['Left / Back','sl']"));
+        assert!(controls.contains("['Right / Back','sr']"));
+        let code = PhysicalPosition::new(10_i32, 10_i32);
+        let size = PhysicalSize::new(600_u32, 700_u32);
+        let left = docked_hud_position(code, size, 2, 1.0);
+        let right = docked_hud_position(code, size, 3, 1.0);
+        assert!(left.x >= 610, "SL HUD must be beside, not over, code");
+        assert!(right.x < code.x, "SR HUD must be beside, not over, code");
+        assert_eq!(left.y, code.y);
+        assert_eq!(right.y, code.y);
     }
 
     #[test]
