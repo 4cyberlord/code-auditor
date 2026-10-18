@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { highlight } from "@/lib/highlight";
+import { codeLineDiff } from "@/lib/codeLineDiff";
 import { describeCodeLanguage } from "@/lib/solutionLanguage";
 import { agentSpec, gatewayPreset } from "@/lib/models";
 import { primaryModelLabel } from "@/lib/primaryModels";
@@ -216,6 +217,19 @@ export default function StoryResultWorkspace() {
           </div>
         </div>
         {report?.answer && <div className="story-solution-summary"><span className="story-eyebrow">SOLUTION SUMMARY</span><p>{report.answer}</p></div>}
+        {report && council.postJudgeUpgrade?.afterCode === report.code && <details className="council-upgrade-diff">
+          <summary>Judges upgraded the verified solution · View GitHub-style diff</summary>
+          <p>{council.postJudgeUpgrade.reason} {council.postJudgeUpgrade.passed} E2B tests passed.</p>
+          <div className="council-diff-lines" role="region" aria-label="Judge upgrade source diff">
+            {codeLineDiff(council.postJudgeUpgrade.beforeCode,council.postJudgeUpgrade.afterCode).map((line,index)=>
+              <div className="council-diff-line" data-kind={line.kind} key={index}>
+                <span className="council-diff-number">{line.beforeLine??""}</span>
+                <span className="council-diff-number">{line.afterLine??""}</span>
+                <span className="council-diff-marker">{line.kind==="removed"?"−":line.kind==="added"?"+":" "}</span>
+                <code>{line.text||" "}</code>
+              </div>)}
+          </div>
+        </details>}
       </section>
       <aside className="story-report-column" aria-label="Technical solution report">
         <div className="story-section-heading"><div><span className="story-eyebrow">02 / TECHNICAL REPORT</span><h2>Solution insights</h2></div></div>
