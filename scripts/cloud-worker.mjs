@@ -20,6 +20,7 @@ import "./lib/config.mjs";
 
 import { createHash, createHmac, createSign } from "node:crypto";
 import { buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "../src/lib/providedCaseHarness.ts";
+import { configuredCodeLanguage, providedTestBrief } from "../src/lib/primaryDeliveryPolicy.ts";
 import { executionId, validateExecution, e2bCommandFailure, parseExecutionOutput, executionStatus, classifyExecutionFailure, mapCandidateFailureLocation, requiresRepair, repairOutcome, withSandboxLifecycle } from "./lib/phase2Execution.mjs";
 import { runGithubBenchmark } from "./lib/githubBenchmark.mjs";
 import { parallelMap, workerConcurrency } from "./lib/parallelField.mjs";
@@ -2930,7 +2931,7 @@ export async function runCouncilJob(job) {
   // manifest, and the house preference for what to write it in.
   const timer = phaseTimer();
   timer.enter("contract");
-  const policy = solutionPolicy(["Python"], Number(settings.memoryTargetKb || 20 * 1024));
+  const policy = solutionPolicy([configuredCodeLanguage(settings.outputLanguage)], Number(settings.memoryTargetKb || 20 * 1024));
   // No knowledge argument here on purpose. `knowledgePackFor` retrieves against
   // text, and before anybody has answered there is no text — only a picture.
   // The library arrives the moment the panel produces words, which is also the
@@ -2990,7 +2991,7 @@ export async function runCouncilJob(job) {
     : (contracting.contract?.kind || reading.extraction?.kind || "");
   const languageEvidence=[contractText, reading.extraction?.code || ""].join("\n");
   const primaryLanguage=/\bLANGUAGES:\s*(?:javascript|js)\b|\bexport\s+(?:default\s+)?function\s+[A-Za-z_$]\w*\s*\(/i.test(languageEvidence)
-    ? "javascript" : requiredProblemLanguage(question)||"python";
+    ? "javascript" : requiredProblemLanguage(question)||configuredCodeLanguage(settings.outputLanguage);
   const documentationQuery = [question, reading.extraction?.problemSummary,
     reading.extraction?.code].filter(Boolean).join("\n");
   const detectedDocsLanguage = inferDocumentationLanguage(documentationQuery,
@@ -3611,6 +3612,7 @@ export async function runCouncilJob(job) {
     : docket;
   const executionBoth = [
     execution,
+    providedTestBrief(extractProvidedFixtures([reading.context, contractText].filter(Boolean).join("\n"))),
     revisedAny && Object.keys(revisedRuns).length
       ? `=== REVISED RUNS ===\n${executionDigest(field3, revisedRuns, { revised: true })}\n=== REPAIR OUTCOMES ===\n${field3.filter((c) => c.revised).map((c) => `Candidate ${c.letter}: ${repairOutcome(benchmark.runs[c.letter], revisedRuns[c.letter])}`).join("\\n")}\nA repair is verified only when its retest ran and passed actual test cases.`
       : "",
@@ -3958,6 +3960,9 @@ export async function runCouncilJob(job) {
     try {
     let reportWrite=Promise.resolve();
     await parallelMap(targets,2,async language=>{
+      await addEvent(job.id,"info","port_started",
+        "Primary solution remains available. Now solving and verifying in "+language+".",
+        {language,sourceLanguage:candidateLanguage(verifiedSource)}).catch(()=>{});
       // A single port's unexpected transport/compiler exception must not
       // prevent the other language from being verified and saved.
       let port;
