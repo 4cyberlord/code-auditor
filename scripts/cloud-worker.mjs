@@ -19,7 +19,7 @@
 import "./lib/config.mjs";
 
 import { createHash, createHmac, createSign } from "node:crypto";
-import { buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "../src/lib/providedCaseHarness.ts";
+import { buildProvidedHarness, buildGeneratedPythonHarness, pythonHarnessJsonSystemPrompt, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "../src/lib/providedCaseHarness.ts";
 import { configuredCodeLanguage, providedTestBrief } from "../src/lib/primaryDeliveryPolicy.ts";
 import { secondaryCouncilLanguages, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "../src/lib/independentLanguageCouncil.ts";
 import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief } from "../src/lib/problemEvidence.ts";
@@ -194,6 +194,7 @@ const {
   candidateDocket,
   candidateLanguage,
   countCases,
+  invalidCaseTraceIds,
   councilMarkdown,
   executionDigest,
   executionFailureEvidence,
@@ -705,7 +706,17 @@ async function tokenRouterTurn() {
   await run;
 }
 
-async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off", apiKey, paced = true }) {
+function largerOutputBudget(current, ceiling = 64_000) {
+  const requested = Math.max(Number(current) + 1_024, Math.ceil(Number(current) * 1.5));
+  return Math.min(ceiling, requested);
+}
+
+function responseWasTruncated(json) {
+  return json?.status === "incomplete" &&
+    /max_output_tokens|output_tokens/i.test(String(json?.incomplete_details?.reason || ""));
+}
+
+async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxTokens = 4096, reasoning = "off", apiKey, paced = true, responseFormat }) {
   // Historical in-flight GLM calls may finish and be recorded; fresh solver
   // selection already excludes GLM in approvedSolverPool.
   if (!isPrimaryModel(model)) throw new Error(`${model} is outside the known model roster.`);
@@ -740,6 +751,7 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
           ],
           max_tokens: maxTokens,
           temperature,
+          ...(responseFormat ? { response_format: responseFormat } : {}),
           ...reasoningFields(think, "chat"),
         }),
       });
@@ -762,12 +774,31 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
     last = gatewayFailureSummary(model, resp.status, text);
     if (resp.ok) {
       let answer = "";
+      let completion = null;
       try {
-        answer = chatCompletionText(JSON.parse(text));
+        completion = JSON.parse(text);
+        answer = chatCompletionText(completion);
       } catch {
         throw new Error(`${model}: gateway returned malformed JSON`);
       }
-      if (answer.trim()) return answer;
+      const finishReason = completion?.choices?.[0]?.finish_reason;
+      const completionTokens = completion?.usage?.completion_tokens;
+      const truncated = finishReason === "length";
+      if (answer.trim()) {
+        if (truncated) {
+          last = `${model}: response truncated at output limit (finish_reason=length${Number.isFinite(completionTokens) ? `, completion_tokens=${completionTokens}` : ""})`;
+          const nextBudget = largerOutputBudget(maxTokens);
+          if (attempt < 2 && nextBudget > maxTokens) {
+            // A 200 response is not complete merely because it has some text.
+            // Retry only truncation, preserving the same model and prompt.
+            maxTokens = nextBudget;
+            await sleep(250 * (attempt + 1));
+            continue;
+          }
+          throw new Error(last);
+        }
+        return answer;
+      }
 
       // Some OpenAI-compatible routes acknowledge a reasoning request with a
       // 200 but omit `message.content`.  That is neither a candidate answer
@@ -776,7 +807,19 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
       // bounded retry.  This is especially important for the spec phase: a
       // single empty completion must not turn an otherwise solved problem into
       // an E2B failure.
-      last = `${model}: empty model response`;
+      last = `${model}: empty model response${finishReason ? ` (finish_reason=${finishReason})` : ""}${Number.isFinite(completionTokens) ? ` (completion_tokens=${completionTokens})` : ""}`;
+      if (truncated) {
+        if (think !== "off") think = "off";
+        const nextBudget = largerOutputBudget(maxTokens);
+        if (attempt < 2 && nextBudget > maxTokens) {
+          // Some gateways spend the completion allowance on hidden reasoning
+          // and return no visible text with finish_reason=length. Retrying at
+          // the same cap cannot recover the required answer.
+          maxTokens = nextBudget;
+          await sleep(250 * (attempt + 1));
+          continue;
+        }
+      }
       if (think !== "off") {
         // An empty completion is transient and does not prove that this model
         // rejects reasoning. Drop it only for the remaining attempts in this
@@ -894,19 +937,42 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
     last = gatewayFailureSummary(model, resp.status, text);
     if (resp.ok) {
       let answer = "";
+      let completion = null;
       try {
-        answer = responseText(JSON.parse(text));
+        completion = JSON.parse(text);
+        answer = responseText(completion);
       } catch {
         throw new Error(`${model}: gateway returned malformed JSON`);
       }
-      if (answer.trim()) return answer;
+      const truncated = responseWasTruncated(completion);
+      const completionTokens = completion?.usage?.output_tokens ?? completion?.usage?.completion_tokens;
+      if (answer.trim()) {
+        if (!truncated) return answer;
+        last = `${model}: response truncated at output limit${Number.isFinite(completionTokens) ? ` (completion_tokens=${completionTokens})` : ""}`;
+        const nextBudget = largerOutputBudget(maxTokens);
+        if (attempt < 2 && nextBudget > maxTokens) {
+          maxTokens = nextBudget;
+          await sleep(250 * (attempt + 1));
+          continue;
+        }
+        throw new Error(last);
+      }
 
       // Match the Chat Completions recovery path.  A few compatible Responses
       // routes return a successful reasoning-only envelope with no final text.
       // That is not a usable harness (or answer), but it also is not evidence
       // that the model is unavailable.  Retry once without the reasoning field
       // before giving the route its remaining bounded attempt.
-      last = `${model}: empty model response`;
+      last = `${model}: empty model response${truncated ? " (output limit reached)" : ""}${Number.isFinite(completionTokens) ? ` (completion_tokens=${completionTokens})` : ""}`;
+      if (truncated) {
+        if (think !== "off") think = "off";
+        const nextBudget = largerOutputBudget(maxTokens);
+        if (attempt < 2 && nextBudget > maxTokens) {
+          maxTokens = nextBudget;
+          await sleep(250 * (attempt + 1));
+          continue;
+        }
+      }
       if (think !== "off") {
         // Do not poison future questions based on one empty completion.
         think = "off";
@@ -974,6 +1040,7 @@ async function tokenRouterGenerate({ settings, ...args }) {
   const reasoning = args.reasoning ?? reasoningForModel(settings, args.model);
   const withThinking = { ...args, model: gatewayModel(args.model, settings),
     apiKey: gatewayCredential(settings), paced: gatewayId(settings) !== "cleanapis", reasoning };
+  if (gatewayId(settings) !== "cleanapis") delete withThinking.responseFormat;
   return endpoint === "responses"
     ? tokenRouterResponses(withThinking)
     : tokenRouterChat(withThinking);
@@ -1368,8 +1435,9 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
       const fullDiagnostic = String(local.stderr || "").trim().slice(0, 3000);
       const diagnostic = fullDiagnostic.split("\n").slice(0, 6).join("\n");
       const exercisedCases = localCases.passed + localCases.failed;
+      const untracedPythonCases = suite.language === "python" ? invalidCaseTraceIds(local.stdout) : [];
       const insufficientCoverage = exercisedCases < requiredHarnessCases(suite) ||
-        (suite.source === "provided" && !localCases.complete);
+        (suite.source === "provided" && !localCases.complete) || untracedPythonCases.length > 0;
       // A program that never started did not fail its tests — the harness did.
       // Naming it distinctly keeps a build problem out of the evidence the
       // judges weigh, where it would read as "this candidate is wrong".
@@ -1396,7 +1464,9 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
           : local.exitVerified === false
             ? "E2B command ended before the benchmark trailer; runner evidence is incomplete"
           : insufficientCoverage
-            ? `test harness exercised only ${exercisedCases} distinct cases; ${requiredHarnessCases(suite)} are required`
+            ? untracedPythonCases.length
+              ? `Python harness omitted executed input/output traces for ${untracedPythonCases.length} test case(s)`
+              : `test harness exercised only ${exercisedCases} distinct cases; ${requiredHarnessCases(suite)} are required`
           : brokenHarness
             ? "generated harness failed static preflight"
             : compileIssue ? "candidate/harness integration or compilation failed; inspect stderr"
@@ -1426,7 +1496,10 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
         warmIdleMs: local.warmIdleMs ?? null,
         network: local.network || "unknown",
         stderr: fullDiagnostic,
-        stdout: String(local.stdout || "").slice(0, 4096),
+        // Keep the bounded runner-output budget for structured CA_CASE rows;
+        // truncating at 4 KiB could discard later question examples after the
+        // harness had already verified them.
+        stdout: String(local.stdout || "").slice(0, MAX_OUTPUT),
         remote,
       };
       await addEvent(job.id, local.ok && localCases.failed === 0 ? "info" : "warn", "benchmark_done",
@@ -1588,10 +1661,17 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
       runtimeGuidanceFor(language).slice(0, 1_400),
       languagePrompt(pack, 1_800),
     ].filter(Boolean).join("\n\n");
-    for (const model of specModels.filter(candidate => !bench.has(candidate)).slice(0, 3)) {
+    // Try the complete ready solver cohort before Council can fail harness
+    // setup. A solver returning no text for this separate spec request does
+    // not invalidate its already-recorded solution answer.
+    const harnessAuthors = specModels.filter(candidate => !bench.has(candidate));
+    const maxHarnessAuthors = Math.min(harnessAuthors.length,
+      Math.max(6, candidateAuthors.length + 2));
+    for (const model of harnessAuthors.slice(0, maxHarnessAuthors)) {
       try {
+        const structuredPython = language === "python";
         const specText = await tokenRouterGenerate({
-          settings, baseUrl, model, system: testSpecSystemPrompt() +
+          settings, baseUrl, model, system: structuredPython ? pythonHarnessJsonSystemPrompt() : testSpecSystemPrompt() +
              (process.env.CODE_AUDITOR_E2B_DIFFERENTIAL === "1"
                ? "\\nOPTIONAL TRACE: For up to eight deterministic, JSON-compatible test inputs," +
                  " print CA_DIFF_CASE followed by a space and a JSON object with fields id, input, actual." +
@@ -1606,18 +1686,20 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
               lastError ? `THE PRIOR HARNESS WAS REJECTED: ${lastError.slice(0, 650)}. Repair only the harness.` : "",
             ].filter(Boolean).join("\n\n"),
           }),
-          // A compact, complete Python suite and reference fit comfortably in
-          // this budget.  Asking a gateway for an arbitrary larger answer is
-          // less reliable and was returning HTTP 200 with an empty body.
-          maxTokens: Math.min(6_144, Math.max(Number(settings.maxTokens || 4096), 4_096)),
-          // Harnesses need careful formatting, but they do not need the full
-          // solve-time deliberation budget.  Leaving this at "high" lets some
-          // gateways consume their completion budget in hidden reasoning and
-          // return HTTP 200 with no final text at all.  Solvers and judges
-          // retain the user's configured (high by default) reasoning level.
-          reasoning: "low",
+          // Reserve a practical output budget for the runnable suite and its
+          // independent reference. This auxiliary artifact is not a solver
+          // answer, so it must not inherit a smaller user solve-token limit.
+          maxTokens: Math.max(8_192, Number(settings.maxTokens || 4096)),
+          // Harnesses are deterministic formatting/contract work, not another
+          // solve pass. Keep hidden reasoning out of this output budget so a
+          // reasoning-only completion cannot starve the required TESTS block.
+          // The actual solver and judge calls keep the user's configured effort.
+          reasoning: "off",
+          ...(structuredPython ? { responseFormat: { type: "json_object" } } : {}),
         });
-        const suite = parseTestSuites(specText).find(item => item.language === language);
+        const suite = structuredPython
+          ? buildGeneratedPythonHarness(question, specText, candidateSource) || parseTestSuites(specText).find(item => item.language === language)
+          : parseTestSuites(specText).find(item => item.language === language);
         if (!suite) throw new Error("No valid executable harness block parsed.");
         // One independent reference run catches malformed harnesses *before*
         // all candidates are tested. Successful evidence can be reused only for
@@ -1654,12 +1736,18 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
         // Do not spend two more provider generations on an infrastructure fault.
         if (/No E2B key|E2B_API_KEY|quota|rate limit|sandbox unavailable|ECONNREFUSED|ETIMEDOUT|deadline_exceeded/i.test(lastError))
           throw err;
-        failures.set(language,`${model}: ${lastError}`);
-        await bench.note(model,err,"speccing");
+        failures.set(language, emptyCompletion
+          ? `${model}: no usable test specification after bounded retries`
+          : `${model}: ${lastError}`);
+        // An empty/malformed completion in this auxiliary spec call is not
+        // evidence that the model's already-produced solution is unavailable.
+        // Keep the solver/judge seat eligible; continue with the next author.
+        if (!emptyCompletion) await bench.note(model,err,"speccing");
         await addEvent(job.id,"warn", emptyCompletion ? "harness_provider_failed" : "spec_retry",
-          emptyCompletion ? `${model} returned no usable harness response; retrying another route.` :
+          emptyCompletion ? `Test preparation is retrying with another available agent.` :
             `${model} produced an invalid ${language} harness: ${lastError}`,
-          {language, model, failureKind: emptyCompletion ? "gateway" : "harness", detail: lastError.slice(0, 300)});
+          {language, model, failureKind: emptyCompletion ? "gateway" : "harness",
+            ...(emptyCompletion ? {} : {detail: lastError.slice(0, 300)})});
       }
     }
     return null;
@@ -2988,7 +3076,7 @@ export async function runCouncilJob(job) {
   let preparedSuites = Promise.resolve([]);
   let earlyHarnessStarted = false;
   const beginCandidateAwareHarness = (candidate) => {
-    if (earlyHarnessStarted || !candidate?.final?.code?.trim()) return;
+    if (earlyHarnessStarted || !candidate?.final?.wellFormed || !candidate.final.code?.trim()) return;
     const language = candidateLanguage(candidate.final);
     if (!earlyLanguages.includes(language)) return;
     earlyHarnessStarted = true;
@@ -3100,10 +3188,10 @@ export async function runCouncilJob(job) {
         });
         const final = parseFinal(text);
         candidates[index] = { letter, model: spec.id, final, text, error: null };
-        if (final?.kind === "code" && final.code?.trim()) {
+        if (final?.kind === "code" && final.wellFormed && final.code?.trim()) {
           beginCandidateAwareHarness(candidates[index]);
         }
-        if(final?.kind==="code"&&final.code?.trim()&&earlyLanguages.includes(candidateLanguage(final))){
+        if(final?.kind==="code"&&final.wellFormed&&final.code?.trim()&&earlyLanguages.includes(candidateLanguage(final))){
           eagerRuns.set(letter,scheduleE2B(async()=>{
             const ready=await preparedSuites;
             const suite=ready.find(item=>item.language===candidateLanguage(final));
@@ -3136,15 +3224,14 @@ export async function runCouncilJob(job) {
     })
   );
 
-  // One bounded format-recovery attempt for at most two solvers that answered
-  // but did not return parseable source. This handles truncated/unstructured
-  // replies without multiplying retries across all four seats or downgrading
-  // the original model selection.
+  // One bounded format-recovery attempt for each solver that answered but did
+  // not return a complete source block. This only spends extra calls for
+  // incomplete candidates and does not change the selected model roster.
   if (inferredKind === "code") {
     const recoveryTargets = candidates.filter((candidate) =>
-      !(candidate?.final?.kind === "code" && candidate.final.code?.trim() &&
+      !(candidate?.final?.kind === "code" && candidate.final.wellFormed && candidate.final.code?.trim() &&
         candidateLanguage(candidate.final) === primaryLanguage) &&
-      (candidate?.text || /empty model response/i.test(candidate?.error || ""))).slice(0, 2);
+      (candidate?.text || /empty model response/i.test(candidate?.error || ""))).slice(0, 4);
     if (recoveryTargets.length) {
       await addEvent(job.id, "warn", "solver_code_recovery_started",
         `Requesting one complete ${primaryLanguage} source block from ${recoveryTargets.length} solver(s) whose first reply contained no usable code.`,
@@ -3167,7 +3254,7 @@ export async function runCouncilJob(job) {
             reasoning: "high",
           });
           const retryFinal = parseFinal(retryText);
-          if (retryFinal?.kind === "code" && retryFinal.code?.trim() && candidateLanguage(retryFinal) === primaryLanguage) {
+          if (retryFinal?.kind === "code" && retryFinal.wellFormed && retryFinal.code?.trim() && candidateLanguage(retryFinal) === primaryLanguage) {
             candidate.final = retryFinal;
             candidate.text = retryText;
             candidate.error = null;
@@ -3199,6 +3286,10 @@ export async function runCouncilJob(job) {
   // source remains in the audit log; ports start only after the final winner.
   if (inferredKind === "code") {
     for (const candidate of candidates.filter(Boolean)) {
+      if (candidate.final?.kind === "code" && (!candidate.final.wellFormed || !candidate.final.code?.trim())) {
+        candidate.final = null;
+        candidate.error ||= `${candidate.model}: incomplete code response; it was not sent to E2B.`;
+      }
       if (candidate.final?.kind === "code" && candidateLanguage(candidate.final) !== primaryLanguage) {
         await addEvent(job.id, "warn", "non_primary_solution",
           "Candidate " + candidate.letter + " returned an incompatible first-stage language.",
@@ -4027,7 +4118,11 @@ export async function runCouncilJob(job) {
     }
     try {
     let reportWrite=Promise.resolve();
-    for (const language of targets) {
+    // Each language Council solves the original problem independently and
+    // owns its own E2B execution leases. Run the Councils concurrently after
+    // the primary result is durable; serialize report mutations so a faster
+    // port cannot overwrite a slower port's result.
+    await Promise.all(targets.map(async language => {
       await addEvent(job.id,"info","port_started",
         "Primary solution remains available. New independent Council: solving and verifying in "+language+".",
         {language,sourceLanguage:candidateLanguage(verifiedSource)}).catch(()=>{});
@@ -4078,7 +4173,8 @@ export async function runCouncilJob(job) {
            elapsedMs:port.run?.remoteElapsedMs??null,error:port.error||null}).catch(()=>{});
       });
       await reportWrite;
-    }
+    }));
+    await reportWrite;
     } finally {
       await portWarmPool?.close();
     }

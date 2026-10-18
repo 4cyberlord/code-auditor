@@ -83,7 +83,7 @@ import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } fro
 import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "./independentLanguageCouncil.ts";
 import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief } from "./problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "./judgeUpgradePolicy.ts";
-import { buildProvidedHarness, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
+import { buildProvidedHarness, buildGeneratedPythonHarness, pythonHarnessJsonSystemPrompt, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
 import { needsCandidateRevision, classifyCandidateRun } from "./revisionPolicy.ts";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
 import { buildOverlayState } from "./overlayState.ts";
@@ -103,6 +103,7 @@ import {
   executionDigest,
   executionFailureEvidence,
   countCases,
+  invalidCaseTraceIds,
   sharedHarnessFailure,
   gateFor,
   judgeSystemPrompt,
@@ -4464,8 +4465,10 @@ async function executeField(
       const { passed, failed } = evidence;
       const codeDigest = await fingerprintCode(code);
       const exercisedCases = passed + failed;
+      const untracedPythonCases = suite.language === "python" ? invalidCaseTraceIds(r.stdout) : [];
       const insufficientCoverage = exercisedCases < requiredHarnessCases(suite) ||
-        (suite.source === "provided" && !("complete" in evidence && evidence.complete));
+        (suite.source === "provided" && !("complete" in evidence && evidence.complete)) ||
+        untracedPythonCases.length > 0;
       const classified = classifyCandidateRun({
         letter: c.letter, ran: true, ok: r.ok && !insufficientCoverage, passed, failed,
         durationMs: r.durationMs, note: "", runtime: r.runtime,
@@ -4489,7 +4492,9 @@ async function executeField(
         stderr: r.stderr,
         failureKind: insufficientCoverage ? "harness" : classified.failureKind,
         note: insufficientCoverage
-          ? `test harness exercised only ${exercisedCases} distinct cases; ${requiredHarnessCases(suite)} are required`
+          ? untracedPythonCases.length
+            ? `Python harness omitted executed input/output traces for ${untracedPythonCases.length} test case(s)`
+            : `test harness exercised only ${exercisedCases} distinct cases; ${requiredHarnessCases(suite)} are required`
           : r.timedOut ? "timed out" : r.exitCode !== 0 ? `exit ${r.exitCode}` : "",
         runtime: r.runtime,
       });
@@ -5254,10 +5259,14 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   if (codeCandidates.length) {
     set((st) => ({ council: { ...st.council, phase: "speccing" } }));
     const languages = Array.from(new Set(codeCandidates.map((c) => candidateLanguage(c.final!)).filter(Boolean)));
+    // The models with ready solutions have the most useful context for
+    // writing that solution's harness. Keep them first, then fall back to the
+    // synthesizer and judges; a spec-only empty response must not demote a
+    // solver answer that is already ready.
     const specModels = Array.from(new Set([
+      ...codeCandidates.map(candidate => candidate.model),
       settings.synthesisModel,
       ...settings.councilJudges.map(seat => seat.model),
-      ...field.map(candidate => candidate.model),
     ].filter(Boolean)));
     let specFailure = "No model produced an executable test harness.";
     // Ask for one language at a time. A large, multi-language harness can
@@ -5276,26 +5285,52 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       // turn into an E2B error when another selected solver can write the same
       // language-specific suite. Five attempts bounds latency while covering
       // the four selected solvers plus the configured synthesis seat.
-      for (const model of specModels.slice(0, 5)) {
+      for (const model of specModels.slice(0, 7)) {
         if (!councilAlive(get().council, runId)) return;
         set((st) => ({ council: { ...st.council, specBy: model } }));
         try {
-          const specText = await bridge.runOnce({
-            runId,
-            agentId: "council-spec",
-            attemptId: newAttemptId(),
-            provider: settings.gatewayId,
-            model,
-            systemPrompt: testSpecSystemPrompt(),
-            userText: testSpecUserPrompt({ question: `${harnessProblem}\n\n${routingGuidance(route)}`, docket: candidateDocket(field), languages: [language], knowledge }),
-            images: [],
-            maxTokens: Math.max(settings.maxTokens, 8192),
-            temperature: 0,
-            baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
-            endpoint: endpointForModel(settings, model),
-          });
+          const structuredPython = language === "python";
+          const originalSpecPrompt = testSpecUserPrompt({ question: `${harnessProblem}\n\n${routingGuidance(route)}`, docket: candidateDocket(field), languages: [language], knowledge });
+          let specText = "";
+          let parsed: TestSuite | undefined;
+          // `run_once` is intentionally one-shot for ordinary calls. Harness
+          // authoring gets one same-model recovery for an empty/malformed
+          // completion, then advances to another ready solver. This handles
+          // transient gateway envelopes without restarting the whole Council.
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+              specText = await bridge.runOnce({
+                runId,
+                agentId: `council-spec:${language}:${attempt + 1}`,
+                attemptId: newAttemptId(),
+                provider: settings.gatewayId,
+                model,
+                systemPrompt: structuredPython ? pythonHarnessJsonSystemPrompt() : testSpecSystemPrompt(),
+                userText: attempt === 0 ? originalSpecPrompt : [
+                  originalSpecPrompt,
+                  structuredPython
+                    ? 'RECOVERY: return one JSON object only, matching the required schema exactly; include at least eight distinct test cases and an independent Python reference_code. Do not emit runner code or commentary.'
+                    : "RECOVERY: your previous harness response was empty or not parseable. Return only the complete required TESTS block for the same language; include the splice marker and independent reference. Do not add commentary.",
+                ].join("\n\n"),
+                images: [],
+                maxTokens: Math.max(settings.maxTokens, 8192),
+                temperature: 0,
+                baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
+                endpoint: endpointForModel(settings, model),
+                jsonMode: structuredPython && settings.gatewayId === "cleanapis",
+              });
+            } catch (err) {
+              specFailure = `${model}: ${cleanError(String(err))}`;
+              if (attempt === 0 && /empty (?:model )?response/i.test(specFailure)) continue;
+              throw err;
+            }
+            if (!councilAlive(get().council, runId)) return;
+            parsed = structuredPython
+              ? buildGeneratedPythonHarness(harnessProblem, specText, candidateCode) || parseTestSuites(specText).find(suite => suite.language === language)
+              : parseTestSuites(specText).find(suite => suite.language === language);
+            if (parsed || attempt === 1) break;
+          }
           if (!councilAlive(get().council, runId)) return;
-          const parsed = parseTestSuites(specText).find(suite => suite.language === language);
           if (parsed) {
             // A candidate never becomes the first executable program in a new
             // harness. Its independent reference must pass this exact suite
@@ -5308,7 +5343,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
             suites.push(parsed);
             break;
           }
-          specFailure = `${model} returned no usable ${language} test harness.`;
+          specFailure = `${model} did not return a usable ${language} harness after recovery.`;
         } catch (err) {
           specFailure = `${model}: ${cleanError(String(err))}`;
           console.warn("Council spec pass failed:", specFailure);

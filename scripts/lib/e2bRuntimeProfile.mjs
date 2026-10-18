@@ -12,7 +12,9 @@ export const PINNED_PYTHON_VALIDATORS = Object.freeze([
 /** The toolchain is installed into an E2B template at build time, never per-run. */
 export function extendedValidatorBuildCommands() {
   return [
+    "python3 -c \"import ast; ast.parse('def solution(value: int) -> int: return value')\"",
     "python3 -m pytest --version",
+    "python3 -c \"import hypothesis; print('hypothesis', hypothesis.__version__)\"",
     "python3 -m mypy --version",
     "radon --version",
     "ruff --version",

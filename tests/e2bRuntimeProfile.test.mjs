@@ -7,6 +7,8 @@ assert.equal(PINNED_PYTHON_VALIDATORS.length,5);
 assert.ok(PINNED_PYTHON_VALIDATORS.every(s=>/^[a-z0-9-]+==[0-9][a-z0-9.]+$/.test(s)));
 const cmds=extendedValidatorBuildCommands();
 assert.ok(PINNED_PYTHON_VALIDATORS.some(s=>s.startsWith("hypothesis==")));
+assert.ok(cmds.some(s=>s.includes("import ast")));
+assert.ok(cmds.some(s=>s.includes("import hypothesis")));
 assert.ok(cmds.some(s=>s.includes("pytest --version"))); 
 assert.ok(cmds.every(s=>!s.includes("pip install")));
 assert.ok(cmds.some(s=>s.includes("clang-tidy --version")));

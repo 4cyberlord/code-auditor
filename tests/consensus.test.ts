@@ -177,6 +177,18 @@ CLAIMS:
   check("mid-stream marked not well formed", !t.wellFormed);
   check("mid-stream claim captured", t.claims.length === 1, JSON.stringify(t.claims));
 
+  const openFence = parseFinal(`<<<FINAL
+KIND: code
+LANGUAGE: python
+ANSWER: Remove duplicates and sort.
+CODE:
+\`\`\`python
+def dedupe_sorted(nums):
+    return sorted(set(nums))
+FINAL>>>`)!;
+  check("FINAL marker cannot make an unclosed code fence look complete", !openFence.wellFormed);
+  check("partial code remains available for bounded recovery diagnostics", openFence.code.includes("dedupe_sorted"));
+
   check("empty text returns null", parseFinal("") === null);
 
   const one = computeConsensus([{ id: "a0", name: "GPT", final: p }]);

@@ -21,16 +21,19 @@ export type ProvidedFixture = {
 export type ProvidedSuite = {
   language: string;
   runnerLanguage: "python";
-  source: "provided";
+  source: "provided" | "generated";
   providedCaseCount: number;
   /** Retained so each candidate can get an adapter for its own callable API. */
   question: string;
   harness: string;
+  referenceCode?: string;
+  candidateAsString?: boolean;
 };
 
 const MAX_CASES = 16;
 const MAX_SOURCE_CHARS = 6000;
-const LABEL = /^\s*(?:sample\s+)?(?:input|output|expected\s+output)\s*:\s*(.*)$/i;
+const LABEL = /^\s*(?:sample\s+)?(?:input|output|expected\s+output|expected)\s*:\s*(.*)$/i;
+const INLINE_LABEL = /\b(?:sample\s+)?(?:expected\s+output|input|output|expected)\s*:/gi;
 export const MIN_GENERATED_HARNESS_CASES = 8;
 
 function splitTopLevel(text: string): string[] {
@@ -91,7 +94,22 @@ function callableInputs(text: string): { args: unknown[]; kwargs: Record<string,
 
 /** Extract only actual labelled sample values from the transcribed question. */
 export function extractProvidedFixtures(question: string): ProvidedFixture[] {
-  const lines = String(question || "").slice(0, 40_000).split(/\r?\n/);
+  // Vision readers often flatten a screenshot's layout into one line, e.g.
+  // "Example 1: Input: ... Output: ...". Split only at explicit field labels
+  // before parsing; values themselves are kept verbatim and never evaluated.
+  const lines = String(question || "").slice(0, 40_000).split(/\r?\n/).flatMap((line) => {
+    const labels = [...line.matchAll(INLINE_LABEL)];
+    if (labels.length < 2) return [line];
+    const result: string[] = [];
+    let start = 0;
+    for (const label of labels) {
+      const index = label.index ?? 0;
+      if (index > start) result.push(line.slice(start, index).trimEnd());
+      start = index;
+    }
+    result.push(line.slice(start));
+    return result.filter(part => part.trim());
+  });
   const pairs: ProvidedFixture[] = [];
   let input: string | null = null;
   let output: string | null = null;
@@ -183,7 +201,8 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "    expected = case['expected']",
     "    ok = actual == expected",
     "    print(('PASS ' if ok else 'FAIL ') + case['id'])",
-    "    print('CA_CASE ' + json.dumps({'id': case['id'], 'input': case.get('input', case.get('kwargs', case.get('args'))), 'expected': expected, 'actual': actual, 'status': 'passed' if ok else 'failed'}, default=str))",
+    "    trace_input = case['input'] if 'input' in case else {'args': case.get('args'), 'kwargs': case.get('kwargs')} ",
+    "    print('CA_CASE ' + json.dumps({'id': case['id'], 'input': trace_input, 'expected': expected, 'actual': actual, 'status': 'passed' if ok else 'failed'}, default=str))",
     "    return ok",
     "def ca_execute():",
     "    if CA_MODE == 'callable':",
@@ -192,7 +211,15 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "        scope.update({'List': List, 'Optional': Optional, 'Dict': Dict, 'Tuple': Tuple, 'Set': Set})",
     "        exec(compile(CA_SOURCE, '<candidate>', 'exec'), scope)",
     "        target = scope['Solution']() if 'Solution' in scope else scope",
-    "        method = getattr(target, CA_METHOD) if not isinstance(target, dict) else target[CA_METHOD]",
+    "        if CA_METHOD:",
+    "            method = getattr(target, CA_METHOD) if not isinstance(target, dict) else target[CA_METHOD]",
+    "        elif not isinstance(target, dict):",
+    "            names = [name for name in dir(target) if not name.startswith('_') and callable(getattr(target, name, None))]",
+    "            method = getattr(target, names[0]) if names else None",
+    "        else:",
+    "            names = [name for name, value in target.items() if not name.startswith('_') and callable(value)]",
+    "            method = target[names[0]] if names else None",
+    "        if method is None: raise RuntimeError('No public callable found in candidate')",
     "        return all([ca_test(case, method(*copy.deepcopy(case['args']), **copy.deepcopy(case['kwargs']))) for case in CA_CASES])",
     "    with tempfile.TemporaryDirectory(prefix='council-fixtures-') as directory:",
     "        ext = {'python': '.py', 'cpp': '.cpp', 'rust': '.rs'}[CA_LANGUAGE]",
@@ -221,6 +248,87 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "        sys.exit(2)",
   ];
   return driver.join("\n") + "\n";
+}
+
+/**
+ * Compile a small model-authored JSON test specification into our fixed Python
+ * runner. The model supplies data and an independent reference, never runner
+ * code, so quoting/indentation/syntax failures cannot strand the Council.
+ */
+export function buildGeneratedPythonHarness(
+  question: string,
+  rawSpec: string,
+  candidateCode = "",
+): ProvidedSuite | null {
+  // Equality-based cases cannot validate a contract that permits several
+  // correct representations. Keep those on the existing comparator-aware path.
+  if (/\b(?:any order|any valid|multiple valid|in any order|any one|arbitrary order|order does not matter|modify in.place|in.place modification|do not return anything)\b/i.test(question)) return null;
+  let spec: Record<string, unknown>;
+  try {
+    const text = String(rawSpec || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+    const first = text.indexOf("{");
+    const last = text.lastIndexOf("}");
+    if (first < 0 || last <= first) return null;
+    spec = JSON.parse(text.slice(first, last + 1));
+  } catch { return null; }
+
+  const referenceCode = typeof spec.reference_code === "string" ? spec.reference_code.trim() : "";
+  if (!referenceCode || referenceCode.length > 24_000) return null;
+  const rawCases = Array.isArray(spec.cases) ? spec.cases : [];
+  if (rawCases.length < MIN_GENERATED_HARNESS_CASES || rawCases.length > MAX_CASES) return null;
+  const mode = spec.mode === "stdin" ? "stdin" : spec.mode === "callable" ? "callable" : null;
+  if (!mode) return null;
+
+  const supplied = extractProvidedFixtures(question);
+  const cases: ProvidedFixture[] = [];
+  const seen = new Set<string>();
+  for (const [index, value] of rawCases.entries()) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const row = value as Record<string, unknown>;
+    let fixture: ProvidedFixture;
+    if (mode === "callable") {
+      if (!Array.isArray(row.args) || !row.kwargs || typeof row.kwargs !== "object" || Array.isArray(row.kwargs) || !Object.hasOwn(row, "expected")) return null;
+      fixture = { id: `generated_${index + 1}`, input: JSON.stringify([row.args, row.kwargs]), output: JSON.stringify(row.expected), args: row.args, kwargs: row.kwargs as Record<string, unknown>, expected: row.expected };
+    } else {
+      if (typeof row.input !== "string" || typeof row.expected !== "string") return null;
+      fixture = { id: `generated_${index + 1}`, input: row.input, output: row.expected };
+    }
+    const key = JSON.stringify(mode === "callable" ? [fixture.args, fixture.kwargs] : fixture.input);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cases.push(fixture);
+  }
+  if (cases.length < MIN_GENERATED_HARNESS_CASES) return null;
+
+  // If we could safely parse statement examples, require every one to appear
+  // with its exact input and expected value. This prevents a JSON-mode answer
+  // from silently dropping or rewriting the examples it was asked to preserve.
+  if (supplied.length) {
+    const retained = supplied.every(example => cases.some(test => mode === "callable"
+      ? JSON.stringify([test.args, test.kwargs, test.expected]) === JSON.stringify([
+          example.args?.length ? example.args : Object.values(example.kwargs || {}), {}, example.expected,
+        ])
+      : test.input === example.input && test.output === example.output));
+    if (!retained) return null;
+  }
+  return {
+    language: "python", runnerLanguage: "python", source: "generated",
+    providedCaseCount: cases.length, question, candidateAsString: true,
+    harness: pythonDriver(cases, mode, "python", callableName(candidateCode) || (typeof spec.method === "string" ? spec.method : undefined)),
+    referenceCode,
+  };
+}
+
+export function pythonHarnessJsonSystemPrompt(): string {
+  return [
+    "You design test DATA and an independent Python reference implementation for one coding problem.",
+    "Do not write a test harness, assertions, runner, Markdown, or prose. Return one JSON object only.",
+    'Schema: {"mode":"callable|stdin","method":"optional public method name","cases":[...],"reference_code":"complete independent Python implementation"}.',
+    "For callable mode each case is {id,args:[JSON values],kwargs:{JSON values},expected:JSON value}.",
+    "For stdin mode each case is {id,input:string,expected:string}; preserve exact statement examples.",
+    `Return at least ${MIN_GENERATED_HARNESS_CASES} distinct cases and no more than ${MAX_CASES}; include all supplied examples exactly and add only contract-justified cases.`,
+    "The reference_code must implement the exact problem interface, independently of the candidate solutions. Never invent a signature or expected result. If the contract cannot support a reliable oracle, return {\"error\":\"insufficient contract\"}.",
+  ].join(" ");
 }
 
 export function buildProvidedHarness(question: string, language: string, candidateCode: string): ProvidedSuite | null {

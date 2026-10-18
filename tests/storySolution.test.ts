@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { extractFunctionSignatures, selectStorySolution, selectVerifiedStorySolution } from "../src/lib/storySolution.ts";
 import type { AgentFinal } from "../src/lib/parse.ts";
-import { harnessPreflightDiagnostics, missingSuiteLanguages, testSpecSystemPrompt, testSpecUserPrompt } from "../src/lib/council.ts";
+import { harnessPreflightDiagnostics, invalidCaseTraceIds, missingSuiteLanguages, testSpecSystemPrompt, testSpecUserPrompt } from "../src/lib/council.ts";
 const final=(code:string):AgentFinal=>({kind:"code",language:"python",answer:"Use a map",complexity:"O(n)",confidence:0.9,claims:[],code,raw:"",wellFormed:true});
 const agents=[
   {id:"a",model:"model A",enabled:true,status:"done" as const,final:final("def f():\n return 1")},
@@ -11,8 +11,13 @@ const council={phase:"idle",winner:"",candidates:[],runs:{},revisedRuns:{},error
 assert.equal(selectStorySolution(agents,council,"b"),null,"unverified solver answers stay hidden");
 assert.equal(selectVerifiedStorySolution(agents,council,"b"),null,"no code is published during Council handoff");
 assert.equal(selectStorySolution([{...agents[0],status:"queued" as const,final:null}],council),null);
-assert.deepEqual(harnessPreflightDiagnostics("python", "x = [2 if i % 2 == 0 else -1 for _ in range(2000)]\n<<<SOLUTION>>>"), ["comprehension references 'i' but iterates '_'"]);
-assert.deepEqual(harnessPreflightDiagnostics("python", "x = [2 if i % 2 == 0 else -1 for i in range(2000)]\n<<<SOLUTION>>>"), []);
+assert.deepEqual(harnessPreflightDiagnostics("python", "x = [2 if i % 2 == 0 else -1 for _ in range(2000)]\n<<<SOLUTION>>>"), ["Python harness must emit a CA_CASE record for each executed test", "comprehension references 'i' but iterates '_'"]);
+assert.deepEqual(harnessPreflightDiagnostics("python", "x = [2 if i % 2 == 0 else -1 for i in range(2000)]\nprint('CA_CASE ' + '{}')\n<<<SOLUTION>>>"), []);
+assert.deepEqual(invalidCaseTraceIds("PASS example-1\nCA_CASE {\"id\":\"example-1\",\"input\":[1],\"expected\":2,\"actual\":2,\"status\":\"passed\"}"), []);
+assert.deepEqual(invalidCaseTraceIds("PASS example-1\nCA_CASE {\"id\":\"example-1\",\"input\":[1],\"expected\":2}"), ["example-1"], "incomplete traces do not count as test evidence");
+assert.deepEqual(invalidCaseTraceIds("PASS example-1"), ["example-1"], "a PASS total without the executed values is insufficient");
+assert.deepEqual(invalidCaseTraceIds("PASS example-1\nCA_CASE {\"id\":\"example-1\",\"input\":1,\"expected\":1,\"actual\":1}\nCA_CASE {\"id\":\"example-1\",\"input\":1,\"expected\":1,\"actual\":1}"), ["example-1"], "duplicate traces do not count as one exact record");
+assert.deepEqual(invalidCaseTraceIds("PASS example-1\nCA_CASE {\"id\":\"example-1\",\"input\":1,\"expected\":1,\"actual\":2,\"status\":\"passed\"}"), ["example-1"], "status cannot contradict the executed values");
 const victory={...council,phase:"done",winner:"B",candidates:[{letter:"B",model:"validated",final:final("def winner():\n return 2"),text:"",error:null}],runs:{},revisedRuns:{}};
 assert.equal(selectStorySolution(agents,victory,"a"),null,"done without passing evidence stays hidden");
 assert.equal(selectVerifiedStorySolution(agents,victory,"a"),null,"no code is published without E2B tests");
@@ -31,6 +36,8 @@ assert.match(specInstructions,/When examples do not exist, derive a thorough tes
 assert.match(specInstructions,/at least eight distinct checks/i);
 assert.match(specInstructions,/Never invent expected outputs/i);
 assert.match(specInstructions,/independent REFERENCE implementation/i);
+assert.match(specInstructions,/For EVERY executed case, emit exactly one CA_CASE/i);
+assert.match(specInstructions,/Do not swap expected and actual/i);
 assert.match(testSpecUserPrompt({question:"Example 1: input [1, 2], output 3",docket:"Candidate A",languages:["python"]}),/Example 1: input \[1, 2\], output 3/);
 assert.deepEqual(extractFunctionSignatures("def solve(nums):\n pass\nfunction verify(x) {\n}\nfn evaluate(v: i32) {}").map(x=>x.name),["solve","verify","evaluate"]);
 console.log("PASS: solution display prefers verified winner; no benchmark attribution without evidence");

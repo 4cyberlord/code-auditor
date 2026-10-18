@@ -1,0 +1,19 @@
+Python-first scope
+==================
+
+Active
+------
+- Keep Python as the default primary output.
+- Preserve every question-provided sample input and expected output exactly.
+- Require one runtime CA_CASE JSON record per executed case with id, input,
+  expected, actual, and status; reject incomplete/missing traces as harness
+  evidence so the Test Cases panel never invents or swaps values.
+- Keep the verified Python winner visible. Only adopt a post-judge improvement
+  after its own E2B tests pass; otherwise preserve the current winner.
+
+Deferred
+--------
+- Independent Rust and C++ solution rounds/ports. The code remains in place but
+  is disabled while the Python solve, judging, harness, and case-display path is
+  stabilized. Re-enable only after Python end-to-end validation, with a
+  language-specific harness and independent execution evidence for each port.

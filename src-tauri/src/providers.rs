@@ -105,6 +105,10 @@ pub struct RunRequest {
     /// exactly that.
     #[serde(default)]
     pub endpoint: Option<String>,
+    /// Opt-in JSON object mode for providers that support OpenAI-compatible
+    /// response_format. Kept off for ordinary solver answers.
+    #[serde(default)]
+    pub json_mode: bool,
 }
 
 fn default_max_tokens() -> u32 {
@@ -723,7 +727,13 @@ pub async fn run_once(req: RunRequest) -> Result<String, String> {
     let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     let out = extract_whole(&req.provider, &v);
     if out.trim().is_empty() {
-        return Err(format!("{} returned an empty response.", req.provider));
+        let finish_reason = v["choices"][0]["finish_reason"].as_str().unwrap_or("not reported");
+        let completion_tokens = v["usage"]["completion_tokens"].as_u64()
+            .map(|count| count.to_string()).unwrap_or_else(|| "not reported".into());
+        return Err(format!(
+            "{} returned no visible text (finish_reason={}, completion_tokens={}).",
+            req.provider, finish_reason, completion_tokens
+        ));
     }
     Ok(out)
 }
@@ -1887,6 +1897,9 @@ fn build_request(
                 ],
                 "stream": stream
             });
+            if req.json_mode && req.provider == "cleanapis" {
+                body["response_format"] = json!({ "type": "json_object" });
+            }
             // OpenAI renamed the budget field for its reasoning models; Moonshot's
             // compatible surface still expects the original, and rejects unknown
             // keys. The gateway is grouped with Moonshot rather than OpenAI on
@@ -2193,6 +2206,7 @@ mod explain_tests {
             temperature: 0.0,
             base_url: None,
             endpoint: Some("responses".into()),
+            json_mode: false,
         };
 
         let body = build_responses_body(&req);

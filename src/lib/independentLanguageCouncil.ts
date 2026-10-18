@@ -1,7 +1,20 @@
 import { configuredCodeLanguage, type CodingLanguage } from "./primaryDeliveryPolicy.ts";
 
-/** Secondary Council rounds run after the chosen primary code is published. */
-export function secondaryCouncilLanguages(primary: string, available: readonly string[] | null | undefined): CodingLanguage[] {
+/**
+ * Secondary language Councils are intentionally paused while Python's
+ * question-fixture and executable-evidence path is hardened. See TODO.md.
+ * Keeping the opt-in argument makes the existing implementation testable and
+ * straightforward to re-enable after that work is complete.
+ */
+export const SECONDARY_LANGUAGE_COUNCILS_ENABLED = false;
+
+/** Secondary Council rounds run only when explicitly enabled. */
+export function secondaryCouncilLanguages(
+  primary: string,
+  available: readonly string[] | null | undefined,
+  enabled = SECONDARY_LANGUAGE_COUNCILS_ENABLED,
+): CodingLanguage[] {
+  if (!enabled) return [];
   const origin = configuredCodeLanguage(primary);
   const seen = new Set<string>([origin]);
   const result: CodingLanguage[] = [];

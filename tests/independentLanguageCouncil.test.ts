@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "../src/lib/independentLanguageCouncil.ts";
 
-assert.deepEqual(secondaryCouncilLanguages("python",["python","rust","cpp"]),["rust","cpp"]);
-assert.deepEqual(secondaryCouncilLanguages("rust",["python","rust","cpp"]),["python","cpp"]);
-assert.deepEqual(secondaryCouncilLanguages("cpp",["python","rust","cpp"]),["python","rust"]);
-assert.deepEqual(secondaryCouncilLanguages("Python",["javascript","python","py","c++","cpp","rs"]),["cpp","rust"]);
-assert.deepEqual(secondaryCouncilLanguages("python",["python"]),["rust","cpp"]);
-assert.deepEqual(secondaryCouncilLanguages("python",undefined),["rust","cpp"]);
-assert.deepEqual(secondaryCouncilLanguages("rust",undefined),["python","cpp"]);
+assert.deepEqual(secondaryCouncilLanguages("python",["python","rust","cpp"]),[], "secondary-language work is paused while Python is stabilized");
+assert.deepEqual(secondaryCouncilLanguages("python",["python","rust","cpp"],true),["rust","cpp"]);
+assert.deepEqual(secondaryCouncilLanguages("rust",["python","rust","cpp"],true),["python","cpp"]);
+assert.deepEqual(secondaryCouncilLanguages("cpp",["python","rust","cpp"],true),["python","rust"]);
+assert.deepEqual(secondaryCouncilLanguages("Python",["javascript","python","py","c++","cpp","rs"],true),["cpp","rust"]);
+assert.deepEqual(secondaryCouncilLanguages("python",["python"],true),["rust","cpp"]);
+assert.deepEqual(secondaryCouncilLanguages("python",undefined,true),["rust","cpp"]);
+assert.deepEqual(secondaryCouncilLanguages("rust",undefined,true),["python","cpp"]);
 assert.deepEqual(independentLanguageSolverModels(["adaptive-b", "adaptive-d", "adaptive-b"], "winner-model"), ["adaptive-b", "adaptive-d"]);
 assert.deepEqual(independentLanguageSolverModels([], "winner-model"), ["winner-model"]);
 assert.deepEqual(independentLanguageSolverModels([], ""), []);

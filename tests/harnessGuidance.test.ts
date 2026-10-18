@@ -4,7 +4,9 @@ assert.deepEqual(harnessPreflightDiagnostics("java","public class Main {}\n<<<SO
 assert.ok(harnessPreflightDiagnostics("java","public class Main {} public class Foo {}\n<<<SOLUTION>>>").length);
 assert.ok(harnessPreflightDiagnostics("go","<<<SOLUTION>>>\nfunc main(){}").length);
 assert.ok(harnessPreflightDiagnostics("python","<<<SOLUTION>>> <<<SOLUTION>>>").length);
+assert.ok(harnessPreflightDiagnostics("python","<<<SOLUTION>>>").some(message=>message.includes("CA_CASE")));
+assert.deepEqual(parseTestSuites(`<<<TESTS\nHARNESS: python\n\`\`\`python\n<<<SOLUTION>>>\nprint('PASS one')\n\`\`\`\nTESTS>>>`), [], "Python harnesses without structured case records are rejected before execution");
 const tick=String.fromCharCode(96).repeat(3);
-const spec=["<<<TESTS","HARNESS: python",tick+"python","<<<SOLUTION>>>","print(\'PASS one\')",tick,"REFERENCE: python",tick+"python","def solve(x): return x",tick,"TESTS>>>"].join("\n");
+const spec=["<<<TESTS","HARNESS: python",tick+"python","<<<SOLUTION>>>","print('PASS one')","print('CA_CASE ' + json.dumps({'id':'one','input':1,'expected':1,'actual':1}))",tick,"REFERENCE: python",tick+"python","def solve(x): return x",tick,"TESTS>>>"] .join("\n");
 const suites=parseTestSuites(spec);assert.equal(suites.length,1);assert.ok(suites[0].referenceCode?.includes("def solve"));
 console.log("PASS: syntax guards and optional reference parsing");

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
-  buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases,
+  buildProvidedHarness, buildGeneratedPythonHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases,
 } from "../src/lib/providedCaseHarness.ts";
 import { spliceSuite, countCases } from "../src/lib/council.ts";
 
@@ -31,6 +31,17 @@ const provided = extractProvidedFixtures(twoSum);
 assert.equal(provided.length, 3);
 assert.deepEqual({...provided[0].kwargs}, {nums: [2,7,11,15], target: 9});
 assert.deepEqual(provided[2].expected, [0,1]);
+
+// Screenshot readers frequently flatten the visual Sample/Example layout.
+// These literal pairs must still enter the deterministic provided-case path,
+// rather than silently falling back to model-invented expected outputs.
+const flattened = extractProvidedFixtures([
+  "Example 1: Input: nums = [2, 7], target = 9 Output: [0, 1]",
+  "Test Case 2: Input: nums = [3, 2, 4] Expected Output: [1, 2]",
+].join("\n"));
+assert.equal(flattened.length, 2);
+assert.deepEqual({...flattened[0].kwargs}, {nums: [2, 7], target: 9});
+assert.deepEqual(flattened[1].expected, [1, 2]);
 
 function runProgram(program: string) {
   const result = spawnSync("python3", ["-c", program], {encoding: "utf8", timeout: 120_000});
@@ -67,6 +78,43 @@ const singleResult = runProgram(spliceSuite(single, correct)!);
 assert.deepEqual(providedCaseEvidence(singleResult.stdout, 1), {passed: 1, failed: 0, complete: true});
 assert.equal(requiredHarnessCases({source: "generated"}), 8,
   "AI-authored suites keep the independent coverage floor");
+
+// Model-authored Python test DATA compiles through our fixed runner. Supplied
+// examples must remain byte-for-byte equivalent, and generated code is never
+// asked to emit executable harness syntax.
+const generatedCases = [
+  {id:"sample-a",args:[[2,7,11,15],9],kwargs:{},expected:[0,1]},
+  {id:"sample-b",args:[[3,2,4],6],kwargs:{},expected:[1,2]},
+  {id:"edge-1",args:[[3,3],6],kwargs:{},expected:[0,1]},
+  {id:"edge-2",args:[[1,5,4,7],9],kwargs:{},expected:[1,2]},
+  {id:"edge-3",args:[[-1,-2,-3],-5],kwargs:{},expected:[1,2]},
+  {id:"edge-4",args:[[0,4],4],kwargs:{},expected:[0,1]},
+  {id:"edge-5",args:[[8,1,6,2],3],kwargs:{},expected:[1,3]},
+  {id:"edge-6",args:[[10,20,30],50],kwargs:{},expected:[1,2]},
+];
+const generated = buildGeneratedPythonHarness(twoSum, JSON.stringify({
+  mode:"callable", method:"twoSum", cases:generatedCases,
+  reference_code:"class Solution:\n    def twoSum(self, nums, target):\n        for i in range(len(nums)):\n            for j in range(i + 1, len(nums)):\n                if nums[i] + nums[j] == target: return [i, j]\n        return []",
+}));
+assert.ok(generated, "valid structured spec must compile locally");
+assert.equal(generated.source, "generated");
+assert.equal(requiredHarnessCases(generated), 8);
+const generatedProgram = spliceSuite(generated, correct)!;
+const generatedSuccess = runProgram(generatedProgram);
+assert.equal(generatedSuccess.status, 0, generatedSuccess.stderr + generatedSuccess.stdout);
+assert.equal(countCases(generatedSuccess.stdout).passed, 8);
+assert.match(generatedSuccess.stdout, /CA_CASE \{"id": "generated_1", "input": \{"args": \[\[2, 7, 11, 15\], 9\]/,
+  "generated Python cases expose their exact executed inputs to the report");
+const generatedReferenceRun = runProgram(spliceSuite(generated, generated.referenceCode!)!);
+assert.equal(generatedReferenceRun.status, 0, generatedReferenceRun.stderr + generatedReferenceRun.stdout);
+assert.equal(buildGeneratedPythonHarness(twoSum, "{}"), null, "incomplete structured responses fail closed");
+assert.equal(buildGeneratedPythonHarness("Return any valid pair; any order is accepted.", JSON.stringify({
+  mode:"callable", cases:generatedCases, reference_code:"class Solution: pass",
+})), null, "equality harnesses refuse contracts with multiple valid outputs");
+const droppedSample = buildGeneratedPythonHarness(twoSum, JSON.stringify({
+  mode:"callable", method:"twoSum", cases:generatedCases.slice(2), reference_code:"pass",
+}));
+assert.equal(droppedSample, null, "all parseable statement examples are mandatory");
 
 // The same supplied fixtures must adapt to each model's own valid callable
 // name; one model's signature must not make another candidate fail E2B.

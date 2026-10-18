@@ -180,6 +180,8 @@ export interface TestSuite {
   question?: string;
   /** The deterministic fixture adapter runs in Python for all three languages. */
   runnerLanguage?: "python";
+  /** The deterministic Python runner embeds candidate source as a JSON string. */
+  candidateAsString?: boolean;
 }
 
 /** AI-authored suites retain the independent coverage floor; supplied samples use their exact count. */
@@ -206,6 +208,10 @@ export function harnessPreflightDiagnostics(language: string, harness: string): 
     errors.push("Go harness must use package main");
   if (lang === "python") {
     if (/Traceback|NameError|SyntaxError/i.test(text)) errors.push("contains Python traceback/error text");
+    // The Test Cases panel must be grounded in the values the harness actually
+    // exercised. A Python suite without structured traces cannot prove that it
+    // preserved the problem's individual inputs and expected outputs.
+    if (!/CA_CASE\s+/.test(text)) errors.push("Python harness must emit a CA_CASE record for each executed test");
     // Catch the exact class of failure that escaped into production: a
     // comprehension refers to a different variable than its iterator.
     const comprehensions = text.matchAll(/\[[^\n\]]*\b([A-Za-z_]\w*)\s*%[^\n\]]*\s+for\s+([A-Za-z_]\w*)\s+in\s+/g);
@@ -335,9 +341,9 @@ export function spliceSuiteWithSourceMap(
   const startLine = (prefix.match(/\n/g)?.length ?? 0) + 1;
   const endLine = startLine + Math.max(0, candidate.split(/\r?\n/).length - 1);
   return {
-    program: prefix + (suite.source === "provided" ? JSON.stringify(candidate) : candidate) +
+    program: prefix + (suite.source === "provided" || suite.candidateAsString ? JSON.stringify(candidate) : candidate) +
       suite.harness.slice(markerAt + SPLICE_MARKER.length),
-    sourceMap: { startLine, endLine: suite.source === "provided" ? startLine : endLine },
+    sourceMap: { startLine, endLine: suite.source === "provided" || suite.candidateAsString ? startLine : endLine },
   };
 }
 
@@ -439,6 +445,47 @@ export function countCases(stdout: string): { passed: number; failed: number } {
     }
   }
   return { passed: passedNames.size, failed: failedNames.size };
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+/**
+ * Check Python's structured test-case evidence against its PASS/FAIL records.
+ * Only runtime-emitted JSON is accepted; model prose or a green total alone is
+ * not enough to populate the user-facing Test Cases panel.
+ */
+export function invalidCaseTraceIds(stdout: string): string[] {
+  const executed = new Set<string>();
+  const traceCounts = new Map<string, number>();
+  for (const line of String(stdout || "").split("\n")) {
+    const result = /^\s*(?:PASS|FAIL)\s+(.+?)(?:\s+got=|\s+want=|\s*$)/.exec(line);
+    if (result) executed.add(result[1].trim());
+    const record = /^\s*CA_CASE\s+(.+?)\s*$/.exec(line);
+    if (!record) continue;
+    try {
+      const value = JSON.parse(record[1]);
+      if (typeof value?.id !== "string" || !Object.hasOwn(value, "input") ||
+          !Object.hasOwn(value, "expected") || !Object.hasOwn(value, "actual") ||
+          !["passed", "failed"].includes(value.status)) continue;
+      const expectedStatus = canonicalJson(value.expected) === canonicalJson(value.actual) ? "passed" : "failed";
+      if (value.status !== expectedStatus) continue;
+      const id = value.id.trim();
+      traceCounts.set(id, (traceCounts.get(id) ?? 0) + 1);
+    } catch {
+      // Malformed trace lines are deliberately not evidence.
+    }
+  }
+  return [...new Set([
+    ...[...executed].filter(id => traceCounts.get(id) !== 1),
+    ...[...traceCounts.keys()].filter(id => !executed.has(id)),
+  ])];
 }
 
 /**
@@ -1556,8 +1603,12 @@ export function testSpecSystemPrompt(): string {
     "Use exactly one line containing <<<SOLUTION>>> to splice any candidate verbatim.",
     "Implement the correct callable signature or exact stdin/stdout interface stated in the problem.",
     "Each assertion must emit a distinct PASS <name> or FAIL <name> record with nonzero exit on failure.",
-    "For JSON-compatible cases, optionally emit CA_CASE with runtime-computed input, expected,",
-    "actual and status fields; never hard-code a candidate's claimed result as the oracle.",
+    "For EVERY executed case, emit exactly one CA_CASE line followed by JSON with id, input,",
+    "expected, actual and status fields. Preserve each supplied example's input and expected",
+    "output exactly as stated in the question; compute actual by running the candidate. Emit the",
+    "record from the harness, never from the candidate. Do not swap expected and actual, omit",
+    "individual values, or report a trace for a case that was not executed. Keep each CA_CASE id",
+    "identical to that case's PASS or FAIL label. These runtime records power the Test Cases UI.",
     "Include an independent REFERENCE implementation with the same interface for the",
     "E2B adapter preflight; do not copy or derive it from a candidate solution.",
     "Write valid single-file source for the selected language; verify variables, imports,",

@@ -35,10 +35,13 @@ let HARNESS_WRONG = false;
 let REPAIRABLE_EDGE = false;
 let EMPTY_SPEC_ONCE = true;
 let EMPTY_SPEC_ALWAYS = false;
+let EMPTY_SPEC_TRUNCATED_ONCE = false;
 // Scenario 3: one route answers nothing, ever, the way a dead endpoint does.
 let DEAD_MODEL = "";
 // Scenario 5: a route with no reasoning mode, which must not read as a dead seat.
 let REJECTS_REASONING = "";
+let TRUNCATE_MODEL_ONCE = "";
+let TRUNCATE_SENT = false;
 let MCQ_READING = false;
 const responsesCalls = [];
 const abort = () => Object.assign(new Error("aborted"), { name: "AbortError" });
@@ -152,6 +155,14 @@ globalThis.fetch = async (url, init = {}) => {
       return json({ error: { message: "Unsupported parameter: 'reasoning_effort'" } }, { status: 400 });
     }
     const system = req.messages[0].content;
+    if (TRUNCATE_MODEL_ONCE && !TRUNCATE_SENT && req.model.includes(TRUNCATE_MODEL_ONCE) &&
+      system.includes("one of four independent expert agents")) {
+      TRUNCATE_SENT = true;
+      return json({
+        choices: [{ finish_reason: "length", message: { content: "<<<FINAL\nKIND: code\nLANGUAGE: javascript\nANSWER: partial\nCODE:\n```javascript\nexport function solve(xs) { return xs.length; }" } }],
+        usage: { completion_tokens: req.max_tokens },
+      });
+    }
     if (system.includes("Two models read the same screenshot and disagree")) {
       if (TIE_BREAK_PICK === "neither") return modelReply("I cannot tell from this image.");
       const shown = Array.isArray(req.messages[1].content)
@@ -257,6 +268,13 @@ export function solve(xs) { return xs ? xs.length : 0; }
 FINAL>>>`);
     }
     if (system.includes("You write test harnesses for candidate solutions")) {
+      if (EMPTY_SPEC_TRUNCATED_ONCE) {
+        EMPTY_SPEC_TRUNCATED_ONCE = false;
+        return json({
+          choices: [{ finish_reason: "length", message: { content: "" } }],
+          usage: { completion_tokens: req.max_tokens },
+        });
+      }
       if (EMPTY_SPEC_ONCE || EMPTY_SPEC_ALWAYS) {
         EMPTY_SPEC_ONCE = false;
         return modelReply("");
@@ -397,6 +415,11 @@ check("report has judges", reports[0]?.report?.judges?.length === 1, String(repo
 check("report has benchmark suite", reports[0]?.report?.suites?.length === 1, String(reports[0]?.report?.suites?.length));
 check("empty harness response was retried with another route",
   modelCalls.filter(c => c.messages?.[0]?.content?.includes("You write test harnesses for candidate solutions")).length >= 2);
+check("provider empty-output details stay out of user-facing run events",
+  !events.some(e => /empty model response/i.test(`${e.message || ""} ${JSON.stringify(e.payload || {})}`)));
+const harnessCalls = modelCalls.filter(c => c.messages?.[0]?.content?.includes("You write test harnesses for candidate solutions"));
+check("harness generation reserves output tokens and disables hidden reasoning",
+  harnessCalls.some(c => c.max_tokens >= 8192 && !c.reasoning_effort && !c.reasoning));
 check("report has passing E2B runs", reports[0]?.report?.runs?.A?.passed === 8 && reports[0]?.report?.runs?.B?.passed === 8, JSON.stringify(reports[0]?.report?.runs));
 check(
   "published winner fingerprint matches the exact E2B-tested source",
@@ -552,6 +575,51 @@ EMPTY_SPEC_ALWAYS = false;
 check("empty specs fail closed", noHarnessRejected, true);
 check("no unverified report was published", reports.length, beforeUnverified.reports);
 check("E2B was not falsely reported as having tested code", EXECUTIONS, beforeUnverified.executions);
+
+console.log("\n1c. truncated model output is retried before parsing or E2B");
+TRUNCATE_MODEL_ONCE = "claude-opus-5.5";
+TRUNCATE_SENT = false;
+events.length = 0;
+patches.length = 0;
+reports.length = 0;
+modelCalls.length = 0;
+await runCouncilJob({ id: "job-truncated-model", session_id: "session-1", settings_snapshot: {
+  mode: "auto", maxTokens: 2048,
+  councilModels: [{ id: "anthropic/claude-opus-5.5", endpoint: "chat" },
+    { id: "moonshotai/kimi-k3", endpoint: "chat" }],
+  councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
+} });
+TRUNCATE_MODEL_ONCE = "";
+const truncatedSolverCalls = modelCalls.filter(c => String(c.model).includes("claude-opus-5.5") &&
+  String(c.messages?.[0]?.content).includes("one of four independent expert agents"));
+check("the truncated 200 response was retried with a larger output budget",
+  truncatedSolverCalls.length === 2 && truncatedSolverCalls[1].max_tokens > truncatedSolverCalls[0].max_tokens,
+  JSON.stringify(truncatedSolverCalls.map(c => c.max_tokens)));
+check("only the complete retry entered candidate processing", reports[0]?.report?.candidates?.some(c =>
+  c.final?.wellFormed === true && c.final?.answer !== "partial"),
+  JSON.stringify(reports[0]?.report?.candidates?.map(c => ({ model: c.model, answer: c.final?.answer, wellFormed: c.final?.wellFormed }))));
+check("the complete answer still passed the E2B suite", reports[0]?.report?.runs?.A?.ok === true ||
+  reports[0]?.report?.runs?.B?.ok === true);
+
+console.log("\n1d. empty truncated harness output retries with a larger budget");
+EMPTY_SPEC_TRUNCATED_ONCE = true;
+events.length = 0;
+patches.length = 0;
+reports.length = 0;
+modelCalls.length = 0;
+await runCouncilJob({ id: "job-empty-truncated-harness", session_id: "session-1", settings_snapshot: {
+  mode: "auto", maxTokens: 8192,
+  councilModels: [{ id: "anthropic/claude-opus-5.5", endpoint: "chat" },
+    { id: "moonshotai/kimi-k3", endpoint: "chat" }],
+  councilJudges: [{ model: "anthropic/claude-opus-5.5", emphasis: "correctness" }],
+} });
+const emptyTruncatedHarnessCalls = modelCalls.filter(c =>
+  c.messages?.[0]?.content?.includes("You write test harnesses for candidate solutions"));
+check("same harness author is retried with a larger token budget",
+  emptyTruncatedHarnessCalls.length >= 2 && emptyTruncatedHarnessCalls[1].max_tokens > emptyTruncatedHarnessCalls[0].max_tokens,
+  JSON.stringify(emptyTruncatedHarnessCalls.map(c => c.max_tokens)));
+check("the answer proceeds through E2B after the empty truncated attempt",
+  reports[0]?.report?.runs?.A?.passed === 8 || reports[0]?.report?.runs?.B?.passed === 8);
 
 // --- the gate, and the harness that convicts everybody ----------------------
 console.log("\n2. a synthesis cannot promote a candidate the runner rejected");

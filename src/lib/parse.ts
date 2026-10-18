@@ -39,6 +39,10 @@ export function parseFinal(text: string): AgentFinal | null {
   const confRaw = field("CONFIDENCE").replace(/[^0-9.]/g, "");
   const confNum = confRaw ? Number(confRaw) : NaN;
 
+  const code = lastFence(body);
+  const fenceCount = body.match(/```/g)?.length ?? 0;
+  const completeCodeFence = fenceCount > 0 && fenceCount % 2 === 0;
+
   return {
     kind,
     language: stripNa(field("LANGUAGE")),
@@ -46,9 +50,12 @@ export function parseFinal(text: string): AgentFinal | null {
     complexity: stripNa(field("COMPLEXITY")),
     confidence: Number.isFinite(confNum) ? clamp01(confNum > 1 ? confNum / 100 : confNum) : null,
     claims: parseClaims(body),
-    code: lastFence(body),
+    code,
     raw: (match ? match[0] : body).trim(),
-    wellFormed: Boolean(match),
+    // A closed FINAL marker alone is insufficient: a token-limited completion
+    // can still end after the opening code fence. Such a partial source must
+    // not start harness generation or be advertised as a ready candidate.
+    wellFormed: Boolean(match) && (kind !== "code" || (Boolean(code.trim()) && completeCodeFence)),
   };
 }
 

@@ -90,12 +90,13 @@ export function reconcileProblemEvidence(
 export function visionEvidenceSystemPrompt(): string {
   return [
     "You are an independent evidence reader, NOT a solver. Inspect the ORIGINAL screenshots.",
-    "Copy only literal sample INPUT and OUTPUT pairs visibly printed in the question.",
+    "First locate every visible section titled Example, Examples, Sample, Sample Test Case, Test Case(s), or similar; inspect those blocks specifically.",
+    "Copy every literal sample INPUT and OUTPUT/EXPECTED OUTPUT pair visibly printed in the question, including pairs whose labels share one line or whose values span multiple lines.",
     "Never solve the problem, run code, calculate missing outputs or invent test cases.",
-    "For every unambiguous visible pair output exactly Example N:, Input:, Output: on separate lines.",
+    "Normalize only the labels: for every unambiguous pair output Example N:, Input:, Output: on separate lines; preserve the actual input/output text, punctuation, ordering, and line breaks exactly.",
     "If any symbol, constraint, input or output is unreadable or conflicting, omit that pair.",
-    "If no unambiguous example is visible, answer NO_CONFIRMED_EXAMPLES.",
-  ].join("\n");
+    "If the screenshot contains no unambiguous explicit example/test case, answer NO_CONFIRMED_EXAMPLES.",
+  ].join(" ");
 }
 export function evidenceJudgeBrief(evidence: ProblemEvidence): string {
   return [

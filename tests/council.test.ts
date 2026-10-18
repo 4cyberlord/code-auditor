@@ -139,6 +139,7 @@ for args, want in cases:
     got = twoSum(*args)
     name = str(args)
     print(("PASS " if got == want else f"FAIL got={got} want={want} ") + name)
+    print("CA_CASE " + json.dumps({"id": name, "input": args, "expected": want, "actual": got}))
 \`\`\`
 HARNESS: javascript
 \`\`\`javascript

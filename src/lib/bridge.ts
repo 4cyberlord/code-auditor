@@ -50,6 +50,8 @@ export interface RunRequest {
    * by the probe; settable per-seat in Council settings.
    */
   endpoint?: "chat" | "responses";
+  /** Request strict JSON mode for compact machine-readable auxiliary output. */
+  jsonMode?: boolean;
 }
 
 export interface DeltaEvent {
