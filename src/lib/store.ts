@@ -5664,11 +5664,13 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
         const baselineAudit = agreedComplexityAudits(judgeReadings)[winner];
         const sourceCandidate = winnerCandidate!;
         const sourceFinal = sourceCandidate.revised ?? sourceCandidate.final;
-        const upgradeModel = synthModel || sourceCandidate.model || "";
-        const independentModels = [...new Set(judges.map(judge => judge.model))]
-          .filter(model => model && model !== upgradeModel).slice(0, 2);
+        // The proposer must be independent of *every* voting judge. All
+        // participating judge models vote; no first-two-only shortcut.
+        const independentModels = [...new Set(judges.map(judge => judge.model))].filter(Boolean);
+        const upgradeModel = [sourceCandidate.model, synthModel]
+          .find(model => model && !independentModels.includes(model)) || "";
         if (ideas.length >= 2 && baselineAudit && sourceFinal?.kind === "code" &&
-            independentModels.length === 2 && upgradeModel) {
+            independentModels.length >= 2 && independentModels.length === judges.length && upgradeModel) {
           const previousRevision = get().council.revisedRuns[winner];
           const restorePreviousRevision = () => set(st => {
             if (st.council.runId !== runId) return {};
