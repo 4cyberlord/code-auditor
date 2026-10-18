@@ -78,13 +78,12 @@ import { titleFor, placeholderTitle, isPlaceholder } from "./title.ts";
 import { resolveAnswerLanguage } from "./answerLanguage.ts";
 import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from "./probeFit.ts";
 import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
-import { structuralTranslationGuidanceFor } from "./structuralTranslationGuidance.ts";
 import { fingerprintCode } from "./codeFingerprint.ts";
 import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
 import { secondaryCouncilLanguages, independentLanguageInstruction, independentLanguageQuestion } from "./independentLanguageCouncil.ts";
 import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief } from "./problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "./judgeUpgradePolicy.ts";
-import { buildProvidedHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
+import { buildProvidedHarness, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
 import { needsCandidateRevision, classifyCandidateRun } from "./revisionPolicy.ts";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
 import { buildOverlayState } from "./overlayState.ts";
@@ -4595,16 +4594,6 @@ function executionFailureSummary(run: CandidateRun | undefined): string {
     .map(line => line.trim())
     .find(line => line.length > 0 && !/^PASS\b/.test(line));
   return [run.note || "test failed", detail?.slice(0, 360)].filter(Boolean).join(" — ");
-}
-
-const PORT_LANGUAGE_ALIASES: Record<string, string> = {
-  "c++": "cpp", cpp: "cpp", c: "c", python: "python", py: "python",
-  rust: "rust", rs: "rust", javascript: "javascript", js: "javascript",
-  typescript: "typescript", ts: "typescript", java: "java", go: "go", golang: "go",
-};
-
-function portLanguageId(language: string): string {
-  return PORT_LANGUAGE_ALIASES[language.trim().toLowerCase()] ?? language.trim().toLowerCase();
 }
 
 /**
