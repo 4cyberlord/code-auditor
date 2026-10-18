@@ -4663,7 +4663,7 @@ async function generateVerifiedPorts(
       if (!candidates.length) throw new Error("No independent solver returned complete " + language + " code.");
       // Build the accepted E2B suite against this language's REAL interfaces.
       const first = candidates[0].final!;
-      let suite = buildProvidedHarness(problem, language, first.kind === "code" ? first.code : "");
+      let suite: TestSuite | undefined = buildProvidedHarness(problem, language, first.kind === "code" ? first.code : "") || undefined;
       if (!suite) {
         const author = settings.synthesisModel || judgeModels[0] || candidates[0].model;
         const spec = await bridge.runOnce({
