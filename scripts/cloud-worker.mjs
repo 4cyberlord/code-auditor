@@ -4258,6 +4258,7 @@ export async function runCouncilJob(job) {
               const originalEvidence=report.e2bEvidence;
               const originalAlgorithmEvidence=report.algorithmEvidence;
               const originalHistory=report.solutionHistory;
+              const originalUpgrade=report.upgrade;
               field3=field3.map(candidate=>candidate.letter===decision.winner
                 ?{...candidate,revised:improved}:candidate);
               source=field3.find(candidate=>candidate.letter===decision.winner);
@@ -4314,6 +4315,8 @@ export async function runCouncilJob(job) {
                 else delete report.algorithmEvidence;
                 if(originalHistory)report.solutionHistory=originalHistory;
                 else delete report.solutionHistory;
+                if(originalUpgrade)report.upgrade=originalUpgrade;
+                else delete report.upgrade;
                 throw persistError;
               }
               await addEvent(job.id,"info","judge_upgrade_verified",
