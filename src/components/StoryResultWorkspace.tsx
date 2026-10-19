@@ -10,7 +10,7 @@ import { useStore } from "@/lib/store";
 import { agreedComplexityAudits, COUNCIL_SIZE, gateFor, splitComplexityClaim } from "@/lib/council";
 import { PORT_LABELS, PORT_LANGUAGES } from "@/lib/review";
 import { councilStageText, modelLamp } from "@/lib/storyProgress";
-import { extractFunctionSignatures, selectVerifiedStorySolution } from "@/lib/storySolution";
+import { extractFunctionSignatures, selectVerifiedStorySolution, type DisplaySolution } from "@/lib/storySolution";
 import "./StoryResultWorkspace.css";
 
 export default function StoryResultWorkspace() {
@@ -47,8 +47,20 @@ export default function StoryResultWorkspace() {
     review.status !== "done" && review.status !== "error";
   // The E2B-confirmed winner is already final. Optional technical commentary
   // must never make a ready-to-copy primary solution disappear.
-  const report = preparing || awaitingCouncil || !settings.councilEnabled
+  const councilReport = preparing || awaitingCouncil || !settings.councilEnabled
     ? null : selectVerifiedStorySolution(agents, council, consensus().representative);
+  const trustyCandidate = !viewingRunId ? council.codingTrusty.candidate : null;
+  const trustyFirstRun = trustyCandidate ? council.runs[trustyCandidate.letter] : null;
+  const trustyRevisedRun = trustyCandidate ? council.revisedRuns[trustyCandidate.letter] : null;
+  const trustyRun = gateFor(trustyRevisedRun ?? undefined) === "pass" ? trustyRevisedRun : trustyFirstRun;
+  const trustyFinal = trustyCandidate && gateFor(trustyRevisedRun ?? undefined) === "pass" && trustyCandidate.revised?.kind === "code"
+    ? trustyCandidate.revised : trustyCandidate?.final;
+  const trustyReport: DisplaySolution | null = !preparing && !viewingRunId &&
+      council.codingTrusty.status === "ready" && trustyFinal?.kind === "code" && gateFor(trustyRun ?? undefined) === "pass"
+    ? { source: "Coding Trusty · Claude Fable 5.1", code: trustyFinal.code, language: trustyFinal.language,
+        answer: trustyFinal.answer, complexity: trustyFinal.complexity, benchmark: trustyRun, provisional: true }
+    : null;
+  const report = councilReport || trustyReport;
   const reviewData = report ? review.data : null;
   const reviewRunning = !preparing && review.status === "running";
   const councilPhase = preparing ? "idle" : council.phase;
@@ -87,6 +99,7 @@ export default function StoryResultWorkspace() {
     ? "The Council is still testing and comparing candidates; no final measurement is available yet."
     : councilPhase === "error" ? "Council verification did not finish successfully. Start a fresh analysis to try again."
     : !council.testSuites.length ? "No executable test suite was produced, so this solution has not been benchmarked."
+    : report?.provisional && run?.ran ? `${run.passed} passed / ${run.failed} failed in E2B for the provisional preflight code; Council review is pending.`
     : run && !run.ran ? "The execution environment is preparing another verification attempt."
     : run?.ran && run.remoteElapsedMs == null && run.peakMemoryKb == null
       ? `Tests executed${run.provider ? ` via ${run.provider}` : ""}, but this runner did not report per-process runtime or peak-memory telemetry. E2B measurements are not available for this desktop run.`
@@ -127,7 +140,7 @@ export default function StoryResultWorkspace() {
     finalReviewPending || reviewRunning ? "Reviewing the solution" :
     councilPhase === "error" ? "Verification could not be completed" :
     report ? language !== "original" ? "Selected independent language solution" :
-      report.provisional ? "Candidate ready — verification pending" : "Tested solution ready" :
+      report.provisional ? "Preflight ready — Council review pending" : "Tested solution ready" :
     failed.length ? "Analysis needs attention" : running ? "Preparing analysis" : "Awaiting solution";
 
   return <main className="story-result" aria-label="Analysis results">
@@ -182,6 +195,18 @@ export default function StoryResultWorkspace() {
           <div><span className="story-eyebrow">01 / SOLUTION</span><h1>Code solution</h1></div>
           {report && <span className="story-outcome" data-provisional={Boolean(report.provisional)}>{language !== "original" ? "Independently verified" : report.provisional ? "Provisional" : "Completed"}</span>}
         </div>
+        {!report && !viewingRunId && settings.codingTrustyEnabled && council.codingTrusty.status !== "idle" && (
+          <p className="story-process-text" role="status">
+            {council.codingTrusty.status === "solving" ? "Coding Trusty (Claude Fable 5.1 · Clean API) is solving the question in parallel." :
+             council.codingTrusty.status === "validating" ? "Coding Trusty is checking its code, language syntax, and the question’s stated examples before E2B." :
+             council.codingTrusty.status === "testing" ? "Coding Trusty has an answer; E2B is checking it before it can be shown as a preflight solution." :
+             council.codingTrusty.status === "unavailable" ? council.codingTrusty.error :
+             council.codingTrusty.status === "failed" ? `Coding Trusty could not provide a usable preflight answer: ${council.codingTrusty.error || "request failed"}` : ""}
+          </p>
+        )}
+        {report?.provisional && <p className="story-trusty-banner" role="status">
+          Preflight solution · Claude Fable 5.1 via Clean API · E2B passed {report.benchmark?.passed ?? 0} tests. Council review is still running; this is not the final verdict.
+        </p>}
         {report && <div className="story-code-source">Selected solution <strong>{report.source}</strong></div>}
         {report && pendingPort && <p className="story-process-text" role="status">
           Primary {report.language || "language"} solution is verified and ready.
@@ -220,6 +245,18 @@ export default function StoryResultWorkspace() {
           </div>
         </div>
         {report?.answer && <div className="story-solution-summary"><span className="story-eyebrow">SOLUTION SUMMARY</span><p>{report.answer}</p></div>}
+        {report && !report.provisional && trustyFinal?.kind === "code" && report.code !== trustyFinal.code && (
+          <details className="council-upgrade-diff">
+            <summary>Council improved the Trusty preflight · View verified diff</summary>
+            <p>The Council-selected version passed E2B. The preflight remains in the run history for comparison.</p>
+            <div className="council-diff-lines" role="region" aria-label="Coding Trusty to Council solution diff">
+              {codeLineDiff(trustyFinal.code, report.code).map((line,index)=><div className="council-diff-line" data-kind={line.kind} key={index}>
+                <span className="council-diff-number">{line.beforeLine??""}</span><span className="council-diff-number">{line.afterLine??""}</span>
+                <span className="council-diff-marker">{line.kind==="removed"?"−":line.kind==="added"?"+":" "}</span><code>{line.text||" "}</code>
+              </div>)}
+            </div>
+          </details>
+        )}
         {report && council.postJudgeUpgrade?.afterCode === report.code && <details className="council-upgrade-diff">
           <summary>Judges upgraded the verified solution · View GitHub-style diff</summary>
           <p>{council.postJudgeUpgrade.reason} {council.postJudgeUpgrade.passed} E2B tests passed.</p>

@@ -3359,9 +3359,14 @@ fn coding_sidebar_evidence(body:&Value)->Value {
     let p=body.get("presentation").unwrap_or(&Value::Null);
     let blueprint=body.get("semanticBlueprint").unwrap_or(&Value::Null);
     let structure=blueprint.get("structure").unwrap_or(&Value::Null);
-    let summary=blueprint.get("explanation").and_then(Value::as_str).unwrap_or("");
+    let early=body.get("provisional").unwrap_or(&Value::Null);
+    let summary=blueprint.get("explanation").and_then(Value::as_str)
+        .filter(|s|!s.trim().is_empty())
+        .or_else(||early.get("answer").and_then(Value::as_str))
+        .unwrap_or("");
     let approach=p.get("approach").and_then(Value::as_str)
-        .filter(|s|!s.trim().is_empty()).unwrap_or(summary);
+        .filter(|s|!s.trim().is_empty())
+        .unwrap_or(summary);
     let structures:Vec<String>=structure.get("dataStructures")
         .and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str)
         .take(6).map(|name|{
@@ -3410,6 +3415,12 @@ fn coding_sidebar_evidence(body:&Value)->Value {
             row.get("passed").and_then(Value::as_u64).unwrap_or(0),
             row.get("failed").and_then(Value::as_u64).unwrap_or(0)))
         .take(4).collect::<Vec<_>>().join("\n");
+    let tests=if tests.is_empty() && early.get("status").and_then(Value::as_str)==Some("provisional") {
+        format!("Candidate {} · {} passed / {} failed in E2B (Council review pending)",
+            early.get("letter").and_then(Value::as_str).unwrap_or("?"),
+            early.get("passed").and_then(Value::as_u64).unwrap_or(0),
+            early.get("failed").and_then(Value::as_u64).unwrap_or(0))
+    } else { tests };
     serde_json::json!({
         "summary":summary.chars().take(480).collect::<String>(),
         "approach":approach.chars().take(800).collect::<String>(),
@@ -3442,7 +3453,10 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
     let agents = if candidates.is_empty() {
         coding_agents_from_events(job)
     } else {
-        candidates.iter().take(4).map(|candidate| {
+        candidates.iter()
+        // Coding Trusty is independent, not one of the four selected seats.
+        .filter(|candidate| candidate.get("codingTrusty").and_then(Value::as_bool) != Some(true))
+        .take(4).map(|candidate| {
             let letter = candidate.get("letter").and_then(Value::as_str).unwrap_or("?");
             let model = candidate.get("model").and_then(Value::as_str).unwrap_or("");
             let error = candidate.get("error").and_then(Value::as_str)
@@ -3476,7 +3490,15 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
             })
         }).collect()
     };
-    let tests = body.map(|body| coding_tests_from_report(body, winner)).unwrap_or_default();
+    let tests = body.map(|body| {
+        // A verified provisional result is the current source until the
+        // Council selects a final winner. Its saved run is real E2B evidence,
+        // not a fabricated summary or an unrelated solver's measurements.
+        let case_letter = if winner.is_empty() {
+            body.pointer("/provisional/letter").and_then(Value::as_str).unwrap_or("")
+        } else { winner };
+        coding_tests_from_report(body, case_letter)
+    }).unwrap_or_default();
     // Every selected port owns its own independent test evidence. Do not
     // present Python cases as if a Rust/C++ translation had run them.
     let port_cases: Vec<Value> = body.and_then(|body| body.get("ports"))
@@ -3494,11 +3516,35 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
                 .and_then(Value::as_str).unwrap_or(""))
         }))
         .collect();
+    let coding_trusty = job.events.iter().rev().find_map(|event| {
+        let phase = event.get("phase").and_then(Value::as_str)?;
+        let status = match phase {
+            "coding_trusty_started" => "solving",
+            "coding_trusty_self_review" => "validating",
+            "coding_trusty_testing" => "testing",
+            "coding_trusty_e2b_passed" => "ready",
+            "coding_trusty_unavailable" => "unavailable",
+            "coding_trusty_failed" => "failed",
+            _ => return None,
+        };
+        Some(serde_json::json!({
+            "status": status,
+            "model": event.pointer("/payload/model").and_then(Value::as_str).unwrap_or("claude-fable-5.1"),
+            "message": event.get("message").and_then(Value::as_str).unwrap_or(""),
+            "error": event.pointer("/payload/error").and_then(Value::as_str),
+        }))
+    });
+    let report_trusty = body.and_then(|body| body.pointer("/provisional/codingTrusty").and_then(Value::as_bool));
+    let coding_trusty = coding_trusty.or_else(|| report_trusty.filter(|value| *value).map(|_| serde_json::json!({
+        "status": "ready", "model": "claude-fable-5.1",
+        "message": "Coding Trusty passed E2B; Council review is pending.", "error": Value::Null,
+    })));
     serde_json::json!({
         "runId": job.id, "updatedAt": now(), "kind": "coding",
         "phase": phase, "status": if completed_without_solution { "needs_attention" } else { job.status.as_str() },
         "progress": progress, "error": job.error.as_deref().or(fallback_error),
         "agents": agents, "solution": solution, "tests": tests,
+        "codingTrusty": coding_trusty,
         "portCases": port_cases,
         "presentation": body.and_then(|b| b.get("presentation")).cloned(),
         "insights": body.map(coding_sidebar_evidence),
@@ -3607,9 +3653,14 @@ fn coding_solution_from_report(body: &Value, winner: &str, candidates: &[Value])
         { return None; }
         let lang = early.get("language").and_then(Value::as_str).unwrap_or("");
         let letter = early.get("letter").and_then(Value::as_str).unwrap_or("?");
+        let source = if early.get("codingTrusty").and_then(Value::as_bool) == Some(true) {
+            "Coding Trusty · Claude Fable 5.1 · E2B verified".to_string()
+        } else {
+            format!("Candidate {letter} · E2B verified")
+        };
         return Some(serde_json::json!({
             "title": format!("solution.{lang}"), "language": lang, "code": code,
-            "source": format!("Candidate {letter} · E2B verified"), "status": "provisional"
+            "source": source, "status": "provisional"
         }));
     }
     // The cloud Council and desktop share the deterministic winner gates.
@@ -4274,10 +4325,12 @@ fn overlay_html() -> &'static str {
               const current=state.solution||{},history=Array.isArray(state.solutionHistory)?state.solutionHistory:[];
               const previous=history.find(entry=>entry.version==='provisional');
               const final=history.find(entry=>entry.version==='final');
-              const changed=state.upgrade&&state.upgrade.changed===true&&
-                current.status==='reviewed'&&previous&&final&&
+              // Source of truth is persisted E2B-backed version history.
+              // This must also detect a judge-approved upgrade when the
+              // first Council winner matched Trusty's provisional code.
+              const changed=current.status==='reviewed'&&previous&&final&&
                 previous.code&&final.code&&previous.language===final.language&&
-                previous.code!==final.code;
+                current.code===final.code&&previous.code!==final.code;
               if(window.__overlayDiffRunId!==state.runId){window.__overlayDiffRunId=state.runId;window.__overlayDiffHidden=false;}
               const button=document.getElementById('overlay-diff-toggle');
               if(button){button.hidden=!changed;button.textContent=window.__overlayDiffHidden?'View changes':'Show final';}
@@ -4339,7 +4392,7 @@ fn overlay_html() -> &'static str {
                         window.updatePreviews=function(images){window.__lastPreviews=images||[];const pictures=document.getElementById('pictures');if(!pictures)return;if(pictures.__sources&&pictures.__sources.length===images.length&&images.every((src,i)=>src===pictures.__sources[i]))return;pictures.__sources=images.slice();pictures.innerHTML='';if(!images.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Captured images will appear here';pictures.appendChild(empty);return;}images.forEach((src,i)=>{const pill=document.createElement('div');pill.className='picture-pill';const img=document.createElement('img');img.src=src;img.alt='Capture '+(i+1);const count=document.createElement('span');count.className='picture-count';count.textContent=(i+1)+'/10';pill.appendChild(img);pill.appendChild(count);pictures.appendChild(pill);});};
                 function renderMcq(state){const savedPictures=document.getElementById('pictures');const left=document.querySelector('.pictures-pane');const right=document.querySelector('.thought-pane');const m=state.mcq||{};const picked=(m.answer&&m.answer.label)||'';const found=Array.isArray(m.options)?m.options:[];const position=found.findIndex((o)=>o.label===picked);const ordinal=(n)=>n%100>=11&&n%100<=13?'th':n%10===1?'st':n%10===2?'nd':n%10===3?'rd':'th';const formatted=m.answerVerified===true&&position>=0?'✅ '+picked+' ('+(position+1)+ordinal(position+1)+' Option) - '+String((m.answer&&m.answer.text)||found[position].text||''):'';const displayAnswer=formatted||String(m.displayAnswer||'');const selectedModel=(m.model&&String(m.model).trim())?String(m.model).trim():'none';const hasModel=selectedModel.toLowerCase()!=='none';left.innerHTML='<div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title-row"><div class="title">Question</div><div class="mcq-model-pill" data-enabled="'+(hasModel?'true':'false')+'">'+esc(hasModel?selectedModel:'No Model')+'</div></div><div class="mcq-box mcq-question"></div><div class="title">Answer</div><div class="mcq-box mcq-answer"></div>';if(savedPictures)document.getElementById('pictures').replaceWith(savedPictures);right.innerHTML='<div class="title">Question history</div><div class="mcq-history"></div>';document.querySelector('.mcq-question').textContent=m.question||state.progress||'Reading the captured question...';document.querySelector('.mcq-answer').innerHTML='<b>'+esc(displayAnswer||(picked||'Answer'))+'</b>'+(displayAnswer?'':(m.answer&&m.answer.text?' — '+esc(m.answer.text):''))+'<br><br>'+esc(m.reason||state.error||state.progress||'Waiting for the MCQ worker result...');const hist=document.querySelector('.mcq-history');const add=(title,body,level,meta)=>{const row=document.createElement('div');row.className='mcq-history-row';row.dataset.level=level||'info';const h=document.createElement('b');h.textContent=title;const p=document.createElement('div');p.textContent=body||'';row.appendChild(h);row.appendChild(p);if(meta&&meta.length){const mrow=document.createElement('div');mrow.className='mcq-history-meta';meta.forEach((x)=>{const s=document.createElement('span');s.textContent=x;mrow.appendChild(s);});row.appendChild(mrow);}hist.appendChild(row);};add('AI selected',selectedModel,'info',[state.status||'',state.phase||''].filter(Boolean));add('Captured question',m.question||'Waiting for the screenshot reading.',state.error?'error':'info',[state.status||'',state.phase||''].filter(Boolean));if(m.options&&m.options.length){add('Choices found',(m.options||[]).map((o)=>(o.label?o.label+'. ':'')+(o.text||'')).join('\\n'),'info',[]);}if(m.knowledgeUsed!==undefined){add('Local knowledge check',m.knowledgeUsed?'A local knowledge match or guidance was included before the model answer.':'The local knowledge pack was checked before the model answer, but no direct match was used.','info',[selectedModel]);}if(picked||m.reason){add('Selected answer',(picked?picked+': ':'')+(m.answer&&m.answer.text?m.answer.text:'')+'\\n'+(m.reason||''),'info',[selectedModel]);}(m.whyNot||[]).forEach((x)=>add('Rejected choice '+(x.label||''),x.reason||'Not selected.','info',[]));(state.history||[]).forEach((e)=>add(e.phase||'worker event',e.message||'',e.level||'info',[e.createdAt||''].filter(Boolean)));if(!hist.children.length)add('Waiting','The helper is waiting for the worker history.','info',[]);window.updatePreviews(window.__lastPreviews||[]);}
 		            function restoreCodingShell(){if(document.getElementById('agents'))return;document.getElementById('panel').innerHTML='<div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div>';window.updatePreviews(window.__lastPreviews||[]);}
-			            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};window.__overlayCurrentState=state;if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';source.textContent=state.solution.status==='reviewed'?'Council verified':state.solution.status==='provisional'?'E2B passed · Council reviewing':('candidate · '+(state.solution.source||''));renderOverlayCodeResult(code,state);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation,state);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation,state);}};
+		            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};window.__overlayCurrentState=state;if(state.kind==='mcq'||state.mcq){renderMcq(state);return;}restoreCodingShell();const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';const isTrusty=String(state.solution.source||'').includes('Coding Trusty');source.textContent=state.solution.status==='reviewed'?'Council verified':state.solution.status==='provisional'?(isTrusty?'Coding Trusty · Claude Fable 5.1 · E2B passed; Council reviewing':'E2B passed · Council reviewing'):('candidate · '+(state.solution.source||''));renderOverlayCodeResult(code,state);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation,state);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation,state);}};
             // Keep the existing capture and result renderer intact, then give
             // its agent output the same clear, glassy Council presentation as
             // the Story workspace. This is intentionally display-only.
@@ -4455,6 +4508,7 @@ fn overlay_html() -> &'static str {
               monitor.insertBefore(header,agents);
               agents.innerHTML='';
               if(!selected.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='The selected Council agents will appear here.';agents.appendChild(empty);}else{selected.forEach((agent)=>{const card=document.createElement('div');card.className='model-chip';card.dataset.state=stateTone(agent.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=agent.label||agent.id||'Council agent';const model=document.createElement('span');model.className='agent-model';model.textContent=agent.model||'Council';const detail=document.createElement('span');detail.textContent=agentStatusText(agent);card.title=[agent.model,agent.error].filter(Boolean).join(' — ');card.append(dot,name,model,detail);agents.appendChild(card);});}
+              const trusty=state.codingTrusty;if(trusty&&trusty.status&&trusty.status!=='idle'){const card=document.createElement('div');card.className='model-chip coding-trusty-chip';card.dataset.state=trusty.status==='ready'?'done':trusty.status==='failed'?'error':trusty.status==='unavailable'?'pending':'working';const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent='Coding Trusty';const model=document.createElement('span');model.className='agent-model';model.textContent='Claude Fable 5.1 · Clean API (separate preflight)';const detail=document.createElement('span');detail.textContent=trusty.status==='ready'?'E2B passed · Council review continues':trusty.status==='failed'?'Preflight unavailable: '+friendlyModelFailure(trusty.error||trusty.message):trusty.status==='unavailable'?'Clean API credential unavailable':trusty.status==='testing'?'Answer ready · E2B testing':'Solving and self-reviewing';card.title=trusty.message||'Separate from the four selected Council agents';card.append(dot,name,model,detail);agents.appendChild(card);}
               const progress=document.createElement('div');progress.className='overlay-progress';const waiting=state.phase==='idle'?'Capture screenshots to begin.':state.progress||'Council is selecting eligible agents.';const stages={queued:'Waiting for the cloud worker',contracting:'Reading the problem contract',
                 reading:'Understanding screenshots',solving:'Generating candidate solutions',
                 speccing:'Preparing independent E2B tests',benchmarking:'Running E2B cases',
@@ -4879,6 +4933,42 @@ CA_CASE {"id":"statement example","input":{"n":4},"expected":6,"actual":6,"statu
             .contains("return 42"));
         assert_eq!(state["agents"].as_array().map(|a| a.len()), Some(2));
         assert_eq!(state["tests"].as_array().map(|a| a.len()), Some(1));
+    }
+
+    #[test]
+    fn coding_overlay_surfaces_fable_trusty_as_a_separate_verified_preflight() {
+        let job = SubmittedJob {
+            id: "trusty-job".into(), mode: "council".into(), mcq_model: None,
+            status: "running".into(), progress_phase: "judging".into(),
+            submitted_at: now(), previews: vec![], error: None,
+            report: Some(serde_json::json!({"report":{
+                "stage":"provisional",
+                "provisional":{"status":"provisional","letter":"T","model":"claude-fable-5.1",
+                    "codingTrusty":true,"language":"python","code":"def solve():\\n    return 42",
+                    "answer":"Return the requested value.","passed":3,"failed":0},
+                "candidates":[{"letter":"T","model":"claude-fable-5.1",
+                    "codingTrusty":true,"final":{"kind":"code","code":"def solve():\\n    return 42"}}],
+                "runs":{"T":{"ran":true,"ok":true,"passed":3,"failed":0,
+                    "stdout":r#"CA_CASE {"id":"example 1","input":1,"expected":2,"actual":2,"status":"passed"}"#}}
+            }})),
+            events: vec![serde_json::json!({"phase":"coding_trusty_e2b_passed",
+                "message":"Claude Fable 5.1 passed the E2B test suite.",
+                "payload":{"model":"claude-fable-5.1","letter":"T"}})],
+        };
+        let state = coding_overlay_state(&job);
+        assert_eq!(state["codingTrusty"]["status"], "ready");
+        assert_eq!(state["codingTrusty"]["model"], "claude-fable-5.1");
+        assert_eq!(state["solution"]["status"], "provisional");
+        assert!(state["solution"]["source"].as_str().unwrap_or("").contains("Coding Trusty · Claude Fable 5.1"));
+        assert_eq!(state["agents"].as_array().map(|agents| agents.len()), Some(0),
+            "Trusty must not be counted as one of the selected Council seats");
+        assert_eq!(state["tests"].as_array().map(|tests| tests.len()), Some(1),
+            "Actual provisional E2B case results must appear before judges finish");
+        assert_eq!(state["tests"][0]["status"], "passed");
+        assert!(state["insights"]["summary"].as_str().unwrap_or("")
+            .contains("Return the requested value"));
+        assert!(state["insights"]["testing"].as_str().unwrap_or("")
+            .contains("3 passed"));
     }
 
     #[test]

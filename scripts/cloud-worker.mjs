@@ -2669,6 +2669,54 @@ export async function runCouncilJob(job) {
   }
 
   const baseUrl = gatewayBaseUrl(settings);
+  // Overlay screenshots are already uploaded under this job's immutable image
+  // manifest. Fetch that manifest first, then launch the independent Trusty
+  // request immediately with the original screenshots—before catalogue
+  // discovery, capability/eligibility checks, readers, or Council selection.
+  await patchJob(job.id, { progress_phase: "downloading_images" });
+  await addEvent(job.id, "info", "downloading_images", "Downloading ordered screenshots from configured private storage.");
+  const images = await downloadJobImages(job.id);
+  if (!images.length) throw new Error("The job has no downloadable screenshots.");
+  await addEvent(job.id, "info", "images_ready",
+    `Prepared ${images.length} direct image link${images.length === 1 ? "" : "s"} for the solving lanes.`,
+    { count: images.length, positions: images.map((image) => image.position) });
+
+  const startTrustyBeforeSelection = settings.codingTrustyEnabled !== false &&
+    settings.source === "overlay" && settings.overlayMode === "code";
+  const trustyModelForRun = preferredPrimaryRoute("claude-fable-5.1", "cleanapis");
+  let earlyTrustyDraftPromise = null;
+  if (startTrustyBeforeSelection) {
+    if (!secret("cleanapis")) {
+      await addEvent(job.id, "warn", "coding_trusty_unavailable",
+        "Coding Trusty needs the account's saved Clean API credential; Council selection continues normally.",
+        { model: trustyModelForRun });
+    } else {
+      const trustyLanguage = configuredCodeLanguage(settings.outputLanguage);
+      const languageLabel = trustyLanguage === "cpp" ? "C++" : trustyLanguage === "rust" ? "Rust" : "Python";
+      await addEvent(job.id, "info", "coding_trusty_started",
+        "Coding Trusty (Claude Fable 5.1 · Clean API) is starting from the uploaded screenshots before Council model selection.",
+        { model: trustyModelForRun, language: trustyLanguage, screenshotCount: images.length });
+      const trustyBaseUrl = "https://cleanapis.com/v1";
+      const trustySettings = { ...settings, gatewayId: "cleanapis", gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
+      earlyTrustyDraftPromise = tokenRouterGenerate({
+        settings: trustySettings,
+        baseUrl: trustyBaseUrl,
+        model: trustyModelForRun,
+        system: systemPrompt("code", { id: trustyLanguage, display: languageLabel }),
+        user: [
+          "You are Coding Trusty, the fast independent preflight solver for the Coding overlay.",
+          "Read every supplied original screenshot and solve the exact coding problem now; do not wait for Council model selection or screenshot-reader results.",
+          `Use ${languageLabel} unless the problem explicitly requires a different language. Preserve the exact judge signature or input/output interface shown in the screenshots.`,
+          "Before returning, mentally check the function signature, visible example inputs and outputs, and common edge cases. Return one complete Council FINAL block with KIND: code, LANGUAGE, ANSWER, COMPLEXITY, and a closed fenced source block. Do not claim tests were executed; E2B will check the code before display.",
+        ].join("\n\n"),
+        images,
+        maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
+        reasoning: "off",
+      }).then(text => ({ text, model: trustyModelForRun, language: trustyLanguage }))
+        .catch(error => ({ error: String(error instanceof Error ? error.message : error), model: trustyModelForRun, language: trustyLanguage }));
+    }
+  }
+
   await discoverWorkerCatalog(settings);
   // Do not decide solver seats from the stored Council roster.  Main and
   // overlay both begin with every enabled approved model; a coordinator reads
@@ -2723,18 +2771,6 @@ export async function runCouncilJob(job) {
       "E2B execution was requested but E2B_API_KEY is missing; benchmark runs will record setup failures."
     );
   }
-
-  await patchJob(job.id, { progress_phase: "downloading_images" });
-  await addEvent(job.id, "info", "downloading_images", "Downloading ordered screenshots from configured private storage.");
-  const images = await downloadJobImages(job.id);
-  if (!images.length) throw new Error("The job has no downloadable screenshots.");
-  await addEvent(
-    job.id,
-    "info",
-    "images_ready",
-    `Prepared ${images.length} direct image link${images.length === 1 ? "" : "s"} for every selected model.`,
-    { count: images.length, positions: images.map((image) => image.position) }
-  );
 
   // Real references, in the order the images are attached, so the manifest can
   // say whether these are separate problems or one screen cut into pieces.
@@ -3018,7 +3054,7 @@ export async function runCouncilJob(job) {
   // problem before asking solvers; never infer the task type from their output.
   const questionLooksLikeCode = looksLikeCodingPrompt([baseQuestion, reading.context,
     reading.extraction?.problemSummary, reading.extraction?.code].filter(Boolean).join("\n"));
-  const inferredKind = questionLooksLikeCode
+  const inferredKind = settings.overlayMode === "code" ? "code" : questionLooksLikeCode
     ? "code"
     : (contracting.contract?.kind || reading.extraction?.kind || "");
   const languageEvidence=[contractText, reading.extraction?.code || ""].join("\n");
@@ -3132,13 +3168,15 @@ export async function runCouncilJob(job) {
   // E2B-tested work-in-progress, NOT the Council's winner. Final selection is
   // still postponed until all solvers, reviewers and judges finish.
   const provisionalState={record:null,persisted:false,writing:Promise.resolve()};
+  const provisionalLock={claimed:false};
   const publishProvisional=async(candidate,run)=>{
-    if(provisionalState.record || !candidate?.final || !run) return;
+    if(provisionalLock.claimed || provisionalState.record || !candidate?.final || !run) return;
     if(candidateLanguage(candidate.final)!==primaryLanguage)return;
     const screened=screenProvisionalCandidate({
       final:candidate.final,run,contractComplexity:contracting.contract?.complexity||""
     });
     if(!screened.eligible)return;
+    provisionalLock.claimed=true;
     const provisional=createProvisionalRecord({
       candidate,run,language:primaryLanguage,screened
     });
@@ -3146,8 +3184,14 @@ export async function runCouncilJob(job) {
     const preliminary={
       stage:"provisional",standing:"provisional",winner:null,
       provisional,solutionHistory:buildSolutionHistory(provisional,null),
-      synthesis:"An early E2B-tested candidate is available. This is NOT the final Council selection; independent review, harness quality checks, and judging remain pending.",
-      candidates:[],reviews:[],judges:[],runs:{},revisedRuns:{},oracles:[],
+      synthesis:candidate.codingTrusty
+        ? "Claude Fable 5.1 Coding Trusty produced an early E2B-tested answer. This is NOT the final Council selection; the four independent solvers, review, harness quality checks, and judging remain pending."
+        : "An early E2B-tested candidate is available. This is NOT the final Council selection; independent review, harness quality checks, and judging remain pending.",
+      // Persist the exact first complete candidate and its original E2B
+      // result immediately, so the history, current overlay, and later
+      // candidate comparison share a stable evidence snapshot.
+      candidates:[candidate],reviews:[],judges:[],
+      runs:{[candidate.letter]:run},revisedRuns:{},oracles:[],
       ports:[],suites:[],
     };
     // No competing writers may replace this row until initial save settles.
@@ -3155,16 +3199,129 @@ export async function runCouncilJob(job) {
       await saveCouncilReport(job,preliminary);
       provisionalState.persisted=true;
       await addEvent(job.id,"info","provisional_solution_ready",
-        "Candidate "+candidate.letter+" passed E2B and initial complexity screening; provisional code is available while Council evaluates all models.",
+        (candidate.codingTrusty ? "Coding Trusty (Claude Fable 5.1)" : "Candidate "+candidate.letter)+" passed E2B and initial complexity screening; provisional code is available while Council evaluates all models.",
         {letter:candidate.letter,language:primaryLanguage,passed:run.passed,
+          model:candidate.model,codingTrusty:Boolean(candidate.codingTrusty),
           complexityClaim:screened.claimedBound,complexityAudited:false});
     })().catch(async(error)=>{
+      provisionalLock.claimed=false;
+      provisionalState.record=null;
       await addEvent(job.id,"warn","provisional_save_failed",
         "Could not display an early solution; final Council verification continues.",
         {detail:String(error).slice(0,200)}).catch(()=>{});
     });
     await provisionalState.writing;
   };
+
+  // Coding Trusty is an extra, independent Claude Fable 5.1 preflight for overlay jobs,
+  // not a fifth selected solver and not a replacement for the four seats. It
+  // uses the owner's Clean API credential, the same screenshot/contract/
+  // knowledge evidence, and the same E2B execution gate as every candidate.
+  // The bounded self-review happens before its source is sent to E2B.
+  const trustyEligible = settings.codingTrustyEnabled !== false && inferredKind === "code" &&
+    ["python", "cpp", "rust"].includes(primaryLanguage);
+  let trustyCandidate = null;
+  let trustyRunPromise = Promise.resolve(null);
+  let trustyPromise = Promise.resolve(null);
+  if (trustyEligible) {
+    trustyPromise = (async () => {
+      const trustyBaseUrl = "https://cleanapis.com/v1";
+      const trustySettings = { ...settings, gatewayId: "cleanapis", gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
+      const trustyModel = preferredPrimaryRoute("claude-fable-5.1", "cleanapis");
+      try {
+        if (!secret("cleanapis")) {
+          await addEvent(job.id, "warn", "coding_trusty_unavailable",
+            "Coding Trusty needs the account's saved Clean API credential; the four Council solvers continue normally.",
+            { model: trustyModel });
+          return null;
+        }
+        if (!earlyTrustyDraftPromise) {
+          await addEvent(job.id, "info", "coding_trusty_started",
+            "Coding Trusty (Claude Fable 5.1 · Clean API) is independently solving the problem alongside the four Council agents.",
+            { model: trustyModel, language: primaryLanguage });
+        }
+        const trustySystem = systemPrompt("code", answerLanguage);
+        const earlyDraft = earlyTrustyDraftPromise ? await earlyTrustyDraftPromise : null;
+        if (earlyDraft?.error) throw new Error(earlyDraft.error);
+        const firstText = earlyDraft?.text || await tokenRouterGenerate({
+          settings: trustySettings, baseUrl: trustyBaseUrl, model: trustyModel,
+          system: trustySystem,
+          user: solverPrompt + "\n\n" +
+            "You are Coding Trusty: independently return your strongest complete solution in " + primaryLanguage +
+            ". Include accurate time and auxiliary-space complexity. This answer is provisional, not Council-approved.",
+          images: solveImages,
+          maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192), reasoning: "high",
+        });
+        let final = parseFinal(firstText);
+        if (!final?.wellFormed || final.kind !== "code" || !final.code?.trim() || candidateLanguage(final) !== primaryLanguage) {
+          if (!earlyDraft) throw new Error("Claude Fable 5.1 did not return a complete " + primaryLanguage + " code answer.");
+          const recoveryText = await tokenRouterGenerate({
+            settings: trustySettings, baseUrl: trustyBaseUrl, model: trustyModel,
+            system: trustySystem,
+            user: solverPrompt + "\n\nYour early preflight answer was not parseable as complete " + primaryLanguage +
+              " code. Return the complete solution now in exactly one closed Council FINAL block; do not omit code.",
+            images: solveImages, maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192), reasoning: "high",
+          });
+          final = parseFinal(recoveryText);
+          if (!final?.wellFormed || final.kind !== "code" || !final.code?.trim() || candidateLanguage(final) !== primaryLanguage) {
+            throw new Error("Claude Fable 5.1 did not return a complete " + primaryLanguage + " code answer.");
+          }
+        }
+        // The original Fable request already performed an explicit internal
+        // example/interface check. Requiring three more complete Fable
+        // generations added minutes without providing executable evidence.
+        // Strict parsing plus E2B, not another AI response, is the gate.
+        await addEvent(job.id, "info", "coding_trusty_self_review",
+          "Fable checked its draft against the screenshot instructions; preparing actual E2B tests.",
+          { model: trustyModel, language: primaryLanguage, method: "initial-solve-check" });
+        const candidate = {
+          letter: "T", model: trustyModel, final, text: firstText,
+          error: null, codingTrusty: true,
+        };
+        trustyCandidate = candidate;
+        await addEvent(job.id, "info", "coding_trusty_testing",
+          "Claude Fable 5.1's reviewed answer is being checked against the problem test suite in E2B.",
+          { model: trustyModel, letter: "T", language: primaryLanguage });
+        // Source-provided literal tests need no second AI author. Build this
+        // deterministic adapter first; only fall back to an independent,
+        // E2B-self-tested generated harness when source fixtures are absent.
+        const verifiedFixtureQuestion = screenshotEvidence.fixtures?.length
+          ? [screenshotEvidence.question || question,
+             ...screenshotEvidence.fixtures.map((pair,index) =>
+               "Example "+(index+1)+":\nInput: "+pair.input+"\nOutput: "+pair.output)]
+              .join("\n\n")
+          : screenshotEvidence.question || question;
+        const providedSuite = buildProvidedHarness(
+          verifiedFixtureQuestion, primaryLanguage, final.code);
+        if (providedSuite) await addEvent(job.id,"info","coding_trusty_provided_tests",
+          "Prepared the question's own test cases without a new AI model call.",
+          {model:trustyModel,language:primaryLanguage,cases:providedSuite.providedCaseCount});
+        const suites = providedSuite ? [providedSuite] :
+          await prepareProblemHarnesses(job, settings, baseUrl, models, judges,
+            screenshotEvidence.question || question, [candidate], [primaryLanguage], knowledge, bench);
+        const suite = suites.find(item => item.language === primaryLanguage);
+        if (!suite) throw new Error("No executable " + primaryLanguage + " test suite was available for the Trusty answer.");
+        const runs = await executeField(job, settings, [suite], [candidate]);
+        const run = runs.T;
+        if (!run?.ran || !run.ok || run.failed !== 0 || run.passed < requiredHarnessCases(suite)) {
+          throw new Error("Claude Fable 5.1's preflight answer did not pass the E2B test suite.");
+        }
+        trustyRunPromise = Promise.resolve(run);
+        eagerRuns.set("T", trustyRunPromise);
+        await addEvent(job.id, "info", "coding_trusty_e2b_passed",
+          "Claude Fable 5.1 passed the E2B test suite; Council will independently review the answer before selecting a final solution.",
+          { model: trustyModel, letter: "T", language: primaryLanguage, passed: run.passed, failed: run.failed });
+        await publishProvisional(candidate, run);
+        return candidate;
+      } catch (error) {
+        const message = String(error instanceof Error ? error.message : error).replace(/<[^>]*>/g, " ").slice(0, 260);
+        await addEvent(job.id, "warn", "coding_trusty_failed",
+          "Coding Trusty could not produce a verified preflight answer; the four Council agents continue unchanged.",
+          { model: trustyModel, error: message });
+        return null;
+      }
+    })();
+  }
 
   // Opt-in canary: four independent E2B copies are created while the solver
   // models reason, ready for their first Python E2B candidate runs. Never warm
@@ -3336,8 +3493,12 @@ export async function runCouncilJob(job) {
       }
     }
   }
+  // Like the main-app preflight, Trusty works in parallel with the four
+  // selected solvers but is joined before Council verification/review so its
+  // independently E2B-tested answer can be included in the same judge docket.
+  trustyCandidate = await trustyPromise;
   const answered = candidates.filter((candidate) => candidate?.text || candidate?.final);
-  if (answered.length < 1) {
+  if (answered.length < 1 && !trustyCandidate) {
     const errors = candidates.filter(Boolean).map((candidate) => candidate.error || "").filter(Boolean);
     const quota = errors.find(isProviderQuotaError);
     const rateLimit = errors.find(isProviderRateLimit);
@@ -3365,10 +3526,11 @@ export async function runCouncilJob(job) {
   }
 
   const field = candidates.filter(Boolean);
+  if (trustyCandidate) field.push(trustyCandidate);
 
   const isCoding = inferredKind === "code" || looksLikeCodingProblem(field);
   if (isCoding && !field.some((candidate) => candidate.final?.kind === "code" && candidate.final.code?.trim())) {
-    const reason = `No selected solver returned complete runnable ${primaryLanguage} code after one recovery attempt. E2B did not run; no solution was verified.`;
+    const reason = `No solver returned complete runnable ${primaryLanguage} code after recovery. E2B did not run; no solution was verified.`;
     await addEvent(job.id, "error", "coding_no_usable_solution", reason,
       { language: primaryLanguage, models: field.map((candidate) => candidate.model) });
     await patchJob(job.id, {
@@ -3429,6 +3591,38 @@ export async function runCouncilJob(job) {
       await publishProvisional(candidate,benchmark.runs[candidate.letter]);
       if(provisionalState.record)break;
     }
+  }
+  // Checkpoint *every* independently submitted candidate, its parsed code,
+  // and its actual E2B run before review, so a later judge/gateway outage
+  // cannot erase the solver field from account-scoped database history.
+  // The existing provisional row (when present) is never replaced with
+  // unverified code; it stays the visible solution until a better one passes.
+  await provisionalState.writing;
+  const candidateCheckpoint = {
+    stage: provisionalState.record ? "provisional" : "candidate_evidence",
+    standing: provisionalState.record ? "provisional" : "unverified",
+    winner: null,
+    ...(provisionalState.record ? {
+      provisional: provisionalState.record,
+      solutionHistory: buildSolutionHistory(provisionalState.record,null),
+    } : {}),
+    synthesis:"Candidate solutions and their E2B evidence are saved; independent Council review and judging are still running.",
+    candidates:field,reviews:[],judges:[],runs:benchmark.runs,
+    revisedRuns:{},oracles:benchmark.oracles || [],ports:[],suites:benchmark.suites,
+  };
+  try {
+    if(provisionalState.persisted) await updateSavedCouncilReport(job,candidateCheckpoint);
+    else {
+      await saveCouncilReport(job,candidateCheckpoint);
+      provisionalState.persisted=true;
+    }
+    await addEvent(job.id,"info","candidate_evidence_saved",
+      "Saved all model candidates and their E2B results before Council judging.",
+      {candidates:field.length,tested:Object.values(benchmark.runs).filter(run=>run.ran).length});
+  } catch(err) {
+    await addEvent(job.id,"warn","candidate_evidence_save_failed",
+      "Candidate checkpoint could not be stored; Council continues with its in-memory evidence.",
+      {detail:String(err).slice(0,200)}).catch(()=>{});
   }
   const docket = candidateDocket(field);
   // An execution backend that is down makes every candidate "untested", which
@@ -3580,8 +3774,12 @@ export async function runCouncilJob(job) {
           `- [TEST FAILURES — repair ${attempt}/${MAX_CANDIDATE_REPAIR_ATTEMPTS}] ${run.passed} passed, ${run.failed} failed. Untrusted E2B evidence:\n${executionFailureEvidence(run)}\nRepair the code, not the test harness. Preserve the original problem contract and callable interface.`
         );
         try {
+          const revisionSettings = candidate.codingTrusty
+            ? { ...settings, gatewayId: "cleanapis", gatewayBaseUrl: "https://cleanapis.com/v1", availableModels: [] }
+            : settings;
+          const revisionBaseUrl = candidate.codingTrusty ? "https://cleanapis.com/v1" : baseUrl;
           const text = await tokenRouterGenerate({
-            settings, baseUrl, model: candidate.model,
+            settings: revisionSettings, baseUrl: revisionBaseUrl, model: candidate.model,
             system: reviseSystemPrompt(),
             user: reviseUserPrompt({
               question, letter: candidate.letter,
@@ -4060,6 +4258,7 @@ export async function runCouncilJob(job) {
               const originalEvidence=report.e2bEvidence;
               const originalAlgorithmEvidence=report.algorithmEvidence;
               const originalHistory=report.solutionHistory;
+              const originalUpgrade=report.upgrade;
               field3=field3.map(candidate=>candidate.letter===decision.winner
                 ?{...candidate,revised:improved}:candidate);
               source=field3.find(candidate=>candidate.letter===decision.winner);
@@ -4086,6 +4285,15 @@ export async function runCouncilJob(job) {
                   letter:decision.winner,language:candidateLanguage(verifiedSource),
                   code:verifiedSource.code,complexity:report.presentation.complexity,
                   passed:proposedRun.passed||0});
+                // The final winner may have originally matched the provisional
+                // code; the later judge-approved E2B-tested patch is still a
+                // real upgrade and must trigger the persisted overlay diff.
+                report.upgrade={
+                  ...(report.upgrade || {}),
+                  changed:verifiedSource.code!==report.provisional.code,
+                  from:report.provisional.letter,to:decision.winner,
+                  reason:postJudgeUpgrade.reason,
+                };
               }
               try{
                 await updateSavedCouncilReport(job,report);
@@ -4107,6 +4315,8 @@ export async function runCouncilJob(job) {
                 else delete report.algorithmEvidence;
                 if(originalHistory)report.solutionHistory=originalHistory;
                 else delete report.solutionHistory;
+                if(originalUpgrade)report.upgrade=originalUpgrade;
+                else delete report.upgrade;
                 throw persistError;
               }
               await addEvent(job.id,"info","judge_upgrade_verified",

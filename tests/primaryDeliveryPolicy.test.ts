@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { configuredCodeLanguage, primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "../src/lib/primaryDeliveryPolicy.ts";
+import { configuredCodeLanguage, primaryCodingLanguage, primaryFirstInstruction, providedTestBrief, codingTrustySelfCheckPrompt, codingTrustyEligible } from "../src/lib/primaryDeliveryPolicy.ts";
 import { reviewSystemPromptFor, parseReview } from "../src/lib/review.ts";
 
 assert.equal(primaryCodingLanguage("Find the optimal algorithm"), "python");
@@ -15,6 +15,17 @@ assert.equal(primaryCodingLanguage("Find the optimal algorithm", "C++"), "cpp");
 assert.equal(primaryCodingLanguage("Find the optimal algorithm", "Rust"), "rust");
 assert.equal(primaryCodingLanguage("Required language: Python", "C++"), "python");
 assert.match(providedTestBrief([{id:"provided_1",input:"[1,2]",output:"3"}]),/EXPECTED OUTPUT 3/);
+const trustyCheck = codingTrustySelfCheckPrompt({
+  question: "Return the sum.", language: "python", candidate: "def solve(a): return sum(a)",
+  cases: [{id:"provided_1",input:"[1,2]",output:"3"}], attempt: 1,
+});
+assert.match(trustyCheck, /before it is sent to E2B/);
+assert.match(trustyCheck, /INPUT \[1,2\] => EXPECTED OUTPUT 3/);
+assert.match(trustyCheck, /mental trace is not proof of execution/);
+assert.match(trustyCheck, /Return only one complete, well-formed FINAL block/);
+assert.equal(codingTrustyEligible({enabled:true,mode:"auto",taskKinds:["code"]}),true);
+assert.equal(codingTrustyEligible({enabled:true,mode:"research",taskKinds:["other"]}),false);
+assert.equal(codingTrustyEligible({enabled:false,mode:"code",taskKinds:["code"]}),false);
 const primaryPrompt = primaryFirstInstruction("python");
 assert.match(primaryPrompt, /Code in Python only/);
 assert.match(primaryFirstInstruction("cpp"), /Code in C\+\+23 only/);

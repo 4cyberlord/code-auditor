@@ -17,15 +17,19 @@ assert.ok(passing.disclaimer.includes("awaiting independent Council review"));
 assert.equal(screenProvisionalCandidate({final,run:{...run,failed:1},contractComplexity:"O(n)"}).eligible,false);
 assert.equal(screenProvisionalCandidate({final,run:{...run,ok:false},contractComplexity:"O(n)"}).eligible,false);
 assert.equal(screenProvisionalCandidate({final,run:{...run,ran:false},contractComplexity:"O(n)"}).eligible,false);
-assert.equal(screenProvisionalCandidate({final:{...final,complexity:"O(n^2)"},run,contractComplexity:"O(n)"}).eligible,false);
-assert.equal(screenProvisionalCandidate({final:{...final,complexity:"unknown"},run,contractComplexity:"O(n)"}).eligible,false);
-assert.equal(screenProvisionalCandidate({final:{...final,complexity:"O(V+E)"},run}).eligible,false);
+assert.equal(screenProvisionalCandidate({final:{...final,complexity:"O(n^2)"},run,contractComplexity:"O(n)"}).eligible,true);
+assert.match(screenProvisionalCandidate({final:{...final,complexity:"O(n^2)"},run,contractComplexity:"O(n)"}).disclaimer,/may exceed/);
+assert.equal(screenProvisionalCandidate({final:{...final,complexity:"unknown"},run,contractComplexity:"O(n)"}).eligible,true);
+assert.equal(screenProvisionalCandidate({final:{...final,complexity:"O(V+E)"},run}).eligible,true);
 assert.equal(screenProvisionalCandidate({final:{...final,code:""},run}).eligible,false);
 const candidate={letter:"A",model:"model-a",final};
 const provisional=createProvisionalRecord({candidate,run,language:"python",screened:passing,at:"2026-10-15T17:00:00Z"});
 assert.equal(provisional.status,"provisional");
 assert.equal(provisional.code,final.code);
 assert.equal(provisional.passed,12);
+const trusty=createProvisionalRecord({candidate:{...candidate,letter:"T",model:"kimi-k3",codingTrusty:true},
+  run,language:"python",screened:passing,at:"2026-10-15T17:00:00Z"});
+assert.equal(trusty.codingTrusty,true,"Kimi Trusty remains explicitly distinguishable from the four solver seats");
 const upgraded=buildSolutionHistory(provisional,{
  letter:"D",language:"python",code:"def solve(xs):\n    return sum(1 for _ in xs)\n",
  complexity:"O(n)",passed:12,at:"2026-10-15T17:01:00Z"

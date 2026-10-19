@@ -80,7 +80,7 @@ import { resolveAnswerLanguage } from "./answerLanguage.ts";
 import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from "./probeFit.ts";
 import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
 import { fingerprintCode } from "./codeFingerprint.ts";
-import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
+import { codingTrustyEligible, primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
 import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "./independentLanguageCouncil.ts";
 import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief, evidenceSolverBrief } from "./problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "./judgeUpgradePolicy.ts";
@@ -297,6 +297,8 @@ export interface CouncilState {
   ports: VerifiedPort[];
   /** Retained Git-style before/after record for the E2B-retested judge upgrade. */
   postJudgeUpgrade: {beforeCode:string;afterCode:string;reason:string;passed:number;time?:string;space?:string} | null;
+  /** Independent provisional Claude Fable 5.1 answer, separate from the selected solver roster. */
+  codingTrusty: { status: "idle" | "solving" | "validating" | "testing" | "ready" | "failed" | "unavailable"; candidate: Candidate | null; error: string | null };
   error: string | null;
   chat: CouncilChatMessage[];
   chatSending: boolean;
@@ -337,6 +339,7 @@ const IDLE_COUNCIL: CouncilState = {
   oracles: [],
   ports: [],
   postJudgeUpgrade: null,
+  codingTrusty: { status: "idle", candidate: null, error: null },
   error: null,
   chat: [],
   chatSending: false,
@@ -599,6 +602,8 @@ interface Settings {
    * by vendor key, so with the gateway off it cannot form.
    */
   councilEnabled: boolean;
+  /** Run an early, separate Claude Fable 5.1 / Clean API preflight answer. */
+  codingTrustyEnabled: boolean;
   /**
    * The models that solve. Round 1 is still the visible panel; the panel's own
    * answers are always candidates, and this list is asked through the gateway
@@ -1066,6 +1071,7 @@ const defaultSettings = (): Settings => ({
   // weaker question than "does this run" — and runtime and memory only exist at
   // all when something executed the code.
   councilEnabled: true,
+  codingTrustyEnabled: true,
   councilModels: COUNCIL_DEFAULT_MODELS,
   councilJudges: COUNCIL_DEFAULT_JUDGES,
   verifiedModelOutcomes: [],
@@ -1224,6 +1230,7 @@ function normalizeSettings(s: Settings): Settings {
         ? s.gatewayBaseUrl.trim()
         : base.gatewayBaseUrl,
     councilEnabled: typeof s.councilEnabled === "boolean" ? s.councilEnabled : base.councilEnabled,
+    codingTrustyEnabled: typeof s.codingTrustyEnabled === "boolean" ? s.codingTrustyEnabled : base.codingTrustyEnabled,
     councilIncludePanel:
       typeof s.councilIncludePanel === "boolean" ? s.councilIncludePanel : base.councilIncludePanel,
     councilProblemContract:
@@ -4306,11 +4313,12 @@ function runCouncilSlot(
   set: SetStore,
   slot: Omit<CouncilSlot, "status" | "text" | "error" | "attemptId" | "elapsedMs">,
   req: Omit<bridge.RunRequest, "runId" | "agentId" | "attemptId" | "provider" | "baseUrl"> & { endpoint?: "chat" | "responses" },
-  s: Settings
+  s: Settings,
+  routeOverride?: { provider: TransportId; model: string; baseUrl: string }
 ): Promise<CouncilSlot> {
   const attemptId = newAttemptId();
   const runId = get().council.runId ?? `council-${Date.now().toString(36)}`;
-  const route = gatewayRoute(slot.model, s);
+  const route = routeOverride ?? gatewayRoute(slot.model, s);
   if (!route) {
     const blocked: CouncilSlot = {
       ...slot,
@@ -4886,6 +4894,7 @@ function councilReportFrom(c: CouncilState): CouncilReport {
     oracles: c.oracles,
     ports: c.ports,
     ...(c.postJudgeUpgrade ? {postJudgeUpgrade:c.postJudgeUpgrade} : {}),
+    codingTrusty: c.codingTrusty,
   };
   return { ...report, presentation: buildPresentation(report) };
 }
@@ -5189,6 +5198,88 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // Screenshot-example readers are already running alongside the problem
   // contract and documentation lookup. Await their exact-match check before
   // solving so every selected model receives the same corroborated fixtures.
+  // Coding Trusty is a dedicated preflight seat, not a change to the four-model
+  // adaptive roster. It calls the saved Clean API credential explicitly and
+  // starts while independent screenshot-example readers are still running.
+  let trustyCandidate: Candidate | null = null;
+  let trustyPromise: Promise<Candidate | null> = Promise.resolve(null);
+  if (codingTrustyEligible({
+    enabled: settings.codingTrustyEnabled,
+    mode: settings.mode,
+    taskKinds: [reading?.kind, contract?.kind, ...readers.map(item => item.kind)],
+  })) {
+    set(st => ({ council: { ...st.council, codingTrusty: { status: "solving", candidate: null, error: null } } }));
+    trustyPromise = (async () => {
+      try {
+        const hasCleanApiKey = settings.gatewayId === "cleanapis"
+          ? s0.gatewayKey : await bridge.hasApiKey("cleanapis");
+        if (!hasCleanApiKey) {
+          set(st => ({ council: { ...st.council, codingTrusty: {
+            status: "unavailable", candidate: null,
+            error: "Coding Trusty needs a saved Clean API credential. Add it in Settings → API.",
+          } } }));
+          return null;
+        }
+          const text = await bridge.runOnce({
+            runId,
+            agentId: "coding-trusty",
+            attemptId: newAttemptId(),
+            provider: "cleanapis",
+            model: preferredPrimaryRoute("claude-fable-5.1", "cleanapis"),
+            systemPrompt: sys,
+            userText: userPrompt(
+              problem, allImages.length > 0, extractionCtx, s0.images, knowledge,
+              solutionPolicy([primaryLanguage], settings.memoryTargetKb || 9 * 1024)
+            ) + "\n\n" + primaryFirstInstruction(primaryLanguage) +
+              "\n\n" + "Read the original screenshot yourself, preserve the exact requested interface, and check the visible examples before returning code. Do not claim any tests were executed." +
+              "\n\nYou are Coding Trusty: return your strongest independently reasoned, complete solution now. This is a provisional preflight candidate; do not claim it is Council-approved.",
+            images: allImages,
+            maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
+            temperature: 0,
+            baseUrl: gatewayPreset("cleanapis").defaultBaseUrl,
+            endpoint: "chat",
+          });
+          const final = parseFinal(text);
+          if (!final?.wellFormed || final.kind !== "code" || !final.code.trim() || candidateLanguage(final) !== primaryLanguage) {
+            throw new Error(`Claude Fable 5.1 did not return a complete ${primaryLanguage} code answer.`);
+          }
+          set(st => ({ council: { ...st.council, codingTrusty: { status: "validating", candidate: null, error: null } } }));
+          // This Fable prompt already asks for an independent, internal
+          // interface/example review. Additional serial full-code LLM passes
+          // can multiply latency without proving correctness. A complete
+          // parseable source proceeds directly to real E2B verification.
+          const candidate: Candidate = {
+            letter: "T", model: preferredPrimaryRoute("claude-fable-5.1", "cleanapis"),
+            final, text, error: null, codingTrusty: true,
+          };
+          trustyCandidate = candidate;
+          set(st => ({ council: { ...st.council, codingTrusty: { status: "testing", candidate, error: null } } }));
+
+          // Start from the screenshots immediately; wait for corroborated
+          // example evidence only before converting it into E2B assertions.
+          const screenshotEvidence = await evidenceReady;
+
+          // When the screenshots contain literal examples, test Trusty as soon
+          // as its code lands, while the four independent solvers are still
+          // working. Unconfirmed/general cases continue through the shared
+          // Council harness and are never promoted from guessed expectations.
+          const earlySuite = buildProvidedHarness(screenshotEvidence.question, primaryLanguage, final.code);
+          if (earlySuite) {
+            set(st => ({ council: { ...st.council, testSuites: [earlySuite] } }));
+            await executeField(get, set, runId, [candidate], [earlySuite], "runs");
+            const earlyRun = get().council.runs.T;
+            if (gateFor(earlyRun) === "pass") {
+              set(st => ({ council: { ...st.council, codingTrusty: { status: "ready", candidate, error: null } } }));
+            }
+          }
+          return candidate;
+        } catch (error) {
+          const message = cleanError(String(error));
+          set(st => ({ council: { ...st.council, codingTrusty: { status: "failed", candidate: null, error: message } } }));
+          return null;
+        }
+      })();
+  }
   const screenshotEvidence = await evidenceReady;
   await Promise.all(
     solveSlots.map((slot, i) =>
@@ -5221,6 +5312,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       })
     )
   );
+  trustyCandidate = await trustyPromise;
   if (!councilAlive(get().council, runId)) {
     set({ running: false });
     void get().persistRun();
@@ -5246,6 +5338,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       error: doneSlot?.error ?? null,
     });
   }
+  if (trustyCandidate) field.push(trustyCandidate);
   // A foreign-language answer cannot demand a C++/Rust verification harness
   // before we have selected the primary solution. Keep it as an errored seat.
   if (field.some(c => c.final?.kind === "code")) {
@@ -5289,7 +5382,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     // synthesizer and judges; a spec-only empty response must not demote a
     // solver answer that is already ready.
     const specModels = Array.from(new Set([
-      ...codeCandidates.map(candidate => candidate.model),
+      ...codeCandidates.filter(candidate => !candidate.codingTrusty).map(candidate => candidate.model),
       settings.synthesisModel,
       ...settings.councilJudges.map(seat => seat.model),
     ].filter(Boolean)));
@@ -5392,6 +5485,12 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   if (suites.length) {
     set((st) => ({ council: { ...st.council, phase: "verifying" } }));
     await executeField(get, set, runId, field, suites, "runs");
+    if (trustyCandidate) {
+      const trustyRun = get().council.runs[trustyCandidate.letter];
+      set(st => ({ council: { ...st.council, codingTrusty: gateFor(trustyRun) === "pass"
+        ? { status: "ready", candidate: trustyCandidate, error: null }
+        : { status: "failed", candidate: trustyCandidate, error: "The preflight candidate did not pass the executable E2B tests." } } }));
+    }
     await recoverSharedHarnessFailures(get, set, runId, field, suites, problem, knowledge, settings);
     await runMutationOracle(get, set, field, suites);
     if (!councilAlive(get().council, runId)) return;
@@ -5411,7 +5510,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     .filter(Boolean)
     .join("\n\n");
   const docket1 = candidateDocket(field);
-  const reviewSlots: CouncilSlot[] = field.map((c) => ({
+  const reviewSlots: CouncilSlot[] = field.filter(c => !c.codingTrusty).map((c) => ({
     id: `council-review:${c.letter}`,
     kind: "review",
     model: c.model,
@@ -5492,6 +5591,9 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
         const failure = requiresRepair(run)
           ? `\n[TEST FAILURES — repair attempt ${attempt}/${MAX_CANDIDATE_REPAIR_ATTEMPTS}; untrusted E2B output]\n${run.passed} passed, ${run.failed} failed.\n${executionFailureEvidence(run)}\nRepair your code, not the harness. Preserve the problem requirements and exact callable interface.`
           : "";
+        if (c.codingTrusty) {
+          set(st => ({ council: { ...st.council, codingTrusty: { status: "validating", candidate: st.council.codingTrusty.candidate, error: null } } }));
+        }
         return runCouncilSlot(get, set, slot, {
           model: slot.model,
           endpoint: endpointForModel(settings, slot.model),
@@ -5508,7 +5610,11 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
           images: [],
           maxTokens: c.final?.kind === "code" ? Math.max(Number(settings.maxTokens || 4096), 8192) : settings.maxTokens,
           temperature: 0,
-        }, settings);
+        }, settings, c.codingTrusty ? {
+          provider: "cleanapis",
+          model: preferredPrimaryRoute("claude-fable-5.1", "cleanapis"),
+          baseUrl: gatewayPreset("cleanapis").defaultBaseUrl,
+        } : undefined);
       })
     ));
     const revisions = get().council.revisions;
@@ -5533,8 +5639,28 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       continue;
     }
     set((st) => ({ council: { ...st.council, phase: "reverifying" } }));
+    const trustyRevision = revisedThisRound.find(candidate => candidate.codingTrusty);
+    const previousTrustyCandidate = trustyRevision ? get().council.codingTrusty.candidate : null;
+    if (trustyRevision) {
+      const revisionFinal = trustyRevision.revised;
+      set(st => ({ council: { ...st.council, codingTrusty: {
+        status: "testing",
+        candidate: revisionFinal?.kind === "code" ? { ...trustyRevision, final: revisionFinal, text: trustyRevision.revisedText || trustyRevision.text } : trustyRevision,
+        error: null,
+      } } }));
+    }
     await executeField(get, set, runId, revisedThisRound, suites, "revisedRuns");
     const nextRuns = get().council.revisedRuns;
+    if (trustyRevision) {
+      const testedCandidate = get().council.candidates.find(candidate => candidate.letter === trustyRevision.letter) || trustyRevision;
+      const trustyRun = nextRuns[trustyRevision.letter];
+      const originalStillPasses = gateFor(get().council.runs[trustyRevision.letter]) === "pass";
+      set(st => ({ council: { ...st.council, codingTrusty: gateFor(trustyRun) === "pass"
+        ? { status: "ready", candidate: testedCandidate, error: null }
+        : originalStillPasses && previousTrustyCandidate
+          ? { status: "ready", candidate: previousTrustyCandidate, error: "A proposed repair did not pass; keeping the original E2B-passing Trusty answer." }
+          : { status: "failed", candidate: testedCandidate, error: "The repaired preflight candidate did not pass the executable E2B tests yet." } } }));
+    }
     const revisedLetters = new Set(revisedThisRound.map(candidate => candidate.letter));
     activeRepairLetters = new Set([
       ...revisedThisRound

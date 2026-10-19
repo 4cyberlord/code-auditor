@@ -51,6 +51,8 @@ export interface Candidate {
   /** The full streamed text — what a judge reads when the FINAL was malformed. */
   text: string;
   error: string | null;
+  /** Dedicated early Kimi/Clean API answer; not one of the four selected seats. */
+  codingTrusty?: boolean;
   /** The revision, when round 3 produced one. */
   revised?: AgentFinal | null;
   revisedText?: string;
@@ -1075,6 +1077,8 @@ export interface CouncilReport {
   ports?: VerifiedPort[];
   /** Independently approved upgrade made after the judges selected a primary winner. */
   postJudgeUpgrade?: {beforeCode:string;afterCode:string;reason:string;passed:number;time?:string;space?:string} | null;
+  /** Kept with history so a provisional Trusty answer remains auditable. */
+  codingTrusty?: { status: "idle" | "solving" | "validating" | "testing" | "ready" | "failed" | "unavailable"; candidate: Candidate | null; error: string | null };
 }
 
 // --------------------------------------------------------------------- prompts
