@@ -3285,7 +3285,7 @@ export async function runCouncilJob(job) {
           ? [screenshotEvidence.question || question,
              ...screenshotEvidence.fixtures.map((pair,index) =>
                "Example "+(index+1)+":\nInput: "+pair.input+"\nOutput: "+pair.output)]
-              .join("\\n\\n")
+              .join("\n\n")
           : screenshotEvidence.question || question;
         const providedSuite = buildProvidedHarness(
           verifiedFixtureQuestion, primaryLanguage, final.code);
