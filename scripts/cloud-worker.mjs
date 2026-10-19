@@ -3187,7 +3187,11 @@ export async function runCouncilJob(job) {
       synthesis:candidate.codingTrusty
         ? "Claude Fable 5.1 Coding Trusty produced an early E2B-tested answer. This is NOT the final Council selection; the four independent solvers, review, harness quality checks, and judging remain pending."
         : "An early E2B-tested candidate is available. This is NOT the final Council selection; independent review, harness quality checks, and judging remain pending.",
-      candidates:[],reviews:[],judges:[],runs:{},revisedRuns:{},oracles:[],
+      // Persist the exact first complete candidate and its original E2B
+      // result immediately, so the history, current overlay, and later
+      // candidate comparison share a stable evidence snapshot.
+      candidates:[candidate],reviews:[],judges:[],
+      runs:{[candidate.letter]:run},revisedRuns:{},oracles:[],
       ports:[],suites:[],
     };
     // No competing writers may replace this row until initial save settles.
@@ -3587,6 +3591,38 @@ export async function runCouncilJob(job) {
       await publishProvisional(candidate,benchmark.runs[candidate.letter]);
       if(provisionalState.record)break;
     }
+  }
+  // Checkpoint *every* independently submitted candidate, its parsed code,
+  // and its actual E2B run before review, so a later judge/gateway outage
+  // cannot erase the solver field from account-scoped database history.
+  // The existing provisional row (when present) is never replaced with
+  // unverified code; it stays the visible solution until a better one passes.
+  await provisionalState.writing;
+  const candidateCheckpoint = {
+    stage: provisionalState.record ? "provisional" : "candidate_evidence",
+    standing: provisionalState.record ? "provisional" : "unverified",
+    winner: null,
+    ...(provisionalState.record ? {
+      provisional: provisionalState.record,
+      solutionHistory: buildSolutionHistory(provisionalState.record,null),
+    } : {}),
+    synthesis:"Candidate solutions and their E2B evidence are saved; independent Council review and judging are still running.",
+    candidates:field,reviews:[],judges:[],runs:benchmark.runs,
+    revisedRuns:{},oracles:benchmark.oracles || [],ports:[],suites:benchmark.suites,
+  };
+  try {
+    if(provisionalState.persisted) await updateSavedCouncilReport(job,candidateCheckpoint);
+    else {
+      await saveCouncilReport(job,candidateCheckpoint);
+      provisionalState.persisted=true;
+    }
+    await addEvent(job.id,"info","candidate_evidence_saved",
+      "Saved all model candidates and their E2B results before Council judging.",
+      {candidates:field.length,tested:Object.values(benchmark.runs).filter(run=>run.ran).length});
+  } catch(err) {
+    await addEvent(job.id,"warn","candidate_evidence_save_failed",
+      "Candidate checkpoint could not be stored; Council continues with its in-memory evidence.",
+      {detail:String(err).slice(0,200)}).catch(()=>{});
   }
   const docket = candidateDocket(field);
   // An execution backend that is down makes every candidate "untested", which
@@ -4248,6 +4284,15 @@ export async function runCouncilJob(job) {
                   letter:decision.winner,language:candidateLanguage(verifiedSource),
                   code:verifiedSource.code,complexity:report.presentation.complexity,
                   passed:proposedRun.passed||0});
+                // The final winner may have originally matched the provisional
+                // code; the later judge-approved E2B-tested patch is still a
+                // real upgrade and must trigger the persisted overlay diff.
+                report.upgrade={
+                  ...(report.upgrade || {}),
+                  changed:verifiedSource.code!==report.provisional.code,
+                  from:report.provisional.letter,to:decision.winner,
+                  reason:postJudgeUpgrade.reason,
+                };
               }
               try{
                 await updateSavedCouncilReport(job,report);
