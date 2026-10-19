@@ -4945,7 +4945,11 @@ CA_CASE {"id":"statement example","input":{"n":4},"expected":6,"actual":6,"statu
                 "stage":"provisional",
                 "provisional":{"status":"provisional","letter":"T","model":"claude-fable-5.1",
                     "codingTrusty":true,"language":"python","code":"def solve():\\n    return 42",
-                    "passed":3,"failed":0}
+                    "answer":"Return the requested value.","passed":3,"failed":0},
+                "candidates":[{"letter":"T","model":"claude-fable-5.1",
+                    "codingTrusty":true,"final":{"kind":"code","code":"def solve():\\n    return 42"}}],
+                "runs":{"T":{"ran":true,"ok":true,"passed":3,"failed":0,
+                    "stdout":r#"CA_CASE {"id":"example 1","input":1,"expected":2,"actual":2,"status":"passed"}"#}}
             }})),
             events: vec![serde_json::json!({"phase":"coding_trusty_e2b_passed",
                 "message":"Claude Fable 5.1 passed the E2B test suite.",
@@ -4958,6 +4962,13 @@ CA_CASE {"id":"statement example","input":{"n":4},"expected":6,"actual":6,"statu
         assert!(state["solution"]["source"].as_str().unwrap_or("").contains("Coding Trusty · Claude Fable 5.1"));
         assert_eq!(state["agents"].as_array().map(|agents| agents.len()), Some(0),
             "Trusty must not be counted as one of the selected Council seats");
+        assert_eq!(state["tests"].as_array().map(|tests| tests.len()), Some(1),
+            "Actual provisional E2B case results must appear before judges finish");
+        assert_eq!(state["tests"][0]["status"], "passed");
+        assert!(state["insights"]["summary"].as_str().unwrap_or("")
+            .contains("Return the requested value"));
+        assert!(state["insights"]["testing"].as_str().unwrap_or("")
+            .contains("3 passed"));
     }
 
     #[test]
