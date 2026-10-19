@@ -121,652 +121,11 @@ fn ghost_process_hide() {
 #[cfg(not(target_os = "macos"))]
 fn ghost_process_hide() {}
 
-// ─── IOHID SHORTCUTS (same as before, just renamed) ──────────────────────────
+// ─── Carbon global shortcuts for the overlay ─────────────────────────────────
 
 #[cfg(target_os = "macos")]
-mod mac_shortcuts {
-    use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
-    use core_graphics::{
-        event::{
-            CallbackResult, CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation,
-            CGEventTapOptions, CGEventTapPlacement, CGEventType,
-        },
-        window::{
-            kCGWindowLayer, kCGWindowListExcludeDesktopElements,
-            kCGWindowListOptionOnScreenOnly, kCGWindowOwnerPID, CGWindowListCopyWindowInfo,
-        },
-    };
-    use objc2_app_kit::NSWorkspace;
-    use std::{
-        ffi::c_void,
-        ptr,
-        sync::{
-            atomic::{AtomicBool, AtomicU8, Ordering},
-            Mutex,
-        },
-        time::{Duration, Instant},
-    };
-
-    type CFAllocatorRef = *const c_void;
-    type CFRunLoopRef = *const c_void;
-    type CFStringRef = *const c_void;
-    type IOHIDManagerRef = *mut c_void;
-    type IOHIDValueRef = *mut c_void;
-    type IOHIDElementRef = *mut c_void;
-    type IOReturn = i32;
-    type IOOptionBits = u32;
-
-    const K_IO_RETURN_SUCCESS: IOReturn = 0;
-    const K_IO_HID_OPTIONS_TYPE_NONE: IOOptionBits = 0;
-    const HID_USAGE_PAGE_KEYBOARD: u32 = 0x07;
-    const HID_USAGE_KEYBOARD_B: u32 = 0x05;
-    const HID_USAGE_KEYBOARD_C: u32 = 0x06;
-    const HID_USAGE_KEYBOARD_M: u32 = 0x10;
-    const HID_USAGE_KEYBOARD_H: u32 = 0x0B;
-    const HID_USAGE_KEYBOARD_L: u32 = 0x0F;
-    const HID_USAGE_KEYBOARD_P: u32 = 0x13;
-    const HID_USAGE_KEYBOARD_R: u32 = 0x15;
-    const HID_USAGE_KEYBOARD_Y: u32 = 0x1C;
-    const HID_USAGE_KEYBOARD_S: u32 = 0x16;
-    const HID_USAGE_KEYBOARD_RETURN: u32 = 0x28;
-    const HID_USAGE_KEYBOARD_BACKSLASH: u32 = 0x31;
-    const HID_USAGE_KEYBOARD_RIGHT_ARROW: u32 = 0x4F;
-    const HID_USAGE_KEYBOARD_LEFT_ARROW: u32 = 0x50;
-    const HID_USAGE_KEYBOARD_DOWN_ARROW: u32 = 0x51;
-    const HID_USAGE_KEYBOARD_UP_ARROW: u32 = 0x52;
-    const HID_USAGE_KEYBOARD_LEFT_CONTROL: u32 = 0xE0;
-    const HID_USAGE_KEYBOARD_LEFT_SHIFT: u32 = 0xE1;
-    const HID_USAGE_KEYBOARD_LEFT_ALT: u32 = 0xE2;
-    const HID_USAGE_KEYBOARD_RIGHT_CONTROL: u32 = 0xE4;
-    const HID_USAGE_KEYBOARD_RIGHT_SHIFT: u32 = 0xE5;
-    const HID_USAGE_KEYBOARD_RIGHT_ALT: u32 = 0xE6;
-    // USB HID usages for the number row (0..9).
-    const HID_USAGE_KEYBOARD_1: u32 = 0x1E;
-    const HID_USAGE_KEYBOARD_2: u32 = 0x1F;
-    const HID_USAGE_KEYBOARD_3: u32 = 0x20;
-    const HID_USAGE_KEYBOARD_4: u32 = 0x21;
-    const HID_USAGE_KEYBOARD_5: u32 = 0x22;
-    const HID_USAGE_KEYBOARD_0: u32 = 0x27;
-    const HID_USAGE_KEYBOARD_MINUS: u32 = 0x2D;
-    const HID_USAGE_KEYBOARD_EQUAL: u32 = 0x2E;
-    const HID_USAGE_KEYBOARD_CAPS_LOCK: u32 = 0x39;
-
-    fn history_open_key(usage: u32, shifted: bool) -> bool {
-        usage == HID_USAGE_KEYBOARD_BACKSLASH && !shifted
-    }
-
-    // The HID observer deliberately does not consume keys, preserving typing
-    // in every foreground app. On an empty Stage Manager space macOS has no
-    // key window, so it sounds the alert for those same overlay commands.
-    // A separate session filter drops only command key-downs on that empty
-    // desktop; the HID observer still receives the physical shortcut.
-    fn quiet_desktop_key(keycode: i64, shifted: bool, modified: bool) -> bool {
-        if modified {
-            return false;
-        }
-        match keycode {
-            // C/M/H open panels; S/L/R/P/Y select a code reader/language.
-            8 | 46 | 4 | 1 | 37 | 15 | 35 | 16 => true,
-            // The number-pair capture commands do not accept Shift.
-            29 | 18 | 19 | 20 | 21 | 23 => !shifted,
-            // ANSI backslash opens a saved result only while History is up.
-            42 => !shifted && HISTORY_VISIBLE.load(Ordering::SeqCst),
-            _ => false,
-        }
-    }
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        fn CFArrayGetCount(array: *const c_void) -> isize;
-        fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
-        fn CFDictionaryGetValue(dictionary: *const c_void, key: *const c_void) -> *const c_void;
-        fn CFNumberGetValue(number: *const c_void, number_type: i32, value: *mut c_void) -> bool;
-        fn CFRelease(value: *const c_void);
-    }
-
-    fn has_frontmost_normal_window(pid: i32) -> Option<bool> {
-        let windows = unsafe {
-            CGWindowListCopyWindowInfo(
-                kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
-                0,
-            )
-        };
-        if windows.is_null() {
-            return None;
-        }
-        let mut found = false;
-        unsafe {
-            for index in 0..CFArrayGetCount(windows.cast()) {
-                let window = CFArrayGetValueAtIndex(windows.cast(), index);
-                if window.is_null() {
-                    continue;
-                }
-                let owner = CFDictionaryGetValue(window, kCGWindowOwnerPID.cast());
-                let layer = CFDictionaryGetValue(window, kCGWindowLayer.cast());
-                if owner.is_null() || layer.is_null() {
-                    continue;
-                }
-                let mut owner_pid = 0_i32;
-                let mut window_layer = -1_i32;
-                if CFNumberGetValue(owner, 3, (&mut owner_pid as *mut i32).cast())
-                    && CFNumberGetValue(layer, 3, (&mut window_layer as *mut i32).cast())
-                    && owner_pid == pid
-                    && window_layer == 0
-                {
-                    found = true;
-                    break;
-                }
-            }
-            CFRelease(windows.cast());
-        }
-        Some(found)
-    }
-
-    fn empty_stage_manager_desktop() -> bool {
-        // NSWorkspace identifies the app that receives key events. A visible
-        // layer-zero window means there is a real foreground destination;
-        // fail open if macOS will not provide its window list.
-        let frontmost = NSWorkspace::sharedWorkspace().frontmostApplication();
-        let Some(frontmost) = frontmost else {
-            return true;
-        };
-        let pid = frontmost.processIdentifier();
-        pid > 0 && has_frontmost_normal_window(pid) == Some(false)
-    }
-
-    pub fn register_quiet_desktop_filter() -> Result<CGEventTap<'static>, String> {
-        let tap = CGEventTap::new(
-            CGEventTapLocation::Session,
-            CGEventTapPlacement::TailAppendEventTap,
-            CGEventTapOptions::Default,
-            vec![CGEventType::KeyDown],
-            |_proxy, event_type, event: &CGEvent| {
-                if !matches!(event_type, CGEventType::KeyDown) {
-                    return CallbackResult::Keep;
-                }
-                let flags = event.get_flags();
-                let modified = flags.intersects(
-                    CGEventFlags::CGEventFlagControl
-                        | CGEventFlags::CGEventFlagAlternate
-                        | CGEventFlags::CGEventFlagCommand,
-                );
-                let keycode = event.get_integer_value_field(
-                    core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE,
-                );
-                if quiet_desktop_key(
-                    keycode,
-                    flags.contains(CGEventFlags::CGEventFlagShift),
-                    modified,
-                ) && empty_stage_manager_desktop()
-                {
-                    CallbackResult::Drop
-                } else {
-                    CallbackResult::Keep
-                }
-            },
-        )
-        .map_err(|_| "macOS did not permit the quiet desktop shortcut filter (Accessibility permission may be needed)".to_string())?;
-        let source = tap
-            .mach_port()
-            .create_runloop_source(0)
-            .map_err(|_| "Could not create the quiet desktop shortcut run-loop source")?;
-        CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
-        tap.enable();
-        Ok(tap)
-    }
-
-    pub static START_BATCH: AtomicBool = AtomicBool::new(false);
-    pub static CAPTURE: AtomicBool = AtomicBool::new(false);
-    pub static CAPTURE_REGION: AtomicBool = AtomicBool::new(false);
-    pub static CAPTURE_LEFT: AtomicBool = AtomicBool::new(false);
-    pub static CAPTURE_RIGHT: AtomicBool = AtomicBool::new(false);
-    pub static SUBMIT: AtomicBool = AtomicBool::new(false);
-    pub static MOVE_LEFT: AtomicBool = AtomicBool::new(false);
-    pub static MOVE_RIGHT: AtomicBool = AtomicBool::new(false);
-    pub static MOVE_UP: AtomicBool = AtomicBool::new(false);
-    pub static MOVE_DOWN: AtomicBool = AtomicBool::new(false);
-    pub static SCROLL_UP: AtomicBool = AtomicBool::new(false);
-    pub static SCROLL_DOWN: AtomicBool = AtomicBool::new(false);
-    static FADE_DOWN: AtomicBool = AtomicBool::new(false);
-    static FADE_UP: AtomicBool = AtomicBool::new(false);
-    static HISTORY_PREVIOUS: AtomicBool = AtomicBool::new(false);
-    static HISTORY_NEXT: AtomicBool = AtomicBool::new(false);
-    static HISTORY_OPEN: AtomicBool = AtomicBool::new(false);
-    static HISTORY_BACK: AtomicBool = AtomicBool::new(false);
-    static LANGUAGE_COMMAND: AtomicU8 = AtomicU8::new(0);
-    // SL/SR dock the verified code reader left or right.
-    static CODE_FOCUS_COMMAND: AtomicU8 = AtomicU8::new(0);
-    static LANGUAGE_KEY_HELD: AtomicU8 = AtomicU8::new(0);
-    static LAST_LANGUAGE_KEY: Mutex<Option<(u32, bool, Instant)>> = Mutex::new(None);
-    static OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
-    static CODING_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(false);
-    static HISTORY_VISIBLE: AtomicBool = AtomicBool::new(false);
-    // 1 coding, 2 multiple-choice, 3 shared cloud history.
-    static PANEL_COMMAND: AtomicU8 = AtomicU8::new(0);
-    // History must remain reachable even if a screenshot picker is pending.
-    static HISTORY_TOGGLE_COMMAND: AtomicBool = AtomicBool::new(false);
-    // Suppress hardware key-repeat; require two distinct keydown edges.
-    static PANEL_KEY_HELD: AtomicU8 = AtomicU8::new(0);
-    static LAST_PANEL_KEY: Mutex<Option<(u8, bool, Instant)>> = Mutex::new(None);
-    // Encoded pairs: 00 and 10-13 route to the main app, 21-25 are coding
-    // overlay controls, and 31-35 are MCQ overlay controls.
-    static NUMBER_COMMAND: AtomicU8 = AtomicU8::new(0);
-
-    static CONTROL_DOWN: AtomicBool = AtomicBool::new(false);
-    static SHIFT_DOWN: AtomicBool = AtomicBool::new(false);
-    // The initial lock state need not be queried: paired-case equality is
-    // invariant if both letters are inverted. Tracking subsequent toggles is
-    // enough to reject a pair that changes case between its two keypresses.
-    static CAPS_LOCK_ON: AtomicBool = AtomicBool::new(false);
-    static CAPS_LOCK_HELD: AtomicBool = AtomicBool::new(false);
-    static OPTION_DOWN: AtomicBool = AtomicBool::new(false);
-    static LAST_DIGIT: Mutex<Option<(u8, Instant)>> = Mutex::new(None);
-    static MONITOR: Mutex<Option<usize>> = Mutex::new(None);
-
-    #[link(name = "IOKit", kind = "framework")]
-    extern "C" {
-        fn IOHIDManagerCreate(allocator: CFAllocatorRef, options: IOOptionBits) -> IOHIDManagerRef;
-        fn IOHIDManagerSetDeviceMatching(manager: IOHIDManagerRef, matching: *const c_void);
-        fn IOHIDManagerRegisterInputValueCallback(
-            manager: IOHIDManagerRef,
-            callback: extern "C" fn(*mut c_void, IOReturn, *mut c_void, IOHIDValueRef),
-            context: *mut c_void,
-        );
-        fn IOHIDManagerScheduleWithRunLoop(
-            manager: IOHIDManagerRef,
-            run_loop: CFRunLoopRef,
-            run_loop_mode: CFStringRef,
-        );
-        fn IOHIDManagerOpen(manager: IOHIDManagerRef, options: IOOptionBits) -> IOReturn;
-        fn IOHIDValueGetElement(value: IOHIDValueRef) -> IOHIDElementRef;
-        fn IOHIDValueGetIntegerValue(value: IOHIDValueRef) -> libc::c_long;
-        fn IOHIDElementGetUsagePage(element: IOHIDElementRef) -> u32;
-        fn IOHIDElementGetUsage(element: IOHIDElementRef) -> u32;
-    }
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        static kCFRunLoopDefaultMode: CFStringRef;
-        fn CFRunLoopGetMain() -> CFRunLoopRef;
-    }
-
-    // Physical HID usages are the same for 's'/'S', 'l'/'L' and
-    // 'r'/'R'. Shift affects character output, not this command mapping.
-    fn dock_pair_command(first: u32, second: u32) -> u8 {
-        match (first,second) {
-            (HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_L)=>5,
-            (HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_R)=>6,
-            _=>0,
-        }
-    }
-
-    fn panel_key_command(usage: u32) -> Option<(u8, u8)> {
-        match usage {
-            HID_USAGE_KEYBOARD_C => Some((1, 1)),
-            HID_USAGE_KEYBOARD_M => Some((2, 2)),
-            HID_USAGE_KEYBOARD_H => Some((3, 4)),
-            _ => None,
-        }
-    }
-
-    fn language_pair_window(first: u32, second: u32) -> Duration {
-        if dock_pair_command(first, second) != 0 {
-            Duration::from_millis(1_200)
-        } else {
-            Duration::from_millis(650)
-        }
-    }
-
-    #[cfg(test)]
-    mod dock_tests {
-        use super::*;
-        #[test]
-        fn sl_sr_use_case_independent_physical_key_usages() {
-            assert_eq!(dock_pair_command(HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_L),5);
-            assert_eq!(dock_pair_command(HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_R),6);
-            assert_eq!(dock_pair_command(HID_USAGE_KEYBOARD_L,HID_USAGE_KEYBOARD_S),0);
-            assert_eq!(dock_pair_command(HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_S),0);
-            assert_eq!(language_pair_window(HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_L), Duration::from_millis(1_200));
-            assert_eq!(language_pair_window(HID_USAGE_KEYBOARD_S,HID_USAGE_KEYBOARD_R), Duration::from_millis(1_200));
-            assert_eq!(language_pair_window(HID_USAGE_KEYBOARD_C,HID_USAGE_KEYBOARD_P), Duration::from_millis(650));
-            assert_eq!(language_pair_window(HID_USAGE_KEYBOARD_R,HID_USAGE_KEYBOARD_R), Duration::from_millis(650));
-        }
-
-        #[test]
-        fn legacy_panel_pairs_keep_their_original_destinations() {
-            assert_eq!(panel_key_command(HID_USAGE_KEYBOARD_C), Some((1, 1)));
-            assert_eq!(panel_key_command(HID_USAGE_KEYBOARD_M), Some((2, 2)), "MM remains the MCQ panel command");
-            assert_eq!(panel_key_command(HID_USAGE_KEYBOARD_H), Some((3, 4)));
-        }
-
-        #[test]
-        fn idle_desktop_filter_spares_modified_keys_and_unrelated_typing() {
-            assert!(quiet_desktop_key(8, false, false)); // cc
-            assert!(quiet_desktop_key(8, true, false)); // CC
-            assert!(quiet_desktop_key(19, false, false)); // 22
-            assert!(!quiet_desktop_key(8, false, true)); // Cmd-C / Ctrl-C
-            assert!(!quiet_desktop_key(19, true, false));
-            assert!(!quiet_desktop_key(0, false, false)); // a
-        }
-
-        #[test]
-        fn history_opens_with_backslash_not_right_arrow() {
-            assert!(history_open_key(HID_USAGE_KEYBOARD_BACKSLASH, false));
-            assert!(!history_open_key(HID_USAGE_KEYBOARD_RIGHT_ARROW, false));
-            assert!(!history_open_key(HID_USAGE_KEYBOARD_BACKSLASH, true));
-        }
-    }
-
-    extern "C" fn input_value_callback(
-        _context: *mut c_void,
-        _result: IOReturn,
-        _sender: *mut c_void,
-        value: IOHIDValueRef,
-    ) {
-        if value.is_null() {
-            return;
-        }
-        let element = unsafe { IOHIDValueGetElement(value) };
-        if element.is_null() {
-            return;
-        }
-        let usage_page = unsafe { IOHIDElementGetUsagePage(element) };
-        if usage_page != HID_USAGE_PAGE_KEYBOARD {
-            return;
-        }
-        let usage = unsafe { IOHIDElementGetUsage(element) };
-        let pressed = unsafe { IOHIDValueGetIntegerValue(value) } != 0;
-
-        // Accept all-lowercase or all-uppercase pairs, but not mixed-case
-        // pairs. A double press must have a key release between taps. The
-        // callback does not store keystrokes or alter foreground input.
-        let uppercase = SHIFT_DOWN.load(Ordering::SeqCst)
-            ^ CAPS_LOCK_ON.load(Ordering::SeqCst);
-        let panel_key = panel_key_command(usage);
-        if let Some((command, bit)) = panel_key {
-            if !pressed {
-                PANEL_KEY_HELD.fetch_and(!bit, Ordering::SeqCst);
-            } else if !CONTROL_DOWN.load(Ordering::SeqCst)
-                && !OPTION_DOWN.load(Ordering::SeqCst)
-                && PANEL_KEY_HELD.fetch_or(bit, Ordering::SeqCst) & bit == 0
-            {
-                if let Ok(mut previous) = LAST_PANEL_KEY.lock() {
-                    if super::double_tap_panel(&mut previous, command, uppercase, Instant::now()).is_some() {
-                            if command == 3 {
-                                HISTORY_TOGGLE_COMMAND.store(true, Ordering::SeqCst);
-                            } else {
-                                PANEL_COMMAND.store(command, Ordering::SeqCst);
-                            }
-                    }
-                }
-            }
-        } else if pressed && usage < HID_USAGE_KEYBOARD_LEFT_CONTROL {
-            if let Ok(mut previous) = LAST_PANEL_KEY.lock() { *previous = None; }
-        }
-        if pressed && (usage == HID_USAGE_KEYBOARD_LEFT_CONTROL
-            || usage == HID_USAGE_KEYBOARD_RIGHT_CONTROL
-            || usage == HID_USAGE_KEYBOARD_LEFT_ALT
-            || usage == HID_USAGE_KEYBOARD_RIGHT_ALT)
-        {
-            if let Ok(mut previous) = LAST_PANEL_KEY.lock() { *previous = None; }
-        }
-
-        // The optional RR / CP / PY view commands are active only in Coding.
-        // The observer doesn't suppress foreground input or log typed text.
-        let lang_key=match usage {
-            HID_USAGE_KEYBOARD_R=>Some(1_u8), HID_USAGE_KEYBOARD_C=>Some(2_u8),
-            HID_USAGE_KEYBOARD_P=>Some(4_u8), HID_USAGE_KEYBOARD_Y=>Some(8_u8),
-            HID_USAGE_KEYBOARD_S=>Some(16_u8), HID_USAGE_KEYBOARD_L=>Some(32_u8),
-            _=>None,
-        };
-        if let Some(bit)=lang_key {
-            if !pressed {LANGUAGE_KEY_HELD.fetch_and(!bit,Ordering::SeqCst);}
-            else if !CONTROL_DOWN.load(Ordering::SeqCst)
-                && !OPTION_DOWN.load(Ordering::SeqCst)
-                // The physical S/L/R usages are identical for uppercase and
-                // lowercase; Shift must not disable the requested SL/SR docks.
-                && LANGUAGE_KEY_HELD.fetch_or(bit,Ordering::SeqCst)&bit==0
-            {
-                if let Ok(mut previous)=LAST_LANGUAGE_KEY.lock(){
-                    // Let an intentional pair work at a normal typing pace;
-                    // SL/SR must not require an unrealistically fast chord.
-                    let pair=previous.take().filter(|(first, first_uppercase, at)|
-                        super::same_letter_case(*first_uppercase, uppercase)
-                            && at.elapsed() <= language_pair_window(*first, usage))
-                        .map(|(first, _, _)|(first,usage));
-                    *previous=Some((usage, uppercase, Instant::now()));
-                    let choice=match pair {
-                        Some((HID_USAGE_KEYBOARD_R,HID_USAGE_KEYBOARD_R))=>1,
-                        Some((HID_USAGE_KEYBOARD_C,HID_USAGE_KEYBOARD_P))=>2,
-                        Some((HID_USAGE_KEYBOARD_P,HID_USAGE_KEYBOARD_Y))=>3,
-                        Some((first,second))=>dock_pair_command(first,second),
-                        _=>0,
-                    };
-                    if choice!=0 {
-                        // Preserve prior behavior: RR/CP/PY are active only
-                        // while the Coding overlay is visible. Only SL/SR
-                        // may open the verified code sheet from another app.
-                        if choice<=3 {
-                            // Both lowercase and uppercase pairs are accepted,
-                            // but modifiers must not route the command elsewhere.
-                            if !HISTORY_VISIBLE.load(Ordering::SeqCst)
-                                && CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) {
-                                LANGUAGE_COMMAND.store(choice,Ordering::SeqCst);
-                            }
-                        } else {
-                            // 5 -> left (2), 6 -> right (3). Both work with
-                            // Shift held throughout or on either letter.
-                            CODE_FOCUS_COMMAND.store(choice-3,Ordering::SeqCst);
-                        }
-                        *previous=None;
-                    }
-                }
-            }
-        }else if pressed&&usage<HID_USAGE_KEYBOARD_LEFT_CONTROL{
-            if let Ok(mut previous)=LAST_LANGUAGE_KEY.lock(){*previous=None;}
-        }
-        // Number pairs route into three independent destinations. The first
-        // digit selects the workflow; the second selects its capture mode.
-        if pressed && !CONTROL_DOWN.load(Ordering::SeqCst)
-            && !SHIFT_DOWN.load(Ordering::SeqCst)
-            && !OPTION_DOWN.load(Ordering::SeqCst)
-        {
-            let digit = match usage {
-                HID_USAGE_KEYBOARD_0 => Some(0),
-                HID_USAGE_KEYBOARD_1 => Some(1),
-                HID_USAGE_KEYBOARD_2 => Some(2),
-                HID_USAGE_KEYBOARD_3 => Some(3),
-                HID_USAGE_KEYBOARD_4 => Some(4),
-                HID_USAGE_KEYBOARD_5 => Some(5),
-                _ => None,
-            };
-            if let Some(digit) = digit {
-                if let Ok(mut previous) = LAST_DIGIT.lock() {
-                    let pair = previous.take().filter(|(_, at)| at.elapsed() <= Duration::from_millis(650))
-                        .map(|(first, _)| (first, digit));
-                    *previous = Some((digit, Instant::now()));
-                    if let Some((first, second)) = pair {
-                        if let Some(command) = super::number_pair_command(first, second) {
-                            NUMBER_COMMAND.store(command, Ordering::SeqCst);
-                        }
-                    }
-                }
-            } else if usage < HID_USAGE_KEYBOARD_LEFT_CONTROL {
-                if let Ok(mut previous) = LAST_DIGIT.lock() { *previous = None; }
-            }
-        }
-
-        // These controls are deliberately active only while the coding overlay
-        // is visible, so ordinary typing elsewhere is unaffected.
-        if pressed && OVERLAY_VISIBLE.load(Ordering::SeqCst)
-            && !CONTROL_DOWN.load(Ordering::SeqCst)
-            && !OPTION_DOWN.load(Ordering::SeqCst)
-        {
-            match (usage, SHIFT_DOWN.load(Ordering::SeqCst)) {
-                (HID_USAGE_KEYBOARD_UP_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_PREVIOUS.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_DOWN_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_NEXT.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_UP_ARROW, false) if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) => SCROLL_UP.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_DOWN_ARROW, false) if CODING_OVERLAY_VISIBLE.load(Ordering::SeqCst) => SCROLL_DOWN.store(true, Ordering::SeqCst),
-                // Back is intentionally local to the read-only History
-                // surface: it never moves the click-through overlay window.
-                (HID_USAGE_KEYBOARD_LEFT_ARROW, false) if HISTORY_VISIBLE.load(Ordering::SeqCst) => HISTORY_BACK.store(true, Ordering::SeqCst),
-                // Backslash selects the highlighted saved run and opens its
-                // full read-only Council result in the overlay.
-                (key, shifted) if HISTORY_VISIBLE.load(Ordering::SeqCst) && history_open_key(key, shifted) => HISTORY_OPEN.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_MINUS, false) => FADE_DOWN.store(true, Ordering::SeqCst),
-                (HID_USAGE_KEYBOARD_EQUAL, false) => FADE_UP.store(true, Ordering::SeqCst),
-                _ => {}
-            }
-        }
-
-        match usage {
-            HID_USAGE_KEYBOARD_LEFT_CONTROL | HID_USAGE_KEYBOARD_RIGHT_CONTROL => {
-                CONTROL_DOWN.store(pressed, Ordering::SeqCst)
-            }
-            HID_USAGE_KEYBOARD_LEFT_SHIFT | HID_USAGE_KEYBOARD_RIGHT_SHIFT => {
-                SHIFT_DOWN.store(pressed, Ordering::SeqCst)
-            }
-            HID_USAGE_KEYBOARD_CAPS_LOCK => {
-                if pressed {
-                    if !CAPS_LOCK_HELD.swap(true, Ordering::SeqCst) {
-                        CAPS_LOCK_ON.fetch_xor(true, Ordering::SeqCst);
-                    }
-                } else {
-                    CAPS_LOCK_HELD.store(false, Ordering::SeqCst);
-                }
-            }
-            HID_USAGE_KEYBOARD_LEFT_ALT | HID_USAGE_KEYBOARD_RIGHT_ALT => {
-                OPTION_DOWN.store(pressed, Ordering::SeqCst)
-            }
-            HID_USAGE_KEYBOARD_LEFT_ARROW
-            | HID_USAGE_KEYBOARD_RIGHT_ARROW
-            | HID_USAGE_KEYBOARD_UP_ARROW
-            | HID_USAGE_KEYBOARD_DOWN_ARROW
-                if pressed
-                    && OVERLAY_VISIBLE.load(Ordering::SeqCst)
-                    && SHIFT_DOWN.load(Ordering::SeqCst)
-                    && OPTION_DOWN.load(Ordering::SeqCst) =>
-            {
-                match usage {
-                    HID_USAGE_KEYBOARD_LEFT_ARROW => MOVE_LEFT.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_RIGHT_ARROW => MOVE_RIGHT.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_UP_ARROW => MOVE_UP.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_DOWN_ARROW => MOVE_DOWN.store(true, Ordering::SeqCst),
-                    _ => {}
-                }
-            }
-            HID_USAGE_KEYBOARD_UP_ARROW | HID_USAGE_KEYBOARD_DOWN_ARROW
-                if pressed && OPTION_DOWN.load(Ordering::SeqCst) =>
-            {
-                match usage {
-                    HID_USAGE_KEYBOARD_UP_ARROW => SCROLL_UP.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_DOWN_ARROW => SCROLL_DOWN.store(true, Ordering::SeqCst),
-                    _ => {}
-                }
-            }
-            HID_USAGE_KEYBOARD_L | HID_USAGE_KEYBOARD_R
-                if pressed && CONTROL_DOWN.load(Ordering::SeqCst)
-                    && OPTION_DOWN.load(Ordering::SeqCst)
-                    && SHIFT_DOWN.load(Ordering::SeqCst) => {
-                match usage {
-                    HID_USAGE_KEYBOARD_L => CAPTURE_LEFT.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_R => CAPTURE_RIGHT.store(true, Ordering::SeqCst),
-                    _ => {}
-                }
-            }
-            HID_USAGE_KEYBOARD_B
-            | HID_USAGE_KEYBOARD_P
-            | HID_USAGE_KEYBOARD_R
-            | HID_USAGE_KEYBOARD_S
-            | HID_USAGE_KEYBOARD_RETURN
-                if pressed
-                    && CONTROL_DOWN.load(Ordering::SeqCst)
-                    && OPTION_DOWN.load(Ordering::SeqCst) =>
-            {
-                match usage {
-                    HID_USAGE_KEYBOARD_B => START_BATCH.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_P | HID_USAGE_KEYBOARD_S => CAPTURE.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_R => CAPTURE_REGION.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_RETURN => SUBMIT.store(true, Ordering::SeqCst),
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
-    pub fn register() -> Result<(), String> {
-        let manager = unsafe { IOHIDManagerCreate(ptr::null(), K_IO_HID_OPTIONS_TYPE_NONE) };
-        if manager.is_null() {
-            return Err("Could not create IOHIDManager.".into());
-        }
-        unsafe {
-            IOHIDManagerSetDeviceMatching(manager, ptr::null());
-            IOHIDManagerRegisterInputValueCallback(manager, input_value_callback, ptr::null_mut());
-            IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), kCFRunLoopDefaultMode);
-        }
-        let opened = unsafe { IOHIDManagerOpen(manager, K_IO_HID_OPTIONS_TYPE_NONE) };
-        if opened != K_IO_RETURN_SUCCESS {
-            return Err(format!("Could not open IOHIDManager: {opened}"));
-        }
-        *MONITOR.lock().map_err(|_| "Lock failed.".to_string())? = Some(manager as usize);
-        Ok(())
-    }
-
-    pub fn hotkeys_ready() -> bool { MONITOR.lock().ok().and_then(|guard| *guard).is_some() }
-    pub fn take_start_batch() -> bool {
-        START_BATCH.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_capture() -> bool {
-        CAPTURE.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_capture_region() -> bool {
-        CAPTURE_REGION.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_capture_left() -> bool {
-        CAPTURE_LEFT.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_capture_right() -> bool {
-        CAPTURE_RIGHT.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_submit() -> bool {
-        SUBMIT.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_panel_command() -> u8 { PANEL_COMMAND.swap(0, Ordering::SeqCst) }
-    pub fn take_history_toggle_command() -> bool {
-        HISTORY_TOGGLE_COMMAND.swap(false, Ordering::SeqCst)
-    }
-    pub fn set_history_visible(value: bool) { HISTORY_VISIBLE.store(value, Ordering::SeqCst); }
-    pub fn take_move_left() -> bool {
-        MOVE_LEFT.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_move_right() -> bool {
-        MOVE_RIGHT.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_move_up() -> bool {
-        MOVE_UP.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_move_down() -> bool {
-        MOVE_DOWN.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_scroll_up() -> bool {
-        SCROLL_UP.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_scroll_down() -> bool {
-        SCROLL_DOWN.swap(false, Ordering::SeqCst)
-    }
-    pub fn take_number_command() -> u8 { NUMBER_COMMAND.swap(0, Ordering::SeqCst) }
-    pub fn set_overlay_visible(value: bool) { OVERLAY_VISIBLE.store(value, Ordering::SeqCst); }
-    pub fn set_coding_overlay_visible(value: bool) { CODING_OVERLAY_VISIBLE.store(value, Ordering::SeqCst); }
-    pub fn take_code_focus_command() -> u8 { CODE_FOCUS_COMMAND.swap(0, Ordering::SeqCst) }
-    pub fn take_fade_down() -> bool { FADE_DOWN.swap(false, Ordering::SeqCst) }
-    pub fn take_fade_up() -> bool { FADE_UP.swap(false, Ordering::SeqCst) }
-    pub fn take_history_previous() -> bool { HISTORY_PREVIOUS.swap(false, Ordering::SeqCst) }
-    pub fn take_history_next() -> bool { HISTORY_NEXT.swap(false, Ordering::SeqCst) }
-    pub fn take_history_open() -> bool { HISTORY_OPEN.swap(false, Ordering::SeqCst) }
-    pub fn take_history_back() -> bool { HISTORY_BACK.swap(false, Ordering::SeqCst) }
-    pub fn take_language_command() -> u8 { LANGUAGE_COMMAND.swap(0, Ordering::SeqCst) }
-}
+#[path = "../mds_hotkeys.rs"]
+mod mac_shortcuts;
 
 async fn space_api_calls() {
     let delay_ms = 300 + rand::random::<u64>() % 500;
@@ -882,7 +241,6 @@ fn drain_capture_commands() {
         let _ = write_private(&path.with_extension("ack"), b"accepted");
         use std::sync::atomic::Ordering;
         match command["mode"].as_str().unwrap_or_default() {
-            "region" => mac_shortcuts::CAPTURE_REGION.store(true, Ordering::SeqCst),
             "screen" => mac_shortcuts::CAPTURE.store(true, Ordering::SeqCst),
             "left" => mac_shortcuts::CAPTURE_LEFT.store(true, Ordering::SeqCst),
             "right" => mac_shortcuts::CAPTURE_RIGHT.store(true, Ordering::SeqCst),
@@ -891,30 +249,6 @@ fn drain_capture_commands() {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn send_capture_to_council(mode: &str) {
-    if !matches!(mode, "region" | "screen" | "left" | "right") { return; }
-    let Ok(dir) = support_root_dir().map(|path| path.join("cache/app-capture-requests")) else { return; };
-    if fs::create_dir_all(&dir).is_err() { return; }
-    let id = Uuid::new_v4().to_string();
-    let target = dir.join(format!("{id}.json"));
-    let temp = dir.join(format!(".{id}.tmp"));
-    if fs::write(&temp, serde_json::json!({"mode": mode, "createdAt": chrono::Utc::now().to_rfc3339()}).to_string()).is_ok() {
-        if fs::rename(&temp, &target).is_err() { let _ = fs::remove_file(temp); }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn send_process_to_council() {
-    let Ok(dir) = support_root_dir().map(|path| path.join("cache/app-capture-requests")) else { return; };
-    if fs::create_dir_all(&dir).is_err() { return; }
-    let id = Uuid::new_v4().to_string();
-    let target = dir.join(format!("{id}.json"));
-    let temp = dir.join(format!(".{id}.tmp"));
-    if fs::write(&temp, serde_json::json!({"mode": "process", "createdAt": chrono::Utc::now().to_rfc3339()}).to_string()).is_ok() {
-        if fs::rename(&temp, &target).is_err() { let _ = fs::remove_file(temp); }
-    }
-}
 // ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -935,6 +269,8 @@ fn run() -> Result<(), String> {
     // Ghost: no Dock, no menu bar
     let mut event_loop = EventLoopBuilder::new().build();
     #[cfg(target_os = "macos")]
+    mac_shortcuts::set_event_loop_waker(event_loop.create_proxy());
+    #[cfg(target_os = "macos")]
     {
         event_loop.set_activation_policy(ActivationPolicy::Prohibited);
     }
@@ -942,42 +278,39 @@ fn run() -> Result<(), String> {
     match mac_shortcuts::register() {
         Ok(()) => write_helper_status(true, None),
         Err(error) => {
-            let message = format!(
-                "Hotkeys are unavailable: {error}. Grant Input Monitoring permission for the helper in macOS System Settings, then reinstall or restart the helper."
-            );
+            let message = format!("Overlay shortcuts are unavailable: {error}");
             eprintln!("{message}");
             write_helper_status(false, Some(&message));
         }
     }
-    #[cfg(target_os = "macos")]
-    let (mut quiet_desktop_tap, mut quiet_desktop_problem) = match mac_shortcuts::register_quiet_desktop_filter() {
-        Ok(tap) => (Some(tap), None),
-        Err(error) => {
-            eprintln!("{error}");
-            write_helper_status(mac_shortcuts::hotkeys_ready(), Some(&error));
-            (None, Some(error))
-        }
-    };
     #[cfg(not(target_os = "macos"))]
     write_helper_status(true, None);
 
     let mut overlay_position = overlay_position(&event_loop);
     let (overlay, webview) = overlay_window(&event_loop, overlay_position)?;
     let (hud, hud_webview) = hud_window(&event_loop, overlay_position)?;
+    #[cfg(target_os = "macos")]
+    let capture_excluded_windows = format!("{},{}", overlay_window_id(&overlay)?, overlay_window_id(&hud)?);
     let mut active_view = "coding".to_string();
     let mut last_hud_view = "coding".to_string();
     let mut overlay_refresh = OverlayRefresh::default();
     update_overlay(&webview, &active_view, &mut overlay_refresh)?;
     let mut overlay_visible = false;
     let mut overlay_alpha = 0.46_f64;
+    #[cfg(target_os = "macos")]
+    let mut reveal_started: Option<Instant> = None;
+    #[cfg(target_os = "macos")]
+    let mut capture_self_test_started = false;
+    #[cfg(target_os = "macos")]
+    let mut capture_self_test_visible_since: Option<Instant> = None;
     // 0 = normal Council overlay, 2 = code reader left, 3 = code reader right.
     let mut code_focus_mode = 0_u8;
     // A history reader stays on that specifically opened result while docking
     // from left to right. A live reader follows only the current Coding run.
     let mut code_focus_from_history = false;
     let mut code_focus_live_run_id: Option<String> = None;
-    // RR / CP / PY select a verified language port for one exact Coding run.
-    // Keep that choice on the native side too: SL/SR are native shortcuts and
+    // Language shortcuts select a verified port for one exact Coding run.
+    // Keep that choice on the native side too: dock keys are native shortcuts and
     // must not race the browser's 500ms state refresh when opening the reader.
     let mut code_focus_language: Option<(String, String)> = None;
     let mut history_open = false;
@@ -992,27 +325,28 @@ fn run() -> Result<(), String> {
     let mut history_detail_requested_id: Option<String> = None;
     let mut history_detail_cache = std::collections::HashMap::<String, Value>::new();
     // A history result remains an independent, read-only source while it is
-    // opened. It lets SL/SR extract that verified result without replacing
+    // opened. It lets the dock shortcuts extract that verified result without replacing
     // it with the newest live coding job.
     let mut history_code_focus_state: Option<Value> = None;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
     let mut last_history_refresh = Instant::now() - Duration::from_secs(60);
     let mut last_heartbeat = Instant::now();
-    #[cfg(target_os = "macos")]
-    let mut last_quiet_retry = Instant::now();
     let mut last_capture_cleanup = Instant::now() - Duration::from_secs(3600);
     #[cfg(target_os = "macos")]
     let helper_hotkeys_ready = mac_shortcuts::hotkeys_ready();
 
-    let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
     // Keep blocking HTTP/upload work off the macOS event loop. Serialize
     // submissions with polling so a stale refresh cannot overwrite a new job.
     let cloud_gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let mut refresh_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut submit_task: Option<tokio::task::JoinHandle<()>> = None;
-    // macOS interactive region selection can take as long as the user needs.
-    // Run screencapture on a blocking worker instead of freezing event handling.
+    // Run capture on a blocking worker instead of freezing event handling.
     #[cfg(target_os = "macos")]
     let mut capture_task: Option<tokio::task::JoinHandle<Result<(), String>>> = None;
     #[cfg(target_os = "macos")]
@@ -1021,11 +355,46 @@ fn run() -> Result<(), String> {
     let mut capture_active_view: Option<String> = None;
 
     event_loop.run(move |_event, event_loop_target, control_flow| {
-        // Global capture hotkeys do not wake Tao's event loop themselves.
-        // Keep this short so the helper begins screencapture and restores the
-        // click-through overlay promptly, without ever showing the overlay in
-        // the image being taken.  The cloud work remains asynchronous.
-        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(33));
+        // Carbon hotkeys wake Tao directly. Poll slowly while hidden for
+        // file-backed commands and completed cloud tasks; animate at 33 ms
+        // while the overlay is visible or a capture is in progress.
+        #[cfg(target_os = "macos")]
+        let interval = if overlay_visible || capture_task.is_some() || reveal_started.is_some() {
+            Duration::from_millis(33)
+        } else {
+            Duration::from_millis(250)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let interval = Duration::from_millis(33);
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + interval);
+        #[cfg(target_os = "macos")]
+        if let Some(started) = reveal_started {
+            if overlay_visible {
+                let progress = (started.elapsed().as_secs_f64() / 0.18).min(1.0);
+                let alpha = overlay_alpha * progress;
+                let _ = set_ghost_opacity(&overlay, alpha);
+                let _ = set_ghost_opacity(&hud, alpha);
+                if progress >= 1.0 {
+                    reveal_started = None;
+                }
+            } else {
+                reveal_started = None;
+                let _ = set_ghost_opacity(&overlay, overlay_alpha);
+                let _ = set_ghost_opacity(&hud, overlay_alpha);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if !capture_self_test_started {
+            if overlay_visible && reveal_started.is_none() {
+                let since = capture_self_test_visible_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= Duration::from_millis(250) {
+                    capture_self_test_started = true;
+                    spawn_overlay_capture_self_test(capture_excluded_windows.clone());
+                }
+            } else {
+                capture_self_test_visible_since = None;
+            }
+        }
         #[cfg(target_os = "macos")]
         drain_capture_commands();
         #[cfg(target_os = "macos")]
@@ -1034,7 +403,7 @@ fn run() -> Result<(), String> {
             // A new overlay action always starts from its normal task view.
             // A docked answer or opened History result must not cover the
             // next capture, submission, or fresh Coding session.
-            if matches!(command, 6 | 20 | 22 | 23 | 24 | 25 | 31..=35) {
+            if matches!(command, 6 | 20 | 22 | 23 | 24 | 25 | 31..=33 | 35) {
                 if code_focus_mode != 0 {
                     code_focus_mode = 0;
                     code_focus_from_history = false;
@@ -1056,16 +425,12 @@ fn run() -> Result<(), String> {
                 }
             }
             match command {
-                10 => send_capture_to_council("screen"),
-                11 => send_capture_to_council("left"),
-                12 => send_capture_to_council("right"),
-                13 => send_process_to_council(),
                 6 => {
                     // 00 starts a new Coding overlay workspace. Previous
                     // finished jobs remain archived; main-app runs are untouched.
                     active_view = "coding".to_string();
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
-                        eprintln!("new session unavailable during screenshot selection");
+                        eprintln!("new session unavailable during screenshot capture");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("new session unavailable during cloud submission");
                     } else if let Err(error) = reset_pending_batch("coding").and_then(|_| start_batch("coding")) {
@@ -1088,7 +453,7 @@ fn run() -> Result<(), String> {
                         let _ = show_overlay_pair(&overlay, &hud, true, code_focus_mode);
                     }
                 }
-                20 | 22 | 23 | 31..=34 => {
+                20 | 22 | 23 | 31..=33 => {
                     let target_view = if command < 30 { "coding" } else { "mcq" };
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("screenshot capture already in progress");
@@ -1108,13 +473,14 @@ fn run() -> Result<(), String> {
                     let _ = show_overlay_pair(&overlay, &hud, false, code_focus_mode);
                         event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
                         let view = active_view.clone();
-                        capture_task = Some(rt.spawn_blocking(move || capture_screen(mode, &view)));
+                        let excluded_windows = capture_excluded_windows.clone();
+                        capture_task = Some(rt.spawn_blocking(move || capture_screen(mode, &view, &excluded_windows)));
                     }
                 }
                 24 | 35 => {
                     let target_view = if command == 24 { "coding" } else { "mcq" };
                     if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
-                        eprintln!("finish the screenshot selection before submitting");
+                        eprintln!("finish the screenshot capture before submitting");
                     } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
                         eprintln!("cloud submission already running");
                     } else {
@@ -1214,31 +580,7 @@ fn run() -> Result<(), String> {
         }
         if last_heartbeat.elapsed() >= Duration::from_secs(4) {
             #[cfg(target_os = "macos")]
-            {
-                if quiet_desktop_tap.is_none()
-                    && last_quiet_retry.elapsed() >= Duration::from_secs(10)
-                {
-                    last_quiet_retry = Instant::now();
-                    match mac_shortcuts::register_quiet_desktop_filter() {
-                        Ok(tap) => {
-                            quiet_desktop_tap = Some(tap);
-                            quiet_desktop_problem = None;
-                        }
-                        Err(error) => quiet_desktop_problem = Some(error),
-                    }
-                }
-                if let Some(tap) = &quiet_desktop_tap {
-                    tap.enable();
-                }
-                write_helper_status(
-                    helper_hotkeys_ready,
-                    if helper_hotkeys_ready {
-                        quiet_desktop_problem.as_deref()
-                    } else {
-                        Some("Input Monitoring permission unavailable")
-                    },
-                );
-            }
+            write_helper_status(helper_hotkeys_ready, None);
             last_heartbeat = Instant::now();
         }
 
@@ -1246,17 +588,10 @@ fn run() -> Result<(), String> {
         if capture_task.as_ref().is_some_and(|task| task.is_finished()) {
             if let Some(task) = capture_task.take() {
                 // The task has already finished. Awaiting its result here does
-                // not wait on interactive selection or a running subprocess.
+                // not wait on a running capture subprocess.
                 let result = rt.block_on(task)
                     .map_err(|e| format!("Screenshot capture worker failed: {e}"))
                     .and_then(|result| result);
-                overlay_visible = restore_overlay_after_capture;
-                event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
-                    ActivationPolicy::Accessory
-                } else {
-                    ActivationPolicy::Prohibited
-                });
-                let _ = show_overlay_pair(&overlay, &hud, overlay_visible, code_focus_mode);
                 let capture_view = capture_active_view.take().unwrap_or_else(|| active_view.clone());
                 if let Err(error) = result {
                     eprintln!("capture failed: {error}");
@@ -1265,6 +600,18 @@ fn run() -> Result<(), String> {
                 if !history_open {
                     let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                 }
+                overlay_visible = restore_overlay_after_capture;
+                event_loop_target.set_activation_policy_at_runtime(if overlay_visible {
+                    ActivationPolicy::Accessory
+                } else {
+                    ActivationPolicy::Prohibited
+                });
+                if overlay_visible {
+                    let _ = set_ghost_opacity(&overlay, 0.0);
+                    let _ = set_ghost_opacity(&hud, 0.0);
+                }
+                let _ = show_overlay_pair(&overlay, &hud, overlay_visible, code_focus_mode);
+                if overlay_visible { reveal_started = Some(Instant::now()); }
             }
         }
 
@@ -1309,12 +656,12 @@ fn run() -> Result<(), String> {
             mac_shortcuts::set_overlay_visible(overlay_visible);
             mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
             // HH is its own surface; unlike the two task views it must not
-            // change which batch is active. CC/MM switch surfaces in-place
+            // change which batch is active. Coding/MCQ shortcuts switch surfaces in-place
             // without opening the main app, stealing application focus, or
             // changing the cloud solving engine.
             // History has its own signal and is always available, including
-            // while a screenshot picker is pending. This prevents a stalled
-            // picker from trapping the person away from HH.
+            // while a screenshot capture is pending. This prevents a stalled
+            // capture from trapping the person away from HH.
             if mac_shortcuts::take_history_toggle_command() {
                 let was_code_reader = code_focus_mode != 0;
                 if was_code_reader {
@@ -1357,7 +704,7 @@ fn run() -> Result<(), String> {
                 }
             }
 
-            // Defer CC/MM during an active screenshot picker without taking
+            // Defer panel switching during an active screenshot capture without taking
             // and discarding their atomic command.
             let panel_command = if capture_task.as_ref().is_none_or(|task| task.is_finished()) {
                 mac_shortcuts::take_panel_command()
@@ -1376,7 +723,7 @@ fn run() -> Result<(), String> {
                         let _ = webview.evaluate_script("window.clearCodeFocusSolution()");
                     }
                     let target_view = if command == 1 { "coding" } else { "mcq" };
-                    // CC/MM close their own open surface, while a command
+                    // Panel shortcuts close their own open surface, while a command
                     // for the other surface switches without hiding.
                     if overlay_visible && !history_open && active_view == target_view
                         && !was_code_reader {
@@ -1402,7 +749,7 @@ fn run() -> Result<(), String> {
             }
             if mac_shortcuts::take_start_batch() {
                 if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
-                    eprintln!("start batch unavailable during screenshot selection");
+                    eprintln!("start batch unavailable during screenshot capture");
                 } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
                     eprintln!("start batch unavailable during cloud submission");
                 } else if let Err(e) = start_batch(&active_view) {
@@ -1411,10 +758,9 @@ fn run() -> Result<(), String> {
                 let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
             }
             let full_capture = mac_shortcuts::take_capture();
-            let region_capture = mac_shortcuts::take_capture_region();
             let left_capture = mac_shortcuts::take_capture_left();
             let right_capture = mac_shortcuts::take_capture_right();
-            if full_capture || region_capture || left_capture || right_capture {
+            if full_capture || left_capture || right_capture {
                 if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
                     eprintln!("screenshot capture already in progress");
                 } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
@@ -1423,11 +769,10 @@ fn run() -> Result<(), String> {
                     let capture_mode = if full_capture { CaptureMode::Full }
                         else if left_capture { CaptureMode::Left }
                         else if right_capture { CaptureMode::Right }
-                        else if region_capture { CaptureMode::Region }
                         else { CaptureMode::Full };
                     // These are helper-overlay captures even when their
                     // shortcut is pressed from another app.  Always restore
-                    // the Coding/MCQ surface when screencapture returns so
+                    // the Coding/MCQ surface when capture returns so
                     // the person can immediately confirm the staged image.
                     restore_overlay_after_capture = true;
                     if let Err(error) = clear_pending_capture_error(&active_view) {
@@ -1438,12 +783,13 @@ fn run() -> Result<(), String> {
                     let _ = show_overlay_pair(&overlay, &hud, false, code_focus_mode);
                     event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
                     let view = active_view.clone();
-                    capture_task = Some(rt.spawn_blocking(move || capture_screen(capture_mode, &view)));
+                    let excluded_windows = capture_excluded_windows.clone();
+                    capture_task = Some(rt.spawn_blocking(move || capture_screen(capture_mode, &view, &excluded_windows)));
                 }
             }
             if mac_shortcuts::take_submit() {
                 if capture_task.as_ref().is_some_and(|task| !task.is_finished()) {
-                    eprintln!("finish the screenshot selection before submitting");
+                    eprintln!("finish the screenshot capture before submitting");
                 } else if submit_task.as_ref().is_some_and(|task| !task.is_finished()) {
                     eprintln!("cloud submission already running");
                 } else {
@@ -1501,7 +847,7 @@ fn run() -> Result<(), String> {
                 let _ = set_ghost_opacity(&hud, overlay_alpha);
             }
             // Arrows navigate only while HH history is visible. They are
-            // observed by IOHID and do not capture normal application keys.
+            // delivered by Carbon only for the registered modifier combinations.
             if history_open && overlay_visible {
                 if mac_shortcuts::take_history_back() {
                     if history_detail_open {
@@ -1868,7 +1214,7 @@ fn hud_window<T>(
 #[cfg(target_os = "macos")]
 fn tune_ghost_overlay(window: &Window) -> Result<(), String> {
     use objc2_app_kit::{
-        NSScreenSaverWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowSharingType,
+        NSStatusWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowSharingType,
         NSWindowStyleMask,
     };
     use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
@@ -1879,20 +1225,20 @@ fn tune_ghost_overlay(window: &Window) -> Result<(), String> {
             return Err("Could not access ghost overlay NSWindow.".into());
         }
         let ns_window = &*ns_window.cast::<NSWindow>();
-        // Screen-saver level: above everything, below the cursor
-        ns_window.setLevel(NSScreenSaverWindowLevel);
+        // Keep the overlay above ordinary windows without using screen-saver level.
+        ns_window.setLevel(NSStatusWindowLevel);
         ns_window.setAlphaValue(0.46);
-        // NSWindowSharingType::None = invisible to screen capture
-        ns_window.setSharingType(NSWindowSharingType::None);
         ns_window.setCollectionBehavior(
             NSWindowCollectionBehavior::CanJoinAllSpaces
                 | NSWindowCollectionBehavior::FullScreenAuxiliary
-                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::Transient
                 | NSWindowCollectionBehavior::IgnoresCycle,
         );
+        ns_window.setExcludedFromWindowsMenu(true);
         ns_window.setIgnoresMouseEvents(true);
         ns_window.setHasShadow(false);
         ns_window.setStyleMask(NSWindowStyleMask::Borderless);
+        ns_window.setSharingType(NSWindowSharingType::None);
     }
 
     apply_vibrancy(
@@ -1904,6 +1250,16 @@ fn tune_ghost_overlay(window: &Window) -> Result<(), String> {
     .map_err(|e| format!("Could not apply ghost vibrancy: {e}"))?;
 
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn overlay_window_id(window: &Window) -> Result<isize, String> {
+    use objc2_app_kit::NSWindow;
+    unsafe {
+        let pointer = window.ns_window();
+        if pointer.is_null() { return Err("Overlay NSWindow unavailable".into()); }
+        Ok((&*pointer.cast::<NSWindow>()).windowNumber())
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1919,33 +1275,43 @@ fn set_ghost_opacity(window: &Window, alpha: f64) -> Result<(), String> {
         if ns_window.is_null() {
             return Err("Overlay NSWindow unavailable".into());
         }
-        (&*ns_window.cast::<NSWindow>()).setAlphaValue(alpha.clamp(0.18, 0.95));
+        (&*ns_window.cast::<NSWindow>()).setAlphaValue(alpha.clamp(0.0, 0.95));
     }
     Ok(())
 }
 
 fn show_overlay(window: &Window, visible: bool) -> Result<(), String> {
-    window.set_always_on_top(true);
     window
         .set_ignore_cursor_events(true)
         .map_err(|e| format!("Could not set ghost click-through: {e}"))?;
-    window.set_visible(visible);
 
-    // `set_visible` alone does not bring an inactive application's window
-    // above the foreground application. Keep this overlay click-through and
-    // non-key, but explicitly order it to the front so its global shortcut
-    // works from any app, Space, or full-screen desktop.
     #[cfg(target_os = "macos")]
-    if visible {
-        use objc2_app_kit::NSWindow;
+    {
+        use objc2_app_kit::{NSStatusWindowLevel, NSWindow, NSWindowSharingType};
 
         unsafe {
             let ns_window = window.ns_window();
             if ns_window.is_null() {
                 return Err("Overlay NSWindow unavailable".into());
             }
-            (&*ns_window.cast::<NSWindow>()).orderFrontRegardless();
+            let ns_window = &*ns_window.cast::<NSWindow>();
+            if visible {
+                // Tao's set_visible(true) calls makeKeyAndOrderFront. Keep this
+                // click-through overlay non-key and preserve capture exclusion.
+                ns_window.setLevel(NSStatusWindowLevel);
+                ns_window.setSharingType(NSWindowSharingType::None);
+                ns_window.orderFrontRegardless();
+                ns_window.setSharingType(NSWindowSharingType::None);
+            } else {
+                ns_window.orderOut(None);
+            }
         }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        window.set_always_on_top(true);
+        window.set_visible(visible);
     }
 
     Ok(())
@@ -1963,6 +1329,40 @@ fn show_overlay_pair(content: &Window, hud: &Window, visible: bool, code_focus_m
         show_overlay(hud, true)?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_overlay_capture_self_test(window_ids: String) {
+    std::thread::spawn(move || {
+        let executable = match std::env::current_exe() {
+            Ok(path) => path.with_file_name("mds-capture"),
+            Err(error) => {
+                eprintln!("overlay capture self-test inconclusive: {error}");
+                return;
+            }
+        };
+        if !executable.is_file() {
+            eprintln!("overlay capture self-test inconclusive: capture helper unavailable");
+            return;
+        }
+        match Command::new(executable)
+            .arg("self-test")
+            .arg(std::process::id().to_string())
+            .arg(window_ids)
+            .output()
+        {
+            Ok(output) if output.status.code() == Some(10) => {
+                eprintln!("WARNING: overlay may be visible to unfiltered ScreenCaptureKit capture on this macOS version");
+            }
+            Ok(output) if output.status.success() => {
+                eprintln!("overlay capture self-test: no significant image difference detected in overlay bounds");
+            }
+            Ok(output) => {
+                eprintln!("overlay capture self-test inconclusive: {}", String::from_utf8_lossy(&output.stderr).trim());
+            }
+            Err(error) => eprintln!("overlay capture self-test inconclusive: {error}"),
+        }
+    });
 }
 
 // ─── CAPTURE / SUBMIT ────────────────────────────────────────────────────────
@@ -2507,38 +1907,15 @@ fn remove_last_pending_image(view: &str) -> Result<bool, String> {
 }
 
 #[derive(Clone, Copy)]
-enum CaptureMode { Full, Region, Left, Right }
+enum CaptureMode { Full, Left, Right }
 
 fn helper_capture_mode(digit: u8) -> Option<CaptureMode> {
     match digit {
         1 => Some(CaptureMode::Full),
         2 => Some(CaptureMode::Left),
         3 => Some(CaptureMode::Right),
-        4 => Some(CaptureMode::Region),
         _ => None,
     }
-}
-
-/// Commands for the three overlay surfaces. This records only C, M or H,
-/// never text typed into applications. The OS HID callback uses physical
-/// key usages, making caps lock and shift equivalent for this command.
-fn double_tap_panel(
-    previous: &mut Option<(u8, bool, Instant)>,
-    key: u8,
-    uppercase: bool,
-    at: Instant,
-) -> Option<u8> {
-    let matched = previous.as_ref().is_some_and(|(last, last_uppercase, time)|
-        *last == key
-            && same_letter_case(*last_uppercase, uppercase)
-            && at.saturating_duration_since(*time) <= Duration::from_millis(1_200)
-    );
-    *previous = if matched { None } else { Some((key, uppercase, at)) };
-    if matched { Some(key) } else { None }
-}
-
-fn same_letter_case(first_uppercase: bool, second_uppercase: bool) -> bool {
-    first_uppercase == second_uppercase
 }
 
 fn code_focus_shortcut_allowed(active_view: &str, history_open: bool, history_detail_open: bool) -> bool {
@@ -2546,16 +1923,6 @@ fn code_focus_shortcut_allowed(active_view: &str, history_open: bool, history_de
         history_detail_open
     } else {
         active_view == "coding"
-    }
-}
-
-fn number_pair_command(first: u8, second: u8) -> Option<u8> {
-    match first {
-        0 if second == 0 => Some(6),
-        1 if second <= 4 => Some(10 + second),
-        2 if second == 0 || (2..=5).contains(&second) => Some(20 + second),
-        3 if (1..=5).contains(&second) => Some(30 + second),
-        _ => None,
     }
 }
 
@@ -2578,7 +1945,7 @@ extern "C" {
     fn CGDisplayBounds(display: u32) -> CaptureRect;
 }
 
-fn capture_screen(mode: CaptureMode, view: &str) -> Result<(), String> {
+fn capture_screen(mode: CaptureMode, view: &str, excluded_windows: &str) -> Result<(), String> {
     // A screenshot shortcut must work even when the main app is closed and the
     // user has not explicitly started a batch. Reuse a pending batch for
     // successive screenshots instead of silently replacing earlier captures.
@@ -2602,37 +1969,7 @@ fn capture_screen(mode: CaptureMode, view: &str) -> Result<(), String> {
     );
     let path = dir.join(&file_name);
 
-    let mut command = Command::new("/usr/sbin/screencapture");
-    command.arg("-x");
-    match mode {
-        CaptureMode::Region => { command.arg("-i"); }
-        CaptureMode::Left | CaptureMode::Right => {
-            #[cfg(target_os = "macos")]
-            {
-                let bounds = unsafe { CGDisplayBounds(CGMainDisplayID()) };
-                let x = bounds.origin.x.round() as i64;
-                let y = bounds.origin.y.round() as i64;
-                let width = bounds.size.width.round() as i64;
-                let height = bounds.size.height.round() as i64;
-                if width < 2 || height < 1 {
-                    return Err("Could not determine display bounds for half-screen capture.".into());
-                }
-                let left_width = width / 2;
-                let (start, part_width) = match mode {
-                    CaptureMode::Left => (x, left_width),
-                    _ => (x + left_width, width - left_width),
-                };
-                command.arg("-R").arg(format!("{start},{y},{part_width},{height}"));
-            }
-        }
-        CaptureMode::Full => {}
-    }
-    let out = command.arg(&path).output()
-        .map_err(|e| format!("Screen capture could not be started: {e}"))?;
-    if matches!(mode, CaptureMode::Region) && !path.exists() {
-        // Escape cancels region selection without corrupting the pending batch.
-        return Ok(());
-    }
+    let out = run_capture_command(mode, &path, excluded_windows)?;
     if !out.status.success() {
         let _ = fs::remove_file(&path);
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -2667,6 +2004,57 @@ fn capture_screen(mode: CaptureMode, view: &str) -> Result<(), String> {
     save_pending_for(view, &batch)?;
     log(&format!("captured image {} for {}", position + 1, batch.id));
     Ok(())
+}
+
+fn run_capture_command(mode: CaptureMode, path: &Path, excluded_windows: &str) -> Result<std::process::Output, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let executable = std::env::current_exe()
+            .map_err(|e| format!("Could not locate capture helper: {e}"))?
+            .with_file_name("mds-capture");
+        if executable.is_file() {
+            let mode_name = match mode {
+                CaptureMode::Full => "full",
+                CaptureMode::Left => "left",
+                CaptureMode::Right => "right",
+            };
+            let output = Command::new(&executable)
+                .arg(mode_name).arg(path).arg(std::process::id().to_string())
+                .arg(excluded_windows).output()
+                .map_err(|e| format!("ScreenCaptureKit helper could not be started: {e}"))?;
+            // macOS 11–13 use the existing system screenshot utility.
+            if output.status.code() != Some(78) { return Ok(output); }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = excluded_windows;
+    let mut command = Command::new("/usr/sbin/screencapture");
+    command.arg("-x");
+    match mode {
+        CaptureMode::Left | CaptureMode::Right => {
+            #[cfg(target_os = "macos")]
+            {
+                let bounds = unsafe { CGDisplayBounds(CGMainDisplayID()) };
+                let x = bounds.origin.x.round() as i64;
+                let y = bounds.origin.y.round() as i64;
+                let width = bounds.size.width.round() as i64;
+                let height = bounds.size.height.round() as i64;
+                if width < 2 || height < 1 {
+                    return Err("Could not determine display bounds for half-screen capture.".into());
+                }
+                let left_width = width / 2;
+                let (start, part_width) = match mode {
+                    CaptureMode::Left => (x, left_width),
+                    _ => (x + left_width, width - left_width),
+                };
+                command.arg("-R").arg(format!("{start},{y},{part_width},{height}"));
+            }
+        }
+        CaptureMode::Full => {}
+    }
+    command.arg(path).output()
+        .map_err(|e| format!("Screen capture could not be started: {e}"))
 }
 
 async fn submit_batch(active_view: &str) -> Result<(), String> {
@@ -3908,12 +3296,12 @@ fn hud_html() -> &'static str {
       window.setOverlayControls=function(view){
         const host=document.getElementById('hud-shortcuts');if(!host)return;
         const controls=view==='docked'
-          ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll code','↑↓'],['Ports','rr/cp/py'],['Left / Back','sl'],['Right / Back','sr']]
+          ? [['Coding','⌃⌥C'],['MCQ','⌃⌥M'],['History','⌃⌥H'],['New','⌃⌥N'],['Capture','⌃⌥1'],['Submit','⌃⌥4'],['Scroll code','⌃⌥↑↓'],['Ports','⌃⌥⌘R/C/P'],['Dock left','⌃⌥⌘L'],['Dock right','⌃⌥⌘⇧R']]
           : view==='history'
-          ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
+          ? [['Coding','⌃⌥C'],['MCQ','⌃⌥M'],['History','⌃⌥H'],['Previous','⌃⌥↑'],['Next','⌃⌥↓'],['Open','⌃⌥\\'],['Back','⌃⌥←']]
           : view==='mcq'
-          ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31'],['Left','32'],['Right','33'],['Region','34'],['Submit','35']]
-          : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py'],['Dock code','sl/sr']];
+          ? [['MCQ','⌃⌥M'],['Coding','⌃⌥C'],['History','⌃⌥H'],['Full','⌃⌥⇧1'],['Left','⌃⌥⇧2'],['Right','⌃⌥⇧3'],['Submit','⌃⌥⇧4']]
+          : [['Coding','⌃⌥C'],['MCQ','⌃⌥M'],['History','⌃⌥H'],['New','⌃⌥N'],['Full','⌃⌥1'],['Left','⌃⌥2'],['Right','⌃⌥3'],['Submit','⌃⌥4'],['Ports','⌃⌥⌘R/C/P'],['Dock','⌃⌥⌘L/⇧R']];
         const fingerprint=controls.map(([name,key])=>name+key).join('|');
         if(host.dataset.shortcutSet===fingerprint)return;
         host.dataset.shortcutSet=fingerprint;host.replaceChildren();
@@ -4132,7 +3520,7 @@ fn overlay_html() -> &'static str {
             #code-focus-code li[data-change="summary"]{border-left:3px solid rgba(125,189,255,.68);background:rgba(52,123,210,.12);color:#c7e2ff}
             @media(prefers-reduced-motion:reduce){body[data-code-focus] #panel{transition:none}}
         </style></head><body><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><section id="code-focus-sheet" hidden><div class="code-focus-header"><div class="code-focus-file"><span class="code-focus-icon" aria-hidden="true">{ }</span><div class="code-focus-file-info"><span id="code-focus-file">solution.py</span><span id="code-focus-lang">Python · read only</span></div></div><div class="code-focus-meta"><button type="button" id="code-focus-diff-toggle" class="code-focus-diff-toggle" hidden>Show update diff</button><span id="code-focus-count">0 lines</span><span id="code-focus-status" class="code-focus-status">Verified</span></div></div><ol id="code-focus-code" aria-label="Solution code"></ol></section><script>
-	            // HUD labels come from the numeric command table handled by mac_shortcuts.
+			// HUD labels reflect the Carbon commands handled by mac_shortcuts.
             // Keep the overlay's real capture controls, not generic demo shortcuts.
             // The reader always starts with the E2B-gated state selected by
             // Rust. It never borrows potentially stale normal-pane markup.
@@ -4760,9 +4148,9 @@ mod tests {
         assert!(content.contains("reading?'code-focus-code':'solution-code'"),
             "the same solution scroll helper must choose the docked code reader");
         assert!(controls.contains("view==='docked'"));
-        assert!(controls.contains("['Scroll code','↑↓']"));
-        assert!(controls.contains("['Left / Back','sl']"));
-        assert!(controls.contains("['Right / Back','sr']"));
+        assert!(controls.contains("['Scroll code','⌃⌥↑↓']"));
+        assert!(controls.contains("['Dock left','⌃⌥⌘L']"));
+        assert!(controls.contains("['Dock right','⌃⌥⌘⇧R']"));
         let code = PhysicalPosition::new(10_i32, 10_i32);
         let size = PhysicalSize::new(600_u32, 700_u32);
         let left = docked_hud_position(code, size, 2, 1.0);
@@ -4771,37 +4159,6 @@ mod tests {
         assert!(right.x < code.x, "SR HUD must be beside, not over, code");
         assert_eq!(left.y, code.y);
         assert_eq!(right.y, code.y);
-    }
-
-    #[test]
-    fn only_distinct_quick_letter_double_taps_open_panels() {
-        let start = Instant::now();
-        let mut last = None;
-        assert_eq!(double_tap_panel(&mut last, 1, false, start), None);
-        assert_eq!(double_tap_panel(&mut last, 1, false, start + Duration::from_millis(230)), Some(1));
-        // A completed pair resets; holding a key is filtered at the HID edge.
-        assert_eq!(double_tap_panel(&mut last, 1, false, start + Duration::from_millis(400)), None);
-        assert_eq!(double_tap_panel(&mut last, 2, false, start + Duration::from_millis(475)), None);
-        assert_eq!(double_tap_panel(&mut last, 2, false, start + Duration::from_millis(900)), Some(2));
-        assert_eq!(double_tap_panel(&mut last, 3, true, start + Duration::from_millis(1000)), None);
-        assert_eq!(double_tap_panel(&mut last, 3, true, start + Duration::from_millis(1700)), Some(3));
-        assert_eq!(double_tap_panel(&mut last, 3, false, start + Duration::from_millis(2_301)), None);
-        assert_eq!(double_tap_panel(&mut last, 3, false, start + Duration::from_millis(3_602)), None);
-        assert_eq!(double_tap_panel(&mut last, 3, false, start + Duration::from_millis(3_610)), Some(3));
-    }
-
-    #[test]
-    fn letter_shortcuts_accept_uniform_case_and_reject_mixed_case() {
-        let start = Instant::now();
-        let mut last = None;
-        assert_eq!(double_tap_panel(&mut last, 1, false, start), None);
-        assert_eq!(double_tap_panel(&mut last, 1, true, start + Duration::from_millis(100)), None);
-        assert_eq!(double_tap_panel(&mut last, 1, true, start + Duration::from_millis(200)), Some(1));
-
-        assert!(same_letter_case(false, false), "cc is a uniform-case pair");
-        assert!(same_letter_case(true, true), "CC is a uniform-case pair");
-        assert!(!same_letter_case(false, true), "cC is mixed case and must not dispatch");
-        assert!(!same_letter_case(true, false), "sL is mixed case and must not dispatch");
     }
 
     #[test]
@@ -4879,22 +4236,6 @@ mod tests {
         let unseen=coding_overlay_state(&no_evidence);
         assert_eq!(unseen["insights"]["edgeCases"].as_array().map(Vec::len),Some(0),
             "Never present proposed harness assertions as tested without Council standing");
-    }
-
-    #[test]
-    fn number_pairs_route_to_the_requested_workflow_and_capture_shape() {
-        let expected = [
-            (0, 0, 6),
-            (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13),
-            (2, 0, 20), (2, 2, 22), (2, 3, 23), (2, 4, 24), (2, 5, 25),
-            (3, 1, 31), (3, 2, 32), (3, 3, 33), (3, 4, 34), (3, 5, 35),
-        ];
-        for (prefix, shape, command) in expected {
-            assert_eq!(number_pair_command(prefix, shape), Some(command));
-        }
-        for invalid in [(1, 5), (2, 1), (2, 6), (3, 0), (4, 1)] {
-            assert_eq!(number_pair_command(invalid.0, invalid.1), None);
-        }
     }
 
     #[test]

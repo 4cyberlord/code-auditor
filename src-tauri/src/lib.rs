@@ -8,6 +8,7 @@ pub mod deployment;
 pub mod ghost_mode;
 mod helper_auth;
 mod knowledge;
+mod language_docs;
 mod overlay;
 mod overlay_state;
 mod platform_base;
@@ -52,21 +53,38 @@ pub const EV_WORKSPACE: &str = "workspace://select";
 /// hotkey table, so registration reports success and the press simply never
 /// arrives. Nothing in the API can detect that. Being able to move the key
 /// without a rebuild is how you find out that is what is happening.
-/// Control+Option+letter, for two reasons. Nothing in macOS claims this family --
-/// unlike Control+digit, which Mission Control binds to "Switch to Desktop N" --
-/// and few apps register global hotkeys with it, so the keystroke actually
-/// reaches us. And the letters say what they do:
+/// Control+Command+Shift+letter keeps main app shortcuts separate from the
+/// overlay helper's Control+Option shortcuts. The letters say what they do:
 ///
 ///   S = Screen   grab the whole display
 ///   R = Region   drag a box
 ///   A = Audit    hand it to the agents
 ///   O = Overlay  toggle the capture-exempt glass panel
-pub const ACCEL_CAPTURE_SCREEN: &str = "Control+Alt+S";
-pub const ACCEL_CAPTURE: &str = "Control+Alt+R";
-pub const ACCEL_CAPTURE_LEFT: &str = "Control+Alt+Shift+L";
-pub const ACCEL_CAPTURE_RIGHT: &str = "Control+Alt+Shift+R";
-pub const ACCEL_SOLVE: &str = "Control+Alt+A";
-pub const ACCEL_OVERLAY: &str = "Control+Alt+O";
+pub const ACCEL_CAPTURE_SCREEN: &str = "Control+Super+Shift+S";
+pub const ACCEL_CAPTURE: &str = "Control+Super+Shift+R";
+pub const ACCEL_CAPTURE_LEFT: &str = "Control+Super+Shift+L";
+pub const ACCEL_CAPTURE_RIGHT: &str = "Control+Super+Shift+H";
+pub const ACCEL_SOLVE: &str = "Control+Super+Shift+A";
+pub const ACCEL_OVERLAY: &str = "Control+Super+Shift+O";
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+    use std::{collections::HashSet, str::FromStr};
+
+    #[test]
+    fn main_app_defaults_are_distinct_registered_modifier_shortcuts() {
+        let mut keys = HashSet::new();
+        for spec in [
+            ACCEL_CAPTURE_SCREEN, ACCEL_CAPTURE, ACCEL_CAPTURE_LEFT,
+            ACCEL_CAPTURE_RIGHT, ACCEL_SOLVE, ACCEL_OVERLAY,
+        ] {
+            assert!(spec.starts_with("Control+Super+Shift+"));
+            let key = tauri_plugin_global_shortcut::Shortcut::from_str(spec).unwrap();
+            assert!(keys.insert(key), "duplicate shortcut: {spec}");
+        }
+    }
+}
 
 fn accel(var: &str, default: &str) -> String {
     std::env::var(var)
@@ -323,7 +341,7 @@ pub fn run() {
                     };
                     if matches!(ev, EV_CAPTURE | EV_CAPTURE_SCREEN | EV_CAPTURE_LEFT | EV_CAPTURE_RIGHT)
                         && background_helper::capture_owner_pid().is_some() {
-                        return; // Helper's IOHID callback already handled the physical press.
+                        return; // The background helper owns this capture while it is active.
                     }
                     trace(&format!("hotkey fired -> {ev}"));
                     let _ = app.emit(ev, ());
@@ -364,6 +382,7 @@ pub fn run() {
             knowledge::knowledge_delete,
             knowledge::knowledge_folder,
             knowledge::knowledge_publish,
+            language_docs::language_reference_context,
             capture::capture_selection,
             capture::capture_screen,
             capture::capture_left_half,

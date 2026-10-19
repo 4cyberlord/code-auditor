@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "council-solve-dispatch",
+  "account_id": "2f1fd5442ab4f1ed35ebe0bf67430eb4",
   "main": "src/index.js",
   "compatibility_date": "2026-10-15",
   "observability": {
@@ -12,7 +13,7 @@
   "vpc_services": [
     {
       "binding": "NIMO_WAKE",
-      "service_id": "01a14123-6d7c-76a1-a1a8-72a13f028342",
+      "service_id": "01a152b4-19a7-7c83-aa22-9a53deabcac2",
       "remote": true
     }
   ],

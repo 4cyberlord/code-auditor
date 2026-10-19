@@ -473,16 +473,16 @@ function CaptureExemptOverlay() {
         <span className="capture-pause" aria-hidden="true">||</span>
         <span className="capture-meter" aria-hidden="true"><i /><i /><i /></span>
         <span className="capture-action">Capture Region</span>
-        <span className="capture-key">⌃⌥</span>
+        <span className="capture-key">⌃⌘⇧</span>
         <span className="capture-key">R</span>
         <span className="capture-action">Capture Screen</span>
-        <span className="capture-key">⌃⌥</span>
+        <span className="capture-key">⌃⌘⇧</span>
         <span className="capture-key">S</span>
         <span className="capture-action">Solve</span>
-        <span className="capture-key">⌃⌥</span>
+        <span className="capture-key">⌃⌘⇧</span>
         <span className="capture-key">A</span>
         <span className="capture-action">Overlay</span>
-        <span className="capture-key">⌃⌥</span>
+        <span className="capture-key">⌃⌘⇧</span>
         <span className="capture-key">O</span>
       </div>
 

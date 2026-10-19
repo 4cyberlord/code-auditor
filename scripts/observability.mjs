@@ -1,7 +1,6 @@
 import * as Sentry from "@sentry/node";
 
 const sentryEnabled = Boolean(process.env.SENTRY_DSN);
-const telegramEnabled = Boolean(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID);
 
 const SECRET_KEY = /(key|token|secret|password|credential|authorization|cookie|dsn|private)/i;
 
@@ -92,15 +91,6 @@ export function captureWorkerException(error, context = {}) {
 }
 
 export async function notifyOps({ title, body, level = "info", jobId = "", phase = "" }) {
-  const text = [
-    `${level.toUpperCase()}: ${safeString(title, 96)}`,
-    body ? safeString(body, 800) : "",
-    jobId ? `job: ${jobId}` : "",
-    phase ? `phase: ${phase}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
-
   if (sentryEnabled && (level === "error" || level === "warn")) {
     Sentry.captureMessage(`${title}: ${body || ""}`, {
       level: level === "error" ? "error" : "warning",
@@ -108,25 +98,7 @@ export async function notifyOps({ title, body, level = "info", jobId = "", phase
     });
   }
 
-  if (!telegramEnabled) return false;
-  const res = await fetch(
-    `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        chat_id: process.env.TELEGRAM_CHAT_ID,
-        text,
-        disable_web_page_preview: true,
-      }),
-    }
-  );
-  if (!res.ok) {
-    const message = `Telegram notification failed: ${res.status} ${res.statusText}`;
-    if (sentryEnabled) Sentry.captureMessage(message, { level: "warning" });
-    return false;
-  }
-  return true;
+  return sentryEnabled;
 }
 
 export async function closeObservability(timeoutMs = 2000) {

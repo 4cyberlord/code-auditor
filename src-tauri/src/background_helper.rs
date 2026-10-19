@@ -62,6 +62,13 @@ fn home() -> Result<PathBuf, String> {
 }
 
 fn plist_path() -> Result<PathBuf, String> {
+    Ok(home()?
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{GHOST_LABEL}.plist")))
+}
+
+fn legacy_plist_path() -> Result<PathBuf, String> {
     Ok(support_dir()?.join(format!("{GHOST_LABEL}.plist")))
 }
 
@@ -73,14 +80,22 @@ fn support_dir() -> Result<PathBuf, String> {
 }
 
 fn helper_bin_dir() -> Result<PathBuf, String> {
-    Ok(support_dir()?.join("bin"))
+    Ok(home()?
+        .join("Library")
+        .join("Application Support")
+        .join("CouncilEditor")
+        .join("Helper"))
+}
+
+fn legacy_helper_bundle_path() -> Result<PathBuf, String> {
+    Ok(support_dir()?.join("bin").join(format!("{GHOST_BUNDLE_ID}.app")))
 }
 
 fn helper_bundle_path() -> Result<PathBuf, String> {
     Ok(helper_bin_dir()?.join(format!("{GHOST_BUNDLE_ID}.app")))
 }
 
-fn helper_executable_path() -> Result<PathBuf, String> {
+pub(crate) fn helper_executable_path() -> Result<PathBuf, String> {
     Ok(helper_bundle_path()?
         .join("Contents/MacOS")
         .join(GHOST_EXECUTABLE))
@@ -121,7 +136,7 @@ pub(crate) fn recent_headless_process() -> bool {
         .is_some_and(|at| at.elapsed() < Duration::from_secs(2))
 }
 
-/// Relay system-wide numeric capture requests from the Input Monitoring helper
+/// Relay legacy app capture requests from the background helper
 /// into the main app's normal capture pipeline (and therefore its preview tray).
 pub(crate) fn watch_app_capture_requests(app: AppHandle) {
     thread::spawn(move || loop {
@@ -300,6 +315,10 @@ fn xml_escape(value: &str) -> String {
 
 fn launch_agent_plist(helper: &str) -> String {
     let helper = xml_escape(helper);
+    let log_path = home()
+        .map(|path| path.join("Library/Logs/CouncilEditor/installed-overlay-helper.log"))
+        .map(|path| xml_escape(&path.to_string_lossy()))
+        .unwrap_or_else(|_| "/dev/null".into());
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
  <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -323,9 +342,9 @@ fn launch_agent_plist(helper: &str) -> String {
  <key>Nice</key>
  <integer>10</integer>
  <key>StandardOutPath</key>
- <string>/dev/null</string>
+ <string>{log_path}</string>
  <key>StandardErrorPath</key>
- <string>/dev/null</string>
+ <string>{log_path}</string>
  <key>LimitLoadToSessionType</key>
  <string>Aqua</string>
  <key>ThrottleInterval</key>
@@ -401,8 +420,6 @@ fn entitlements_plist() -> String {
  <true/>
  <key>com.apple.security.device.microphone</key>
  <true/>
- <key>com.apple.security.device.input</key>
- <true/>
  <key>com.apple.security.automation.apple-events</key>
  <true/>
  <key>com.apple.security.cs.anti-mach-lookup</key>
@@ -434,6 +451,10 @@ fn install_helper_bundle(bundled_helper: &str) -> Result<String, String> {
     let executable = helper_executable_path()?;
     std::fs::copy(bundled_helper, &executable)
         .map_err(|e| format!("Could not install ghost helper executable: {e}"))?;
+    let capture_source = std::path::Path::new(bundled_helper).with_file_name("mds-capture");
+    let capture_executable = macos_dir.join("mds-capture");
+    std::fs::copy(&capture_source, &capture_executable)
+        .map_err(|e| format!("Could not install ScreenCaptureKit helper from {}: {e}", capture_source.display()))?;
     std::fs::write(helper_info_plist_path()?, helper_info_plist())
         .map_err(|e| format!("Could not write ghost Info.plist: {e}"))?;
     std::fs::write(helper_pkg_info_path()?, "APPL????")
@@ -455,6 +476,12 @@ fn install_helper_bundle(bundled_helper: &str) -> Result<String, String> {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&executable, permissions)
             .map_err(|e| format!("Could not make ghost helper executable: {e}"))?;
+        let mut capture_permissions = std::fs::metadata(&capture_executable)
+            .map_err(|e| format!("Could not inspect ScreenCaptureKit helper: {e}"))?
+            .permissions();
+        capture_permissions.set_mode(0o755);
+        std::fs::set_permissions(&capture_executable, capture_permissions)
+            .map_err(|e| format!("Could not make ScreenCaptureKit helper executable: {e}"))?;
     }
 
     let identity = helper_signing_identity();
@@ -537,13 +564,13 @@ fn helper_problem(
             .map(|code| format!(", last exit code {code}"))
             .unwrap_or_default();
         return Some(format!(
-            "Ghost agent is registered with launchd but is not running (state {state}{exit}). Reinstall, then check Input Monitoring permission."
+            "Ghost agent is registered with launchd but is not running (state {state}{exit}). Reinstall and check the helper log."
         ));
     }
     if runtime.and_then(|status| status.hotkeys_available) == Some(false) {
         return runtime
             .and_then(|status| status.problem.clone())
-            .or_else(|| Some("Ghost agent is running, but hotkeys are unavailable. Grant Input Monitoring permission for the helper in macOS System Settings.".into()));
+            .or_else(|| Some("Ghost agent is running, but overlay hotkeys are unavailable. Check for conflicting system shortcuts or another running helper.".into()));
     }
     None
 }
@@ -608,7 +635,7 @@ pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
     }
     // Stop a running LaunchAgent before replacing its executable. In-place
     // overwrites can fail with a text-file-busy error and leave the old helper
-    // holding Input Monitoring while the new app assumes the updated code is live.
+    // running while the new app assumes the updated code is live.
     bootout(GHOST_LABEL);
     std::thread::sleep(std::time::Duration::from_millis(300));
     let helper = install_helper_bundle(&bundled)?;
@@ -620,8 +647,15 @@ pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("Could not create ghost plist dir: {e}"))?;
     }
+    if let Ok(dir) = home().map(|path| path.join("Library/Logs/CouncilEditor")) {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("Could not create helper log dir: {e}"))?;
+    }
     std::fs::write(&path, launch_agent_plist(&helper))
         .map_err(|e| format!("Could not write ghost LaunchAgent: {e}"))?;
+    if let Ok(previous) = legacy_plist_path() {
+        let _ = std::fs::remove_file(previous);
+    }
 
     let out = std::process::Command::new("launchctl")
         .arg("bootstrap")
@@ -653,6 +687,16 @@ pub async fn background_helper_install() -> Result<GhostModeStatus, String> {
             format!("The launchd service accepted the helper, but it was not running yet: {detail}")
         });
     }
+    if status.loaded {
+        let legacy_bundle = legacy_helper_bundle_path()?;
+        if legacy_bundle.exists() {
+            if let Err(error) = std::fs::remove_dir_all(&legacy_bundle) {
+                status.problem = Some(format!("Helper is running, but the previous bundle could not be removed: {error}"));
+            } else if let Some(old_bin_dir) = legacy_bundle.parent() {
+                let _ = std::fs::remove_dir(old_bin_dir);
+            }
+        }
+    }
     Ok(status)
 }
 
@@ -665,10 +709,19 @@ pub async fn background_helper_uninstall() -> Result<GhostModeStatus, String> {
         std::fs::remove_file(&path)
             .map_err(|e| format!("Could not remove ghost LaunchAgent: {e}"))?;
     }
+    if let Ok(previous) = legacy_plist_path() {
+        let _ = std::fs::remove_file(previous);
+    }
     if let Ok(bundle) = helper_bundle_path() {
         if bundle.exists() {
             std::fs::remove_dir_all(&bundle)
                 .map_err(|e| format!("Could not remove ghost bundle: {e}"))?;
+        }
+    }
+    if let Ok(bundle) = legacy_helper_bundle_path() {
+        if bundle.exists() {
+            std::fs::remove_dir_all(&bundle)
+                .map_err(|e| format!("Could not remove previous ghost bundle: {e}"))?;
         }
     }
     if let Ok(support) = support_dir() {

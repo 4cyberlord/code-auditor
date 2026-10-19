@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { signBinary } from "./lib/signing.mjs";
+import { buildCaptureHelper } from "./lib/build-capture-helper.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const srcTauri = join(root, "src-tauri");
@@ -42,6 +43,7 @@ const helperName = "mds";
 const explicitCargoTarget = process.env.TAURI_ENV_TARGET_TRIPLE || process.env.CARGO_BUILD_TARGET || "";
 const triple = targetTriple();
 const to = join(dir, `${helperName}-${triple}${extension}`);
+const captureSidecar = join(dir, `mds-capture-${triple}${extension}`);
 const profileIndex = args.indexOf("--profile");
 const profile = profileIndex >= 0 ? args[profileIndex + 1] : args.includes("--debug") ? "debug" : "release";
 const skipFrontend = args.includes("--skip-frontend") || args.includes("--no-frontend");
@@ -53,6 +55,10 @@ if (!["debug", "release"].includes(profile)) {
 if (!existsSync(to)) {
   writeFileSync(to, "#!/bin/sh\nexit 70\n");
   chmodSync(to, 0o755);
+}
+if (!existsSync(captureSidecar)) {
+  writeFileSync(captureSidecar, "#!/bin/sh\nexit 78\n");
+  chmodSync(captureSidecar, 0o755);
 }
 
 const cargoArgs = ["build", "--manifest-path", join(srcTauri, "Cargo.toml"), "--bin", cargoHelperName];
@@ -69,6 +75,8 @@ chmodSync(to, 0o755);
 const signedAs = signBinary(to, { require: true });
 console.log(`Prepared ${profile} sidecar: ${to}`);
 if (signedAs) console.log(`Signed sidecar as: ${signedAs}`);
+buildCaptureHelper(root, captureSidecar, triple);
+console.log(`Prepared capture sidecar: ${captureSidecar}`);
 
 if (!skipFrontend) {
   run("npm", ["run", "build"]);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { inspectReleaseConfiguration } from "../scripts/release-preflight.mjs";
-const base={build:{frontendDist:"../out"},bundle:{active:true,targets:["app","dmg"],externalBin:["binaries/mds"]},identifier:"com.charles.councileditor",version:"0.1.0",app:{security:{csp:{"script-src":"'self'"}}}};
+const base={build:{frontendDist:"../out"},bundle:{active:true,targets:["app","dmg"],externalBin:["binaries/mds","binaries/mds-capture"]},identifier:"com.charles.councileditor",version:"0.1.0",app:{security:{csp:{"script-src":"'self'"}}}};
 const pkg={scripts:{"app:build:signed":"node scripts/build-signed.mjs","app:build":"tauri build && node scripts/package-dmg.mjs"}};
 assert.deepEqual(inspectReleaseConfiguration(base,pkg),[]);
 assert.ok(inspectReleaseConfiguration({...base,bundle:{...base.bundle,externalBin:[]}},pkg).some(x=>x.includes("sidecar")));

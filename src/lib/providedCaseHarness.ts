@@ -36,6 +36,11 @@ const LABEL = /^\s*(?:sample\s+)?(?:input|output|expected\s+output|expected)\s*:
 const INLINE_LABEL = /\b(?:sample\s+)?(?:expected\s+output|input|output|expected)\s*:/gi;
 export const MIN_GENERATED_HARNESS_CASES = 8;
 
+export function shouldUseStructuredPythonHarness(language: string, question: string): boolean {
+  return language === "python" &&
+    !/\b(?:any order|any valid|multiple valid|in any order|any one|arbitrary order|order does not matter|modify in.place|in.place modification|do not return anything)\b/i.test(question);
+}
+
 function splitTopLevel(text: string): string[] {
   const result: string[] = [];
   let depth = 0;
@@ -262,7 +267,7 @@ export function buildGeneratedPythonHarness(
 ): ProvidedSuite | null {
   // Equality-based cases cannot validate a contract that permits several
   // correct representations. Keep those on the existing comparator-aware path.
-  if (/\b(?:any order|any valid|multiple valid|in any order|any one|arbitrary order|order does not matter|modify in.place|in.place modification|do not return anything)\b/i.test(question)) return null;
+  if (!shouldUseStructuredPythonHarness("python", question)) return null;
   let spec: Record<string, unknown>;
   try {
     const text = String(rawSpec || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");

@@ -84,7 +84,7 @@ import { codingTrustyEligible, primaryCodingLanguage, primaryFirstInstruction, p
 import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "./independentLanguageCouncil.ts";
 import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief, evidenceSolverBrief } from "./problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "./judgeUpgradePolicy.ts";
-import { buildProvidedHarness, buildGeneratedPythonHarness, pythonHarnessJsonSystemPrompt, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
+import { buildProvidedHarness, buildGeneratedPythonHarness, pythonHarnessJsonSystemPrompt, shouldUseStructuredPythonHarness, providedCaseEvidence, requiredHarnessCases } from "./providedCaseHarness.ts";
 import { needsCandidateRevision, classifyCandidateRun, MAX_CANDIDATE_REPAIR_ATTEMPTS } from "./revisionPolicy.ts";
 import { requiresRepair } from "../../scripts/lib/phase2Execution.mjs";
 import { blankDocument, markdownToRecord, recordToMarkdown, slugify } from "./knowledgeDoc.ts";
@@ -5086,6 +5086,15 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // the stages that did not would be answering different questions.
   const problem = [s0.note, s0.extraction.context, contractText].filter(value => value && value.trim()).join("\n\n---\n\n");
   const primaryLanguage = primaryCodingLanguage([problem, s0.extraction.context].filter(Boolean).join("\n\n"), settings.outputLanguage);
+  // Fetch only the selected output language's focused reference excerpt now,
+  // while model capability evidence and screenshot fixtures are preparing.
+  // The bridge is fixed-host and bounded; if the VPS is unreachable the local
+  // language knowledge remains sufficient to continue without a new wait.
+  const isCodingSubmission = reading?.kind === "code" ||
+    /\b(?:test cases?|function signature|algorithm|leetcode|compile|stdin|expected output)\b/i.test(problem);
+  const languageReferenceReady = isCodingSubmission
+    ? bridge.languageReferenceContext(primaryLanguage, problem)
+    : Promise.resolve("");
 
   set((st) => ({ council: { ...st.council, phase: "solving" as const } }));
   const seats = Math.max(0, COUNCIL_SIZE.solversMax - paneAnswers.length);
@@ -5166,8 +5175,10 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // records in your knowledge folder laid over it by id. Something you wrote
   // this morning is in front of the solvers this afternoon, with no deploy and
   // no sync — the cloud worker is the leg that waits for a publish.
-  const knowledge = solverKnowledgePack(get,
+  const retrievedKnowledge = solverKnowledgePack(get,
     [s0.note, extractionCtx, contractQuery(contract)].filter((x) => x && x.trim()).join("\n\n"));
+  const languageReference = await languageReferenceReady;
+  const knowledge = [retrievedKnowledge, languageReference].filter(Boolean).join("\n\n");
   const sys = systemPrompt(
     settings.mode,
     resolveAnswerLanguage(primaryLanguage === "cpp" ? "C++" : primaryLanguage === "rust" ? "Rust" : "Python", "")
@@ -5407,7 +5418,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
         if (!councilAlive(get().council, runId)) return;
         set((st) => ({ council: { ...st.council, specBy: model } }));
         try {
-          const structuredPython = language === "python";
+          const structuredPython = shouldUseStructuredPythonHarness(language, harnessProblem);
           const originalSpecPrompt = testSpecUserPrompt({ question: `${harnessProblem}\n\n${routingGuidance(route)}`, docket: candidateDocket(field), languages: [language], knowledge });
           let specText = "";
           let parsed: TestSuite | undefined;
@@ -5416,6 +5427,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
           // completion, then advances to another ready solver. This handles
           // transient gateway envelopes without restarting the whole Council.
           for (let attempt = 0; attempt < 2; attempt += 1) {
+            const useJsonFormat = structuredPython && attempt === 0;
             try {
               specText = await bridge.runOnce({
                 runId,
@@ -5423,19 +5435,17 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
                 attemptId: newAttemptId(),
                 provider: settings.gatewayId,
                 model,
-                systemPrompt: structuredPython ? pythonHarnessJsonSystemPrompt() : testSpecSystemPrompt(),
+                systemPrompt: useJsonFormat ? pythonHarnessJsonSystemPrompt() : testSpecSystemPrompt(),
                 userText: attempt === 0 ? originalSpecPrompt : [
                   originalSpecPrompt,
-                  structuredPython
-                    ? 'RECOVERY: return one JSON object only, matching the required schema exactly; include at least eight distinct test cases and an independent Python reference_code. Do not emit runner code or commentary.'
-                    : "RECOVERY: your previous harness response was empty or not parseable. Return only the complete required TESTS block for the same language; include the splice marker and independent reference. Do not add commentary.",
+                  "RECOVERY: your previous harness response was empty or not parseable. Return only the complete required TESTS block for the same language; include the splice marker and independent reference. Do not add commentary.",
                 ].join("\n\n"),
                 images: [],
                 maxTokens: Math.max(settings.maxTokens, 8192),
                 temperature: 0,
                 baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
                 endpoint: endpointForModel(settings, model),
-                jsonMode: structuredPython && settings.gatewayId === "cleanapis",
+                jsonMode: useJsonFormat && settings.gatewayId === "cleanapis",
               });
             } catch (err) {
               specFailure = `${model}: ${cleanError(String(err))}`;
@@ -5443,7 +5453,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
               throw err;
             }
             if (!councilAlive(get().council, runId)) return;
-            parsed = structuredPython
+            parsed = useJsonFormat
               ? buildGeneratedPythonHarness(harnessProblem, specText, candidateCode) || parseTestSuites(specText).find(suite => suite.language === language)
               : parseTestSuites(specText).find(suite => suite.language === language);
             if (parsed || attempt === 1) break;

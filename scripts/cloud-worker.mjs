@@ -19,7 +19,7 @@
 import "./lib/config.mjs";
 
 import { createHash, createHmac, createSign } from "node:crypto";
-import { buildProvidedHarness, buildGeneratedPythonHarness, pythonHarnessJsonSystemPrompt, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "../src/lib/providedCaseHarness.ts";
+import { buildProvidedHarness, buildGeneratedPythonHarness, pythonHarnessJsonSystemPrompt, shouldUseStructuredPythonHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "../src/lib/providedCaseHarness.ts";
 import { configuredCodeLanguage, providedTestBrief } from "../src/lib/primaryDeliveryPolicy.ts";
 import { secondaryCouncilLanguages, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "../src/lib/independentLanguageCouncil.ts";
 import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief, evidenceSolverBrief } from "../src/lib/problemEvidence.ts";
@@ -1671,7 +1671,7 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
       Math.max(6, candidateAuthors.length + 2));
     for (const model of harnessAuthors.slice(0, maxHarnessAuthors)) {
       try {
-        const structuredPython = language === "python";
+        const structuredPython = shouldUseStructuredPythonHarness(language, question);
         const specText = await tokenRouterGenerate({
           settings, baseUrl, model, system: structuredPython ? pythonHarnessJsonSystemPrompt() : testSpecSystemPrompt() +
              (process.env.CODE_AUDITOR_E2B_DIFFERENTIAL === "1"
@@ -1699,9 +1699,24 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
           reasoning: "off",
           ...(structuredPython ? { responseFormat: { type: "json_object" } } : {}),
         });
-        const suite = structuredPython
+        let suite = structuredPython
           ? buildGeneratedPythonHarness(question, specText, candidateSource) || parseTestSuites(specText).find(item => item.language === language)
           : parseTestSuites(specText).find(item => item.language === language);
+        if (!suite && structuredPython) {
+          // Some gateways accept JSON mode but return incomplete test data.
+          // Switch formats before discarding an otherwise working author.
+          const blockText = await tokenRouterGenerate({
+            settings, baseUrl, model, system: testSpecSystemPrompt(),
+            user: testSpecUserPrompt({
+              question: String(question || "").slice(0, 8_000),
+              docket: (candidateDocket(candidates) || "No candidate code exists yet.").slice(0, 7_000),
+              languages: [language], knowledge: languageKnowledge,
+            }),
+            maxTokens: Math.max(8_192, Number(settings.maxTokens || 4096)),
+            reasoning: "off",
+          });
+          suite = parseTestSuites(blockText).find(item => item.language === language);
+        }
         if (!suite) throw new Error("No valid executable harness block parsed.");
         // One independent reference run catches malformed harnesses *before*
         // all candidates are tested. Successful evidence can be reused only for

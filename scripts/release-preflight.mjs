@@ -17,6 +17,8 @@ export function inspectReleaseConfiguration(config, packageJson) {
   need(config?.bundle?.targets?.includes("dmg"),"DMG bundle target is required");
   need(Array.isArray(config?.bundle?.externalBin) && config.bundle.externalBin.includes("binaries/mds"),
     "Expected helper sidecar binaries/mds is missing");
+  need(Array.isArray(config?.bundle?.externalBin) && config.bundle.externalBin.includes("binaries/mds-capture"),
+    "Expected capture sidecar binaries/mds-capture is missing");
   need(typeof config?.identifier==="string" && /^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$/.test(config.identifier),
     "Bundle identifier invalid");
   need(typeof config?.version==="string" && /^\d+\.\d+\.\d+([+-][a-zA-Z0-9.-]+)?$/.test(config.version),

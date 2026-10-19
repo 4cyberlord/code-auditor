@@ -48,7 +48,8 @@
     "category": "DeveloperTool",
     "shortDescription": "Multi-agent code, math and research solver",
     "externalBin": [
-      "binaries/mds"
+      "binaries/mds",
+      "binaries/mds-capture"
     ],
     "icon": [
       "icons/32x32.png",

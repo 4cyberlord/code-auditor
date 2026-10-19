@@ -146,6 +146,17 @@ export async function runOnce(req: RunRequest): Promise<string> {
   return invoke<string>("run_once", { req });
 }
 
+/** Read a bounded excerpt from the fixed, owner-hosted language docs tree. */
+export async function languageReferenceContext(language: string, query: string): Promise<string> {
+  if (!inTauri()) return "";
+  try {
+    return await invoke<string>("language_reference_context", { language, query });
+  } catch {
+    // Documentation is an enhancement, never a dependency that blocks solving.
+    return "";
+  }
+}
+
 export interface LocalQwenRequest {
   model: string;
   /** Full chat-completions URL, for example http://127.0.0.1:8787/v1/chat/completions. */

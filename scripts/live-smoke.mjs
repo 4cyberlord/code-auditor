@@ -5,7 +5,6 @@
  * Loads .development.env locally, then checks:
  * - Supabase REST reachability
  * - screenshot Storage upload/sign/download/delete
- * - Telegram bot getMe + dev message
  * - APNs private key signing from APNS_PRIVATE_KEY or APNS_PRIVATE_KEY_PATH
  * - optional queued solve job + one worker tick
  *
@@ -28,7 +27,6 @@ const BUCKET = "screenshots";
 const APP = "Council Editor";
 const args = new Set(process.argv.slice(2));
 const SHOULD_SOLVE = !args.has("--no-solve");
-const SHOULD_NOTIFY_TELEGRAM = !args.has("--no-telegram");
 
 const startedAll = Date.now();
 let failures = 0;
@@ -233,43 +231,6 @@ async function deleteObject(objectPath) {
   });
 }
 
-async function telegramCheck() {
-  if (!SHOULD_NOTIFY_TELEGRAM) {
-    warn("Telegram bot message", "--no-telegram was passed");
-    return;
-  }
-  const token = mustEnv("TELEGRAM_BOT_TOKEN");
-  const chatId = mustEnv("TELEGRAM_CHAT_ID");
-  if (!token || !chatId) {
-    warn("Telegram bot message", "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing");
-    return;
-  }
-  const me = await timed("Telegram getMe", async () => {
-    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
-    const json = await res.json();
-    if (!res.ok || !json.ok) throw new Error(json.description || res.statusText);
-    return json.result?.username || "bot";
-  });
-  if (!me) {
-    console.log(dim("       Network timeout here means this machine cannot reach api.telegram.org yet."));
-  }
-  if (me) {
-    await timed("Telegram dev alert", async () => {
-      const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: `${APP} dev smoke test: external bot channel is reachable.`,
-          disable_web_page_preview: true,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok || !json.ok) throw new Error(json.description || res.statusText);
-    });
-  }
-}
-
 async function apnsCheck() {
   if (!mustEnv("APNS_KEY_ID") || !mustEnv("APNS_TEAM_ID") || !mustEnv("APNS_BUNDLE_ID")) {
     warn("APNs token signing", "APNS_KEY_ID, APNS_TEAM_ID or APNS_BUNDLE_ID is missing");
@@ -423,7 +384,6 @@ if (mustEnv("SUPABASE_URL") && serviceKey()) {
 } else {
   warn("Supabase checks", "missing SUPABASE_URL or service role");
 }
-await telegramCheck();
 await apnsCheck();
 ok("Sentry DSN configured", Boolean(mustEnv("SENTRY_DSN")));
 

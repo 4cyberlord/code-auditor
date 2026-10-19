@@ -42,7 +42,7 @@ export interface Preflight {
 const list = (ids: AgentId[]) => ids.map((i) => agentSpec(i).label).join(" and ");
 
 const SHRUNK =
-  "That screenshot was shrunk to under half size to fit what vision models accept, so small text in it may not be readable. Capturing just the region you care about with ⌃⌥R keeps it full size.";
+  "That screenshot was shrunk to under half size to fit what vision models accept, so small text in it may not be readable. Capturing just the region you care about with ⌃⌘⇧R keeps it full size.";
 
 const shrunkCaution = (shrunk: boolean) => (shrunk ? SHRUNK : null);
 

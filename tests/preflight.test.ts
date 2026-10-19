@@ -216,7 +216,7 @@ console.log("\n9. a screenshot shrunk past the point of being readable");
   const whole = preflight({ ...base, smallestScale: 0.31 });
   check("cautions, but does not block", whole.blocking === null && whole.caution !== null);
   check("says why it matters", (whole.caution ?? "").includes("may not be readable"), String(whole.caution));
-  check("names the region shortcut", (whole.caution ?? "").includes("⌃⌥R"), String(whole.caution));
+  check("names the region shortcut", (whole.caution ?? "").includes("⌃⌘⇧R"), String(whole.caution));
 
   const region = preflight({ ...base, smallestScale: 1 });
   check("a full-size capture is left alone", region.caution === null, String(region.caution));

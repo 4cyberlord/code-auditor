@@ -1842,18 +1842,18 @@ function CouncilCard() {
 }
 
 /**
- * The three global shortcuts, shown rather than edited.
+ * The main app's global shortcuts, shown rather than edited.
  *
  * They are registered in Rust before the web view exists, so the web view is the
  * wrong place to change them; the environment variables are the honest escape
  * hatch until there is a Rust-side settings store to write to.
  */
 const SHORTCUTS = [
-  { keys: "\u2303\u2325S", what: "Capture the whole screen", env: "CODE_AUDITOR_SCREEN_KEY" },
-  { keys: "\u2303\u2325R", what: "Capture a region", env: "CODE_AUDITOR_CAPTURE_KEY" },
-  { keys: "\u2303\u2325\u21e7L", what: "Capture the left half of this app's display", env: "CODE_AUDITOR_CAPTURE_LEFT_KEY" },
-  { keys: "\u2303\u2325\u21e7R", what: "Capture the right half of this app's display", env: "CODE_AUDITOR_CAPTURE_RIGHT_KEY" },
-  { keys: "\u2303\u2325A", what: "Solve what is loaded", env: "CODE_AUDITOR_SOLVE_KEY" },
+  { keys: "\u2303\u2318\u21e7S", what: "Capture the whole screen", env: "CODE_AUDITOR_SCREEN_KEY" },
+  { keys: "\u2303\u2318\u21e7R", what: "Capture a region", env: "CODE_AUDITOR_CAPTURE_KEY" },
+  { keys: "\u2303\u2318\u21e7L", what: "Capture the left half of this app's display", env: "CODE_AUDITOR_CAPTURE_LEFT_KEY" },
+  { keys: "\u2303\u2318\u21e7H", what: "Capture the right half of this app's display", env: "CODE_AUDITOR_CAPTURE_RIGHT_KEY" },
+  { keys: "\u2303\u2318\u21e7A", what: "Solve what is loaded", env: "CODE_AUDITOR_SOLVE_KEY" },
 ];
 
 /** Capture behaviour and the shortcuts that trigger it. */
@@ -1915,7 +1915,7 @@ function CaptureCard() {
         <p className="settings-form-caption">Manage background captures without opening the main window.</p>
         <details className="settings-inline-help">
           <summary>Permissions and capture sequence</summary>
-          <p>The first digit chooses the workflow and the second the screenshot shape. The helper requires macOS Input Monitoring and Screen Recording permissions.</p>
+          <p>The overlay helper uses registered modifier shortcuts without Input Monitoring. Screen capture still requires macOS Screen Recording permission.</p>
         </details>
         <div className="row">
           <label>State</label>
@@ -2073,12 +2073,9 @@ function CaptureCard() {
           </div>
         ))}
         {[
-          { keys: "10 · 11 · 12", route: "Main app: full screen · left · right" },
-          { keys: "21 · 22 · 23 · 24", route: "Background coding: full screen · left · right · region" },
-          { keys: "31 · 32 · 33 · 34", route: "Background MCQ: full screen · left · right · region" },
-          { keys: "13", route: "Main app: process captured image(s) with enabled models" },
-          { keys: "25", route: "Background coding: submit captured images for processing" },
-          { keys: "35", route: "Background MCQ: submit captured images for processing" },
+          { keys: "⌃⌥C · ⌃⌥M · ⌃⌥H", route: "Overlay: Coding · MCQ · History" },
+          { keys: "⌃⌥1 · 2 · 3 · 4", route: "Overlay Coding: full screen · left · right · submit" },
+          { keys: "⌃⌥⇧1 · 2 · 3 · 4", route: "Overlay MCQ: full screen · left · right · submit" },
         ].map((route) => (
           <div className="row" key={route.keys}>
             <label><span style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}>{route.keys}</span></label>
@@ -2087,7 +2084,7 @@ function CaptureCard() {
         ))}
         <details className="settings-inline-help">
           <summary>Using and customizing shortcuts</summary>
-          <p>Enter two-digit codes quickly. Capture codes stage images; 13, 25 and 35 submit staged images. The Rust helper works with the app closed. Configure regular shortcut environment variables before launch, such as <code>CODE_AUDITOR_SOLVE_KEY="Control+Alt+J"</code>. Conflicts with other apps can prevent a shortcut from working.</p>
+          <p>The overlay helper works with the app closed. Its shortcuts use Control+Option combinations. Configure main app shortcut environment variables before launch, such as <code>CODE_AUDITOR_SOLVE_KEY="Control+Super+Shift+J"</code>. Conflicts with other apps can prevent a shortcut from working.</p>
         </details>
       </div>
     </>

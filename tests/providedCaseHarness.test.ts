@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
-  buildProvidedHarness, buildGeneratedPythonHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases,
+  buildProvidedHarness, buildGeneratedPythonHarness, shouldUseStructuredPythonHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases,
 } from "../src/lib/providedCaseHarness.ts";
 import { spliceSuite, countCases } from "../src/lib/council.ts";
 
@@ -17,6 +17,9 @@ const twoSum = [
   "Input: nums = [3,3], target = 6",
   "Output: [0,1]",
 ].join("\n");
+assert.equal(shouldUseStructuredPythonHarness("python", twoSum), true);
+assert.equal(shouldUseStructuredPythonHarness("python", "Return any valid answer in any order"), false);
+assert.equal(shouldUseStructuredPythonHarness("cpp", twoSum), false);
 const correct = [
   "class Solution:",
   "    def twoSum(self, nums: List[int], target: int) -> List[int]:",

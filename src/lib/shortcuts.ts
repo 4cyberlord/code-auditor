@@ -24,23 +24,23 @@ import { useStore } from "./store.ts";
  */
 export const SHORTCUTS = {
   /** S for Screen: grab the whole display, no aiming. */
-  captureScreen: "Control+Alt+S",
+  captureScreen: "Control+Super+Shift+S",
   /** R for Region: drag a box. */
-  capture: "Control+Alt+R",
+  capture: "Control+Super+Shift+R",
   /** L / R for the automatic halves of the display containing the app. */
-  captureLeft: "Control+Alt+Shift+L",
-  captureRight: "Control+Alt+Shift+R",
+  captureLeft: "Control+Super+Shift+L",
+  captureRight: "Control+Super+Shift+H",
   /** A for Audit: hand it to the agents. */
-  solve: "Control+Alt+A",
+  solve: "Control+Super+Shift+A",
 } as const;
 
 /** How those read on a Mac keyboard. */
 export const SHORTCUT_LABELS = {
-  captureScreen: "⌃⌥S",
-  capture: "⌃⌥R",
-  captureLeft: "⌃⌥⇧L",
-  captureRight: "⌃⌥⇧R",
-  solve: "⌃⌥A",
+  captureScreen: "⌃⌘⇧S",
+  capture: "⌃⌘⇧R",
+  captureLeft: "⌃⌘⇧L",
+  captureRight: "⌃⌘⇧H",
+  solve: "⌃⌘⇧A",
 } as const;
 
 type CaptureKind = "region" | "screen" | "left" | "right";

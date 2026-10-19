@@ -79,26 +79,39 @@ The workspace keeps the experience focused: the project name is shown clearly, s
 
 | Shortcut | Action |
 |---|---|
-| `Control+7` | Capture a screen region from anywhere |
-| `Control+8` | Run the loaded task |
+| `Control+Command+Shift+S` | Capture the whole screen in the main app |
+| `Control+Command+Shift+R` | Capture a region in the main app |
+| `Control+Command+Shift+L` | Capture the left half in the main app |
+| `Control+Command+Shift+H` | Capture the right half in the main app |
+| `Control+Command+Shift+A` | Run the loaded task in the main app |
+| `Control+Command+Shift+O` | Toggle the main app overlay |
 | `Command+Enter` | Run from the focused app window |
 | `Command+,` | Open Settings |
 
-Background capture helpers can also be configured for batch-style capture and submit workflows.
+The main app registers these with Carbon through Tauri's global shortcut plugin. They do not request Input Monitoring.
 
 ### Background helper overlay shortcuts
 
-When the installed background helper is running, these are the overlay test shortcuts:
+When the overlay helper is running, its global shortcuts use Carbon hotkey registration and do not request Input Monitoring:
 
 | Shortcut | Action |
 |---|---|
 | `Control+Option+C` | Toggle the coding overlay |
 | `Control+Option+M` | Toggle the MCQ overlay |
-| `Control+Option+B` | Start a helper capture batch |
-| `Control+Option+P` | Capture the current screen into the helper batch |
-| `Control+Option+Return` | Submit the helper batch |
-| `Shift+Option+Arrow Keys` | Move the visible helper overlay |
-| `Option+Up / Option+Down` | Scroll the visible helper overlay |
+| `Control+Option+H` | Toggle history |
+| `Control+Option+N` | Start a new coding workspace |
+| `Control+Option+1 / 2 / 3 / 4 / 5` | Coding full / left / right capture, submit, undo |
+| `Control+Option+Shift+1 / 2 / 3 / 4` | MCQ full / left / right capture, submit |
+| `Control+Option+B` | Start a capture batch |
+| `Control+Option+P` or `Control+Option+S` | Capture the full screen into the active batch |
+| `Control+Option+Shift+L / R` | Capture left / right into the active batch |
+| `Control+Option+Return` | Submit the active batch |
+| `Control+Option+Command+R / C / P` | Select the Rust / C++ / Python code port |
+| `Control+Option+Command+L` / `Control+Option+Command+Shift+R` | Dock code left / right |
+| `Control+Option+Shift+Arrow Keys` | Move the visible overlay |
+| `Control+Option+Up / Down` | Scroll code or navigate history |
+| `Control+Option+Left / Backslash` | Go back / open a history item |
+| `Control+Option+Minus / Equal` | Decrease / increase overlay opacity |
 
 ## Planned Feature: PrivateTrigger iOS Companion
 

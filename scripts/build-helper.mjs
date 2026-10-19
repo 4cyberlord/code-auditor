@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { signBinary } from "./lib/signing.mjs";
+import { buildCaptureHelper } from "./lib/build-capture-helper.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const srcTauri = join(root, "src-tauri");
@@ -38,3 +39,7 @@ const signedAs = signBinary(to, { require: true });
 
 console.log(`Built ghost helper: ${to}`);
 if (signedAs) console.log(`Signed helper as: ${signedAs}`);
+const triple = process.platform === "darwin"
+  ? (process.arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin")
+  : process.platform === "win32" ? "x86_64-pc-windows-msvc" : "x86_64-unknown-linux-gnu";
+buildCaptureHelper(root, join(srcTauri, "target", "debug", `mds-capture${extension}`), triple);

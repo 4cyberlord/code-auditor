@@ -23,8 +23,6 @@ pub fn entitlements_plist() -> String {
  <dict>
  <key>com.apple.security.device.screen-capture</key>
  <true/>
- <key>com.apple.security.device.input</key>
- <true/>
  <key>com.apple.security.automation.apple-events</key>
  <true/>
  <key>com.apple.security.cs.allow-jit</key>
