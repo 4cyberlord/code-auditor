@@ -20,7 +20,7 @@ import "./lib/config.mjs";
 
 import { createHash, createHmac, createSign } from "node:crypto";
 import { buildProvidedHarness, buildGeneratedPythonHarness, pythonHarnessJsonSystemPrompt, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases } from "../src/lib/providedCaseHarness.ts";
-import { configuredCodeLanguage, providedTestBrief, codingTrustySelfCheckPrompt } from "../src/lib/primaryDeliveryPolicy.ts";
+import { configuredCodeLanguage, providedTestBrief } from "../src/lib/primaryDeliveryPolicy.ts";
 import { secondaryCouncilLanguages, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "../src/lib/independentLanguageCouncil.ts";
 import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief, evidenceSolverBrief } from "../src/lib/problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "../src/lib/judgeUpgradePolicy.ts";
@@ -3281,8 +3281,14 @@ export async function runCouncilJob(job) {
         // Source-provided literal tests need no second AI author. Build this
         // deterministic adapter first; only fall back to an independent,
         // E2B-self-tested generated harness when source fixtures are absent.
+        const verifiedFixtureQuestion = screenshotEvidence.fixtures?.length
+          ? [screenshotEvidence.question || question,
+             ...screenshotEvidence.fixtures.map((pair,index) =>
+               "Example "+(index+1)+":\nInput: "+pair.input+"\nOutput: "+pair.output)]
+              .join("\\n\\n")
+          : screenshotEvidence.question || question;
         const providedSuite = buildProvidedHarness(
-          screenshotEvidence.question || question, primaryLanguage, final.code);
+          verifiedFixtureQuestion, primaryLanguage, final.code);
         if (providedSuite) await addEvent(job.id,"info","coding_trusty_provided_tests",
           "Prepared the question's own test cases without a new AI model call.",
           {model:trustyModel,language:primaryLanguage,cases:providedSuite.providedCaseCount});
