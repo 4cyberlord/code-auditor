@@ -3359,9 +3359,14 @@ fn coding_sidebar_evidence(body:&Value)->Value {
     let p=body.get("presentation").unwrap_or(&Value::Null);
     let blueprint=body.get("semanticBlueprint").unwrap_or(&Value::Null);
     let structure=blueprint.get("structure").unwrap_or(&Value::Null);
-    let summary=blueprint.get("explanation").and_then(Value::as_str).unwrap_or("");
+    let early=body.get("provisional").unwrap_or(&Value::Null);
+    let summary=blueprint.get("explanation").and_then(Value::as_str)
+        .filter(|s|!s.trim().is_empty())
+        .or_else(||early.get("answer").and_then(Value::as_str))
+        .unwrap_or("");
     let approach=p.get("approach").and_then(Value::as_str)
-        .filter(|s|!s.trim().is_empty()).unwrap_or(summary);
+        .filter(|s|!s.trim().is_empty())
+        .unwrap_or(summary);
     let structures:Vec<String>=structure.get("dataStructures")
         .and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str)
         .take(6).map(|name|{
@@ -3410,6 +3415,12 @@ fn coding_sidebar_evidence(body:&Value)->Value {
             row.get("passed").and_then(Value::as_u64).unwrap_or(0),
             row.get("failed").and_then(Value::as_u64).unwrap_or(0)))
         .take(4).collect::<Vec<_>>().join("\n");
+    let tests=if tests.is_empty() && early.get("status").and_then(Value::as_str)==Some("provisional") {
+        format!("Candidate {} · {} passed / {} failed in E2B (Council review pending)",
+            early.get("letter").and_then(Value::as_str).unwrap_or("?"),
+            early.get("passed").and_then(Value::as_u64).unwrap_or(0),
+            early.get("failed").and_then(Value::as_u64).unwrap_or(0))
+    } else { tests };
     serde_json::json!({
         "summary":summary.chars().take(480).collect::<String>(),
         "approach":approach.chars().take(800).collect::<String>(),
@@ -3442,7 +3453,10 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
     let agents = if candidates.is_empty() {
         coding_agents_from_events(job)
     } else {
-        candidates.iter().take(4).map(|candidate| {
+        candidates.iter()
+        // Coding Trusty is independent, not one of the four selected seats.
+        .filter(|candidate| candidate.get("codingTrusty").and_then(Value::as_bool) != Some(true))
+        .take(4).map(|candidate| {
             let letter = candidate.get("letter").and_then(Value::as_str).unwrap_or("?");
             let model = candidate.get("model").and_then(Value::as_str).unwrap_or("");
             let error = candidate.get("error").and_then(Value::as_str)
@@ -3476,7 +3490,15 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
             })
         }).collect()
     };
-    let tests = body.map(|body| coding_tests_from_report(body, winner)).unwrap_or_default();
+    let tests = body.map(|body| {
+        // A verified provisional result is the current source until the
+        // Council selects a final winner. Its saved run is real E2B evidence,
+        // not a fabricated summary or an unrelated solver's measurements.
+        let case_letter = if winner.is_empty() {
+            body.pointer("/provisional/letter").and_then(Value::as_str).unwrap_or("")
+        } else { winner };
+        coding_tests_from_report(body, case_letter)
+    }).unwrap_or_default();
     // Every selected port owns its own independent test evidence. Do not
     // present Python cases as if a Rust/C++ translation had run them.
     let port_cases: Vec<Value> = body.and_then(|body| body.get("ports"))
@@ -4303,10 +4325,12 @@ fn overlay_html() -> &'static str {
               const current=state.solution||{},history=Array.isArray(state.solutionHistory)?state.solutionHistory:[];
               const previous=history.find(entry=>entry.version==='provisional');
               const final=history.find(entry=>entry.version==='final');
-              const changed=state.upgrade&&state.upgrade.changed===true&&
-                current.status==='reviewed'&&previous&&final&&
+              // Source of truth is persisted E2B-backed version history.
+              // This must also detect a judge-approved upgrade when the
+              // first Council winner matched Trusty's provisional code.
+              const changed=current.status==='reviewed'&&previous&&final&&
                 previous.code&&final.code&&previous.language===final.language&&
-                previous.code!==final.code;
+                current.code===final.code&&previous.code!==final.code;
               if(window.__overlayDiffRunId!==state.runId){window.__overlayDiffRunId=state.runId;window.__overlayDiffHidden=false;}
               const button=document.getElementById('overlay-diff-toggle');
               if(button){button.hidden=!changed;button.textContent=window.__overlayDiffHidden?'View changes':'Show final';}
