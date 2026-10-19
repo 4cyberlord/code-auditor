@@ -3551,7 +3551,8 @@ fn coding_overlay_state(job: &SubmittedJob) -> Value {
         "ports": body.and_then(|b|b.get("ports")).cloned().unwrap_or_else(||Value::Array(Vec::new())),
         "progressPhase": job.progress_phase,
         "upgrade": body.and_then(|b| b.get("upgrade")).cloned(),
-        "solutionHistory": body.and_then(|b| b.get("solutionHistory")).cloned()
+        "solutionHistory": body.and_then(|b| b.get("solutionHistory")).cloned(),
+        "postJudgeUpgrade": body.and_then(|b| b.get("postJudgeUpgrade")).cloned()
     })
 }
 
@@ -4117,13 +4118,15 @@ fn overlay_html() -> &'static str {
             .code-focus-status::before{content:"";width:6px;height:6px;border-radius:50%;background:#64dda0;box-shadow:0 0 8px rgba(100,221,160,.65)}
             .code-focus-status[data-stage="provisional"]{border-color:rgba(112,184,255,.35);background:rgba(52,123,210,.13);color:#a9d7ff}
             .code-focus-status[data-stage="provisional"]::before{background:#7dbdff;box-shadow:0 0 8px rgba(125,189,255,.62)}
-            #code-focus-code{box-sizing:border-box;flex:1;min-width:0;min-height:0;width:100%;margin:0;padding:15px 0 28px;background:rgba(3,9,17,.88);color:var(--code-text);font:530 14.5px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line;scrollbar-width:thin;scrollbar-color:rgba(147,180,214,.4) transparent}
+            .code-focus-diff-toggle{border:1px solid rgba(125,189,255,.4);border-radius:7px;padding:6px 9px;background:rgba(52,123,210,.14);color:#c7e2ff;font:650 10px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;cursor:pointer}
+            .code-focus-diff-toggle:hover{background:rgba(52,123,210,.24)}
+            #code-focus-code{box-sizing:border-box;flex:1;min-width:0;min-height:0;width:100%;margin:0;padding:15px 0 28px;background:rgba(3,9,17,.88);color:var(--code-text);font:530 14.5px/1.7 "Cascadia Code Variable","Cascadia Code",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow:auto;counter-reset:code-line;scrollbar-width:thin;scrollbar-color:rgba(147,180,214,.4) transparent}
             #code-focus-code li{box-sizing:border-box;display:grid;grid-template-columns:58px max-content;min-width:100%;width:max-content;min-height:25px;padding-right:28px;list-style:none;counter-increment:code-line}
             #code-focus-code li:nth-child(even){background:rgba(141,174,207,.025)}
             #code-focus-code li::before{content:counter(code-line);position:sticky;left:0;z-index:1;box-sizing:border-box;width:58px;padding-right:13px;border-right:1px solid rgba(153,183,212,.12);background:#091522;color:#60758d;text-align:right;user-select:none}
             #code-focus-code code{display:block;min-width:max-content;padding-left:19px;white-space:pre;overflow-wrap:normal;tab-size:4}
             @media(prefers-reduced-motion:reduce){body[data-code-focus] #panel{transition:none}}
-        </style></head><body><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><section id="code-focus-sheet" hidden><div class="code-focus-header"><div class="code-focus-file"><span class="code-focus-icon" aria-hidden="true">{ }</span><div class="code-focus-file-info"><span id="code-focus-file">solution.py</span><span id="code-focus-lang">Python · read only</span></div></div><div class="code-focus-meta"><span id="code-focus-count">0 lines</span><span id="code-focus-status" class="code-focus-status">Verified</span></div></div><ol id="code-focus-code" aria-label="Solution code"></ol></section><script>
+        </style></head><body><div id="panel"><div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div></div><section id="code-focus-sheet" hidden><div class="code-focus-header"><div class="code-focus-file"><span class="code-focus-icon" aria-hidden="true">{ }</span><div class="code-focus-file-info"><span id="code-focus-file">solution.py</span><span id="code-focus-lang">Python · read only</span></div></div><div class="code-focus-meta"><button type="button" id="code-focus-diff-toggle" class="code-focus-diff-toggle" hidden>Show update diff</button><span id="code-focus-count">0 lines</span><span id="code-focus-status" class="code-focus-status">Verified</span></div></div><ol id="code-focus-code" aria-label="Solution code"></ol></section><script>
 	            // HUD labels come from the numeric command table handled by mac_shortcuts.
             // Keep the overlay's real capture controls, not generic demo shortcuts.
             // The reader always starts with the E2B-gated state selected by
@@ -4140,6 +4143,26 @@ fn overlay_html() -> &'static str {
                 String(item.code||'').trim()&&canonicalPortLanguage(item.language)===desired);
               return port||primary; // Never display an unverified translation.
             }
+            function codeFocusDiff(state,chosen){
+              if(!state||!chosen)return null;
+              const repair=chosen.repair;
+              if(repair&&repair.status==='verified'&&String(repair.beforeCode||'').trim()&&
+                String(repair.beforeCode)!==String(chosen.code||''))
+                return {before:String(repair.beforeCode),after:String(chosen.code||''),kind:'repair'};
+              const history=Array.isArray(state.solutionHistory)?state.solutionHistory:[];
+              const provisional=history.find(item=>item&&item.version==='provisional');
+              const final=history.find(item=>item&&item.version==='final');
+              if(chosen.status==='reviewed'&&provisional&&final&&provisional.code&&final.code&&
+                canonicalPortLanguage(provisional.language)===canonicalPortLanguage(chosen.language)&&
+                canonicalPortLanguage(final.language)===canonicalPortLanguage(chosen.language)&&
+                String(chosen.code)===String(final.code)&&String(provisional.code)!==String(final.code))
+                return {before:String(provisional.code),after:String(final.code),kind:'council'};
+              const judged=state.postJudgeUpgrade;
+              if(chosen.status==='reviewed'&&judged&&judged.beforeCode&&judged.afterCode&&
+                String(judged.afterCode)===String(chosen.code)&&String(judged.beforeCode)!==String(judged.afterCode))
+                return {before:String(judged.beforeCode),after:String(judged.afterCode),kind:'judge'};
+              return null;
+            }
             window.renderCodeFocusSheet=function(){
               const target=document.getElementById('code-focus-code');
               const state=window.__overlayCodeFocusState;
@@ -4152,17 +4175,34 @@ fn overlay_html() -> &'static str {
               const label=kind==='rust'?'Rust':kind==='cpp'?'C++':'Python';
               document.getElementById('code-focus-file').textContent='solution.'+extension;
               document.getElementById('code-focus-lang').textContent=label+' · read only';
-              const lines=code?code.split('\n').length:0;
+              const diff=codeFocusDiff(state,chosen);
+              const diffButton=document.getElementById('code-focus-diff-toggle');
+              const diffKey=diff?String(state.runId||'')+'\u0000'+language+'\u0000'+diff.before+'\u0000'+diff.after:'';
+              if(diffButton){
+                diffButton.hidden=!diff;
+                diffButton.textContent=diff?(window.__overlayCodeFocusDiffHidden?'Show verified code':'Show update diff'):'Show update diff';
+                diffButton.title=diff?(diff.kind==='repair'?'View the verified port repair':diff.kind==='judge'?'View the judge-approved E2B-tested improvement':'View the final Council winner against its provisional solution'):'';
+              }
+              if(diff&&window.__overlayCodeFocusDiffKey!==diffKey){
+                // As in the regular solution pane, make a newly published,
+                // verified revision visible immediately in the standalone reader.
+                window.__overlayCodeFocusDiffKey=diffKey;
+                window.__overlayCodeFocusDiffHidden=false;
+              }
+              const showDiff=Boolean(diff&&!window.__overlayCodeFocusDiffHidden);
+              if(!diff)window.__overlayCodeFocusDiffKey='';
+              const lines=(showDiff?diff.after:code)?(showDiff?diff.after:code).split('\n').length:0;
               document.getElementById('code-focus-count').textContent=lines+' line'+(lines===1?'':'s');
               const status=document.getElementById('code-focus-status');
               status.dataset.stage=chosen&&chosen.status==='provisional'?'provisional':'reviewed';
               status.textContent=status.dataset.stage==='provisional'?'E2B tested':'Verified';
-              const fingerprint=String(state&&state.runId||'')+'\u0000'+language+'\u0000'+code;
+              const fingerprint=String(state&&state.runId||'')+'\u0000'+language+'\u0000'+code+'\u0000'+diffKey+'\u0000'+showDiff;
               // A 500ms cloud refresh must not keep jumping the reader back
               // to line one when the verified code itself has not changed.
               if(target.dataset.renderedCode===fingerprint)return;
               target.dataset.renderedCode=fingerprint;
-              if(code)renderFocusCodeLines(target,code,language);
+              if(showDiff)renderOverlayDiff(target,diff.before,diff.after,language);
+              else if(code)renderFocusCodeLines(target,code,language);
               else target.replaceChildren();
               target.scrollTop=0;
             };
@@ -4184,13 +4224,22 @@ fn overlay_html() -> &'static str {
               window.__overlayCodeFocusLiveRunId=null;
               const target=document.getElementById('code-focus-code');
               if(target)target.dataset.renderedCode='';
+              window.__overlayCodeFocusDiffKey='';
+              window.__overlayCodeFocusDiffHidden=false;
             };
+            document.addEventListener('click',function(event){
+              if(event.target&&event.target.id==='code-focus-diff-toggle'){
+                window.__overlayCodeFocusDiffHidden=!window.__overlayCodeFocusDiffHidden;
+                window.renderCodeFocusSheet();
+              }
+            });
             window.setCodeFocusMode=function(mode){
               const previous=document.body.dataset.codeFocus||'normal';
               const next=['left','right'].includes(mode)?mode:'normal';
               if(previous==='normal'&&next!=='normal'){
                 window.__overlayDiffBeforeCodeFocus=window.__overlayDiffHidden===true;
-                // Code-only must show the clean verified code, never diff marks.
+                // The standalone reader owns a separate revision-diff toggle;
+                // preserve only the normal pane's toggle state here.
                 window.__overlayDiffHidden=true;
               }else if(previous!=='normal'&&next==='normal'){
                 window.__overlayDiffHidden=window.__overlayDiffBeforeCodeFocus===true;
@@ -4666,6 +4715,9 @@ mod tests {
         assert!(html.contains("port.status==='verified'") || html.contains("item.status==='verified'"));
         assert!(html.contains("#code-focus-sheet[hidden]{display:none}"));
         assert!(html.contains("window.renderCodeFocusSheet=function()"));
+        assert!(html.contains("function codeFocusDiff(state,chosen)"));
+        assert!(html.contains("id=\"code-focus-diff-toggle\""));
+        assert!(html.contains("window.__overlayCodeFocusDiffHidden=false"));
         assert!(html.contains("target.dataset.renderedCode===fingerprint"));
         assert!(html.contains("next=['left','right'].includes(mode)"));
     }
@@ -5212,13 +5264,15 @@ CA_CASE {"id":"statement example","input":{"n":4},"expected":6,"actual":6,"statu
                 "solutionHistory":[
                     {"version":"provisional","code":"print(1)","language":"python"},
                     {"version":"final","code":"print(2)","language":"python"}
-                ],"upgrade":{"changed":true,"from":"A","to":"B"}
+                ],"upgrade":{"changed":true,"from":"A","to":"B"},
+                "postJudgeUpgrade":{"beforeCode":"print(2)","afterCode":"print(3)","reason":"verified improvement","passed":2}
             }}))
         };
         let state = coding_overlay_state(&job);
         assert_eq!(state["solution"]["code"],"print(2)");
         assert_eq!(state["upgrade"]["changed"],true);
         assert_eq!(state["solutionHistory"].as_array().map(Vec::len),Some(2));
+        assert_eq!(state["postJudgeUpgrade"]["afterCode"],"print(3)");
     }
 
     #[test]
