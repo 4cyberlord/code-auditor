@@ -28,6 +28,7 @@ const patches = [];
 const reports = [];
 const modelCalls = [];
 const apiRoutes = [];
+const requestOrder = [];
 let cleanRateRetries = 0;
 // Flipped for the second scenario, so the generated harness rejects every
 // candidate the way a harness with a wrong expectation does.
@@ -69,6 +70,7 @@ let TIE_BREAK_PICK = "B";
 
 globalThis.fetch = async (url, init = {}) => {
   const href = String(url);
+  if (href.endsWith("/models")) requestOrder.push("catalog");
   if (href.includes("/rest/v1/app_config?")) {
     return json([{ key: "cleanapis", value: "test-clean-token", owner_id: "clean-owner" }]);
   }
@@ -149,6 +151,7 @@ globalThis.fetch = async (url, init = {}) => {
   }
   if (href.includes("/chat/completions")) {
     const req = JSON.parse(init.body);
+    requestOrder.push(`model:${req.model}`);
     modelCalls.push(req);
     apiRoutes.push({ url: href, authorization: init.headers?.authorization, model: req.model });
     if (href === "https://cleanapis.com/v1/chat/completions" && cleanRateRetries === 0) {
@@ -1163,7 +1166,7 @@ READERS_DISAGREE = false;
 TIE_BREAK_PICK = "B";
 
 console.log("\n10. Clean API carries the owner's token and only approved model IDs");
-events.length = patches.length = reports.length = modelCalls.length = apiRoutes.length = 0;
+events.length = patches.length = reports.length = modelCalls.length = apiRoutes.length = requestOrder.length = 0;
 await runCouncilJob({
   id: "clean-job", owner_id: "clean-owner", session_id: "session-1",
   settings_snapshot: {
@@ -1189,6 +1192,35 @@ check("the unapproved model was never called", !apiRoutes.some(route => route.mo
 check("Clean API received the screenshot", modelCalls.some(call =>
   call.messages?.[1]?.content?.some?.(part => part.type === "image_url")));
 check("Clean API produced a tested final solution", reports[0]?.winner === "A" && reports[0]?.report?.runs?.A?.passed === 8);
+
+console.log("\n11. Coding overlay Trusty starts from uploaded screenshots before Council selection");
+events.length = patches.length = reports.length = modelCalls.length = apiRoutes.length = requestOrder.length = 0;
+await runCouncilJob({
+  id: "overlay-trusty-early-job", owner_id: "clean-owner", session_id: "session-1",
+  settings_snapshot: {
+    mode: "code", source: "overlay", overlayMode: "code", codingTrustyEnabled: true,
+    outputLanguage: "python", maxTokens: 2048, gatewayId: "cleanapis",
+    gatewayBaseUrl: "https://cleanapis.com/v1",
+    enabled: {},
+    councilModels: [
+      { id: "anthropic/claude-opus-5.5", endpoint: "chat" },
+      { id: "moonshotai/kimi-k3", endpoint: "chat" },
+    ],
+    councilJudges: [{ model: "openai/gpt-5.6-sol", emphasis: "correctness" }],
+    probes: {
+      "anthropic/claude-opus-5.5": { vision: true },
+      "moonshotai/kimi-k3": { vision: true },
+    },
+  },
+});
+const trustyStartIndex = events.findIndex(event => event.phase === "coding_trusty_started");
+const earlyFableCall = modelCalls.find(call => call.model === "claude-fable-5.1" || call.model === "anthropic/claude-fable-5.1");
+check("Fable Trusty is announced before Council selects solver seats",
+  trustyStartIndex >= 0 && requestOrder.indexOf(`model:${earlyFableCall?.model}`) >= 0 &&
+    requestOrder.indexOf(`model:${earlyFableCall?.model}`) < requestOrder.indexOf("catalog"),
+  JSON.stringify(requestOrder.slice(0, 5)));
+check("early Fable Trusty request includes the uploaded screenshot",
+  Boolean(earlyFableCall?.messages?.[1]?.content?.some?.(part => part.type === "image_url")));
 
 console.log(fail ? `\n${fail} FAILURE(S)\n` : "\nall cloud worker checks passed\n");
 process.exit(fail ? 1 : 0);

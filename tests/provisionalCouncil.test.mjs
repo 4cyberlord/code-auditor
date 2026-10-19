@@ -26,6 +26,9 @@ const provisional=createProvisionalRecord({candidate,run,language:"python",scree
 assert.equal(provisional.status,"provisional");
 assert.equal(provisional.code,final.code);
 assert.equal(provisional.passed,12);
+const trusty=createProvisionalRecord({candidate:{...candidate,letter:"T",model:"kimi-k3",codingTrusty:true},
+  run,language:"python",screened:passing,at:"2026-10-15T17:00:00Z"});
+assert.equal(trusty.codingTrusty,true,"Kimi Trusty remains explicitly distinguishable from the four solver seats");
 const upgraded=buildSolutionHistory(provisional,{
  letter:"D",language:"python",code:"def solve(xs):\n    return sum(1 for _ in xs)\n",
  complexity:"O(n)",passed:12,at:"2026-10-15T17:01:00Z"

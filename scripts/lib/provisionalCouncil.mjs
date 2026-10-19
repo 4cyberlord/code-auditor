@@ -41,6 +41,7 @@ export function screenProvisionalCandidate({final,run,contractComplexity="",lang
 export function createProvisionalRecord({candidate,run,language,screened,at=new Date().toISOString()}){
   return {
     status:"provisional",letter:candidate.letter,model:candidate.model,
+    codingTrusty:Boolean(candidate.codingTrusty),
     language,code:candidate.final.code,complexity:candidate.final.complexity||"",
     passed:run.passed,failed:run.failed,screenedComplexity:screened,
     at,verification:"E2B test cases passed; Council review and final selection pending.",
