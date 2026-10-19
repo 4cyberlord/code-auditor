@@ -679,8 +679,16 @@ check("failed candidates and E2B evidence reached Council reviewers",
   modelCalls.some(c => String(c.messages?.[0]?.content).includes("senior engineer on a review council") &&
     textOf(c).includes("FAIL empty got=0 want=99") && textOf(c).includes("Candidate A")),
   JSON.stringify(events.filter(e => e.phase === "review_done").map(e => e.payload?.model)));
-check("no unverified coding solution was published", rejectedUnverified && reports.length === 0,
-  JSON.stringify({ rejectedUnverified, reports: reports.length }));
+check("failed E2B candidates are checkpointed without publishing unverified code",
+  rejectedUnverified && reports.length === 1 &&
+  reports[0]?.report?.stage === "candidate_evidence" &&
+  reports[0]?.report?.standing === "unverified" &&
+  !reports[0]?.report?.provisional &&
+  !reports[0]?.report?.winner &&
+  Array.isArray(reports[0]?.report?.candidates) &&
+  reports[0].report.candidates.length >= 2 &&
+  Object.values(reports[0].report.runs || {}).every(run => !run.ok || run.failed > 0),
+  JSON.stringify({ rejectedUnverified, reports: reports.length, stage: reports[0]?.report?.stage }));
 check(
   "identical failures accuse the harness, not the code",
   events.some((e) => e.phase === "harness_suspect"),
