@@ -57,7 +57,7 @@ export default function StoryResultWorkspace() {
     ? trustyCandidate.revised : trustyCandidate?.final;
   const trustyReport: DisplaySolution | null = !preparing && !viewingRunId &&
       council.codingTrusty.status === "ready" && trustyFinal?.kind === "code" && gateFor(trustyRun ?? undefined) === "pass"
-    ? { source: "Coding Trusty · Kimi K3", code: trustyFinal.code, language: trustyFinal.language,
+    ? { source: "Coding Trusty · Claude Fable 5.1", code: trustyFinal.code, language: trustyFinal.language,
         answer: trustyFinal.answer, complexity: trustyFinal.complexity, benchmark: trustyRun, provisional: true }
     : null;
   const report = councilReport || trustyReport;
@@ -197,7 +197,7 @@ export default function StoryResultWorkspace() {
         </div>
         {!report && !viewingRunId && settings.codingTrustyEnabled && council.codingTrusty.status !== "idle" && (
           <p className="story-process-text" role="status">
-            {council.codingTrusty.status === "solving" ? "Coding Trusty (Kimi K3 · Clean API) is solving the question in parallel." :
+            {council.codingTrusty.status === "solving" ? "Coding Trusty (Claude Fable 5.1 · Clean API) is solving the question in parallel." :
              council.codingTrusty.status === "validating" ? "Coding Trusty is checking its code, language syntax, and the question’s stated examples before E2B." :
              council.codingTrusty.status === "testing" ? "Coding Trusty has an answer; E2B is checking it before it can be shown as a preflight solution." :
              council.codingTrusty.status === "unavailable" ? council.codingTrusty.error :
@@ -205,7 +205,7 @@ export default function StoryResultWorkspace() {
           </p>
         )}
         {report?.provisional && <p className="story-trusty-banner" role="status">
-          Preflight solution · Kimi K3 via Clean API · E2B passed {report.benchmark?.passed ?? 0} tests. Council review is still running; this is not the final verdict.
+          Preflight solution · Claude Fable 5.1 via Clean API · E2B passed {report.benchmark?.passed ?? 0} tests. Council review is still running; this is not the final verdict.
         </p>}
         {report && <div className="story-code-source">Selected solution <strong>{report.source}</strong></div>}
         {report && pendingPort && <p className="story-process-text" role="status">
