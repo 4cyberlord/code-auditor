@@ -80,7 +80,7 @@ import { resolveAnswerLanguage } from "./answerLanguage.ts";
 import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from "./probeFit.ts";
 import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
 import { fingerprintCode } from "./codeFingerprint.ts";
-import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief, codingTrustySelfCheckPrompt } from "./primaryDeliveryPolicy.ts";
+import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
 import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "./independentLanguageCouncil.ts";
 import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief, evidenceSolverBrief } from "./problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "./judgeUpgradePolicy.ts";
