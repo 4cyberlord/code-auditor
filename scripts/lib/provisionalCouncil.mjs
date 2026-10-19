@@ -28,11 +28,17 @@ export function screenProvisionalCandidate({final,run,contractComplexity="",lang
   if(!run?.ran||!run.ok||run.passed<=0||run.failed!==0)
     return {eligible:false,reason:"No passing E2B evidence"};
   const claim=simpleComplexityRank(final.complexity);
-  if(!claim)return {eligible:false,reason:"Complexity unknown; wait for Council audit"};
+  // Passing executable evidence can be shown provisionally even when the
+  // model expresses a multivariate/unknown Big-O. Complexity is an unverified
+  // claim here, not a reason to hide the working E2B-tested source.
+  if(!claim)return {eligible:true,reason:"E2B cases passed; complexity requires Council audit",
+    claimedBound:null,targetBound:null,
+    disclaimer:"E2B cases passed; complexity is unverified and Council review is pending."};
   const target=simpleComplexityRank(contractComplexity);
   if(target && claim.rank>target.rank){
-    return {eligible:false,reason:"Claimed "+claim.bound+" exceeds contract target "+target.bound,
-      claimedBound:claim.bound,targetBound:target.bound};
+    return {eligible:true,reason:"E2B passed; claimed complexity exceeds target and needs Council audit",
+      claimedBound:claim.bound,targetBound:target.bound,
+      disclaimer:"E2B cases passed, but the claimed Big-O may exceed the problem target. Council review is pending."};
   }
   return {eligible:true,reason:target?"Claim screened against contract; not independently audited":"Claim parsed; no comparable contract bound available",
     claimedBound:claim.bound,targetBound:target?.bound||null,
@@ -43,6 +49,7 @@ export function createProvisionalRecord({candidate,run,language,screened,at=new 
     status:"provisional",letter:candidate.letter,model:candidate.model,
     codingTrusty:Boolean(candidate.codingTrusty),
     language,code:candidate.final.code,complexity:candidate.final.complexity||"",
+    answer:candidate.final.answer||"",claims:Array.isArray(candidate.final.claims)?candidate.final.claims.slice(0,6):[],
     passed:run.passed,failed:run.failed,screenedComplexity:screened,
     at,verification:"E2B test cases passed; Council review and final selection pending.",
   };
