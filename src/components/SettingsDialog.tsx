@@ -1631,7 +1631,7 @@ function CouncilCard() {
         <input id="coding-trusty-on" type="checkbox" checked={settings.codingTrustyEnabled}
           onChange={(event) => patch({ codingTrustyEnabled: event.target.checked })} />
       </div>
-      <p className="settings-form-caption">When enabled, Kimi K3 on Clean API starts a separate provisional solution while Council solvers work. It uses the local language knowledge and the same E2B-validated test cases; it is never counted as one of your four selected agents. A passing preflight appears early, then Council may replace it only with a stronger answer that passes verification.</p>
+      <p className="settings-form-caption">When enabled, Claude Fable 5.1 on Clean API starts a separate provisional solution while Council solvers work. It uses the local language knowledge and the same E2B-validated test cases; it is never counted as one of your four selected agents. A passing preflight appears early, then Council may replace it only with a stronger answer that passes verification.</p>
       <details className="settings-inline-help"><summary>How Council mode works</summary><p>The council re-solves the problem, tests each code candidate, reviews the results, and produces a final recommendation. Failed tests cannot win. Expect about 36 extra requests per run, so low gateway limits make council runs slower.</p></details>
 
       <div className="row">
