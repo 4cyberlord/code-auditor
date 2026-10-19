@@ -1868,7 +1868,7 @@ fn hud_window<T>(
 #[cfg(target_os = "macos")]
 fn tune_ghost_overlay(window: &Window) -> Result<(), String> {
     use objc2_app_kit::{
-        NSScreenSaverWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowSharingType,
+        NSStatusWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowSharingType,
         NSWindowStyleMask,
     };
     use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
@@ -1879,8 +1879,8 @@ fn tune_ghost_overlay(window: &Window) -> Result<(), String> {
             return Err("Could not access ghost overlay NSWindow.".into());
         }
         let ns_window = &*ns_window.cast::<NSWindow>();
-        // Screen-saver level: above everything, below the cursor
-        ns_window.setLevel(NSScreenSaverWindowLevel);
+        // Status-bar level: above ordinary app windows without using the screen-saver tier.
+        ns_window.setLevel(NSStatusWindowLevel);
         ns_window.setAlphaValue(0.46);
         // NSWindowSharingType::None = invisible to screen capture
         ns_window.setSharingType(NSWindowSharingType::None);
