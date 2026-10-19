@@ -5217,7 +5217,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
           } } }));
           return null;
         }
-          let text = await bridge.runOnce({
+          const text = await bridge.runOnce({
             runId,
             agentId: "coding-trusty",
             attemptId: newAttemptId(),
@@ -5236,7 +5236,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
             baseUrl: gatewayPreset("cleanapis").defaultBaseUrl,
             endpoint: "chat",
           });
-          let final = parseFinal(text);
+          const final = parseFinal(text);
           if (!final?.wellFormed || final.kind !== "code" || !final.code.trim() || candidateLanguage(final) !== primaryLanguage) {
             throw new Error(`Claude Fable 5.1 did not return a complete ${primaryLanguage} code answer.`);
           }
