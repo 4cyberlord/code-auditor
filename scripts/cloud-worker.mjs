@@ -2707,11 +2707,11 @@ export async function runCouncilJob(job) {
           "You are Coding Trusty, the fast independent preflight solver for the Coding overlay.",
           "Read every supplied original screenshot and solve the exact coding problem now; do not wait for Council model selection or screenshot-reader results.",
           `Use ${languageLabel} unless the problem explicitly requires a different language. Preserve the exact judge signature or input/output interface shown in the screenshots.`,
-          "Return one complete, well-formed Council FINAL block with KIND: code, LANGUAGE, ANSWER, COMPLEXITY, and the full source in a closed fenced code block. Do not claim execution; the app will self-review and run E2B before displaying it.",
+          "Before returning, mentally check the function signature, visible example inputs and outputs, and common edge cases. Return one complete Council FINAL block with KIND: code, LANGUAGE, ANSWER, COMPLEXITY, and a closed fenced source block. Do not claim tests were executed; E2B will check the code before display.",
         ].join("\n\n"),
         images,
         maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
-        reasoning: "high",
+        reasoning: "off",
       }).then(text => ({ text, model: trustyModelForRun, language: trustyLanguage }))
         .catch(error => ({ error: String(error instanceof Error ? error.message : error), model: trustyModelForRun, language: trustyLanguage }));
     }
@@ -3054,7 +3054,7 @@ export async function runCouncilJob(job) {
   // problem before asking solvers; never infer the task type from their output.
   const questionLooksLikeCode = looksLikeCodingPrompt([baseQuestion, reading.context,
     reading.extraction?.problemSummary, reading.extraction?.code].filter(Boolean).join("\n"));
-  const inferredKind = questionLooksLikeCode
+  const inferredKind = settings.overlayMode === "code" ? "code" : questionLooksLikeCode
     ? "code"
     : (contracting.contract?.kind || reading.extraction?.kind || "");
   const languageEvidence=[contractText, reading.extraction?.code || ""].join("\n");
@@ -3201,6 +3201,7 @@ export async function runCouncilJob(job) {
           complexityClaim:screened.claimedBound,complexityAudited:false});
     })().catch(async(error)=>{
       provisionalLock.claimed=false;
+      provisionalState.record=null;
       await addEvent(job.id,"warn","provisional_save_failed",
         "Could not display an early solution; final Council verification continues.",
         {detail:String(error).slice(0,200)}).catch(()=>{});
@@ -3262,36 +3263,13 @@ export async function runCouncilJob(job) {
             throw new Error("Claude Fable 5.1 did not return a complete " + primaryLanguage + " code answer.");
           }
         }
+        // The original Fable request already performed an explicit internal
+        // example/interface check. Requiring three more complete Fable
+        // generations added minutes without providing executable evidence.
+        // Strict parsing plus E2B, not another AI response, is the gate.
         await addEvent(job.id, "info", "coding_trusty_self_review",
-          "Claude Fable 5.1 is checking its interface, language syntax, screenshot examples, and edge cases before E2B.",
-          { model: trustyModel, language: primaryLanguage });
-        let previousIssue = "";
-        let selfReviewed = false;
-        for (let attempt = 1; attempt <= MAX_CANDIDATE_REPAIR_ATTEMPTS; attempt += 1) {
-          const auditText = await tokenRouterGenerate({
-            settings: trustySettings, baseUrl: trustyBaseUrl, model: trustyModel,
-            system: "You are the senior coding agent performing a strict pre-execution self-review. Return exactly one complete FINAL code block. Never claim tests were executed; E2B will run them.",
-            user: codingTrustySelfCheckPrompt({
-              question: screenshotEvidence.question || question,
-              language: primaryLanguage,
-              candidate: final.code,
-              cases: screenshotEvidence.fixtures,
-              knowledge: [initialReference.prompt, knowledge].filter(Boolean).join("\n\n"),
-              attempt,
-              previousIssue,
-            }),
-            images: [], maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
-            temperature: 0, reasoning: "high",
-          });
-          const reviewed = parseFinal(auditText);
-          if (reviewed?.wellFormed && reviewed.kind === "code" && reviewed.code?.trim() && candidateLanguage(reviewed) === primaryLanguage) {
-            final = reviewed;
-            selfReviewed = true;
-            break;
-          }
-          previousIssue = "Attempt " + attempt + " returned no complete " + primaryLanguage + " FINAL code block.";
-        }
-        if (!selfReviewed) throw new Error("Claude Fable 5.1 could not complete its bounded pre-E2B self-review.");
+          "Fable checked its draft against the screenshot instructions; preparing actual E2B tests.",
+          { model: trustyModel, language: primaryLanguage, method: "initial-solve-check" });
         const candidate = {
           letter: "T", model: trustyModel, final, text: firstText,
           error: null, codingTrusty: true,
@@ -3300,13 +3278,22 @@ export async function runCouncilJob(job) {
         await addEvent(job.id, "info", "coding_trusty_testing",
           "Claude Fable 5.1's reviewed answer is being checked against the problem test suite in E2B.",
           { model: trustyModel, letter: "T", language: primaryLanguage });
-        const suites = await prepareProblemHarnesses(job, settings, baseUrl, models, judges,
-          screenshotEvidence.question || question, [candidate], [primaryLanguage], knowledge, bench);
+        // Source-provided literal tests need no second AI author. Build this
+        // deterministic adapter first; only fall back to an independent,
+        // E2B-self-tested generated harness when source fixtures are absent.
+        const providedSuite = buildProvidedHarness(
+          screenshotEvidence.question || question, primaryLanguage, final.code);
+        if (providedSuite) await addEvent(job.id,"info","coding_trusty_provided_tests",
+          "Prepared the question's own test cases without a new AI model call.",
+          {model:trustyModel,language:primaryLanguage,cases:providedSuite.providedCaseCount});
+        const suites = providedSuite ? [providedSuite] :
+          await prepareProblemHarnesses(job, settings, baseUrl, models, judges,
+            screenshotEvidence.question || question, [candidate], [primaryLanguage], knowledge, bench);
         const suite = suites.find(item => item.language === primaryLanguage);
         if (!suite) throw new Error("No executable " + primaryLanguage + " test suite was available for the Trusty answer.");
         const runs = await executeField(job, settings, [suite], [candidate]);
         const run = runs.T;
-        if (!run?.ran || !run.ok || run.failed !== 0 || run.passed < 1) {
+        if (!run?.ran || !run.ok || run.failed !== 0 || run.passed < requiredHarnessCases(suite)) {
           throw new Error("Claude Fable 5.1's preflight answer did not pass the E2B test suite.");
         }
         trustyRunPromise = Promise.resolve(run);
