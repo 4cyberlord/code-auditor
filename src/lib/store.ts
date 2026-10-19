@@ -80,7 +80,7 @@ import { resolveAnswerLanguage } from "./answerLanguage.ts";
 import { classifyProbeResult, isPermanentlyUnreachable, probeToastText } from "./probeFit.ts";
 import { allKnowledgeRecords, knowledgePackForLocalLibrary, type KnowledgeRecord } from "./knowledge.ts";
 import { fingerprintCode } from "./codeFingerprint.ts";
-import { primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
+import { codingTrustyEligible, primaryCodingLanguage, primaryFirstInstruction, providedTestBrief } from "./primaryDeliveryPolicy.ts";
 import { secondaryCouncilLanguages, independentLanguageSolverModels, independentLanguageInstruction, independentLanguageQuestion, independentJudgesReady } from "./independentLanguageCouncil.ts";
 import { reconcileProblemEvidence, visionEvidenceSystemPrompt, evidenceJudgeBrief, evidenceSolverBrief } from "./problemEvidence.ts";
 import { corroboratedImprovementIdeas, parseJudgeUpgradeVote, canAdoptJudgeUpgrade } from "./judgeUpgradePolicy.ts";
@@ -5198,13 +5198,16 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   // Screenshot-example readers are already running alongside the problem
   // contract and documentation lookup. Await their exact-match check before
   // solving so every selected model receives the same corroborated fixtures.
-  const screenshotEvidence = await evidenceReady;
   // Coding Trusty is a dedicated preflight seat, not a change to the four-model
   // adaptive roster. It calls the saved Clean API credential explicitly and
-  // starts before the independent Council solvers are dispatched.
+  // starts while independent screenshot-example readers are still running.
   let trustyCandidate: Candidate | null = null;
   let trustyPromise: Promise<Candidate | null> = Promise.resolve(null);
-  if (settings.codingTrustyEnabled) {
+  if (codingTrustyEligible({
+    enabled: settings.codingTrustyEnabled,
+    mode: settings.mode,
+    taskKinds: [reading?.kind, contract?.kind, ...readers.map(item => item.kind)],
+  })) {
     set(st => ({ council: { ...st.council, codingTrusty: { status: "solving", candidate: null, error: null } } }));
     trustyPromise = (async () => {
       try {
@@ -5228,7 +5231,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
               problem, allImages.length > 0, extractionCtx, s0.images, knowledge,
               solutionPolicy([primaryLanguage], settings.memoryTargetKb || 9 * 1024)
             ) + "\n\n" + primaryFirstInstruction(primaryLanguage) +
-              "\n\n" + evidenceSolverBrief(screenshotEvidence) +
+              "\n\n" + "Read the original screenshot yourself, preserve the exact requested interface, and check the visible examples before returning code. Do not claim any tests were executed." +
               "\n\nYou are Coding Trusty: return your strongest independently reasoned, complete solution now. This is a provisional preflight candidate; do not claim it is Council-approved.",
             images: allImages,
             maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
@@ -5252,6 +5255,10 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
           trustyCandidate = candidate;
           set(st => ({ council: { ...st.council, codingTrusty: { status: "testing", candidate, error: null } } }));
 
+          // Start from the screenshots immediately; wait for corroborated
+          // example evidence only before converting it into E2B assertions.
+          const screenshotEvidence = await evidenceReady;
+
           // When the screenshots contain literal examples, test Trusty as soon
           // as its code lands, while the four independent solvers are still
           // working. Unconfirmed/general cases continue through the shared
@@ -5273,6 +5280,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
         }
       })();
   }
+  const screenshotEvidence = await evidenceReady;
   await Promise.all(
     solveSlots.map((slot, i) =>
       wait(i * COUNCIL_STEP_MS).then(() => {

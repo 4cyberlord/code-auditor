@@ -4,6 +4,14 @@ export function configuredCodeLanguage(value: string | undefined): CodingLanguag
   const normalized = String(value || "Python").trim().toLowerCase();
   return normalized === "rust" ? "rust" : (normalized === "cpp" || normalized === "c++" || normalized === "c++23") ? "cpp" : "python";
 }
+/** Keep the optional Coding Trusty lane from hijacking non-coding tasks. */
+export function codingTrustyEligible(input: {
+  enabled: boolean;
+  mode: string;
+  taskKinds: Array<string | null | undefined>;
+}): boolean {
+  return input.enabled && (input.mode === "code" || input.taskKinds.includes("code"));
+}
 export function primaryCodingLanguage(problem: string, configured = "Python"): CodingLanguage {
   const text = String(problem || "").slice(0, 18000);
   // A required language/visible judge stub is part of the question's contract.
