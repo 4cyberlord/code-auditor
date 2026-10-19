@@ -9,7 +9,7 @@ type Port = {
 };
 type EarlySolution = {
   status?:string;letter?:string;model?:string;language?:string;code?:string;
-  complexity?:string;passed?:number;failed?:number;
+  complexity?:string;passed?:number;failed?:number;answer?:string;claims?:string[];
   verification?:string;
   screenedComplexity?:{claimedBound?:string;targetBound?:string|null;reason?:string;disclaimer?:string};
 };
@@ -56,9 +56,16 @@ export function ProgressiveCouncilResult({
       </div>
       <p>{early?.language||"Primary language"} · Candidate {early?.letter||"?"}
         {" · "}{early?.passed||0} passing executable tests</p>
+      {early?.answer&&<div className="progressive-result-note"><strong>Preflight approach</strong><p>{early.answer}</p></div>}
+      {Array.isArray(early?.claims)&&early.claims.length>0&&<details>
+        <summary>Preflight reasoning and checks</summary>
+        <ul>{early.claims.map((claim,index)=><li key={index}>{claim}</li>)}</ul>
+        <p>These are the solver's claims, not independently verified reasoning.</p>
+      </details>}
       {early?.complexity&&<p>Preliminary Big-O claim: {early.complexity} (not independently audited yet)</p>}
       <p className="progressive-result-note">
-        This version passed the generated E2B test cases and initial complexity screening.
+        This version passed executable E2B test cases; its algorithm and complexity are still awaiting independent Council review.
+        {early?.screenedComplexity?.disclaimer ? " " + early.screenedComplexity.disclaimer : ""}
         {processing
           ? "Other solvers and independent complexity judges are still working. The Council may replace this code with a stronger verified solution."
           : "The Council did not finish its final decision. This provisional code is not an authoritative final answer."}
