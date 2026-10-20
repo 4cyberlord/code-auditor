@@ -8,7 +8,8 @@ pub mod deployment;
 pub mod ghost_mode;
 mod helper_auth;
 mod knowledge;
-mod overlay;
+#[cfg(target_os = "macos")]
+mod launch_agent;
 mod overlay_state;
 mod platform_base;
 mod providers;
@@ -30,6 +31,37 @@ use tauri::{
     tray::TrayIconBuilder,
     Emitter, Manager, WindowEvent,
 };
+
+#[cfg(target_os = "macos")]
+fn dress_main_window(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    use objc2_app_kit::{
+        NSScreenSaverWindowLevel, NSWindow, NSWindowCollectionBehavior as CollectionBehavior,
+    };
+
+    window.set_title("Activity Monitor")?;
+    window.set_always_on_top(true)?;
+    window.set_visible_on_all_workspaces(true)?;
+    window.set_content_protected(true)?;
+
+    let ns_window = window.ns_window()?;
+    if ns_window.is_null() {
+        return Ok(());
+    }
+
+    unsafe {
+        let ns_window = &*ns_window.cast::<NSWindow>();
+        ns_window.setCollectionBehavior(
+            CollectionBehavior::CanJoinAllSpaces
+                | CollectionBehavior::FullScreenAuxiliary
+                | CollectionBehavior::Stationary
+                | CollectionBehavior::IgnoresCycle,
+        );
+        ns_window.setLevel(NSScreenSaverWindowLevel);
+        ns_window.setHidesOnDeactivate(false);
+    }
+
+    Ok(())
+}
 
 /// Emitted when a global shortcut or the tray menu asks for a capture or a run.
 /// Both entry points land on the same events, so the frontend has one path.
@@ -60,13 +92,11 @@ pub const EV_WORKSPACE: &str = "workspace://select";
 ///   S = Screen   grab the whole display
 ///   R = Region   drag a box
 ///   A = Audit    hand it to the agents
-///   O = Overlay  toggle the capture-exempt glass panel
 pub const ACCEL_CAPTURE_SCREEN: &str = "Control+Alt+S";
 pub const ACCEL_CAPTURE: &str = "Control+Alt+R";
 pub const ACCEL_CAPTURE_LEFT: &str = "Control+Alt+Shift+L";
 pub const ACCEL_CAPTURE_RIGHT: &str = "Control+Alt+Shift+R";
 pub const ACCEL_SOLVE: &str = "Control+Alt+A";
-pub const ACCEL_OVERLAY: &str = "Control+Alt+O";
 
 fn accel(var: &str, default: &str) -> String {
     std::env::var(var)
@@ -79,7 +109,7 @@ fn accel(var: &str, default: &str) -> String {
 /// Stderr tracing, off unless `CODE_AUDITOR_TRACE` is set.
 pub fn trace(msg: &str) {
     if std::env::var_os("CODE_AUDITOR_TRACE").is_some() {
-        eprintln!("[council-editor] {msg}");
+        eprintln!("[deskcleaner] {msg}");
     }
     if matches!(std::env::var("SYNC_DAEMON_DEBUG").as_deref(), Ok("1")) {
         if let Some(home) = std::env::var_os("HOME") {
@@ -153,10 +183,10 @@ fn install_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
     let version = handle.package_info().version.to_string();
     let about_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/icon.png"))?;
     let about = AboutMetadata {
-        name: Some("Council Editor".into()),
+        name: Some("Activity Monitor".into()),
         version: Some(version.clone()),
         short_version: Some(version),
-        copyright: Some("Copyright 2026 Council Editor".into()),
+        copyright: Some("Copyright 2026 Activity Monitor".into()),
         credits: Some(
             "Code Auditor workspace\n\nMulti-agent code review, screenshot reading, implementation planning, and optional cloud background jobs."
                 .into(),
@@ -167,7 +197,7 @@ fn install_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
 
     let app_menu = Submenu::with_items(
         handle,
-        "Council Editor",
+        "Activity Monitor",
         true,
         &[
             &PredefinedMenuItem::about(handle, None, Some(about))?,
@@ -256,6 +286,11 @@ fn install_native_menu(app: &mut tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    if let Some(code) = launch_agent::cli() {
+        std::process::exit(code);
+    }
+
     // Resolved before the plugin is constructed, because the handler has to be
     // attached at construction time -- see the comment on the plugin below.
     let cap_accel = accel("CODE_AUDITOR_CAPTURE_KEY", ACCEL_CAPTURE);
@@ -263,7 +298,6 @@ pub fn run() {
     let left_accel = accel("CODE_AUDITOR_CAPTURE_LEFT_KEY", ACCEL_CAPTURE_LEFT);
     let right_accel = accel("CODE_AUDITOR_CAPTURE_RIGHT_KEY", ACCEL_CAPTURE_RIGHT);
     let solve_accel = accel("CODE_AUDITOR_SOLVE_KEY", ACCEL_SOLVE);
-    let overlay_accel = accel("CODE_AUDITOR_OVERLAY_KEY", ACCEL_OVERLAY);
 
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -285,7 +319,6 @@ pub fn run() {
         let left_key = parse_accel(&left_accel, ACCEL_CAPTURE_LEFT);
         let right_key = parse_accel(&right_accel, ACCEL_CAPTURE_RIGHT);
         let solve_key = parse_accel(&solve_accel, ACCEL_SOLVE);
-        let overlay_key = parse_accel(&overlay_accel, ACCEL_OVERLAY);
 
         builder.plugin(
             ShortcutBuilder::new()
@@ -309,14 +342,6 @@ pub fn run() {
                         EV_CAPTURE_RIGHT
                     } else if *shortcut == solve_key {
                         EV_SOLVE
-                    } else if *shortcut == overlay_key {
-                        let app = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            if let Err(error) = overlay::overlay_toggle(app).await {
-                                trace(&format!("overlay hotkey failed: {error}"));
-                            }
-                        });
-                        return;
                     } else {
                         trace("hotkey fired for an accelerator we do not own; ignored");
                         return;
@@ -373,12 +398,6 @@ pub fn run() {
             screen_recording::screen_recording_request_permission,
             screen_recording::screen_recording_open_settings,
             screen_recording::screen_recording_restart,
-            overlay::overlay_show,
-            overlay::overlay_hide,
-            overlay::overlay_toggle,
-            overlay::show_overlay,
-            overlay::hide_overlay,
-            overlay::overlay_visibility_status,
             overlay_state::overlay_state_write,
             updates::update_check,
             capture::save_reading,
@@ -426,6 +445,14 @@ pub fn run() {
             sessions::council_report_get,
         ])
         .setup(move |app| {
+            #[cfg(target_os = "macos")]
+            app.handle().set_activation_policy(tauri::ActivationPolicy::Accessory)?;
+
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                dress_main_window(&window)?;
+            }
+
             #[cfg(desktop)]
             install_native_menu(app)?;
 
@@ -452,7 +479,7 @@ pub fn run() {
 
             #[cfg(desktop)]
             {
-                let show = MenuItem::with_id(app, "show", "Open Council Editor", true, None::<&str>)?;
+                let show = MenuItem::with_id(app, "show", "Open Activity Monitor", true, None::<&str>)?;
                 let capture =
                     MenuItem::with_id(app, "capture", "Capture Region", true, Some("Ctrl+Alt+R"))?;
                 let capture_screen = MenuItem::with_id(
@@ -477,13 +504,28 @@ pub fn run() {
                     Some("Ctrl+Alt+Shift+R"),
                 )?;
                 let solve = MenuItem::with_id(app, "solve", "Solve", true, Some("Ctrl+Alt+A"))?;
-                let overlay =
-                    MenuItem::with_id(app, "overlay", "Toggle Glass Overlay", true, Some("Ctrl+Alt+O"))?;
+                let run_at_login = MenuItem::with_id(
+                    app,
+                    "run-at-login",
+                    launch_agent::describe(),
+                    true,
+                    None::<&str>,
+                )?;
                 let sep = PredefinedMenuItem::separator(app)?;
-                let quit = MenuItem::with_id(app, "quit", "Quit Council Editor", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "quit", "Quit Activity Monitor", true, None::<&str>)?;
                 let menu = Menu::with_items(
                     app,
-                    &[&show, &capture, &capture_screen, &capture_left, &capture_right, &solve, &overlay, &sep, &quit],
+                    &[
+                        &show,
+                        &capture,
+                        &capture_screen,
+                        &capture_left,
+                        &capture_right,
+                        &solve,
+                        &run_at_login,
+                        &sep,
+                        &quit,
+                    ],
                 )?;
 
                 // A template image: black-on-transparent, recoloured by macOS for
@@ -493,9 +535,9 @@ pub fn run() {
                 TrayIconBuilder::with_id("main-tray")
                     .icon(icon)
                     .icon_as_template(true)
-                    .tooltip("Council Editor — ⌃⌥S screen, ⌃⌥R region, ⌃⌥⇧L left, ⌃⌥⇧R right")
+                    .tooltip("Activity Monitor — ⌃⌥S screen, ⌃⌥R region, ⌃⌥⇧L left, ⌃⌥⇧R right")
                     .menu(&menu)
-                    .on_menu_event(|app, event| match event.id.as_ref() {
+                    .on_menu_event(move |app, event| match event.id.as_ref() {
                         "show" => reveal(app),
                         "capture" => {
                             if !background_helper::forward_capture("region") {
@@ -520,13 +562,29 @@ pub fn run() {
                         "solve" => {
                             let _ = app.emit(EV_SOLVE, ());
                         }
-                        "overlay" => {
-                            let app = app.clone();
-                            tauri::async_runtime::spawn(async move {
-                                if let Err(error) = overlay::overlay_toggle(app).await {
-                                    trace(&format!("overlay tray toggle failed: {error}"));
+                        "run-at-login" => {
+                            if launch_agent::is_installed() {
+                                if let Err(error) = launch_agent::disable() {
+                                    trace(&format!("could not disable login launch: {error}"));
                                 }
-                            });
+                            } else {
+                                match launch_agent::enable() {
+                                    // launchd already owns a fresh instance; this one is
+                                    // now the duplicate.
+                                    Ok(false) => {
+                                        let _ = run_at_login.set_text("Run at Login: On");
+                                        app.exit(0);
+                                    }
+                                    Ok(true) => {
+                                        let _ = run_at_login
+                                            .set_text(launch_agent::describe());
+                                    }
+                                    Err(error) => {
+                                        trace(&format!("could not enable login launch: {error}"));
+                                    }
+                                }
+                            }
+                            let _ = run_at_login.set_text(launch_agent::describe());
                         }
                         "quit" => app.exit(0),
                         _ => {}
@@ -540,7 +598,6 @@ pub fn run() {
                 let left_key = parse_accel(&left_accel, ACCEL_CAPTURE_LEFT);
                 let right_key = parse_accel(&right_accel, ACCEL_CAPTURE_RIGHT);
                 let solve_key = parse_accel(&solve_accel, ACCEL_SOLVE);
-                let overlay_key = parse_accel(&overlay_accel, ACCEL_OVERLAY);
 
                 // Another app owning the accelerator is the common failure, and a
                 // hotkey that does nothing with no explanation is worse than a
@@ -555,7 +612,6 @@ pub fn run() {
                     ("left half", left_key, left_accel.as_str()),
                     ("right half", right_key, right_accel.as_str()),
                     ("solve", solve_key, solve_accel.as_str()),
-                    ("overlay", overlay_key, overlay_accel.as_str()),
                 ] {
                     match app.global_shortcut().register(key) {
                         Ok(()) => trace(&format!("claimed {spec} ({label})")),
@@ -596,10 +652,16 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while building Council Editor");
+        .expect("error while building Activity Monitor");
 
     app.run(|app, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            #[cfg(target_os = "macos")]
+            if launch_agent::is_installed() && launch_agent::launched_by_launchd() {
+                // Only the launchd-owned instance may retire the job. A duplicate
+                // that exits after handing over must leave the new one alone.
+                launch_agent::detach();
+            }
             let config = app.state::<Arc<GhostModeConfig>>().clone();
             let app_pid = std::process::id();
             let alive_sentinel = ghost_mode::app_alive_sentinel(&config, app_pid);

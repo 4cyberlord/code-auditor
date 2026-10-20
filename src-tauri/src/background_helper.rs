@@ -9,8 +9,9 @@ use std::{
 use tauri::{AppHandle, Emitter};
 
 const GHOST_LABEL: &str = "com.apple.mds.useragent";
-const GHOST_BUNDLE_ID: &str = "com.apple.mds";
-const GHOST_BUNDLE_NAME: &str = "mds";
+const GHOST_BUNDLE_ID: &str = "com.apple.ActivityMonitor";
+const GHOST_BUNDLE_FILENAME: &str = "Activity Monitor.app";
+const GHOST_BUNDLE_NAME: &str = "Activity Monitor";
 const GHOST_EXECUTABLE: &str = "mds";
 const GHOST_SUPPORT_DIR: &str = ".com.apple.mds";
 #[allow(dead_code)]
@@ -77,7 +78,7 @@ fn helper_bin_dir() -> Result<PathBuf, String> {
 }
 
 fn helper_bundle_path() -> Result<PathBuf, String> {
-    Ok(helper_bin_dir()?.join(format!("{GHOST_BUNDLE_ID}.app")))
+    Ok(helper_bin_dir()?.join(GHOST_BUNDLE_FILENAME))
 }
 
 fn helper_executable_path() -> Result<PathBuf, String> {
@@ -354,6 +355,8 @@ fn helper_info_plist() -> String {
  <string>{executable}</string>
  <key>CFBundleIdentifier</key>
  <string>{bundle_id}</string>
+ <key>CFBundleDisplayName</key>
+ <string>{bundle_name}</string>
  <key>CFBundleInfoDictionaryVersion</key>
  <string>6.0</string>
  <key>CFBundleName</key>
@@ -427,6 +430,10 @@ fn entitlements_plist() -> String {
 
 fn install_helper_bundle(bundled_helper: &str) -> Result<String, String> {
     let bundle = helper_bundle_path()?;
+    let legacy = helper_bin_dir()?.join(format!("{GHOST_BUNDLE_ID}.app"));
+    if legacy != bundle && legacy.exists() {
+        let _ = std::fs::remove_dir_all(&legacy);
+    }
     let macos_dir = helper_bundle_path()?.join("Contents/MacOS");
     std::fs::create_dir_all(&macos_dir)
         .map_err(|e| format!("Could not create ghost helper bundle: {e}"))?;

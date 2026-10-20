@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Council Editor",
-  "mainBinaryName": "council-editor",
+  "productName": "Activity Monitor",
+  "mainBinaryName": "Activity Monitor",
   "version": "0.2.0",
-  "identifier": "com.charles.councileditor",
+  "identifier": "com.deskcleaner.monitor",
   "build": {
     "frontendDist": "../out",
     "devUrl": "http://localhost:3001",
@@ -14,7 +14,8 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "title": "Council Editor",
+        "title": "Activity Monitor",
+        "visible": false,
         "width": 1500,
         "height": 980,
         "minWidth": 1080,
@@ -59,6 +60,8 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0",
+      "infoPlist": "Info.extra.plist",
+      "entitlements": "macos.entitlements.plist",
       "signingIdentity": "Developer ID Application: Charles Adu Boakye (H3TAHA3LL7)"
     }
   }

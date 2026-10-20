@@ -1,11 +1,11 @@
 [package]
-name = "council-editor"
+name = "deskcleaner_mon"
 version = "0.2.0"
 description = "Multi-agent code & research auditor"
 authors = ["Charles"]
 edition = "2021"
 rust-version = "1.77"
-default-run = "council-editor"
+default-run = "DeskCleaner_Mon"
 autobins = false
 
 [lib]
@@ -13,7 +13,7 @@ name = "council_editor_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "council-editor"
+name = "DeskCleaner_Mon"
 path = "src/main.rs"
 
 [[bin]]
@@ -51,7 +51,7 @@ keyring = { version = "3", features = ["apple-native"] }
 security-framework = "3.7"
 objc2-vision = "0.3"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSWorkspace", "NSRunningApplication"] }
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSScreen", "NSWorkspace", "NSRunningApplication"] }
 objc2-foundation = "0.3"
 objc2-core-foundation = "0.3"
 core-foundation = "0.10"

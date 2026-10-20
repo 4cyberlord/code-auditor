@@ -1,6 +1,6 @@
 {
-  "identifier": "com.charles.councileditor.dev",
-  "productName": "Council Editor Dev",
+  "identifier": "com.deskcleaner.monitor",
+  "productName": "Activity Monitor",
   "build": {
     "devUrl": "http://localhost:3000",
     "beforeDevCommand": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Council Editor Dev",
+        "title": "Activity Monitor",
         "width": 1500,
         "height": 980,
         "minWidth": 1080,
