@@ -655,8 +655,12 @@ function unreachableCouncilSeatIds(seats, idOf, catalogue) {
 function gatewayModel(model, settings) {
   const approved = primaryModelId(model);
   if (!approved) throw new Error(`${model} is outside the approved ten-model roster.`);
+  const gateway = gatewayId(settings);
+  // Experiential publishes the granted routes under different spellings; the
+  // catalogue also lists the locked canonical ones, so the alias must win.
+  if (gateway === "experientiallabs") return preferredPrimaryRoute(approved, gateway);
   return listedPrimaryRoute(model, settings?.availableModels ?? []) ||
-    preferredPrimaryRoute(approved, gatewayId(settings));
+    preferredPrimaryRoute(approved, gateway);
 }
 
 async function discoverWorkerCatalog(settings) {
@@ -739,7 +743,7 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
   if (!isPrimaryModel(model)) throw new Error(`${model} is outside the known model roster.`);
   const content = [{ type: "text", text: user }];
   for (const image of images) {
-    content.push({ type: "image_url", image_url: { url: image.url || image.dataUrl } });
+    content.push({ type: "image_url", image_url: { url: baseUrl.includes("experientiallabs.ai") ? image.dataUrl : (image.url || image.dataUrl) } });
   }
 
   let temperature = 0.2;
@@ -906,7 +910,7 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
   if (!isPrimaryModel(model)) throw new Error(`${model} is outside the known model roster.`);
   const content = [{ type: "input_text", text: user }];
   for (const image of images) {
-    content.push({ type: "input_image", image_url: image.url || image.dataUrl });
+    content.push({ type: "input_image", image_url: baseUrl.includes("experientiallabs.ai") ? image.dataUrl : (image.url || image.dataUrl) });
   }
 
   let last = "";
