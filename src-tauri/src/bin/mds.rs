@@ -2664,7 +2664,12 @@ fn capture_highlight(view: &str) -> Result<usize, String> {
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default();
     }
-    trace(&format!("grab ax={} len={}", ax_text.is_some(), text.trim().chars().count()));
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" { fn CGPreflightPostEventAccess() -> bool; }
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" { fn AXIsProcessTrusted() -> bool; }
+    let (ax_trust, post_trust) = unsafe { (AXIsProcessTrusted(), CGPreflightPostEventAccess()) };
+    trace(&format!("grab ax={} len={} axtrust={} posttrust={}", ax_text.is_some(), text.trim().chars().count(), ax_trust, post_trust));
     if let Ok(mut child) = Command::new("/usr/bin/pbcopy").stdin(std::process::Stdio::piped()).spawn() {
         if let Some(mut stdin) = child.stdin.take() { let _ = stdin.write_all(&previous); }
         let _ = child.wait();
