@@ -621,6 +621,22 @@ function trustyGateway(settings) {
   return id === "tokenrouter" ? "cleanapis" : id;
 }
 
+function trustyModelsFor(gateway) {
+  const preset = gatewayPreset(gateway);
+  const primary = preset.trustyModel ?? preferredPrimaryRoute("claude-fable-5.1", gateway);
+  return [...new Set([primary, preset.trustyFallbackModel].filter(Boolean))];
+}
+
+/** One retry on the preset's fallback before Trusty gives up. */
+async function generateTrusty(args, models) {
+  let last;
+  for (const model of models) {
+    try { return { text: await tokenRouterGenerate({ ...args, model }), model }; }
+    catch (error) { last = error; }
+  }
+  throw last;
+}
+
 function gatewayCredential(settings) {
   const id = gatewayId(settings);
   return secret(id) || secret(`${id.toUpperCase()}_API_KEY`) ||
@@ -2703,7 +2719,8 @@ export async function runCouncilJob(job) {
   const startTrustyBeforeSelection = settings.codingTrustyEnabled !== false &&
     settings.source === "overlay" && settings.overlayMode === "code";
   const trustyGatewayForRun = trustyGateway(settings);
-  const trustyModelForRun = gatewayPreset(trustyGatewayForRun).trustyModel ?? preferredPrimaryRoute("claude-fable-5.1", trustyGatewayForRun);
+  const trustyModelsForRun = trustyModelsFor(trustyGatewayForRun);
+  const trustyModelForRun = trustyModelsForRun[0];
   let earlyTrustyDraftPromise = null;
   if (startTrustyBeforeSelection) {
     if (!secret(trustyGatewayForRun)) {
@@ -2718,10 +2735,9 @@ export async function runCouncilJob(job) {
         { model: trustyModelForRun, language: trustyLanguage, screenshotCount: images.length });
       const trustyBaseUrl = gatewayBaseUrl({ gatewayId: trustyGatewayForRun });
       const trustySettings = { ...settings, gatewayId: trustyGatewayForRun, gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
-      earlyTrustyDraftPromise = tokenRouterGenerate({
+      earlyTrustyDraftPromise = generateTrusty({
         settings: trustySettings,
         baseUrl: trustyBaseUrl,
-        model: trustyModelForRun,
         system: systemPrompt("code", { id: trustyLanguage, display: languageLabel }),
         user: [
           "You are Coding Trusty, the fast independent preflight solver for the Coding overlay.",
@@ -2732,7 +2748,7 @@ export async function runCouncilJob(job) {
         images,
         maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
         reasoning: "off",
-      }).then(text => ({ text, model: trustyModelForRun, language: trustyLanguage }))
+      }, trustyModelsForRun).then(({ text, model }) => ({ text, model, language: trustyLanguage }))
         .catch(error => ({ error: String(error instanceof Error ? error.message : error), model: trustyModelForRun, language: trustyLanguage }));
     }
   }
@@ -3249,7 +3265,8 @@ export async function runCouncilJob(job) {
       const trustyGatewayForRun = trustyGateway(settings);
       const trustyBaseUrl = gatewayBaseUrl({ gatewayId: trustyGatewayForRun });
       const trustySettings = { ...settings, gatewayId: trustyGatewayForRun, gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
-      const trustyModel = gatewayPreset(trustyGatewayForRun).trustyModel ?? preferredPrimaryRoute("claude-fable-5.1", trustyGatewayForRun);
+      const trustyModels = trustyModelsFor(trustyGatewayForRun);
+      const trustyModel = trustyModels[0];
       try {
         if (!secret(trustyGatewayForRun)) {
           await addEvent(job.id, "warn", "coding_trusty_unavailable",
@@ -3265,26 +3282,28 @@ export async function runCouncilJob(job) {
         const trustySystem = systemPrompt("code", answerLanguage);
         const earlyDraft = earlyTrustyDraftPromise ? await earlyTrustyDraftPromise : null;
         if (earlyDraft?.error) throw new Error(earlyDraft.error);
-        const firstText = earlyDraft?.text || await tokenRouterGenerate({
-          settings: trustySettings, baseUrl: trustyBaseUrl, model: trustyModel,
+        const stronger = earlyDraft?.text ? null : await generateTrusty({
+          settings: trustySettings, baseUrl: trustyBaseUrl,
           system: trustySystem,
           user: solverPrompt + "\n\n" +
             "You are Coding Trusty: independently return your strongest complete solution in " + primaryLanguage +
             ". Include accurate time and auxiliary-space complexity. This answer is provisional, not Council-approved.",
           images: solveImages,
           maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192), reasoning: "high",
-        });
+        }, trustyModels);
+        const firstText = earlyDraft?.text || stronger.text;
+        const trustyModelUsed = earlyDraft?.model || stronger.model;
         let final = parseFinal(firstText);
         if (!final?.wellFormed || final.kind !== "code" || !final.code?.trim() || candidateLanguage(final) !== primaryLanguage) {
           if (!earlyDraft) throw new Error("Claude Fable 5.1 did not return a complete " + primaryLanguage + " code answer.");
-          const recoveryText = await tokenRouterGenerate({
-            settings: trustySettings, baseUrl: trustyBaseUrl, model: trustyModel,
+          const recovery = await generateTrusty({
+            settings: trustySettings, baseUrl: trustyBaseUrl,
             system: trustySystem,
             user: solverPrompt + "\n\nYour early preflight answer was not parseable as complete " + primaryLanguage +
               " code. Return the complete solution now in exactly one closed Council FINAL block; do not omit code.",
             images: solveImages, maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192), reasoning: "high",
-          });
-          final = parseFinal(recoveryText);
+          }, trustyModels);
+          final = parseFinal(recovery.text);
           if (!final?.wellFormed || final.kind !== "code" || !final.code?.trim() || candidateLanguage(final) !== primaryLanguage) {
             throw new Error("Claude Fable 5.1 did not return a complete " + primaryLanguage + " code answer.");
           }
@@ -3295,9 +3314,9 @@ export async function runCouncilJob(job) {
         // Strict parsing plus E2B, not another AI response, is the gate.
         await addEvent(job.id, "info", "coding_trusty_self_review",
           "Fable checked its draft against the screenshot instructions; preparing actual E2B tests.",
-          { model: trustyModel, language: primaryLanguage, method: "initial-solve-check" });
+          { model: trustyModelUsed, language: primaryLanguage, method: "initial-solve-check" });
         const candidate = {
-          letter: "T", model: trustyModel, final, text: firstText,
+          letter: "T", model: trustyModelUsed, final, text: firstText,
           error: null, codingTrusty: true,
         };
         trustyCandidate = candidate;

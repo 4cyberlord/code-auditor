@@ -5225,37 +5225,55 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
           } } }));
           return null;
         }
-          const trustyModel = gatewayPreset(trustyGateway).trustyModel ?? preferredPrimaryRoute("claude-fable-5.1", trustyGateway);
-          const text = await bridge.runOnce({
-            runId,
-            agentId: "coding-trusty",
-            attemptId: newAttemptId(),
-            provider: trustyGateway,
-            model: trustyModel,
-            systemPrompt: sys,
-            userText: userPrompt(
-              problem, allImages.length > 0, extractionCtx, s0.images, knowledge,
-              solutionPolicy([primaryLanguage], settings.memoryTargetKb || 9 * 1024)
-            ) + "\n\n" + primaryFirstInstruction(primaryLanguage) +
-              "\n\n" + "Read the original screenshot yourself, preserve the exact requested interface, and check the visible examples before returning code. Do not claim any tests were executed." +
-              "\n\nYou are Coding Trusty: return your strongest independently reasoned, complete solution now. This is a provisional preflight candidate; do not claim it is Council-approved.",
-            images: allImages,
-            maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
-            temperature: 0,
-            baseUrl: gatewayPreset(trustyGateway).defaultBaseUrl,
-            endpoint: "chat",
-          });
-          const final = parseFinal(text);
-          if (!final?.wellFormed || final.kind !== "code" || !final.code.trim() || candidateLanguage(final) !== primaryLanguage) {
-            throw new Error(`Claude Fable 5.1 did not return a complete ${primaryLanguage} code answer.`);
+          const trustyPreset = gatewayPreset(trustyGateway);
+          const trustyModel = trustyPreset.trustyModel ?? preferredPrimaryRoute("claude-fable-5.1", trustyGateway);
+          const trustyModels = [trustyModel, trustyPreset.trustyFallbackModel]
+            .filter((value, index, all): value is string => !!value && all.indexOf(value) === index);
+          let text = "";
+          let usedTrustyModel = trustyModel;
+          let final: ReturnType<typeof parseFinal> = null;
+          let lastTrustyError: unknown = null;
+          for (const model of trustyModels) {
+            try {
+              const attempt = await bridge.runOnce({
+                runId,
+                agentId: "coding-trusty",
+                attemptId: newAttemptId(),
+                provider: trustyGateway,
+                model,
+                systemPrompt: sys,
+                userText: userPrompt(
+                  problem, allImages.length > 0, extractionCtx, s0.images, knowledge,
+                  solutionPolicy([primaryLanguage], settings.memoryTargetKb || 9 * 1024)
+                ) + "\n\n" + primaryFirstInstruction(primaryLanguage) +
+                  "\n\n" + "Read the original screenshot yourself, preserve the exact requested interface, and check the visible examples before returning code. Do not claim any tests were executed." +
+                  "\n\nYou are Coding Trusty: return your strongest independently reasoned, complete solution now. This is a provisional preflight candidate; do not claim it is Council-approved.",
+                images: allImages,
+                maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
+                temperature: 0,
+                baseUrl: trustyPreset.defaultBaseUrl,
+                endpoint: "chat",
+              });
+              const parsed = parseFinal(attempt);
+              if (!parsed?.wellFormed || parsed.kind !== "code" || !parsed.code.trim() || candidateLanguage(parsed) !== primaryLanguage) {
+                throw new Error(`Claude Fable 5.1 did not return a complete ${primaryLanguage} code answer.`);
+              }
+              text = attempt;
+              final = parsed;
+              usedTrustyModel = model;
+              break;
+            } catch (err) {
+              lastTrustyError = err;
+            }
           }
+          if (!final) throw lastTrustyError ?? new Error(`Coding Trusty did not return a complete ${primaryLanguage} code answer.`);
           set(st => ({ council: { ...st.council, codingTrusty: { status: "validating", candidate: null, error: null } } }));
           // This Fable prompt already asks for an independent, internal
           // interface/example review. Additional serial full-code LLM passes
           // can multiply latency without proving correctness. A complete
           // parseable source proceeds directly to real E2B verification.
           const candidate: Candidate = {
-            letter: "T", model: trustyModel,
+            letter: "T", model: usedTrustyModel,
             final, text, error: null, codingTrusty: true,
           };
           trustyCandidate = candidate;

@@ -229,7 +229,8 @@ export const EXPERIENTIAL_GATEWAY = {
     gemini: "gemini-4-argon",
   } as Record<ProviderId, string>,
   coordinatorModel: "gpt-5.6-terra",
-  trustyModel: "deepseek-v4-pro",
+  trustyModel: "kimi-k3",
+  trustyFallbackModel: "deepseek-v4.1-flash",
 } as const;
 
 /**
@@ -255,6 +256,8 @@ export interface GatewayPreset {
   coordinatorModel?: string;
   /** Preflight solver model, when the gateway's default is unavailable. */
   trustyModel?: string;
+  /** Used once when the preflight model itself fails. */
+  trustyFallbackModel?: string;
 }
 
 export const KNOWN_GATEWAYS: GatewayPreset[] = [
@@ -308,6 +311,7 @@ export const KNOWN_GATEWAYS: GatewayPreset[] = [
     defaultRouterModels: EXPERIENTIAL_GATEWAY.defaultRouterModels,
     coordinatorModel: EXPERIENTIAL_GATEWAY.coordinatorModel,
     trustyModel: EXPERIENTIAL_GATEWAY.trustyModel,
+    trustyFallbackModel: EXPERIENTIAL_GATEWAY.trustyFallbackModel,
   },
 ];
 
