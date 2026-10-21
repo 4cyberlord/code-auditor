@@ -2649,17 +2649,22 @@ fn capture_highlight(view: &str) -> Result<usize, String> {
     use std::io::Write;
     let previous = Command::new("/usr/bin/pbpaste").output().map(|o| o.stdout).unwrap_or_default();
     let previous_text = String::from_utf8_lossy(&previous).to_string();
-    post_copy_shortcut();
-    std::thread::sleep(Duration::from_millis(260));
-    let copied = Command::new("/usr/bin/pbpaste").output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-    let mut text = copied.clone();
-    // An unchanged clipboard means the synthetic copy did not take, so the
-    // old contents must not be pasted as if they were the selection.
-    if text.trim().is_empty() || text == previous_text {
-        text = read_selected_text_ax().unwrap_or_default();
+    let ax_text = read_selected_text_ax();
+    let mut text = ax_text.clone().unwrap_or_default();
+    // Emptying the pasteboard first makes "did the copy take?" unambiguous:
+    // a selection that happens to equal the old clipboard still reads back.
+    if text.trim().is_empty() {
+        if let Ok(mut child) = Command::new("/usr/bin/pbcopy").stdin(std::process::Stdio::piped()).spawn() {
+            drop(child.stdin.take());
+            let _ = child.wait();
+        }
+        post_copy_shortcut();
+        std::thread::sleep(Duration::from_millis(320));
+        text = Command::new("/usr/bin/pbpaste").output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
     }
+    trace(&format!("grab ax={} len={}", ax_text.is_some(), text.trim().chars().count()));
     if let Ok(mut child) = Command::new("/usr/bin/pbcopy").stdin(std::process::Stdio::piped()).spawn() {
         if let Some(mut stdin) = child.stdin.take() { let _ = stdin.write_all(&previous); }
         let _ = child.wait();
