@@ -959,6 +959,19 @@ fn main() {
 fn run() -> Result<(), String> {
     let _single_instance = claim_single_instance()?;
     ghost_process_hide();
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        extern "C" {
+            fn CGPreflightPostEventAccess() -> bool;
+            fn CGRequestPostEventAccess() -> bool;
+        }
+        let trusted = unsafe { CGPreflightPostEventAccess() };
+        log(&format!("event posting trusted={trusted}"));
+        if !trusted {
+            let _ = unsafe { CGRequestPostEventAccess() };
+        }
+    }
 
     // Ghost: no Dock, no menu bar
     let mut event_loop = EventLoopBuilder::new().build();
