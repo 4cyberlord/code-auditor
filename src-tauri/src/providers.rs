@@ -246,7 +246,7 @@ pub async fn run_coding_model_step(
 ) -> Result<LocalQwenResponse, String> {
     crate::auth::require()?;
     let provider = req.provider.trim();
-    if !matches!(provider, "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis") {
+    if !matches!(provider, "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" | "experientiallabs") {
         return Err(format!(
             "{provider} is not available for Coding yet. Choose a TokenRouter, OpenAI, or Moonshot chat model."
         ));
@@ -269,6 +269,7 @@ pub async fn run_coding_model_step(
             "tokenrouter" => "https://api.tokenrouter.com/v1".into(),
             "wiro" => "https://llm.wiro.ai/v1".into(),
             "cleanapis" => "https://cleanapis.com/v1".into(),
+            "experientiallabs" => "https://api.experientiallabs.ai/v1".into(),
             _ => "https://api.moonshot.ai/v1".into(),
         });
     let mut body = json!({
@@ -1107,7 +1108,7 @@ pub async fn probe_models(
         return Err("Only the ten approved models can be probed.".into());
     }
     let want_vision = test_vision.unwrap_or(false);
-    let use_azure_vision = vision_transport.as_deref() == Some("azure") && gateway_id.as_deref() == Some("cleanapis");
+    let use_azure_vision = vision_transport.as_deref() == Some("azure") && gateway_id.as_deref().is_some_and(direct_gateway);
     let endpoint_by_model = endpoint_by_model.unwrap_or_default();
     let gateway_id = gateway_id.unwrap_or_else(|| "tokenrouter".into());
     if !is_gateway(&gateway_id) {
@@ -1119,6 +1120,7 @@ pub async fn probe_models(
         .unwrap_or_else(|| match gateway_id.as_str() {
             "wiro" => "https://llm.wiro.ai/v1".into(),
             "cleanapis" => "https://cleanapis.com/v1".into(),
+            "experientiallabs" => "https://api.experientiallabs.ai/v1".into(),
             _ => "https://api.tokenrouter.com/v1".into(),
         });
     let url = format!("{}/chat/completions", base.trim_end_matches('/'));
@@ -1391,7 +1393,7 @@ async fn probe_vision(
         }],
         // Clean APIs documents a 2,048-token floor for reasoning models. Give
         // the vision check enough room to produce a visible one-word answer.
-        "max_tokens": if provider == "cleanapis" { 2048 } else { 256 },
+        "max_tokens": if direct_gateway(provider) { 2048 } else { 256 },
     });
 
     // Keep preflight out of the solver retry queue.  The actual candidate
@@ -1515,6 +1517,7 @@ pub async fn list_gateway_models(
         .unwrap_or_else(|| match gateway_id.as_str() {
             "wiro" => "https://llm.wiro.ai/v1".into(),
             "cleanapis" => "https://cleanapis.com/v1".into(),
+            "experientiallabs" => "https://api.experientiallabs.ai/v1".into(),
             _ => "https://api.tokenrouter.com/v1".into(),
         });
     let url = format!("{}/models", base.trim_end_matches('/'));
@@ -1625,7 +1628,13 @@ const RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 /// The transport whose budget this is. Direct vendor calls have their own,
 /// far larger, limits and must not be made to wait behind the gateway's.
 fn is_gateway(provider: &str) -> bool {
-    matches!(provider, "tokenrouter" | "wiro" | "cleanapis")
+    matches!(provider, "tokenrouter" | "wiro" | "cleanapis" | "experientiallabs")
+}
+
+/// Gateways that serve the approved models under their own unprefixed ids and
+/// share the OpenAI-compatible shapes below.
+fn direct_gateway(provider: &str) -> bool {
+    matches!(provider, "cleanapis" | "experientiallabs")
 }
 
 /// Clean API supplies its own quota and Retry-After responses. Keep the old
@@ -1637,16 +1646,16 @@ fn uses_gateway_governor(provider: &str) -> bool {
 fn approved_model(model: &str) -> bool {
     matches!(model.trim().to_ascii_lowercase().as_str(),
         "claude-opus-5.5" | "anthropic/claude-opus-5.5" | "claude/opus-5-5" | "claude/opus-5.5" |
-        "claude-fable-5.1" | "anthropic/claude-fable-5.1" | "claude/fable-5-1" | "claude/fable-5.1" |
+        "claude-fable-5.1" | "claude-haiku-5.5" | "anthropic/claude-fable-5.1" | "claude/fable-5-1" | "claude/fable-5.1" |
         "gpt-5.6-sol" | "openai/gpt-5.6-sol" | "openai/gpt-5-6-sol" |
-        "gemini-3.1-pro" | "google/gemini-3.1-pro" | "google/gemini-3-1-pro" |
+        "gemini-3.1-pro" | "gemini-3.1-pro-preview" | "google/gemini-3.1-pro" | "google/gemini-3-1-pro" |
         "grok-4.6" | "x-ai/grok-4.6" | "xai/grok-4-6" | "xai/grok-4.6" |
         "gpt-5.6-terra" | "openai/gpt-5.6-terra" | "openai/gpt-5-6-terra" |
         "qwen3.8-max" | "qwen/qwen3.8-max" | "qwen/qwen3-8-max" |
         "kimi-k3" | "moonshotai/kimi-k3" | "moonshot/kimi-k3" |
         "glm-5.3" | "z-ai/glm-5.3" | "zai/glm-5-3" | "glm/5-3" | "glm/5.3" |
-        "deepseek-v4-pro-max" | "deepseek/deepseek-v4-pro-max" |
-        "seed-2.1-pro" | "bytedance/seed-v2-1-pro" | "bytedance/seed-2.1-pro")
+        "deepseek-v4-pro-max" | "deepseek-v4-pro" | "deepseek/deepseek-v4-pro-max" |
+        "seed-2.1-pro" | "seed-2-1-turbo" | "bytedance/seed-v2-1-pro" | "bytedance/seed-2.1-pro")
 }
 
 struct Gate {
@@ -1784,7 +1793,7 @@ async fn send_for_provider(
     build: impl Fn() -> reqwest::RequestBuilder,
     provider: &str,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    if provider != "cleanapis" {
+    if !direct_gateway(provider) {
         return send_governed(build, uses_gateway_governor(provider)).await;
     }
     // Clean API has a separate plan quota. Parallel calls use its own retry
@@ -1866,7 +1875,7 @@ fn build_request(
 ) -> Result<(String, Vec<(String, String)>, Value), String> {
     let key = secrets::read_api_key(&req.provider)?;
     match req.provider.as_str() {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => {
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" | "experientiallabs" => {
             let base = req
                 .base_url
                 .clone()
@@ -1879,7 +1888,7 @@ fn build_request(
                 });
             let mut content = vec![json!({ "type": "text", "text": req.user_text })];
             for img in &req.images {
-                let image_url = if req.provider == "cleanapis" {
+                let image_url = if direct_gateway(&req.provider) {
                     img.url.clone().unwrap_or_else(|| format!("data:{};base64,{}", img.mime, img.data))
                 } else {
                     format!("data:{};base64,{}", img.mime, img.data)
@@ -1897,7 +1906,7 @@ fn build_request(
                 ],
                 "stream": stream
             });
-            if req.json_mode && req.provider == "cleanapis" {
+            if req.json_mode && direct_gateway(&req.provider) {
                 body["response_format"] = json!({ "type": "json_object" });
             }
             // OpenAI renamed the budget field for its reasoning models; Moonshot's
@@ -2015,7 +2024,7 @@ fn gemini_text(v: &Value) -> String {
 
 fn extract_delta(provider: &str, v: &Value) -> String {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" =>
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" | "experientiallabs" =>
             chat_content_text(&v["choices"][0]["delta"]["content"]),
         "anthropic" => {
             // `thinking_delta` events also arrive under `content_block_delta`, but
@@ -2033,7 +2042,7 @@ fn extract_delta(provider: &str, v: &Value) -> String {
 
 fn extract_whole(provider: &str, v: &Value) -> String {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => chat_message_text(v),
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" | "experientiallabs" => chat_message_text(v),
         "anthropic" => v["content"]
             .as_array()
             .map(|blocks| {
@@ -2051,7 +2060,7 @@ fn extract_whole(provider: &str, v: &Value) -> String {
 
 fn extract_usage(provider: &str, v: &Value) -> Option<Usage> {
     match provider {
-        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" => {
+        "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" | "experientiallabs" => {
             let u = &v["usage"];
             u.is_object()
                 .then(|| (u["prompt_tokens"].as_u64(), u["completion_tokens"].as_u64()))
@@ -2241,7 +2250,9 @@ mod explain_tests {
             assert!(!approved_model(id), "{id}");
         }
         assert!(is_gateway("cleanapis"));
+        assert!(is_gateway("experientiallabs"));
         assert!(!uses_gateway_governor("cleanapis"));
+        assert!(direct_gateway("experientiallabs"));
     }
 
     #[test]

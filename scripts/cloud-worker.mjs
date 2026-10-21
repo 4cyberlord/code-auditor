@@ -46,6 +46,7 @@ import { screenProvisionalCandidate, createProvisionalRecord, buildSolutionHisto
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { gatewayPreset } from "../src/lib/models.ts";
 import { SELECTABLE_PRIMARY_MODEL_IDS, isPrimaryModel, isSelectablePrimaryModel, listedPrimaryRoute, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "../src/lib/primaryModels.ts";
 import { coordinateAndVerify } from "../src/lib/visionCoordinator.ts";
 import {
@@ -594,6 +595,7 @@ function screenshotReaderSeats(settings, fallback) {
 function gatewayBaseUrl(settings) {
   return settings?.gatewayBaseUrl || ({
     cleanapis: "https://cleanapis.com/v1",
+    experientiallabs: "https://api.experientiallabs.ai/v1",
     wiro: "https://llm.wiro.ai/v1",
     tokenrouter: "https://api.tokenrouter.com/v1",
   })[settings?.gatewayId || "tokenrouter"] || "https://api.tokenrouter.com/v1";
@@ -602,8 +604,21 @@ function gatewayBaseUrl(settings) {
 function gatewayId(settings) {
   const baseUrl = String(settings?.gatewayBaseUrl || "");
   if (settings?.gatewayId === "cleanapis" || baseUrl.includes("cleanapis.com")) return "cleanapis";
+  if (settings?.gatewayId === "experientiallabs" || baseUrl.includes("experientiallabs.ai")) return "experientiallabs";
   if (settings?.gatewayId === "wiro" || baseUrl.includes("llm.wiro.ai")) return "wiro";
   return "tokenrouter";
+}
+
+/** Gateways that serve unprefixed ids and the OpenAI-compatible JSON mode. */
+function usesDirectGateway(settings) {
+  const id = gatewayId(settings);
+  return id === "cleanapis" || id === "experientiallabs";
+}
+
+/** Trusty rides the selected gateway, falling back to Clean API on TokenRouter. */
+function trustyGateway(settings) {
+  const id = gatewayId(settings);
+  return id === "tokenrouter" ? "cleanapis" : id;
 }
 
 function gatewayCredential(settings) {
@@ -1041,8 +1056,8 @@ async function tokenRouterGenerate({ settings, ...args }) {
   // still use the user's configured reasoning effort.
   const reasoning = args.reasoning ?? reasoningForModel(settings, args.model);
   const withThinking = { ...args, model: gatewayModel(args.model, settings),
-    apiKey: gatewayCredential(settings), paced: gatewayId(settings) !== "cleanapis", reasoning };
-  if (gatewayId(settings) !== "cleanapis") delete withThinking.responseFormat;
+    apiKey: gatewayCredential(settings), paced: !usesDirectGateway(settings), reasoning };
+  if (!usesDirectGateway(settings)) delete withThinking.responseFormat;
   return endpoint === "responses"
     ? tokenRouterResponses(withThinking)
     : tokenRouterChat(withThinking);
@@ -1920,7 +1935,7 @@ async function readScreenshots({ job, settings, baseUrl, models, images, imageRe
           images,
           maxTokens: Number(settings.maxTokens || 4096),
           reasoning: "off",
-          ...(gatewayId(settings) === "cleanapis" ? {responseFormat: {type: "json_object"}} : {}),
+          ...(usesDirectGateway(settings) ? {responseFormat: {type: "json_object"}} : {}),
         });
         const parsed = parseExtraction(text);
         if (!parsed) {
@@ -2398,7 +2413,7 @@ function mcqEndpointFor(settings, model) {
 
 async function mcqGenerate({ settings, baseUrl, model, system, user, images = [], maxTokens = 2048 }) {
   const args = { baseUrl, model: gatewayModel(model, settings), system, user, images, maxTokens,
-    apiKey: gatewayCredential(settings), paced: gatewayId(settings) !== "cleanapis",
+    apiKey: gatewayCredential(settings), paced: !usesDirectGateway(settings),
     reasoning: reasoningForModel(settings, model) };
   return mcqEndpointFor(settings, model) === "responses"
     ? tokenRouterResponses(args)
@@ -2683,21 +2698,22 @@ export async function runCouncilJob(job) {
 
   const startTrustyBeforeSelection = settings.codingTrustyEnabled !== false &&
     settings.source === "overlay" && settings.overlayMode === "code";
-  const trustyModelForRun = preferredPrimaryRoute("claude-fable-5.1", "cleanapis");
+  const trustyGatewayForRun = trustyGateway(settings);
+  const trustyModelForRun = gatewayPreset(trustyGatewayForRun).trustyModel ?? preferredPrimaryRoute("claude-fable-5.1", trustyGatewayForRun);
   let earlyTrustyDraftPromise = null;
   if (startTrustyBeforeSelection) {
-    if (!secret("cleanapis")) {
+    if (!secret(trustyGatewayForRun)) {
       await addEvent(job.id, "warn", "coding_trusty_unavailable",
-        "Coding Trusty needs the account's saved Clean API credential; Council selection continues normally.",
+        `Coding Trusty needs the account's saved ${trustyGatewayForRun} credential; Council selection continues normally.`,
         { model: trustyModelForRun });
     } else {
       const trustyLanguage = configuredCodeLanguage(settings.outputLanguage);
       const languageLabel = trustyLanguage === "cpp" ? "C++" : trustyLanguage === "rust" ? "Rust" : "Python";
       await addEvent(job.id, "info", "coding_trusty_started",
-        "Coding Trusty (Claude Fable 5.1 · Clean API) is starting from the uploaded screenshots before Council model selection.",
+        `Coding Trusty (Claude Fable 5.1 · ${trustyGatewayForRun}) is starting from the uploaded screenshots before Council model selection.`,
         { model: trustyModelForRun, language: trustyLanguage, screenshotCount: images.length });
-      const trustyBaseUrl = "https://cleanapis.com/v1";
-      const trustySettings = { ...settings, gatewayId: "cleanapis", gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
+      const trustyBaseUrl = gatewayBaseUrl({ gatewayId: trustyGatewayForRun });
+      const trustySettings = { ...settings, gatewayId: trustyGatewayForRun, gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
       earlyTrustyDraftPromise = tokenRouterGenerate({
         settings: trustySettings,
         baseUrl: trustyBaseUrl,
@@ -2901,6 +2917,7 @@ export async function runCouncilJob(job) {
     note: [reading.context, reading.markdown].filter(Boolean).join("\n\n").slice(0, 2800),
     screenshotCount: solveImages.length,
     fallbackOrder: selectionCandidates.map((seat) => seat.id),
+    preferredCoordinator: gatewayPreset(settings.gatewayId).coordinatorModel,
     probe: async (routes, needsVision) => {
       // A fresh Clean API catalogue is already an entitlement and capability
       // check. The first actual selected-solver call carries this job's direct
@@ -2974,7 +2991,7 @@ export async function runCouncilJob(job) {
         settings, baseUrl, model, system: visionEvidenceSystemPrompt(),
         user: "Independently transcribe only labelled examples from the ORIGINAL pixels into strict JSON; never infer an expected answer.",
         images, maxTokens: 3600, reasoning: "off",
-        ...(gatewayId(settings) === "cleanapis" ? {responseFormat: {type: "json_object"}} : {}),
+        ...(usesDirectGateway(settings) ? {responseFormat: {type: "json_object"}} : {}),
       });
     } catch { return ""; }
   };
@@ -3225,19 +3242,20 @@ export async function runCouncilJob(job) {
   let trustyPromise = Promise.resolve(null);
   if (trustyEligible) {
     trustyPromise = (async () => {
-      const trustyBaseUrl = "https://cleanapis.com/v1";
-      const trustySettings = { ...settings, gatewayId: "cleanapis", gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
-      const trustyModel = preferredPrimaryRoute("claude-fable-5.1", "cleanapis");
+      const trustyGatewayForRun = trustyGateway(settings);
+      const trustyBaseUrl = gatewayBaseUrl({ gatewayId: trustyGatewayForRun });
+      const trustySettings = { ...settings, gatewayId: trustyGatewayForRun, gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
+      const trustyModel = gatewayPreset(trustyGatewayForRun).trustyModel ?? preferredPrimaryRoute("claude-fable-5.1", trustyGatewayForRun);
       try {
-        if (!secret("cleanapis")) {
+        if (!secret(trustyGatewayForRun)) {
           await addEvent(job.id, "warn", "coding_trusty_unavailable",
-            "Coding Trusty needs the account's saved Clean API credential; the four Council solvers continue normally.",
+            `Coding Trusty needs the account's saved ${trustyGatewayForRun} credential; the four Council solvers continue normally.`,
             { model: trustyModel });
           return null;
         }
         if (!earlyTrustyDraftPromise) {
           await addEvent(job.id, "info", "coding_trusty_started",
-            "Coding Trusty (Claude Fable 5.1 · Clean API) is independently solving the problem alongside the four Council agents.",
+            `Coding Trusty (Claude Fable 5.1 · ${trustyGatewayForRun}) is independently solving the problem alongside the four Council agents.`,
             { model: trustyModel, language: primaryLanguage });
         }
         const trustySystem = systemPrompt("code", answerLanguage);
@@ -3774,10 +3792,12 @@ export async function runCouncilJob(job) {
           `- [TEST FAILURES — repair ${attempt}/${MAX_CANDIDATE_REPAIR_ATTEMPTS}] ${run.passed} passed, ${run.failed} failed. Untrusted E2B evidence:\n${executionFailureEvidence(run)}\nRepair the code, not the test harness. Preserve the original problem contract and callable interface.`
         );
         try {
+          const revisionTrustyGateway = trustyGateway(settings);
+          const revisionTrustyBase = gatewayBaseUrl({ gatewayId: revisionTrustyGateway });
           const revisionSettings = candidate.codingTrusty
-            ? { ...settings, gatewayId: "cleanapis", gatewayBaseUrl: "https://cleanapis.com/v1", availableModels: [] }
+            ? { ...settings, gatewayId: revisionTrustyGateway, gatewayBaseUrl: revisionTrustyBase, availableModels: [] }
             : settings;
-          const revisionBaseUrl = candidate.codingTrusty ? "https://cleanapis.com/v1" : baseUrl;
+          const revisionBaseUrl = candidate.codingTrusty ? revisionTrustyBase : baseUrl;
           const text = await tokenRouterGenerate({
             settings: revisionSettings, baseUrl: revisionBaseUrl, model: candidate.model,
             system: reviseSystemPrompt(),

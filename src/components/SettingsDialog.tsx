@@ -13,6 +13,7 @@ import {
   agentSpec,
   PROVIDERS,
   PROVIDER_ORDER,
+  usesDirectModelIds,
   type ProviderId,
   STORAGE,
 } from "@/lib/models";
@@ -316,7 +317,7 @@ interface CodingModelChoice {
 }
 
 function supportsCodingTools(route: Route | null): boolean {
-  return !!route && ["openai", "moonshot", "tokenrouter", "wiro", "cleanapis"].includes(route.provider);
+  return !!route && ["openai", "moonshot", "tokenrouter", "wiro", "cleanapis", "experientiallabs"].includes(route.provider);
 }
 
 function projectNameFromPath(path: string): string {
@@ -661,7 +662,7 @@ function GatewayCard() {
       const details = await bridge.listGatewayModelDetails(baseUrl, gatewayId);
       const ids = primaryCatalog(details.map(model => model.id));
       const approved = new Set(ids);
-      const vision = gatewayId === "cleanapis"
+      const vision = usesDirectModelIds(gatewayId)
         ? Object.fromEntries(details.filter(model =>
             approved.has(model.id) && Array.isArray(model.capabilities)).map(model => [
               model.id, model.capabilities!.some(capability => capability.toLowerCase() === "vision")
@@ -913,9 +914,9 @@ function GatewayCard() {
             </button>
           </div>
 
-          {gatewayId === "cleanapis" && modelsInUse.length > 0 && modelsToImageCheck.length === 0 && (
+          {usesDirectModelIds(gatewayId) && modelsInUse.length > 0 && modelsToImageCheck.length === 0 && (
             <p className="hint" style={{ margin: "0 0 6px", color: "var(--warn)" }}>
-              Clean API lists no enabled approved model with vision. Screenshot tasks need a model whose catalogue capabilities include vision.
+              This gateway lists no enabled approved model with vision. Screenshot tasks need a model whose catalogue capabilities include vision.
             </p>
           )}
 
@@ -1099,6 +1100,13 @@ function GatewayCard() {
           server-side secrets; the app only receives whether it is present. Only the ten approved
           models appear in this catalogue and can be selected for a run. Enable the token&apos;s
           inference and models:read scopes.
+        </p>
+      )}
+      {gatewayId === "experientiallabs" && (
+        <p className="hint">
+          Paste an Experiential Labs API key above and save it. The key stays in your signed-in
+          account&apos;s server-side secrets; the app only receives whether it is present. All eleven
+          approved models are served on the same key under their own ids.
         </p>
       )}
     </div>

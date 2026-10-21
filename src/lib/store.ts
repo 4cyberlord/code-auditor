@@ -16,6 +16,8 @@ import {
   type GatewayId,
   type ProviderId,
   type TransportId,
+  isGatewayId,
+  usesDirectModelIds,
 } from "./models.ts";
 import { normalizeMcqEndpoint, normalizeOverlayMode, type McqEndpoint, type OverlayMode } from "./mcq.ts";
 import { parseFinal, type AgentFinal } from "./parse.ts";
@@ -1181,8 +1183,9 @@ function normalizeSettings(s: Settings): Settings {
   const base = defaultSettings();
   const savedBaseUrl = typeof s.gatewayBaseUrl === "string" ? s.gatewayBaseUrl : "";
   const gatewayId: GatewayId = s.gatewayId === "cleanapis" || savedBaseUrl.includes("cleanapis.com")
-    ? "cleanapis" : s.gatewayId === "wiro" || savedBaseUrl.includes("llm.wiro.ai")
-      ? "wiro" : GATEWAY.id;
+    ? "cleanapis" : s.gatewayId === "experientiallabs" || savedBaseUrl.includes("experientiallabs.ai")
+      ? "experientiallabs" : s.gatewayId === "wiro" || savedBaseUrl.includes("llm.wiro.ai")
+        ? "wiro" : GATEWAY.id;
   return {
     ...s,
     primaryRosterVersion: 1,
@@ -2818,7 +2821,7 @@ export const useStore = create<State>((set, get) => ({
       try {
         const details = await bridge.listGatewayModelDetails(settings.gatewayBaseUrl, settings.gatewayId);
         catalogue = details.map(model => model.id);
-        if (settings.gatewayId === "cleanapis") {
+        if (usesDirectModelIds(settings.gatewayId)) {
           advertisedVision = Object.fromEntries(details
             .filter(model => Array.isArray(model.capabilities))
             .map(model => [model.id,
@@ -2842,7 +2845,7 @@ export const useStore = create<State>((set, get) => ({
         // eligible. Some valid Clean entries omit `capabilities` altogether;
         // absence is unknown, not a claim that the model cannot receive an
         // image. An explicit non-vision declaration is still rejected.
-        if (images.length > 0 && settings.gatewayId === "cleanapis" && advertisedVision[model] === false) return [];
+        if (images.length > 0 && usesDirectModelIds(settings.gatewayId) && advertisedVision[model] === false) return [];
         seenModels.add(canonical);
         return [{ id, model, canSeeImages: agentSpec(id).vision }];
       });
@@ -2860,6 +2863,7 @@ export const useStore = create<State>((set, get) => ({
       const availability = await coordinateAndVerify({
         candidates, catalogue, note, screenshotCount: images.length,
         fallbackOrder: shortlist.selected,
+        preferredCoordinator: gatewayPreset(settings.gatewayId).coordinatorModel,
         probe: (models, vision) => {
           // Never manufacture successful 0ms probes from a model catalogue.
           // Native probes send an actual PNG through the selected gateway.
@@ -2915,8 +2919,8 @@ export const useStore = create<State>((set, get) => ({
         hadRouteFailure = true;
         get().pushToast("err", "Gateway has no verified models",
           candidates.length === 0 && configured.length > 0 && catalogue.length > 0 &&
-          images.length > 0 && settings.gatewayId === "cleanapis"
-            ? "Clean API's model catalogue does not advertise image input for any enabled approved model. Enable a model with the vision capability on this key, then refresh the list."
+          images.length > 0 && usesDirectModelIds(settings.gatewayId)
+            ? "The gateway's model catalogue does not advertise image input for any enabled approved model. Enable a model with the vision capability on this key, then refresh the list."
             : "The configured candidates failed live availability checks on " + settings.gatewayId + ". " +
               availability.rejected.slice(0, 3).map(r=>r.model + ": " + r.reason).join("; "),
           { sticky: true });
@@ -3075,7 +3079,7 @@ export const useStore = create<State>((set, get) => ({
         // submission's signed Azure URLs are validated by the real solver call.
         // Requiring an older synthetic-probe row here after selection already
         // accepted the catalogue route left agents queued forever.
-        const catalogueVision = settings.gatewayId === "cleanapis" &&
+        const catalogueVision = usesDirectModelIds(settings.gatewayId) &&
           get().settings.availableModels.includes(route.model) &&
           get().settings.advertisedVision[route.model] !== false;
         // Decided per pane rather than once for the run: the same screenshot is
@@ -5002,7 +5006,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
           userText: "Independently read literal examples from ORIGINAL screenshot pixels only. No OCR transcription, code or model-generated expected outputs are given.",
           images: allImages, maxTokens: 2400, temperature: 0,
           baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
-          jsonMode: settings.gatewayId === "cleanapis",
+          jsonMode: usesDirectModelIds(settings.gatewayId),
         });
       } catch { return ""; }
     }));
@@ -5188,7 +5192,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
           userText: "Independently verify the literal screenshot examples from the ORIGINAL pixels. Do not copy an OCR or another reader.",
           images: allImages, maxTokens: 2400, temperature: 0,
           baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
-          jsonMode: settings.gatewayId === "cleanapis",
+          jsonMode: usesDirectModelIds(settings.gatewayId),
         });
         evidence = reconcileProblemEvidence(problem, true, [...readings, reply]);
       } catch { /* No third vote: disputed examples remain unconfirmed. */ }
@@ -5211,21 +5215,23 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
     set(st => ({ council: { ...st.council, codingTrusty: { status: "solving", candidate: null, error: null } } }));
     trustyPromise = (async () => {
       try {
-        const hasCleanApiKey = settings.gatewayId === "cleanapis"
-          ? s0.gatewayKey : await bridge.hasApiKey("cleanapis");
-        if (!hasCleanApiKey) {
+        const trustyGateway = isGatewayId(settings.gatewayId) ? settings.gatewayId : "cleanapis";
+        const hasTrustyKey = trustyGateway === settings.gatewayId && settings.gatewayId !== "cleanapis"
+          ? s0.gatewayKey : await bridge.hasApiKey(trustyGateway);
+        if (!hasTrustyKey) {
           set(st => ({ council: { ...st.council, codingTrusty: {
             status: "unavailable", candidate: null,
-            error: "Coding Trusty needs a saved Clean API credential. Add it in Settings → API.",
+            error: "Coding Trusty needs a saved gateway credential. Add it in Settings → API.",
           } } }));
           return null;
         }
+          const trustyModel = gatewayPreset(trustyGateway).trustyModel ?? preferredPrimaryRoute("claude-fable-5.1", trustyGateway);
           const text = await bridge.runOnce({
             runId,
             agentId: "coding-trusty",
             attemptId: newAttemptId(),
-            provider: "cleanapis",
-            model: preferredPrimaryRoute("claude-fable-5.1", "cleanapis"),
+            provider: trustyGateway,
+            model: trustyModel,
             systemPrompt: sys,
             userText: userPrompt(
               problem, allImages.length > 0, extractionCtx, s0.images, knowledge,
@@ -5236,7 +5242,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
             images: allImages,
             maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
             temperature: 0,
-            baseUrl: gatewayPreset("cleanapis").defaultBaseUrl,
+            baseUrl: gatewayPreset(trustyGateway).defaultBaseUrl,
             endpoint: "chat",
           });
           const final = parseFinal(text);
@@ -5249,7 +5255,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
           // can multiply latency without proving correctness. A complete
           // parseable source proceeds directly to real E2B verification.
           const candidate: Candidate = {
-            letter: "T", model: preferredPrimaryRoute("claude-fable-5.1", "cleanapis"),
+            letter: "T", model: trustyModel,
             final, text, error: null, codingTrusty: true,
           };
           trustyCandidate = candidate;
@@ -5435,7 +5441,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
                 temperature: 0,
                 baseUrl: settings.gatewayBaseUrl || gatewayPreset(settings.gatewayId).defaultBaseUrl,
                 endpoint: endpointForModel(settings, model),
-                jsonMode: structuredPython && settings.gatewayId === "cleanapis",
+                jsonMode: structuredPython && usesDirectModelIds(settings.gatewayId),
               });
             } catch (err) {
               specFailure = `${model}: ${cleanError(String(err))}`;
@@ -5611,9 +5617,9 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
           maxTokens: c.final?.kind === "code" ? Math.max(Number(settings.maxTokens || 4096), 8192) : settings.maxTokens,
           temperature: 0,
         }, settings, c.codingTrusty ? {
-          provider: "cleanapis",
-          model: preferredPrimaryRoute("claude-fable-5.1", "cleanapis"),
-          baseUrl: gatewayPreset("cleanapis").defaultBaseUrl,
+          provider: isGatewayId(settings.gatewayId) ? settings.gatewayId : "cleanapis",
+          model: preferredPrimaryRoute("claude-fable-5.1", isGatewayId(settings.gatewayId) ? settings.gatewayId : "cleanapis"),
+          baseUrl: gatewayPreset(isGatewayId(settings.gatewayId) ? settings.gatewayId : "cleanapis").defaultBaseUrl,
         } : undefined);
       })
     ));

@@ -212,6 +212,26 @@ export const CLEANAPIS_GATEWAY = {
   } as Record<ProviderId, string>,
 } as const;
 
+/** Experiential Labs is an OpenAI-compatible gateway with the same unprefixed ids. */
+export const EXPERIENTIAL_GATEWAY = {
+  id: "experientiallabs",
+  label: "Experiential",
+  vendor: "Experiential Labs",
+  keyUrl: "https://platform.experientiallabs.ai/settings",
+  keyHint: "exp_…",
+  defaultBaseUrl: "https://api.experientiallabs.ai/v1",
+  modelsUrl: "https://platform.experientiallabs.ai/models",
+  accent: "#3b82f6",
+  defaultRouterModels: {
+    openai: "gpt-5.6-sol",
+    moonshot: "kimi-k3",
+    anthropic: "claude-opus-5.5",
+    gemini: "gemini-3.1-pro-preview",
+  } as Record<ProviderId, string>,
+  coordinatorModel: "gpt-5.6-terra",
+  trustyModel: "deepseek-v4-pro",
+} as const;
+
 /**
  * Every gateway the app knows about, in display order.
  *
@@ -231,6 +251,10 @@ export interface GatewayPreset {
   accent: string;
   /** Default router model ids for the four provider panes. */
   defaultRouterModels: Record<ProviderId, string>;
+  /** Asks this model to choose the solver panel when the gateway lists one. */
+  coordinatorModel?: string;
+  /** Preflight solver model, when the gateway's default is unavailable. */
+  trustyModel?: string;
 }
 
 export const KNOWN_GATEWAYS: GatewayPreset[] = [
@@ -271,6 +295,19 @@ export const KNOWN_GATEWAYS: GatewayPreset[] = [
     modelsUrl: CLEANAPIS_GATEWAY.modelsUrl,
     accent: CLEANAPIS_GATEWAY.accent,
     defaultRouterModels: CLEANAPIS_GATEWAY.defaultRouterModels,
+  },
+  {
+    id: EXPERIENTIAL_GATEWAY.id,
+    label: EXPERIENTIAL_GATEWAY.label,
+    vendor: EXPERIENTIAL_GATEWAY.vendor,
+    keyUrl: EXPERIENTIAL_GATEWAY.keyUrl,
+    keyHint: EXPERIENTIAL_GATEWAY.keyHint,
+    defaultBaseUrl: EXPERIENTIAL_GATEWAY.defaultBaseUrl,
+    modelsUrl: EXPERIENTIAL_GATEWAY.modelsUrl,
+    accent: EXPERIENTIAL_GATEWAY.accent,
+    defaultRouterModels: EXPERIENTIAL_GATEWAY.defaultRouterModels,
+    coordinatorModel: EXPERIENTIAL_GATEWAY.coordinatorModel,
+    trustyModel: EXPERIENTIAL_GATEWAY.trustyModel,
   },
 ];
 
@@ -411,7 +448,19 @@ export function agentSpec(id: AgentId): AgentSpec {
  * travels over is either that vendor or the gateway. It doubles as the Keychain
  * entry id, because a credential belongs to whoever you are actually talking to.
  */
-export type GatewayId = typeof GATEWAY.id | typeof WIRO_GATEWAY.id | typeof CLEANAPIS_GATEWAY.id;
+export type GatewayId =
+  | typeof GATEWAY.id
+  | typeof WIRO_GATEWAY.id
+  | typeof CLEANAPIS_GATEWAY.id
+  | typeof EXPERIENTIAL_GATEWAY.id;
+
+/** Gateways that serve the approved models under their own unprefixed ids. */
+export const usesDirectModelIds = (gateway: string): boolean =>
+  gateway === CLEANAPIS_GATEWAY.id || gateway === EXPERIENTIAL_GATEWAY.id;
+
+/** Every id that is a gateway rather than a vendor. */
+export const isGatewayId = (id: string): id is GatewayId =>
+  KNOWN_GATEWAYS.some((gateway) => gateway.id === id);
 
 /** Finds the saved gateway preset, retaining TokenRouter for older settings. */
 export const gatewayPreset = (id: string | null | undefined): GatewayPreset =>

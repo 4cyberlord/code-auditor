@@ -72,6 +72,8 @@ export async function coordinateAndVerify<Id extends string>(input: {
   note: string;
   screenshotCount: number;
   maxSolvers?: number;
+  /** Preferred decision model, when the gateway names one. */
+  preferredCoordinator?: string | null;
   probe: (models: string[], checkVision: boolean) => Promise<LiveModelProbe[]>;
   ask: (model: string, prompt: ReturnType<typeof coordinatorPrompt>) => Promise<string>;
 }): Promise<{
@@ -103,7 +105,11 @@ export async function coordinateAndVerify<Id extends string>(input: {
   let assigned: Id[] = [];
   let reason = "Validated deterministic fallback";
   let family = "other";
-  const coordinatorList = coordinatorCandidates(input.candidates,3);
+  const coordinatorList = coordinatorCandidates(input.candidates, input.preferredCoordinator ? 4 : 3);
+  if (input.preferredCoordinator) {
+    const index = coordinatorList.findIndex(candidate => candidate.model === input.preferredCoordinator);
+    if (index > 0) coordinatorList.unshift(...coordinatorList.splice(index, 1));
+  }
   const approvedIds=new Set(input.candidates.map(c=>c.id));
   const fallbackIds=[...input.fallbackOrder]
     .filter((id, index, values)=>approvedIds.has(id) && values.indexOf(id)===index)
