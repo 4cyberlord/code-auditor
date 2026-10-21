@@ -38,6 +38,8 @@ export interface Extraction {
   url: string;
   /** Anything notable that is not covered by the fields above. */
   observations: string[];
+  /** Verbatim copy of every visible character of the question. */
+  questionText: string;
   /** One or two sentences saying what is being asked. */
   problemSummary: string;
   /**
@@ -60,6 +62,7 @@ export const EMPTY_EXTRACTION: Extraction = {
   terminalOutput: "",
   url: "",
   observations: [],
+  questionText: "",
   problemSummary: "",
   ambiguities: [],
   confidence: 0,
@@ -98,6 +101,13 @@ the uncertainty in "ambiguities"; never silently invent missing structure.
 Transcribe exactly what is on screen. If the code contains a bug, transcribe the
 bug; do not correct it. If a line is cut off, say so rather than completing it.
 
+"questionText" is a verbatim copy, not a summary: the whole problem statement as
+printed, every constraint line, every example including its labels, inputs and
+expected outputs, and the exact signature or starter code. Keep the original
+line order and the original wording. Downstream test builders parse this field,
+so omitting an example or paraphrasing a constraint loses real coverage. Use
+"problemSummary" only for the one- or two-sentence gist.
+
 Screenshots are photographs of screens: expect glare, compression and cropping.
 When a character is genuinely ambiguous — l/1/I, O/0, rn/m, .-, — choose the
 reading the surrounding syntax supports and record the doubt in "ambiguities".
@@ -118,6 +128,7 @@ Reply with one JSON object and nothing else:
   "terminalOutput": "",
   "url": "",
   "observations": [],
+  "questionText": "",
   "problemSummary": "",
   "ambiguities": [],
   "confidence": 0.0
@@ -156,6 +167,7 @@ export function extractionUserPrompt(note: string, manifest = "", ocrHint = ""):
 /** Renders an extraction as the text a non-vision model will reason over. */
 export function renderForReasoning(e: Extraction): string {
   const out: string[] = [];
+  if (e.questionText) out.push(`QUESTION (verbatim)\n${e.questionText}`);
   if (e.problemSummary) out.push(`PROBLEM\n${e.problemSummary}`);
   const stack = [e.language, e.framework].filter(Boolean).join(" / ");
   if (stack) out.push(`STACK\n${stack}`);
@@ -173,7 +185,7 @@ export function renderForReasoning(e: Extraction): string {
   if (e.terminalOutput) out.push(`TERMINAL OUTPUT\n${e.terminalOutput}`);
   if (e.url) out.push(`URL\n${e.url}`);
   if (e.observations.length) out.push("NOTES\n" + e.observations.map((o) => `- ${o}`).join("\n"));
-  if (e.problemSummary || e.observations.length) out.push(routingGuidance(routeProblem(e)));
+  if (e.questionText || e.problemSummary || e.observations.length) out.push(routingGuidance(routeProblem(e)));
   if (e.ambiguities.length) {
     // Carried through deliberately. A reader who knows which characters were
     // uncertain can weigh the answer; one who does not, cannot.
@@ -277,6 +289,7 @@ export function parseExtraction(text: string): Extraction | null {
     terminalOutput: str(raw.terminalOutput),
     url: str(raw.url),
     observations: strArray(raw.observations),
+    questionText: str(raw.questionText),
     problemSummary: str(raw.problemSummary),
     ambiguities: strArray(raw.ambiguities),
     confidence,
@@ -892,6 +905,7 @@ Reply with one JSON object and nothing else, in exactly this shape:
   "terminalOutput": "",
   "url": "",
   "observations": [],
+  "questionText": "",
   "problemSummary": "",
   "ambiguities": [],
   "confidence": 0.0

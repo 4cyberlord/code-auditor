@@ -163,6 +163,7 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_C: u32 = 0x06;
     const HID_USAGE_KEYBOARD_M: u32 = 0x10;
     const HID_USAGE_KEYBOARD_H: u32 = 0x0B;
+    const HID_USAGE_KEYBOARD_K: u32 = 0x0E;
     const HID_USAGE_KEYBOARD_L: u32 = 0x0F;
     const HID_USAGE_KEYBOARD_P: u32 = 0x13;
     const HID_USAGE_KEYBOARD_R: u32 = 0x15;
@@ -452,6 +453,17 @@ mod mac_shortcuts {
             assert!(!history_open_key(HID_USAGE_KEYBOARD_BACKSLASH, true));
         }
 
+        #[test]
+        fn user_cases_parse_arrows_and_labelled_pairs() {
+            let parsed = super::super::parse_user_cases(
+                "nums = [2,7], target = 9 => [0,1]\nInput: nums = [3,3], target = 6\nOutput: [0,1]\nnoise line",
+            );
+            assert_eq!(parsed.len(), 2);
+            assert_eq!(parsed[0].input, "nums = [2,7], target = 9");
+            assert_eq!(parsed[0].output, "[0,1]");
+            assert_eq!(parsed[1].output, "[0,1]");
+            assert!(super::super::parse_user_cases("nothing here").is_empty());
+        }
     }
 
     extern "C" fn input_value_callback(
@@ -771,6 +783,13 @@ mod mac_shortcuts {
 async fn space_api_calls() {
     let delay_ms = 300 + rand::random::<u64>() % 500;
     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BatchCase {
+    input: String,
+    output: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1403,6 +1422,13 @@ fn run() -> Result<(), String> {
                     let _ = show_overlay_pair(&overlay, &hud, true, code_focus_mode);
                         let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                     }
+                }
+                7 => {
+                    match import_clipboard_cases(&active_view) {
+                        Ok(count) => log(&format!("imported {count} user test case(s)")),
+                        Err(error) => eprintln!("case import failed: {error}"),
+                    }
+                    let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                 }
                 _ => {}
             }
@@ -2523,6 +2549,61 @@ fn clear_pending_capture_error(view: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn user_cases_path(view: &str) -> Result<PathBuf, String> {
+    Ok(support_root_dir()?.join("cache").join(format!("user-cases-{view}.json")))
+}
+
+fn read_user_cases(view: &str) -> Vec<BatchCase> {
+    user_cases_path(view).ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<Vec<BatchCase>>(&text).ok())
+        .unwrap_or_default()
+}
+
+/// One case per line, either "input => expected" or an Input:/Output: pair.
+fn parse_user_cases(raw: &str) -> Vec<BatchCase> {
+    let mut out = Vec::new();
+    let mut pending_input: Option<String> = None;
+    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some((left, right)) = line.split_once("=>").or_else(|| line.split_once("->")) {
+            if !left.trim().is_empty() && !right.trim().is_empty() {
+                out.push(BatchCase { input: left.trim().to_string(), output: right.trim().to_string() });
+                pending_input = None;
+                continue;
+            }
+        }
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("input:").or_else(|| lower.strip_prefix("args:")) {
+            let _ = rest;
+            pending_input = Some(line.split_once(':').map(|(_, value)| value.trim().to_string()).unwrap_or_default());
+        } else if let Some(rest) = lower.strip_prefix("output:").or_else(|| lower.strip_prefix("expected:")) {
+            let _ = rest;
+            if let Some(input) = pending_input.take() {
+                let output = line.split_once(':').map(|(_, value)| value.trim().to_string()).unwrap_or_default();
+                if !input.is_empty() && !output.is_empty() {
+                    out.push(BatchCase { input, output });
+                }
+            }
+        }
+    }
+    out.truncate(24);
+    out
+}
+
+fn import_clipboard_cases(view: &str) -> Result<usize, String> {
+    let output = Command::new("/usr/bin/pbpaste").output().map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let cases = parse_user_cases(&text);
+    if cases.is_empty() {
+        return Err("No cases on the clipboard. Copy lines like `nums = [2,7], target = 9 => [0,1]`.".into());
+    }
+    let path = user_cases_path(view)?;
+    if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
+    write_private(&path, serde_json::to_vec(&cases).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    Ok(cases.len())
+}
+
 fn start_batch(view: &str) -> Result<(), String> {
     // Do not orphan screenshots when the start shortcut is pressed twice.
     // The existing ordered batch remains available until it is submitted.
@@ -2531,6 +2612,7 @@ fn start_batch(view: &str) -> Result<(), String> {
             return Err(format!("Batch {} already contains {} screenshot(s). Submit it before starting another.", existing.id, existing.images.len()));
         }
     }
+    let _ = fs::remove_file(user_cases_path(view).unwrap_or_default());
     let id = format!("batch-{}", Uuid::new_v4());
     // Keep the previous submitted job visible while collecting the next batch.
     let batch = PendingBatch {
@@ -2914,6 +2996,10 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
         }));
     }
 
+    let user_cases = read_user_cases(active_view);
+    if !user_cases.is_empty() {
+        user_settings["userCases"] = serde_json::to_value(&user_cases).unwrap_or(Value::Null);
+    }
     let job = api(
         "jobs.create",
         serde_json::json!({
@@ -3998,12 +4084,12 @@ fn hud_html() -> &'static str {
       window.setOverlayControls=function(view){
         const host=document.getElementById('hud-shortcuts');if(!host)return;
         const controls=view==='docked'
-          ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll code','↑↓'],['Ports','rr/cp/py'],['Left / Back','sl'],['Right / Back','sr']]
+          ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Cases','kk'],['Capture','20'],['Submit','24'],['Scroll code','↑↓'],['Ports','rr/cp/py'],['Left / Back','sl'],['Right / Back','sr']]
           : view==='history'
           ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
           : view==='mcq'
           ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31 · ⌃⌥0'],['Left','32 · ⌃⌥2'],['Right','33 · ⌃⌥3'],['Submit','35 · ⌃⌥5']]
-          : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py'],['Dock code','sl/sr']];
+          : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Cases','kk'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py'],['Dock code','sl/sr']];
         const fingerprint=controls.map(([name,key])=>name+key).join('|');
         if(host.dataset.shortcutSet===fingerprint)return;
         host.dataset.shortcutSet=fingerprint;host.replaceChildren();

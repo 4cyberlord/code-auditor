@@ -33,8 +33,8 @@ export type ProvidedSuite = {
 
 const MAX_CASES = 16;
 const MAX_SOURCE_CHARS = 6000;
-const LABEL = /^\s*(?:sample\s+)?(?:input|output|expected\s+output|expected)\s*:\s*(.*)$/i;
-const INLINE_LABEL = /\b(?:sample\s+)?(?:expected\s+output|input|output|expected)\s*:/gi;
+const LABEL = /^\s*(?:sample\s+)?(?:(?:arg(?:ument)?s?)|(?:input)|(?:returns?|output|result|expected(?:\s+(?:output|result))?))\s*:\s*(.*)$/i;
+const INLINE_LABEL = /\b(?:sample\s+)?(?:(?:arg(?:ument)?s?)|input|output|returns?|result|expected(?:\s+(?:output|result))?)\s*:/gi;
 export const MIN_GENERATED_HARNESS_CASES = 8;
 
 function splitTopLevel(text: string): string[] {
@@ -136,10 +136,27 @@ export function extractProvidedFixtures(question: string): ProvidedFixture[] {
     output = null;
     mode = null;
   };
+  const ARROW = /^\s*(.+?)\s*(?:=>|->)\s*(.+?)\s*$/;
   for (const line of lines) {
+    // "nums = [2,7], target = 9 => [0,1]" is a complete case on one line. The
+    // signature also uses "->", so skip lines that define one.
+    const arrow = !/^\s*(?:def|class|function|fn|public|private|static)\b/.test(line) && ARROW.exec(line);
+    if (arrow && !/^\s*(?:example|input|output|sample|note)\b/i.test(line) && pairs.length < MAX_CASES) {
+      const rawInput = arrow[1].trim();
+      const rawOutput = arrow[2].replace(/^["'`]|["'`]$/g, "").trim();
+      try {
+        const expected = literal(rawOutput);
+        const parsed = callableInputs(rawInput);
+        pairs.push({
+          id: "provided_" + (pairs.length + 1), input: rawInput, output: rawOutput,
+          ...(parsed ? { args: parsed.args, kwargs: parsed.kwargs, expected } : {}),
+        });
+        continue;
+      } catch { /* fall through to the label parser */ }
+    }
     const label = LABEL.exec(line);
     if (label) {
-      const isInput = /input/i.test(line.split(":")[0]);
+      const isInput = /arg|input/i.test(line.split(":")[0]);
       if (isInput) {
         finish();
         input = label[1];

@@ -2100,7 +2100,7 @@ async function selectKnowledge(job, settings, { candidates = [], reading = null,
     .join("\n\n");
   const e = reading?.extraction;
   const fromReading = e
-    ? [e.problemSummary, (e.observations || []).join("\n"), e.code].filter((part) => part?.trim()).join("\n\n")
+    ? [e.questionText, e.problemSummary, (e.observations || []).join("\n"), e.code].filter((part) => part?.trim()).join("\n\n")
     : "";
   const query = [fromContract, fromCandidates, fromReading].filter(Boolean).join("\n\n");
   if (!query.trim()) {
@@ -3049,7 +3049,15 @@ export async function runCouncilJob(job) {
   // text, and before anybody has answered there is no text — only a picture.
   // The library arrives the moment the panel produces words, which is also the
   // moment the system can tell this is a coding problem at all.
-  const baseQuestion = userPrompt("", solveImages.length > 0, reading.context, imageRefs, "", policy);
+  const baseQuestionRaw = userPrompt("", solveImages.length > 0, reading.context, imageRefs, "", policy);
+  // Cases the person pasted in the overlay outrank anything a model invents.
+  const userCases = Array.isArray(settings.userCases)
+    ? settings.userCases.filter((row) => row && typeof row.input === "string" && typeof row.output === "string").slice(0, 24)
+    : [];
+  const baseQuestion = userCases.length
+    ? baseQuestionRaw + "\n\nUSER TEST CASES (must pass)\n" + userCases
+      .map((row, index) => `Case ${index + 1}:\nInput: ${row.input}\nOutput: ${row.output}`).join("\n\n")
+    : baseQuestionRaw;
 
   // Everything downstream — solvers, the harness spec, reviews, revisions,
   // judges, the synthesis — is handed this same string as "the problem". Folding
@@ -3115,8 +3123,8 @@ export async function runCouncilJob(job) {
   const languageEvidence=[contractText, reading.extraction?.code || ""].join("\n");
   const primaryLanguage=/\bLANGUAGES:\s*(?:javascript|js)\b|\bexport\s+(?:default\s+)?function\s+[A-Za-z_$]\w*\s*\(/i.test(languageEvidence)
     ? "javascript" : requiredProblemLanguage(question)||configuredCodeLanguage(settings.outputLanguage);
-  const documentationQuery = [question, reading.extraction?.problemSummary,
-    reading.extraction?.code].filter(Boolean).join("\n");
+  const documentationQuery = [question, reading.extraction?.questionText,
+    reading.extraction?.problemSummary, reading.extraction?.code].filter(Boolean).join("\n");
   const detectedDocsLanguage = inferDocumentationLanguage(documentationQuery,
     reading.extraction?.language || settings.outputLanguage || primaryLanguage);
   // Proactive reference lookup before the first solver: bounded, cached,
