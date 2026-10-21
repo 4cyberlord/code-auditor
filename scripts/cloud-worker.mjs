@@ -1737,7 +1737,7 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
         const suite = structuredPython
           ? buildGeneratedPythonHarness(question, specText, candidateSource) || parseTestSuites(specText).find(item => item.language === language)
           : parseTestSuites(specText).find(item => item.language === language);
-        if (!suite) throw new Error("No valid executable harness block parsed.");
+        if (!suite) throw new Error(`No valid executable harness block parsed${structuredPython ? ` (len ${String(specText || "").length}): ${String(specText || "").replace(/\s+/g, " ").slice(0, 220)}` : ""}.`);
         // One independent reference run catches malformed harnesses *before*
         // all candidates are tested. Successful evidence can be reused only for
         // identical code, harness and execution environment.
@@ -3357,7 +3357,7 @@ export async function runCouncilJob(job) {
       } catch (error) {
         const message = String(error instanceof Error ? error.message : error).replace(/<[^>]*>/g, " ").slice(0, 260);
         await addEvent(job.id, "warn", "coding_trusty_failed",
-          "Coding Trusty could not produce a verified preflight answer; the four Council agents continue unchanged.",
+          `Coding Trusty could not produce a verified preflight answer (${message}); the four Council agents continue unchanged.`,
           { model: trustyModel, error: message });
         return null;
       }
