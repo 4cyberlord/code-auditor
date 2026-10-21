@@ -164,6 +164,7 @@ mod mac_shortcuts {
     const HID_USAGE_KEYBOARD_M: u32 = 0x10;
     const HID_USAGE_KEYBOARD_H: u32 = 0x0B;
     const HID_USAGE_KEYBOARD_K: u32 = 0x0E;
+    const HID_USAGE_KEYBOARD_V: u32 = 0x19;
     const HID_USAGE_KEYBOARD_L: u32 = 0x0F;
     const HID_USAGE_KEYBOARD_P: u32 = 0x13;
     const HID_USAGE_KEYBOARD_R: u32 = 0x15;
@@ -1430,6 +1431,13 @@ fn run() -> Result<(), String> {
                     }
                     let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
                 }
+                8 => {
+                    match capture_highlight(&active_view) {
+                        Ok(count) => log(&format!("captured highlight ({count} note(s))")),
+                        Err(error) => eprintln!("highlight failed: {error}"),
+                    }
+                    let _ = update_overlay(&webview, &active_view, &mut overlay_refresh);
+                }
                 _ => {}
             }
             if mac_shortcuts::take_start_batch() {
@@ -2549,6 +2557,79 @@ fn clear_pending_capture_error(view: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn user_notes_path(view: &str) -> Result<PathBuf, String> {
+    Ok(support_root_dir()?.join("cache").join(format!("user-notes-{view}.json")))
+}
+
+fn read_user_notes(view: &str) -> Vec<String> {
+    user_notes_path(view).ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "macos")]
+fn post_copy_shortcut() {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else { return; };
+    for down in [true, false] {
+        if let Ok(event) = CGEvent::new_keyboard_event(source.clone(), 0x08, down) {
+            event.set_flags(CGEventFlags::CGEventFlagCommand);
+            event.post(CGEventTapLocation::HID);
+        }
+    }
+}
+
+/// AXSelectedText from the focused element. This is the way around editors
+/// that swallow or disable Cmd+C.
+#[cfg(target_os = "macos")]
+fn read_selected_text_ax() -> Option<String> {
+    const SCRIPT: &str = r#"tell application "System Events"
+  set p to (first process whose frontmost is true)
+  try
+    set e to value of attribute "AXFocusedUIElement" of p
+    set t to value of attribute "AXSelectedText" of e
+  on error
+    set t to ""
+  end try
+end tell
+return t"#;
+    let output = Command::new("/usr/bin/osascript").arg("-e").arg(SCRIPT).output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// Grab whatever is selected and return it to the clipboard exactly as it was,
+/// so the overlay keeps the text and every other app sees no change.
+#[cfg(target_os = "macos")]
+fn capture_highlight(view: &str) -> Result<usize, String> {
+    use std::io::Write;
+    let previous = Command::new("/usr/bin/pbpaste").output().map(|o| o.stdout).unwrap_or_default();
+    let previous_text = String::from_utf8_lossy(&previous).to_string();
+    post_copy_shortcut();
+    std::thread::sleep(Duration::from_millis(180));
+    let mut text = Command::new("/usr/bin/pbpaste").output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    if text.trim().is_empty() || text == previous_text {
+        if let Some(ax) = read_selected_text_ax() { text = ax; }
+    }
+    if let Ok(mut child) = Command::new("/usr/bin/pbcopy").stdin(std::process::Stdio::piped()).spawn() {
+        if let Some(mut stdin) = child.stdin.take() { let _ = stdin.write_all(&previous); }
+        let _ = child.wait();
+    }
+    let text = text.trim().to_string();
+    if text.is_empty() { return Err("Nothing was selected.".into()); }
+    let mut notes = read_user_notes(view);
+    notes.push(text.chars().take(6_000).collect());
+    if notes.len() > 20 { let excess = notes.len() - 20; notes.drain(0..excess); }
+    let path = user_notes_path(view)?;
+    if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
+    write_private(&path, serde_json::to_vec(&notes).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    Ok(notes.len())
+}
+
 fn user_cases_path(view: &str) -> Result<PathBuf, String> {
     Ok(support_root_dir()?.join("cache").join(format!("user-cases-{view}.json")))
 }
@@ -2613,6 +2694,7 @@ fn start_batch(view: &str) -> Result<(), String> {
         }
     }
     let _ = fs::remove_file(user_cases_path(view).unwrap_or_default());
+    let _ = fs::remove_file(user_notes_path(view).unwrap_or_default());
     let id = format!("batch-{}", Uuid::new_v4());
     // Keep the previous submitted job visible while collecting the next batch.
     let batch = PendingBatch {
@@ -2999,6 +3081,10 @@ async fn submit_batch(active_view: &str) -> Result<(), String> {
     let user_cases = read_user_cases(active_view);
     if !user_cases.is_empty() {
         user_settings["userCases"] = serde_json::to_value(&user_cases).unwrap_or(Value::Null);
+    }
+    let user_notes = read_user_notes(active_view);
+    if !user_notes.is_empty() {
+        user_settings["userNotes"] = serde_json::to_value(&user_notes).unwrap_or(Value::Null);
     }
     let job = api(
         "jobs.create",
@@ -4084,12 +4170,12 @@ fn hud_html() -> &'static str {
       window.setOverlayControls=function(view){
         const host=document.getElementById('hud-shortcuts');if(!host)return;
         const controls=view==='docked'
-          ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Cases','kk'],['Capture','20'],['Submit','24'],['Scroll code','↑↓'],['Ports','rr/cp/py'],['Left / Back','sl'],['Right / Back','sr']]
+          ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Cases','kk'],['Grab','vv'],['Capture','20'],['Submit','24'],['Scroll code','↑↓'],['Ports','rr/cp/py'],['Left / Back','sl'],['Right / Back','sr']]
           : view==='history'
           ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
           : view==='mcq'
           ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31 · ⌃⌥0'],['Left','32 · ⌃⌥2'],['Right','33 · ⌃⌥3'],['Submit','35 · ⌃⌥5']]
-          : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Cases','kk'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py'],['Dock code','sl/sr']];
+          : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Cases','kk'],['Grab','vv'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py'],['Dock code','sl/sr']];
         const fingerprint=controls.map(([name,key])=>name+key).join('|');
         if(host.dataset.shortcutSet===fingerprint)return;
         host.dataset.shortcutSet=fingerprint;host.replaceChildren();

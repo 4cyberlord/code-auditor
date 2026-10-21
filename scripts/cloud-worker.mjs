@@ -3054,10 +3054,14 @@ export async function runCouncilJob(job) {
   const userCases = Array.isArray(settings.userCases)
     ? settings.userCases.filter((row) => row && typeof row.input === "string" && typeof row.output === "string").slice(0, 24)
     : [];
-  const baseQuestion = userCases.length
+  const userNotes = Array.isArray(settings.userNotes)
+    ? settings.userNotes.filter((row) => typeof row === "string" && row.trim()).slice(-20)
+    : [];
+  const baseQuestion = (userCases.length
     ? baseQuestionRaw + "\n\nUSER TEST CASES (must pass)\n" + userCases
       .map((row, index) => `Case ${index + 1}:\nInput: ${row.input}\nOutput: ${row.output}`).join("\n\n")
-    : baseQuestionRaw;
+    : baseQuestionRaw) +
+    (userNotes.length ? "\n\nUSER HIGHLIGHTS (verbatim text the person selected)\n" + userNotes.join("\n\n---\n\n") : "");
 
   // Everything downstream — solvers, the harness spec, reviews, revisions,
   // judges, the synthesis — is handed this same string as "the problem". Folding
