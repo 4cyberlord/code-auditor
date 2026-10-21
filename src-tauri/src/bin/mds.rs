@@ -3455,17 +3455,16 @@ fn update_overlay(webview: &WebView, active_view: &str, refresh: &mut OverlayRef
             .unwrap_or_else(|_| "{}".to_string())
     } else if !running {
         if let Some(batch) = pending.as_ref() {
-            if pending_has_images {
-                let pending_state = if active_view == "mcq" {
-                    mcq_pending_state(&batch)
-                } else {
-                    coding_pending_state(&batch)
-                };
-                serde_json::to_string(&pending_state)
-                    .unwrap_or_else(|_| read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref()))
+            // A fresh batch always owns the screen, even before its first
+            // screenshot, so the previous job's solution cannot bleed into
+            // the capture layout.
+            let pending_state = if active_view == "mcq" {
+                mcq_pending_state(&batch)
             } else {
-                read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
-            }
+                coding_pending_state(&batch)
+            };
+            serde_json::to_string(&pending_state)
+                .unwrap_or_else(|_| read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref()))
         } else {
             read_overlay_state_snapshot(active_view, submitted.as_ref(), pending.as_ref())
         }
@@ -3531,10 +3530,8 @@ fn read_overlay_state_snapshot(active_view: &str, submitted: Option<&SubmittedJo
     }
 
     if let Some(batch) = pending {
-        if batch.error.is_some() || !batch.images.is_empty() {
-            return serde_json::to_string(&coding_pending_state(&batch))
-                .unwrap_or_else(|_| fallback.to_string());
-        }
+        return serde_json::to_string(&coding_pending_state(&batch))
+            .unwrap_or_else(|_| fallback.to_string());
     }
 
     fallback.to_string()
@@ -4205,6 +4202,9 @@ fn overlay_html() -> &'static str {
             .pictures-pane{align-items:flex-start}
             body.collecting .council-monitor,body.collecting .thought-list,body.collecting #thought-title{display:none}
             body.collecting #collect{display:flex}
+            body.collecting .picture-list{flex-wrap:wrap;gap:9px;padding:9px;min-height:0;overflow:visible}
+            body.collecting .picture-pill{flex:1 1 46%}
+            body.collecting img{width:100%;height:150px;object-fit:contain;background:var(--box-fill)}
             body.collecting .divider,body.collecting #solution-title,body.collecting .solution-editor,body.collecting .tests{display:none}
             body.submitted .pictures-pane>.title:first-of-type,body.submitted .picture-list{display:none}
             #collect{display:none;flex-direction:column;gap:8px;width:100%;min-height:0;overflow-y:auto}
