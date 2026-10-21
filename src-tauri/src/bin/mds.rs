@@ -1418,6 +1418,9 @@ fn run() -> Result<(), String> {
                         overlay_refresh.sent_state=None;
                         overlay_refresh.sent_previews=None;
                         active_view = target_view.to_string();
+                        if target_view == "coding" && matches!(read_pending_for("coding"), Ok(None)) {
+                            let _ = start_batch("coding");
+                        }
                         overlay_visible = true;
                         event_loop_target.set_activation_policy_at_runtime(ActivationPolicy::Accessory);
                     let _ = show_overlay_pair(&overlay, &hud, true, code_focus_mode);
