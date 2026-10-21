@@ -657,7 +657,7 @@ export interface GatewayModelDetails {
 
 export async function listGatewayModelDetails(
   baseUrl?: string | null,
-  gatewayId: Extract<TransportId, "tokenrouter" | "wiro" | "cleanapis"> = "tokenrouter"
+  gatewayId: Extract<TransportId, "tokenrouter" | "wiro" | "cleanapis" | "experientiallabs"> = "tokenrouter"
 ): Promise<GatewayModelDetails[]> {
   if (!inTauri()) throw new Error(NOT_TAURI);
   return invoke<GatewayModelDetails[]>("list_gateway_models", { baseUrl: baseUrl ?? null, gatewayId });
@@ -665,7 +665,7 @@ export async function listGatewayModelDetails(
 
 export async function listGatewayModels(
   baseUrl?: string | null,
-  gatewayId: Extract<TransportId, "tokenrouter" | "wiro" | "cleanapis"> = "tokenrouter"
+  gatewayId: Extract<TransportId, "tokenrouter" | "wiro" | "cleanapis" | "experientiallabs"> = "tokenrouter"
 ): Promise<string[]> {
   return (await listGatewayModelDetails(baseUrl, gatewayId)).map(model => model.id);
 }
@@ -692,7 +692,7 @@ export interface ProbeResult {
 export async function probeModels(
   models: string[],
   baseUrl?: string | null,
-  gatewayId: Extract<TransportId, "tokenrouter" | "wiro" | "cleanapis"> = "tokenrouter",
+  gatewayId: Extract<TransportId, "tokenrouter" | "wiro" | "cleanapis" | "experientiallabs"> = "tokenrouter",
   testVision = false,
   // Which wire each model speaks when it is not chat. Passed through to the
   // probe so it does not mark a Responses-API model broken for being one.

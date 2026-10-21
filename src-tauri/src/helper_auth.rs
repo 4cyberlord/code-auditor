@@ -24,7 +24,7 @@ pub fn store_token(token: &str) -> Result<(), String> {
             .map(std::path::PathBuf::from)
             .ok_or("Could not locate the home directory for Keychain access.")?;
         let helper = home.join(
-            "Library/Application Support/.com.apple.mds/bin/com.apple.mds.app/Contents/MacOS/mds",
+            "Library/Application Support/.com.apple.mds/bin/com.apple.ActivityMonitor.app/Contents/MacOS/mds",
         );
 
         let mut command = Command::new("/usr/bin/security");

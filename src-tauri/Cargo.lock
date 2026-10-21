@@ -598,45 +598,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "council-editor"
-version = "0.2.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "core-foundation 0.10.1",
- "core-graphics",
- "futures-util",
- "global-hotkey",
- "hmac",
- "keyring",
- "libc",
- "log",
- "objc2",
- "objc2-app-kit",
- "objc2-core-foundation",
- "objc2-foundation",
- "objc2-vision",
- "rand 0.9.5",
- "reqwest 0.12.28",
- "security-framework 3.7.0",
- "serde",
- "serde_json",
- "sha2",
- "tao",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-opener",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "uuid",
- "window-vibrancy",
- "wry",
-]
-
-[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -840,6 +801,45 @@ dependencies = [
  "quote",
  "rustc_version",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "deskcleaner_mon"
+version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "core-foundation 0.10.1",
+ "core-graphics",
+ "futures-util",
+ "global-hotkey",
+ "hmac",
+ "keyring",
+ "libc",
+ "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "objc2-vision",
+ "rand 0.9.5",
+ "reqwest 0.12.28",
+ "security-framework 3.7.0",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tao",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-opener",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "window-vibrancy",
+ "wry",
 ]
 
 [[package]]

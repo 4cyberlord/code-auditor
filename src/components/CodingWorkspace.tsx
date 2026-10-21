@@ -71,7 +71,7 @@ interface CodingModelChoice {
 }
 
 function supportsCodingTools(route: Route | null): boolean {
-  return !!route && ["openai", "moonshot", "tokenrouter", "wiro", "cleanapis"].includes(route.provider);
+  return !!route && ["openai", "moonshot", "tokenrouter", "wiro", "cleanapis", "experientiallabs"].includes(route.provider);
 }
 
 export default function CodingWorkspace() {

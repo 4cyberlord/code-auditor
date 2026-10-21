@@ -46,6 +46,7 @@ import { screenProvisionalCandidate, createProvisionalRecord, buildSolutionHisto
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { gatewayPreset } from "../src/lib/models.ts";
 import { SELECTABLE_PRIMARY_MODEL_IDS, isPrimaryModel, isSelectablePrimaryModel, listedPrimaryRoute, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "../src/lib/primaryModels.ts";
 import { coordinateAndVerify } from "../src/lib/visionCoordinator.ts";
 import {
@@ -594,6 +595,7 @@ function screenshotReaderSeats(settings, fallback) {
 function gatewayBaseUrl(settings) {
   return settings?.gatewayBaseUrl || ({
     cleanapis: "https://cleanapis.com/v1",
+    experientiallabs: "https://api.experientiallabs.ai/v1",
     wiro: "https://llm.wiro.ai/v1",
     tokenrouter: "https://api.tokenrouter.com/v1",
   })[settings?.gatewayId || "tokenrouter"] || "https://api.tokenrouter.com/v1";
@@ -602,8 +604,37 @@ function gatewayBaseUrl(settings) {
 function gatewayId(settings) {
   const baseUrl = String(settings?.gatewayBaseUrl || "");
   if (settings?.gatewayId === "cleanapis" || baseUrl.includes("cleanapis.com")) return "cleanapis";
+  if (settings?.gatewayId === "experientiallabs" || baseUrl.includes("experientiallabs.ai")) return "experientiallabs";
   if (settings?.gatewayId === "wiro" || baseUrl.includes("llm.wiro.ai")) return "wiro";
   return "tokenrouter";
+}
+
+/** Gateways that serve unprefixed ids and the OpenAI-compatible JSON mode. */
+function usesDirectGateway(settings) {
+  const id = gatewayId(settings);
+  return id === "cleanapis" || id === "experientiallabs";
+}
+
+/** Trusty rides the selected gateway, falling back to Clean API on TokenRouter. */
+function trustyGateway(settings) {
+  const id = gatewayId(settings);
+  return id === "tokenrouter" ? "cleanapis" : id;
+}
+
+function trustyModelsFor(gateway) {
+  const preset = gatewayPreset(gateway);
+  const primary = preset.trustyModel ?? preferredPrimaryRoute("claude-fable-5.1", gateway);
+  return [...new Set([primary, preset.trustyFallbackModel].filter(Boolean))];
+}
+
+/** One retry on the preset's fallback before Trusty gives up. */
+async function generateTrusty(args, models) {
+  let last;
+  for (const model of models) {
+    try { return { text: await tokenRouterGenerate({ ...args, model }), model }; }
+    catch (error) { last = error; }
+  }
+  throw last;
 }
 
 function gatewayCredential(settings) {
@@ -640,8 +671,12 @@ function unreachableCouncilSeatIds(seats, idOf, catalogue) {
 function gatewayModel(model, settings) {
   const approved = primaryModelId(model);
   if (!approved) throw new Error(`${model} is outside the approved ten-model roster.`);
+  const gateway = gatewayId(settings);
+  // Experiential publishes the granted routes under different spellings; the
+  // catalogue also lists the locked canonical ones, so the alias must win.
+  if (gateway === "experientiallabs") return preferredPrimaryRoute(approved, gateway);
   return listedPrimaryRoute(model, settings?.availableModels ?? []) ||
-    preferredPrimaryRoute(approved, gatewayId(settings));
+    preferredPrimaryRoute(approved, gateway);
 }
 
 async function discoverWorkerCatalog(settings) {
@@ -724,7 +759,7 @@ async function tokenRouterChat({ baseUrl, model, system, user, images = [], maxT
   if (!isPrimaryModel(model)) throw new Error(`${model} is outside the known model roster.`);
   const content = [{ type: "text", text: user }];
   for (const image of images) {
-    content.push({ type: "image_url", image_url: { url: image.url || image.dataUrl } });
+    content.push({ type: "image_url", image_url: { url: baseUrl.includes("experientiallabs.ai") ? image.dataUrl : (image.url || image.dataUrl) } });
   }
 
   let temperature = 0.2;
@@ -891,7 +926,7 @@ async function tokenRouterResponses({ baseUrl, model, system, user, images = [],
   if (!isPrimaryModel(model)) throw new Error(`${model} is outside the known model roster.`);
   const content = [{ type: "input_text", text: user }];
   for (const image of images) {
-    content.push({ type: "input_image", image_url: image.url || image.dataUrl });
+    content.push({ type: "input_image", image_url: baseUrl.includes("experientiallabs.ai") ? image.dataUrl : (image.url || image.dataUrl) });
   }
 
   let last = "";
@@ -1041,8 +1076,8 @@ async function tokenRouterGenerate({ settings, ...args }) {
   // still use the user's configured reasoning effort.
   const reasoning = args.reasoning ?? reasoningForModel(settings, args.model);
   const withThinking = { ...args, model: gatewayModel(args.model, settings),
-    apiKey: gatewayCredential(settings), paced: gatewayId(settings) !== "cleanapis", reasoning };
-  if (gatewayId(settings) !== "cleanapis") delete withThinking.responseFormat;
+    apiKey: gatewayCredential(settings), paced: !usesDirectGateway(settings), reasoning };
+  if (!usesDirectGateway(settings)) delete withThinking.responseFormat;
   return endpoint === "responses"
     ? tokenRouterResponses(withThinking)
     : tokenRouterChat(withThinking);
@@ -1702,7 +1737,7 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
         const suite = structuredPython
           ? buildGeneratedPythonHarness(question, specText, candidateSource) || parseTestSuites(specText).find(item => item.language === language)
           : parseTestSuites(specText).find(item => item.language === language);
-        if (!suite) throw new Error("No valid executable harness block parsed.");
+        if (!suite) throw new Error(`No valid executable harness block parsed${structuredPython ? ` (len ${String(specText || "").length}): ${String(specText || "").replace(/\s+/g, " ").slice(0, 220)}` : ""}.`);
         // One independent reference run catches malformed harnesses *before*
         // all candidates are tested. Successful evidence can be reused only for
         // identical code, harness and execution environment.
@@ -1920,7 +1955,7 @@ async function readScreenshots({ job, settings, baseUrl, models, images, imageRe
           images,
           maxTokens: Number(settings.maxTokens || 4096),
           reasoning: "off",
-          ...(gatewayId(settings) === "cleanapis" ? {responseFormat: {type: "json_object"}} : {}),
+          ...(usesDirectGateway(settings) ? {responseFormat: {type: "json_object"}} : {}),
         });
         const parsed = parseExtraction(text);
         if (!parsed) {
@@ -2398,7 +2433,7 @@ function mcqEndpointFor(settings, model) {
 
 async function mcqGenerate({ settings, baseUrl, model, system, user, images = [], maxTokens = 2048 }) {
   const args = { baseUrl, model: gatewayModel(model, settings), system, user, images, maxTokens,
-    apiKey: gatewayCredential(settings), paced: gatewayId(settings) !== "cleanapis",
+    apiKey: gatewayCredential(settings), paced: !usesDirectGateway(settings),
     reasoning: reasoningForModel(settings, model) };
   return mcqEndpointFor(settings, model) === "responses"
     ? tokenRouterResponses(args)
@@ -2683,25 +2718,26 @@ export async function runCouncilJob(job) {
 
   const startTrustyBeforeSelection = settings.codingTrustyEnabled !== false &&
     settings.source === "overlay" && settings.overlayMode === "code";
-  const trustyModelForRun = preferredPrimaryRoute("claude-fable-5.1", "cleanapis");
+  const trustyGatewayForRun = trustyGateway(settings);
+  const trustyModelsForRun = trustyModelsFor(trustyGatewayForRun);
+  const trustyModelForRun = trustyModelsForRun[0];
   let earlyTrustyDraftPromise = null;
   if (startTrustyBeforeSelection) {
-    if (!secret("cleanapis")) {
+    if (!secret(trustyGatewayForRun)) {
       await addEvent(job.id, "warn", "coding_trusty_unavailable",
-        "Coding Trusty needs the account's saved Clean API credential; Council selection continues normally.",
+        `Coding Trusty needs the account's saved ${trustyGatewayForRun} credential; Council selection continues normally.`,
         { model: trustyModelForRun });
     } else {
       const trustyLanguage = configuredCodeLanguage(settings.outputLanguage);
       const languageLabel = trustyLanguage === "cpp" ? "C++" : trustyLanguage === "rust" ? "Rust" : "Python";
       await addEvent(job.id, "info", "coding_trusty_started",
-        "Coding Trusty (Claude Fable 5.1 · Clean API) is starting from the uploaded screenshots before Council model selection.",
+        `Coding Trusty (Claude Fable 5.1 · ${trustyGatewayForRun}) is starting from the uploaded screenshots before Council model selection.`,
         { model: trustyModelForRun, language: trustyLanguage, screenshotCount: images.length });
-      const trustyBaseUrl = "https://cleanapis.com/v1";
-      const trustySettings = { ...settings, gatewayId: "cleanapis", gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
-      earlyTrustyDraftPromise = tokenRouterGenerate({
+      const trustyBaseUrl = gatewayBaseUrl({ gatewayId: trustyGatewayForRun });
+      const trustySettings = { ...settings, gatewayId: trustyGatewayForRun, gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
+      earlyTrustyDraftPromise = generateTrusty({
         settings: trustySettings,
         baseUrl: trustyBaseUrl,
-        model: trustyModelForRun,
         system: systemPrompt("code", { id: trustyLanguage, display: languageLabel }),
         user: [
           "You are Coding Trusty, the fast independent preflight solver for the Coding overlay.",
@@ -2712,7 +2748,7 @@ export async function runCouncilJob(job) {
         images,
         maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
         reasoning: "off",
-      }).then(text => ({ text, model: trustyModelForRun, language: trustyLanguage }))
+      }, trustyModelsForRun).then(({ text, model }) => ({ text, model, language: trustyLanguage }))
         .catch(error => ({ error: String(error instanceof Error ? error.message : error), model: trustyModelForRun, language: trustyLanguage }));
     }
   }
@@ -2901,6 +2937,7 @@ export async function runCouncilJob(job) {
     note: [reading.context, reading.markdown].filter(Boolean).join("\n\n").slice(0, 2800),
     screenshotCount: solveImages.length,
     fallbackOrder: selectionCandidates.map((seat) => seat.id),
+    preferredCoordinator: gatewayPreset(settings.gatewayId).coordinatorModel,
     probe: async (routes, needsVision) => {
       // A fresh Clean API catalogue is already an entitlement and capability
       // check. The first actual selected-solver call carries this job's direct
@@ -2974,7 +3011,7 @@ export async function runCouncilJob(job) {
         settings, baseUrl, model, system: visionEvidenceSystemPrompt(),
         user: "Independently transcribe only labelled examples from the ORIGINAL pixels into strict JSON; never infer an expected answer.",
         images, maxTokens: 3600, reasoning: "off",
-        ...(gatewayId(settings) === "cleanapis" ? {responseFormat: {type: "json_object"}} : {}),
+        ...(usesDirectGateway(settings) ? {responseFormat: {type: "json_object"}} : {}),
       });
     } catch { return ""; }
   };
@@ -3225,44 +3262,48 @@ export async function runCouncilJob(job) {
   let trustyPromise = Promise.resolve(null);
   if (trustyEligible) {
     trustyPromise = (async () => {
-      const trustyBaseUrl = "https://cleanapis.com/v1";
-      const trustySettings = { ...settings, gatewayId: "cleanapis", gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
-      const trustyModel = preferredPrimaryRoute("claude-fable-5.1", "cleanapis");
+      const trustyGatewayForRun = trustyGateway(settings);
+      const trustyBaseUrl = gatewayBaseUrl({ gatewayId: trustyGatewayForRun });
+      const trustySettings = { ...settings, gatewayId: trustyGatewayForRun, gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
+      const trustyModels = trustyModelsFor(trustyGatewayForRun);
+      const trustyModel = trustyModels[0];
       try {
-        if (!secret("cleanapis")) {
+        if (!secret(trustyGatewayForRun)) {
           await addEvent(job.id, "warn", "coding_trusty_unavailable",
-            "Coding Trusty needs the account's saved Clean API credential; the four Council solvers continue normally.",
+            `Coding Trusty needs the account's saved ${trustyGatewayForRun} credential; the four Council solvers continue normally.`,
             { model: trustyModel });
           return null;
         }
         if (!earlyTrustyDraftPromise) {
           await addEvent(job.id, "info", "coding_trusty_started",
-            "Coding Trusty (Claude Fable 5.1 · Clean API) is independently solving the problem alongside the four Council agents.",
+            `Coding Trusty (Claude Fable 5.1 · ${trustyGatewayForRun}) is independently solving the problem alongside the four Council agents.`,
             { model: trustyModel, language: primaryLanguage });
         }
         const trustySystem = systemPrompt("code", answerLanguage);
         const earlyDraft = earlyTrustyDraftPromise ? await earlyTrustyDraftPromise : null;
         if (earlyDraft?.error) throw new Error(earlyDraft.error);
-        const firstText = earlyDraft?.text || await tokenRouterGenerate({
-          settings: trustySettings, baseUrl: trustyBaseUrl, model: trustyModel,
+        const stronger = earlyDraft?.text ? null : await generateTrusty({
+          settings: trustySettings, baseUrl: trustyBaseUrl,
           system: trustySystem,
           user: solverPrompt + "\n\n" +
             "You are Coding Trusty: independently return your strongest complete solution in " + primaryLanguage +
             ". Include accurate time and auxiliary-space complexity. This answer is provisional, not Council-approved.",
           images: solveImages,
           maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192), reasoning: "high",
-        });
+        }, trustyModels);
+        const firstText = earlyDraft?.text || stronger.text;
+        const trustyModelUsed = earlyDraft?.model || stronger.model;
         let final = parseFinal(firstText);
         if (!final?.wellFormed || final.kind !== "code" || !final.code?.trim() || candidateLanguage(final) !== primaryLanguage) {
           if (!earlyDraft) throw new Error("Claude Fable 5.1 did not return a complete " + primaryLanguage + " code answer.");
-          const recoveryText = await tokenRouterGenerate({
-            settings: trustySettings, baseUrl: trustyBaseUrl, model: trustyModel,
+          const recovery = await generateTrusty({
+            settings: trustySettings, baseUrl: trustyBaseUrl,
             system: trustySystem,
             user: solverPrompt + "\n\nYour early preflight answer was not parseable as complete " + primaryLanguage +
               " code. Return the complete solution now in exactly one closed Council FINAL block; do not omit code.",
             images: solveImages, maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192), reasoning: "high",
-          });
-          final = parseFinal(recoveryText);
+          }, trustyModels);
+          final = parseFinal(recovery.text);
           if (!final?.wellFormed || final.kind !== "code" || !final.code?.trim() || candidateLanguage(final) !== primaryLanguage) {
             throw new Error("Claude Fable 5.1 did not return a complete " + primaryLanguage + " code answer.");
           }
@@ -3273,9 +3314,9 @@ export async function runCouncilJob(job) {
         // Strict parsing plus E2B, not another AI response, is the gate.
         await addEvent(job.id, "info", "coding_trusty_self_review",
           "Fable checked its draft against the screenshot instructions; preparing actual E2B tests.",
-          { model: trustyModel, language: primaryLanguage, method: "initial-solve-check" });
+          { model: trustyModelUsed, language: primaryLanguage, method: "initial-solve-check" });
         const candidate = {
-          letter: "T", model: trustyModel, final, text: firstText,
+          letter: "T", model: trustyModelUsed, final, text: firstText,
           error: null, codingTrusty: true,
         };
         trustyCandidate = candidate;
@@ -3316,7 +3357,7 @@ export async function runCouncilJob(job) {
       } catch (error) {
         const message = String(error instanceof Error ? error.message : error).replace(/<[^>]*>/g, " ").slice(0, 260);
         await addEvent(job.id, "warn", "coding_trusty_failed",
-          "Coding Trusty could not produce a verified preflight answer; the four Council agents continue unchanged.",
+          `Coding Trusty could not produce a verified preflight answer (${message}); the four Council agents continue unchanged.`,
           { model: trustyModel, error: message });
         return null;
       }
@@ -3774,10 +3815,12 @@ export async function runCouncilJob(job) {
           `- [TEST FAILURES — repair ${attempt}/${MAX_CANDIDATE_REPAIR_ATTEMPTS}] ${run.passed} passed, ${run.failed} failed. Untrusted E2B evidence:\n${executionFailureEvidence(run)}\nRepair the code, not the test harness. Preserve the original problem contract and callable interface.`
         );
         try {
+          const revisionTrustyGateway = trustyGateway(settings);
+          const revisionTrustyBase = gatewayBaseUrl({ gatewayId: revisionTrustyGateway });
           const revisionSettings = candidate.codingTrusty
-            ? { ...settings, gatewayId: "cleanapis", gatewayBaseUrl: "https://cleanapis.com/v1", availableModels: [] }
+            ? { ...settings, gatewayId: revisionTrustyGateway, gatewayBaseUrl: revisionTrustyBase, availableModels: [] }
             : settings;
-          const revisionBaseUrl = candidate.codingTrusty ? "https://cleanapis.com/v1" : baseUrl;
+          const revisionBaseUrl = candidate.codingTrusty ? revisionTrustyBase : baseUrl;
           const text = await tokenRouterGenerate({
             settings: revisionSettings, baseUrl: revisionBaseUrl, model: candidate.model,
             system: reviseSystemPrompt(),

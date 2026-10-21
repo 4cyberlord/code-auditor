@@ -284,21 +284,17 @@ mod mac_shortcuts {
                 if !matches!(event_type, CGEventType::KeyDown) {
                     return CallbackResult::Keep;
                 }
+                let keycode = event.get_integer_value_field(
+                    core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE,
+                );
                 let flags = event.get_flags();
+                let shifted = flags.contains(CGEventFlags::CGEventFlagShift);
                 let modified = flags.intersects(
                     CGEventFlags::CGEventFlagControl
                         | CGEventFlags::CGEventFlagAlternate
                         | CGEventFlags::CGEventFlagCommand,
                 );
-                let keycode = event.get_integer_value_field(
-                    core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE,
-                );
-                if quiet_desktop_key(
-                    keycode,
-                    flags.contains(CGEventFlags::CGEventFlagShift),
-                    modified,
-                ) && empty_stage_manager_desktop()
-                {
+                if quiet_desktop_key(keycode, shifted, modified) && empty_stage_manager_desktop() {
                     CallbackResult::Drop
                 } else {
                     CallbackResult::Keep
@@ -455,6 +451,7 @@ mod mac_shortcuts {
             assert!(!history_open_key(HID_USAGE_KEYBOARD_RIGHT_ARROW, false));
             assert!(!history_open_key(HID_USAGE_KEYBOARD_BACKSLASH, true));
         }
+
     }
 
     extern "C" fn input_value_callback(
@@ -497,6 +494,7 @@ mod mac_shortcuts {
                             } else {
                                 PANEL_COMMAND.store(command, Ordering::SeqCst);
                             }
+                            super::trace(&format!("hotkey command={command} overlay_visible={}", OVERLAY_VISIBLE.load(Ordering::SeqCst)));
                     }
                 }
             }
@@ -567,7 +565,10 @@ mod mac_shortcuts {
         }
         // Number pairs route into three independent destinations. The first
         // digit selects the workflow; the second selects its capture mode.
-        if pressed && !CONTROL_DOWN.load(Ordering::SeqCst)
+        // While the overlay is hidden these keys belong to whatever app has
+        // focus, so a solution that happens to contain "22" cannot fire.
+        if pressed && OVERLAY_VISIBLE.load(Ordering::SeqCst)
+            && !CONTROL_DOWN.load(Ordering::SeqCst)
             && !SHIFT_DOWN.load(Ordering::SeqCst)
             && !OPTION_DOWN.load(Ordering::SeqCst)
         {
@@ -588,6 +589,7 @@ mod mac_shortcuts {
                     if let Some((first, second)) = pair {
                         if let Some(command) = super::number_pair_command(first, second) {
                             NUMBER_COMMAND.store(command, Ordering::SeqCst);
+                            super::trace(&format!("pair command={command}"));
                         }
                     }
                 }
@@ -676,7 +678,6 @@ mod mac_shortcuts {
             }
             HID_USAGE_KEYBOARD_B
             | HID_USAGE_KEYBOARD_P
-            | HID_USAGE_KEYBOARD_R
             | HID_USAGE_KEYBOARD_S
             | HID_USAGE_KEYBOARD_RETURN
                 if pressed
@@ -686,7 +687,6 @@ mod mac_shortcuts {
                 match usage {
                     HID_USAGE_KEYBOARD_B => START_BATCH.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_P | HID_USAGE_KEYBOARD_S => CAPTURE.store(true, Ordering::SeqCst),
-                    HID_USAGE_KEYBOARD_R => CAPTURE_REGION.store(true, Ordering::SeqCst),
                     HID_USAGE_KEYBOARD_RETURN => SUBMIT.store(true, Ordering::SeqCst),
                     _ => {}
                 }
@@ -961,8 +961,8 @@ fn run() -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     write_helper_status(true, None);
 
-    let mut overlay_position = overlay_position(&event_loop);
-    let (overlay, webview) = overlay_window(&event_loop, overlay_position)?;
+    let (mut overlay_position, overlay_height) = overlay_geometry(&event_loop);
+    let (overlay, webview) = overlay_window(&event_loop, overlay_position, overlay_height)?;
     let (hud, hud_webview) = hud_window(&event_loop, overlay_position)?;
     let mut active_view = "coding".to_string();
     let mut last_hud_view = "coding".to_string();
@@ -997,6 +997,8 @@ fn run() -> Result<(), String> {
     let mut history_code_focus_state: Option<Value> = None;
     let mut last_job_poll = Instant::now() - Duration::from_secs(60);
     let mut last_overlay_refresh = Instant::now();
+    #[cfg(target_os = "macos")]
+    let mut last_reinforce = Instant::now();
     let mut last_history_refresh = Instant::now() - Duration::from_secs(60);
     let mut last_heartbeat = Instant::now();
     #[cfg(target_os = "macos")]
@@ -1307,6 +1309,10 @@ fn run() -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
             mac_shortcuts::set_overlay_visible(overlay_visible);
+            if overlay_visible && last_reinforce.elapsed() >= Duration::from_millis(900) {
+                last_reinforce = Instant::now();
+                reinforce_overlay(&overlay);
+            }
             mac_shortcuts::set_coding_overlay_visible(overlay_visible && active_view == "coding");
             // HH is its own surface; unlike the two task views it must not
             // change which batch is active. CC/MM switch surfaces in-place
@@ -1724,7 +1730,7 @@ fn run() -> Result<(), String> {
 
 // ─── OVERLAY (GHOST WINDOW) ───────────────────────────────────────────────────
 
-fn overlay_position<T>(event_loop: &tao::event_loop::EventLoop<T>) -> LogicalPosition<f64> {
+fn overlay_geometry<T>(event_loop: &tao::event_loop::EventLoop<T>) -> (LogicalPosition<f64>, f64) {
     if let Some(monitor) = event_loop.primary_monitor() {
         let scale = monitor.scale_factor();
         let size = monitor.size();
@@ -1734,13 +1740,36 @@ fn overlay_position<T>(event_loop: &tao::event_loop::EventLoop<T>) -> LogicalPos
             + ((size.width as f64 / scale - group_width) / 2.0)
             + HUD_WIDTH
             + HUD_GAP;
-        // Keep the normal overlay slightly above its previous resting point;
-        // the SL/SR code-only docks use their own edge-aligned geometry.
-        let y =
-            (pos.y as f64 / scale) + ((size.height as f64 / scale - OVERLAY_HEIGHT) / 2.0) + 4.0;
-        return LogicalPosition::new(x.max(HUD_WIDTH + HUD_GAP), y.max(0.0));
+        // Center inside the usable area, never under the menu bar or notch.
+        let (top, bottom) = screen_insets();
+        let viewport = size.height as f64 / scale - top - bottom;
+        let height = OVERLAY_HEIGHT.min((viewport - 16.0).max(320.0));
+        let y = pos.y as f64 / scale + top + ((viewport - height) / 2.0);
+        return (
+            LogicalPosition::new(x.max(HUD_WIDTH + HUD_GAP), y.max(0.0)),
+            height,
+        );
     }
-    LogicalPosition::new(320.0, 64.0)
+    (LogicalPosition::new(320.0, 64.0), OVERLAY_HEIGHT)
+}
+
+/// Logical points reserved by the menu bar, notch and Dock on the main
+/// display. Panels are laid out inside the remaining area so their top edge
+/// never disappears behind system chrome.
+fn screen_insets() -> (f64, f64) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSScreen;
+        if let Some(screen) = MainThreadMarker::new().and_then(|marker| NSScreen::mainScreen(marker)) {
+            let frame = screen.frame();
+            let visible = screen.visibleFrame();
+            let top = (frame.size.height - (visible.origin.y + visible.size.height)).max(0.0);
+            let bottom = visible.origin.y.max(0.0);
+            return (top, bottom);
+        }
+    }
+    (32.0, 8.0)
 }
 
 fn hud_position(content_position: LogicalPosition<f64>) -> LogicalPosition<f64> {
@@ -1771,9 +1800,21 @@ fn hud_height(view: &str) -> f64 {
 }
 
 fn restore_normal_geometry(overlay: &Window, hud: &Window, position: LogicalPosition<f64>) {
-    overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT));
-    overlay.set_outer_position(position);
-    hud.set_outer_position(hud_position(position));
+    let (top, bottom) = screen_insets();
+    let (y, height) = overlay
+        .current_monitor()
+        .map(|monitor| {
+            let scale = monitor.scale_factor();
+            let viewport = monitor.size().height as f64 / scale - top - bottom;
+            let height = OVERLAY_HEIGHT.min((viewport - 16.0).max(320.0));
+            let floor = monitor.position().y as f64 / scale + top;
+            let ceiling = floor + viewport - height;
+            (position.y.clamp(floor, ceiling.max(floor)), height)
+        })
+        .unwrap_or((position.y, OVERLAY_HEIGHT));
+    overlay.set_inner_size(LogicalSize::new(OVERLAY_WIDTH, height));
+    overlay.set_outer_position(LogicalPosition::new(position.x, y));
+    hud.set_outer_position(hud_position(LogicalPosition::new(position.x, y)));
 }
 
 /// Coordinates use the monitor holding the helper overlay, not a hard-coded
@@ -1792,15 +1833,19 @@ fn code_focus_geometry<T>(
     // complete path physical from monitor discovery through window placement.
     let half = extent.width / 2;
     let inset = 8_u32;
+    let (top, bottom) = screen_insets();
+    let scale = monitor.scale_factor();
+    let top = (top * scale).round() as u32 + inset;
+    let bottom = (bottom * scale).round() as u32 + inset;
     let (x, available_width) = match mode {
         2 => (location.x, half),
         3 => (location.x.saturating_add(half as i32), extent.width - half),
         _ => return None,
     };
     let inner_width = available_width.saturating_sub(inset * 2).max(260);
-    let inner_height = extent.height.saturating_sub(inset * 2).max(260);
+    let inner_height = extent.height.saturating_sub(top + bottom).max(260);
     Some((
-        PhysicalPosition::new(x.saturating_add(inset as i32), location.y.saturating_add(inset as i32)),
+        PhysicalPosition::new(x.saturating_add(inset as i32), location.y.saturating_add(top as i32)),
         PhysicalSize::new(inner_width, inner_height),
     ))
 }
@@ -1808,10 +1853,11 @@ fn code_focus_geometry<T>(
 fn overlay_window<T>(
     event_loop: &tao::event_loop::EventLoop<T>,
     position: LogicalPosition<f64>,
+    height: f64,
 ) -> Result<(Window, WebView), String> {
     let window = WindowBuilder::new()
         .with_title("mds") // Ghost: title matches process name
-        .with_inner_size(LogicalSize::new(OVERLAY_WIDTH, OVERLAY_HEIGHT))
+        .with_inner_size(LogicalSize::new(OVERLAY_WIDTH, height))
         .with_position(position)
         .with_visible(false)
         .with_decorations(false)
@@ -1880,7 +1926,11 @@ fn tune_ghost_overlay(window: &Window) -> Result<(), String> {
         }
         let ns_window = &*ns_window.cast::<NSWindow>();
         // Screen-saver level: above everything, below the cursor
-        ns_window.setLevel(NSScreenSaverWindowLevel);
+        // The proctor's kiosk also sits at screen-saver level and re-raises
+        // itself on focus changes; one level above wins the tie.
+        ns_window.setLevel(NSScreenSaverWindowLevel + 1);
+        ns_window.setHidesOnDeactivate(false);
+        ns_window.setCanHide(false);
         ns_window.setAlphaValue(0.46);
         // NSWindowSharingType::None = invisible to screen capture
         ns_window.setSharingType(NSWindowSharingType::None);
@@ -1924,7 +1974,22 @@ fn set_ghost_opacity(window: &Window, alpha: f64) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn reinforce_overlay(window: &Window) {
+    use objc2_app_kit::{NSScreenSaverWindowLevel, NSWindow};
+    unsafe {
+        let ns_window = window.ns_window();
+        if ns_window.is_null() {
+            return;
+        }
+        let ns_window = &*ns_window.cast::<NSWindow>();
+        ns_window.setLevel(NSScreenSaverWindowLevel + 1);
+        ns_window.orderFrontRegardless();
+    }
+}
+
 fn show_overlay(window: &Window, visible: bool) -> Result<(), String> {
+    trace(&format!("show_overlay visible={visible}"));
     window.set_always_on_top(true);
     window
         .set_ignore_cursor_events(true)
@@ -1944,7 +2009,9 @@ fn show_overlay(window: &Window, visible: bool) -> Result<(), String> {
             if ns_window.is_null() {
                 return Err("Overlay NSWindow unavailable".into());
             }
-            (&*ns_window.cast::<NSWindow>()).orderFrontRegardless();
+            let ns_window = &*ns_window.cast::<NSWindow>();
+            ns_window.orderFrontRegardless();
+            ns_window.displayIfNeeded();
         }
     }
 
@@ -1973,6 +2040,19 @@ fn now() -> String {
 
 fn cache_dir() -> Result<PathBuf, String> {
     Ok(support_root_dir()?.join("cache"))
+}
+
+fn trace(message: &str) {
+    let Ok(dir) = log_dir() else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("overlay-trace.log"))
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{} {}", now(), message);
+    }
 }
 
 fn log_dir() -> Result<PathBuf, String> {
@@ -2554,7 +2634,7 @@ fn number_pair_command(first: u8, second: u8) -> Option<u8> {
         0 if second == 0 => Some(6),
         1 if second <= 4 => Some(10 + second),
         2 if second == 0 || (2..=5).contains(&second) => Some(20 + second),
-        3 if (1..=5).contains(&second) => Some(30 + second),
+        3 if (1..=3).contains(&second) || second == 5 => Some(30 + second),
         _ => None,
     }
 }
@@ -3912,7 +3992,7 @@ fn hud_html() -> &'static str {
           : view==='history'
           ? [['Coding','cc'],['MCQ','mm'],['History','hh'],['Previous','↑'],['Next','↓']]
           : view==='mcq'
-          ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31'],['Left','32'],['Right','33'],['Region','34'],['Submit','35']]
+          ? [['MCQ','mm'],['Coding','cc'],['History','hh'],['Full','31 · ⌃⌥0'],['Left','32 · ⌃⌥2'],['Right','33 · ⌃⌥3'],['Submit','35 · ⌃⌥5']]
           : [['Coding','cc'],['MCQ','mm'],['History','hh'],['New','00'],['Capture','20'],['Submit','24'],['Scroll','↑↓'],['Ports','rr/cp/py'],['Dock code','sl/sr']];
         const fingerprint=controls.map(([name,key])=>name+key).join('|');
         if(host.dataset.shortcutSet===fingerprint)return;
@@ -4887,12 +4967,12 @@ mod tests {
             (0, 0, 6),
             (1, 0, 10), (1, 1, 11), (1, 2, 12), (1, 3, 13),
             (2, 0, 20), (2, 2, 22), (2, 3, 23), (2, 4, 24), (2, 5, 25),
-            (3, 1, 31), (3, 2, 32), (3, 3, 33), (3, 4, 34), (3, 5, 35),
+            (3, 1, 31), (3, 2, 32), (3, 3, 33), (3, 5, 35),
         ];
         for (prefix, shape, command) in expected {
             assert_eq!(number_pair_command(prefix, shape), Some(command));
         }
-        for invalid in [(1, 5), (2, 1), (2, 6), (3, 0), (4, 1)] {
+        for invalid in [(1, 5), (2, 1), (2, 6), (3, 0), (3, 4), (4, 1)] {
             assert_eq!(number_pair_command(invalid.0, invalid.1), None);
         }
     }

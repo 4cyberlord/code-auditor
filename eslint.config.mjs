@@ -6,7 +6,7 @@ const config = [
   {
     // supabase/functions is Deno, not Next: different globals, different module
     // resolution. Linting it with this config reports problems that are not.
-    ignores: [".next/**", ".kilo/**", "out/**", "src-tauri/**", "supabase/functions/**", "node_modules/**", "next-env.d.ts"],
+    ignores: [".next/**", ".kilo/**", "out/**", "src-tauri/**", "supabase/functions/**", "cloudflare/**", "node_modules/**", "next-env.d.ts"],
   },
   ...tseslint.configs.recommended,
   reactHooks.configs.flat.recommended,
