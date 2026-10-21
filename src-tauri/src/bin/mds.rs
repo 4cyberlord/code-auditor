@@ -967,7 +967,7 @@ fn run() -> Result<(), String> {
             fn CGRequestPostEventAccess() -> bool;
         }
         let trusted = unsafe { CGPreflightPostEventAccess() };
-        log(&format!("event posting trusted={trusted}"));
+        trace(&format!("event posting trusted={trusted}"));
         if !trusted {
             let _ = unsafe { CGRequestPostEventAccess() };
         }
