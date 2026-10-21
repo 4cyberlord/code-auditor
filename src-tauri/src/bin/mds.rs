@@ -2568,6 +2568,8 @@ fn clear_pending_capture_error(view: &str) -> Result<(), String> {
     Ok(())
 }
 
+static GRAB_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 fn user_notes_path(view: &str) -> Result<PathBuf, String> {
     Ok(support_root_dir()?.join("cache").join(format!("user-notes-{view}.json")))
 }
@@ -2592,23 +2594,39 @@ fn post_copy_shortcut() {
     }
 }
 
-/// AXSelectedText from the focused element. This is the way around editors
-/// that swallow or disable Cmd+C.
+/// AXSelectedText from the focused element. Native AX (not osascript), so it
+/// does not depend on the Automation grant and works wherever AX exposes a
+/// selection.
 #[cfg(target_os = "macos")]
 fn read_selected_text_ax() -> Option<String> {
-    const SCRIPT: &str = r#"tell application "System Events"
-  set p to (first process whose frontmost is true)
-  try
-    set e to value of attribute "AXFocusedUIElement" of p
-    set t to value of attribute "AXSelectedText" of e
-  on error
-    set t to ""
-  end try
-end tell
-return t"#;
-    let output = Command::new("/usr/bin/osascript").arg("-e").arg(SCRIPT).output().ok()?;
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!text.is_empty()).then_some(text)
+    use core_foundation::base::{CFRelease, TCFType};
+    use core_foundation::string::{CFString, CFStringRef};
+    use std::ffi::c_void;
+
+    type AXElement = *const c_void;
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXUIElementCreateSystemWide() -> AXElement;
+        fn AXUIElementCopyAttributeValue(element: AXElement, attribute: CFStringRef, value: *mut *const c_void) -> i32;
+        fn AXIsProcessTrusted() -> bool;
+    }
+    unsafe {
+        if !AXIsProcessTrusted() { return None; }
+        let system = AXUIElementCreateSystemWide();
+        if system.is_null() { return None; }
+        let mut focused: *const c_void = std::ptr::null();
+        let focus_status = AXUIElementCopyAttributeValue(
+            system, CFString::new("AXFocusedUIElement").as_concrete_TypeRef(), &mut focused);
+        CFRelease(system as *const c_void);
+        if focus_status != 0 || focused.is_null() { return None; }
+        let mut value: *const c_void = std::ptr::null();
+        let status = AXUIElementCopyAttributeValue(
+            focused as AXElement, CFString::new("AXSelectedText").as_concrete_TypeRef(), &mut value);
+        CFRelease(focused as *const c_void);
+        if status != 0 || value.is_null() { return None; }
+        let text = CFString::wrap_under_create_rule(value as CFStringRef).to_string();
+        (!text.trim().is_empty()).then_some(text)
+    }
 }
 
 /// Grab whatever is selected and return it to the clipboard exactly as it was,
@@ -2634,7 +2652,11 @@ fn capture_highlight(view: &str) -> Result<usize, String> {
         let _ = child.wait();
     }
     let text = text.trim().to_string();
-    if text.is_empty() { return Err("Nothing was selected.".into()); }
+    if text.is_empty() {
+        if let Ok(mut slot) = GRAB_ERROR.lock() { *slot = Some("Nothing was copied — keep the text selected and press vv again.".into()); }
+        return Err("Nothing was selected.".into());
+    }
+    if let Ok(mut slot) = GRAB_ERROR.lock() { *slot = None; }
     let mut notes = read_user_notes(view);
     notes.push(text.chars().take(6_000).collect());
     if notes.len() > 20 { let excess = notes.len() - 20; notes.drain(0..excess); }
@@ -3626,6 +3648,7 @@ fn coding_pending_state(batch: &PendingBatch) -> Value {
         "collecting": true,
         "notes": read_user_notes(if batch.mode.as_deref() == Some("mcq") { "mcq" } else { "coding" }),
         "collectCases": read_user_cases(if batch.mode.as_deref() == Some("mcq") { "mcq" } else { "coding" }),
+        "grabError": GRAB_ERROR.lock().ok().and_then(|value| value.clone()),
     })
 }
 
@@ -4736,7 +4759,7 @@ fn overlay_html() -> &'static str {
             }
                         window.updatePreviews=function(images){window.__lastPreviews=images||[];const pictures=document.getElementById('pictures');if(!pictures)return;if(pictures.__sources&&pictures.__sources.length===images.length&&images.every((src,i)=>src===pictures.__sources[i]))return;pictures.__sources=images.slice();pictures.innerHTML='';if(!images.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='Captured images will appear here';pictures.appendChild(empty);return;}images.forEach((src,i)=>{const pill=document.createElement('div');pill.className='picture-pill';const img=document.createElement('img');img.src=src;img.alt='Capture '+(i+1);const count=document.createElement('span');count.className='picture-count';count.textContent=(i+1)+'/10';pill.appendChild(img);pill.appendChild(count);pictures.appendChild(pill);});};
                 function renderMcq(state){const savedPictures=document.getElementById('pictures');const left=document.querySelector('.pictures-pane');const right=document.querySelector('.thought-pane');const m=state.mcq||{};const picked=(m.answer&&m.answer.label)||'';const found=Array.isArray(m.options)?m.options:[];const position=found.findIndex((o)=>o.label===picked);const ordinal=(n)=>n%100>=11&&n%100<=13?'th':n%10===1?'st':n%10===2?'nd':n%10===3?'rd':'th';const formatted=m.answerVerified===true&&position>=0?'✅ '+picked+' ('+(position+1)+ordinal(position+1)+' Option) - '+String((m.answer&&m.answer.text)||found[position].text||''):'';const displayAnswer=formatted||String(m.displayAnswer||'');const selectedModel=(m.model&&String(m.model).trim())?String(m.model).trim():'none';const hasModel=selectedModel.toLowerCase()!=='none';left.innerHTML='<div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title-row"><div class="title">Question</div><div class="mcq-model-pill" data-enabled="'+(hasModel?'true':'false')+'">'+esc(hasModel?selectedModel:'No Model')+'</div></div><div class="mcq-box mcq-question"></div><div class="title">Answer</div><div class="mcq-box mcq-answer"></div>';if(savedPictures)document.getElementById('pictures').replaceWith(savedPictures);right.innerHTML='<div class="title">Question history</div><div class="mcq-history"></div>';document.querySelector('.mcq-question').textContent=m.question||state.progress||'Reading the captured question...';document.querySelector('.mcq-answer').innerHTML='<b>'+esc(displayAnswer||(picked||'Answer'))+'</b>'+(displayAnswer?'':(m.answer&&m.answer.text?' — '+esc(m.answer.text):''))+'<br><br>'+esc(m.reason||state.error||state.progress||'Waiting for the MCQ worker result...');const hist=document.querySelector('.mcq-history');const add=(title,body,level,meta)=>{const row=document.createElement('div');row.className='mcq-history-row';row.dataset.level=level||'info';const h=document.createElement('b');h.textContent=title;const p=document.createElement('div');p.textContent=body||'';row.appendChild(h);row.appendChild(p);if(meta&&meta.length){const mrow=document.createElement('div');mrow.className='mcq-history-meta';meta.forEach((x)=>{const s=document.createElement('span');s.textContent=x;mrow.appendChild(s);});row.appendChild(mrow);}hist.appendChild(row);};add('AI selected',selectedModel,'info',[state.status||'',state.phase||''].filter(Boolean));add('Captured question',m.question||'Waiting for the screenshot reading.',state.error?'error':'info',[state.status||'',state.phase||''].filter(Boolean));if(m.options&&m.options.length){add('Choices found',(m.options||[]).map((o)=>(o.label?o.label+'. ':'')+(o.text||'')).join('\\n'),'info',[]);}if(m.knowledgeUsed!==undefined){add('Local knowledge check',m.knowledgeUsed?'A local knowledge match or guidance was included before the model answer.':'The local knowledge pack was checked before the model answer, but no direct match was used.','info',[selectedModel]);}if(picked||m.reason){add('Selected answer',(picked?picked+': ':'')+(m.answer&&m.answer.text?m.answer.text:'')+'\\n'+(m.reason||''),'info',[selectedModel]);}(m.whyNot||[]).forEach((x)=>add('Rejected choice '+(x.label||''),x.reason||'Not selected.','info',[]));(state.history||[]).forEach((e)=>add(e.phase||'worker event',e.message||'',e.level||'info',[e.createdAt||''].filter(Boolean)));if(!hist.children.length)add('Waiting','The helper is waiting for the worker history.','info',[]);window.updatePreviews(window.__lastPreviews||[]);}
-		            function renderCollect(state){const notes=Array.isArray(state.notes)?state.notes:[];const cases=Array.isArray(state.collectCases)?state.collectCases:[];const noteBox=document.getElementById('notes');const caseBox=document.getElementById('collect-cases');if(noteBox){noteBox.innerHTML='';if(!notes.length){const tip=document.createElement('div');tip.className='note-empty';tip.textContent='Highlight text anywhere, then press vv.';noteBox.appendChild(tip);}notes.forEach((text)=>{const bubble=document.createElement('div');bubble.className='note';bubble.textContent=text;noteBox.appendChild(bubble);});}if(caseBox){caseBox.innerHTML='';if(!cases.length){const tip=document.createElement('div');tip.className='note-empty';tip.textContent='Copy input => expected lines, then press kk.';caseBox.appendChild(tip);}cases.forEach((row)=>{const bubble=document.createElement('div');bubble.className='note';bubble.textContent=String(row.input||'')+'  =>  '+String(row.output||'');caseBox.appendChild(bubble);});}}
+		            function renderCollect(state){const notes=Array.isArray(state.notes)?state.notes:[];const cases=Array.isArray(state.collectCases)?state.collectCases:[];const noteBox=document.getElementById('notes');const caseBox=document.getElementById('collect-cases');if(noteBox){noteBox.innerHTML='';if(!notes.length){const tip=document.createElement('div');tip.className='note-empty';tip.textContent=state.grabError||'Highlight text anywhere, then press vv.';tip.style.color=state.grabError?'var(--warn)':'inherit';noteBox.appendChild(tip);}notes.forEach((text)=>{const bubble=document.createElement('div');bubble.className='note';bubble.textContent=text;noteBox.appendChild(bubble);});}if(caseBox){caseBox.innerHTML='';if(!cases.length){const tip=document.createElement('div');tip.className='note-empty';tip.textContent='Copy input => expected lines, then press kk.';caseBox.appendChild(tip);}cases.forEach((row)=>{const bubble=document.createElement('div');bubble.className='note';bubble.textContent=String(row.input||'')+'  =>  '+String(row.output||'');caseBox.appendChild(bubble);});}}
 function restoreCodingShell(){if(document.getElementById('agents'))return;document.getElementById('panel').innerHTML='<div class="pane pictures-pane"><div class="title">Pictures</div><div class="picture-list" id="pictures"></div><div class="divider"></div><div class="title" id="solution-heading">Solution</div><div class="solution-editor"><div class="editor-head"><b id="solution-title">solution</b><span class="solution-toolbar"><span id="solution-source">waiting</span><button type="button" class="overlay-diff-toggle" id="overlay-diff-toggle" hidden>Show final</button></span></div><ol class="code-lines" id="solution-code"></ol></div><div class="tests"><div class="tests-head"><b>Test cases</b><span id="tests-count">real data</span></div><div class="case-list" id="tests"></div></div></div><div class="pane thought-pane"><section id="collect" hidden><div class="title">Chat</div><div class="chat-box"><div id="notes" class="note-list"></div><div id="collect-cases" class="note-list"></div></div></section><section class="council-monitor"><div class="solution-status" id="agents"></div></section><div class="title" id="thought-title">Thought process</div><div class="thought-list"><div class="thought-item"><div class="thought-heading">Approach/algorithm</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Functions</div><div class="thought-space function-notes" id="function-notes"></div></div><div class="thought-item"><div class="thought-heading">Data structures</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Time complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Space complexity</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Edge cases</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Testing</div><div class="thought-space"></div></div><div class="thought-item"><div class="thought-heading">Trade-offs</div><div class="thought-space"></div></div></div></div>';window.updatePreviews(window.__lastPreviews||[]);}
 		            window.updateOverlayState=function(state){state=state||{agents:[],tests:[],solution:null,phase:'idle'};window.__overlayCurrentState=state;if(state.kind==='mcq'||state.mcq){document.body.classList.remove('collecting','submitted');renderMcq(state);return;}restoreCodingShell();document.body.classList.toggle('collecting',!!state.collecting);document.body.classList.toggle('submitted',!state.collecting);renderCollect(state);const agents=document.getElementById('agents');agents.innerHTML='';if(!state.agents||!state.agents.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No active model run';agents.appendChild(empty);}else{state.agents.slice(0,5).forEach((a)=>{const chip=document.createElement('div');chip.className='model-chip';chip.dataset.state=stateTone(a.status);const dot=document.createElement('span');dot.className='dot';const name=document.createElement('b');name.textContent=a.label||a.id;const status=document.createElement('span');status.textContent=a.status==='error'?(a.error||'error'):a.status;chip.title=[a.model,a.error].filter(Boolean).join(' — ');chip.appendChild(dot);chip.appendChild(name);chip.appendChild(status);agents.appendChild(chip);});}const title=document.getElementById('solution-title');const source=document.getElementById('solution-source');const code=document.getElementById('solution-code');const tests=document.getElementById('tests');const count=document.getElementById('tests-count');if(state.solution&&state.solution.code){title.textContent=state.solution.title||'solution';const isTrusty=String(state.solution.source||'').includes('Coding Trusty');source.textContent=state.solution.status==='reviewed'?'Council verified':state.solution.status==='provisional'?(isTrusty?'Coding Trusty · Claude Fable 5.1 · E2B passed; Council reviewing':'E2B passed · Council reviewing'):('candidate · '+(state.solution.source||''));renderOverlayCodeResult(code,state);renderFunctionNotes(state.solution.code);renderSmartTests(tests,count,state.solution.code,state.tests);renderCouncilInsights(state.presentation,state);}else{title.textContent='solution';source.textContent=state.phase==='idle'?'idle':'waiting';const waiting=state.phase==='idle'?'No run yet.':'Waiting for solution...';renderCodeLines(code,waiting,'');renderFunctionNotes(waiting);renderSmartTests(tests,count,waiting,state.tests);renderCouncilInsights(state.presentation,state);}};
             // Keep the existing capture and result renderer intact, then give
