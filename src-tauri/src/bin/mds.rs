@@ -403,6 +403,8 @@ mod mac_shortcuts {
             HID_USAGE_KEYBOARD_C => Some((1, 1)),
             HID_USAGE_KEYBOARD_M => Some((2, 2)),
             HID_USAGE_KEYBOARD_H => Some((3, 4)),
+            HID_USAGE_KEYBOARD_K => Some((7, 5)),
+            HID_USAGE_KEYBOARD_V => Some((8, 6)),
             _ => None,
         }
     }
@@ -452,6 +454,12 @@ mod mac_shortcuts {
             assert!(history_open_key(HID_USAGE_KEYBOARD_BACKSLASH, false));
             assert!(!history_open_key(HID_USAGE_KEYBOARD_RIGHT_ARROW, false));
             assert!(!history_open_key(HID_USAGE_KEYBOARD_BACKSLASH, true));
+        }
+
+        #[test]
+        fn grab_and_cases_have_panel_codes() {
+            assert_eq!(panel_key_command(HID_USAGE_KEYBOARD_V), Some((8, 6)));
+            assert_eq!(panel_key_command(HID_USAGE_KEYBOARD_K), Some((7, 5)));
         }
 
         #[test]
