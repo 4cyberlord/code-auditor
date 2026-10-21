@@ -50,3 +50,6 @@ task-*-output-*.txt
 *.gz
 
 supabase/.temp/
+
+# stray capture from local runs
+/output
