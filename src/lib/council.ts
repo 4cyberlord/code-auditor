@@ -177,6 +177,8 @@ export interface TestSuite {
   referenceCode?: string;
   /** Verified user-supplied examples use a trusted deterministic adapter. */
   source?: "provided" | "generated";
+  /** The contract permits any ordering of list outputs. */
+  unordered?: boolean;
   providedCaseCount?: number;
   /** Original statement lets each candidate receive its own deterministic adapter. */
   question?: string;

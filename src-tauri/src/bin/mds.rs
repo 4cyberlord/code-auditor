@@ -2002,7 +2002,7 @@ fn show_overlay(window: &Window, visible: bool) -> Result<(), String> {
     // works from any app, Space, or full-screen desktop.
     #[cfg(target_os = "macos")]
     if visible {
-        use objc2_app_kit::NSWindow;
+        use objc2_app_kit::{NSScreenSaverWindowLevel, NSWindow, NSWindowCollectionBehavior};
 
         unsafe {
             let ns_window = window.ns_window();
@@ -2010,6 +2010,16 @@ fn show_overlay(window: &Window, visible: bool) -> Result<(), String> {
                 return Err("Overlay NSWindow unavailable".into());
             }
             let ns_window = &*ns_window.cast::<NSWindow>();
+            // tao's set_always_on_top drops the window to the floating level;
+            // restore the screen-saver level and re-assert the Space behavior
+            // on every show so a Space switch or full-screen app cannot hide it.
+            ns_window.setLevel(NSScreenSaverWindowLevel + 1);
+            ns_window.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary
+                    | NSWindowCollectionBehavior::Stationary
+                    | NSWindowCollectionBehavior::IgnoresCycle,
+            );
             ns_window.orderFrontRegardless();
             ns_window.displayIfNeeded();
         }

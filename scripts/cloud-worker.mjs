@@ -1707,22 +1707,26 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
     for (const model of harnessAuthors.slice(0, maxHarnessAuthors)) {
       try {
         const structuredPython = language === "python";
-        const specText = await tokenRouterGenerate({
+        const baseUser = testSpecUserPrompt({
+          question: String(question || "").slice(0, 8_000),
+          docket: (candidateDocket(candidates) || "No candidate code exists yet. Derive the test cases, outputs and API signature only from the problem specification.").slice(0, 7_000),
+          languages: [language],
+          knowledge: [
+            languageKnowledge,
+            lastError ? `THE PRIOR HARNESS WAS REJECTED: ${lastError.slice(0, 650)}. Repair only the harness.` : "",
+          ].filter(Boolean).join("\n\n"),
+        });
+        const parseHarness = (text) => structuredPython
+          ? buildGeneratedPythonHarness(question, text, candidateSource) || parseTestSuites(text).find(item => item.language === language)
+          : parseTestSuites(text).find(item => item.language === language);
+        let specText = await tokenRouterGenerate({
           settings, baseUrl, model, system: structuredPython ? pythonHarnessJsonSystemPrompt() : testSpecSystemPrompt() +
              (process.env.CODE_AUDITOR_E2B_DIFFERENTIAL === "1"
                ? "\\nOPTIONAL TRACE: For up to eight deterministic, JSON-compatible test inputs," +
                  " print CA_DIFF_CASE followed by a space and a JSON object with fields id, input, actual." +
                  " These must be the actual candidate outputs; retain all required PASS/FAIL assertions." +
                  " Use stable case IDs and fixtures from the problem; omit non-JSON or multi-answer cases." : ""),
-          user: testSpecUserPrompt({
-            question: String(question || "").slice(0, 8_000),
-            docket: (candidateDocket(candidates) || "No candidate code exists yet. Derive the test cases, outputs and API signature only from the problem specification.").slice(0, 7_000),
-            languages: [language],
-            knowledge: [
-              languageKnowledge,
-              lastError ? `THE PRIOR HARNESS WAS REJECTED: ${lastError.slice(0, 650)}. Repair only the harness.` : "",
-            ].filter(Boolean).join("\n\n"),
-          }),
+          user: baseUser,
           // Reserve a practical output budget for the runnable suite and its
           // independent reference. This auxiliary artifact is not a solver
           // answer, so it must not inherit a smaller user solve-token limit.
@@ -1734,9 +1738,23 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
           reasoning: "off",
           ...(structuredPython ? { responseFormat: { type: "json_object" } } : {}),
         });
-        const suite = structuredPython
-          ? buildGeneratedPythonHarness(question, specText, candidateSource) || parseTestSuites(specText).find(item => item.language === language)
-          : parseTestSuites(specText).find(item => item.language === language);
+        let suite = parseHarness(specText);
+        if (!suite && structuredPython) {
+          // One focused repair beats losing the seat: the JSON is usually
+          // intact apart from a missing reference, defaulted case field or a
+          // truncated tail.
+          specText = await tokenRouterGenerate({
+            settings, baseUrl, model,
+            system: pythonHarnessJsonSystemPrompt(),
+            user: baseUser + "\n\nYour previous reply was rejected (" +
+              (String(specText || "").length < 40 ? "empty output" : "it did not satisfy the schema") +
+              "). Return the corrected JSON object only, with at least eight cases and reference_code.",
+            maxTokens: Math.max(8_192, Number(settings.maxTokens || 4096)),
+            reasoning: "off",
+            responseFormat: { type: "json_object" },
+          });
+          suite = parseHarness(specText);
+        }
         if (!suite) throw new Error(`No valid executable harness block parsed${structuredPython ? ` (len ${String(specText || "").length}): ${String(specText || "").replace(/\s+/g, " ").slice(0, 220)}` : ""}.`);
         // One independent reference run catches malformed harnesses *before*
         // all candidates are tested. Successful evidence can be reused only for

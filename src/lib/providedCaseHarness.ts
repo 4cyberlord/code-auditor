@@ -28,6 +28,7 @@ export type ProvidedSuite = {
   harness: string;
   referenceCode?: string;
   candidateAsString?: boolean;
+  unordered?: boolean;
 };
 
 const MAX_CASES = 16;
@@ -183,7 +184,18 @@ function callableName(code: string): string | null {
   return standalone && !standalone[1].startsWith("_") ? standalone[1] : null;
 }
 
-function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", language: string, method?: string): string {
+const ANY_ORDER = /\b(?:any order|in any order|arbitrary order|order does not matter|any one)\b/i;
+const HARD_TO_COMPARE = /\b(?:any valid|multiple valid|modify in.place|in.place modification|do not return anything)\b/i;
+
+/** Equality-based cases cannot validate a contract that permits several
+ * correct representations. Ordering-only contracts are still comparable once
+ * both sides are normalized. */
+export function harnessOrderMode(question: string): { unordered: boolean; comparable: boolean } {
+  const text = String(question || "");
+  return { unordered: ANY_ORDER.test(text), comparable: !HARD_TO_COMPARE.test(text) };
+}
+
+function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", language: string, method?: string, unordered = false): string {
   // The replacement is an escaped JSON string literal. Candidate text is not
   // interpolated into Python syntax and cannot break the driver string.
   const payload = JSON.stringify(fixtures.map(pair => mode === "callable"
@@ -197,9 +209,16 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "CA_MODE = " + JSON.stringify(mode),
     "CA_LANGUAGE = " + JSON.stringify(language),
     "CA_METHOD = " + methodLiteral,
+    "CA_UNORDERED = " + (unordered ? "True" : "False"),
+    "def ca_norm(value):",
+    "    if isinstance(value, list):",
+    "        return sorted((ca_norm(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True, default=str))",
+    "    if isinstance(value, dict):",
+    "        return {key: ca_norm(item) for key, item in value.items()}",
+    "    return value",
     "def ca_test(case, actual):",
     "    expected = case['expected']",
-    "    ok = actual == expected",
+    "    ok = (ca_norm(actual) == ca_norm(expected)) if CA_UNORDERED else (actual == expected)",
     "    print(('PASS ' if ok else 'FAIL ') + case['id'])",
     "    trace_input = case['input'] if 'input' in case else {'args': case.get('args'), 'kwargs': case.get('kwargs')} ",
     "    print('CA_CASE ' + json.dumps({'id': case['id'], 'input': trace_input, 'expected': expected, 'actual': actual, 'status': 'passed' if ok else 'failed'}, default=str))",
@@ -260,9 +279,8 @@ export function buildGeneratedPythonHarness(
   rawSpec: string,
   candidateCode = "",
 ): ProvidedSuite | null {
-  // Equality-based cases cannot validate a contract that permits several
-  // correct representations. Keep those on the existing comparator-aware path.
-  if (/\b(?:any order|any valid|multiple valid|in any order|any one|arbitrary order|order does not matter|modify in.place|in.place modification|do not return anything)\b/i.test(question)) return null;
+  const order = harnessOrderMode(question);
+  if (!order.comparable) return null;
   let spec: Record<string, unknown>;
   try {
     const text = String(rawSpec || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
@@ -272,9 +290,11 @@ export function buildGeneratedPythonHarness(
     spec = JSON.parse(text.slice(first, last + 1));
   } catch { return null; }
 
-  const referenceCode = typeof spec.reference_code === "string" ? spec.reference_code.trim() : "";
+  const referenceCode = [spec.reference_code, spec.referenceCode, spec.reference, spec.solution, spec.code]
+    .find((value): value is string => typeof value === "string" && !!value.trim())?.trim() || "";
   if (!referenceCode || referenceCode.length > 24_000) return null;
-  const rawCases = Array.isArray(spec.cases) ? spec.cases : [];
+  const rawCases = [spec.cases, spec.tests, spec.test_cases, spec.testCases]
+    .find((value): value is unknown[] => Array.isArray(value)) || [];
   if (rawCases.length < MIN_GENERATED_HARNESS_CASES || rawCases.length > MAX_CASES) return null;
   const mode = spec.mode === "stdin" ? "stdin" : spec.mode === "callable" ? "callable" : null;
   if (!mode) return null;
@@ -287,11 +307,17 @@ export function buildGeneratedPythonHarness(
     const row = value as Record<string, unknown>;
     let fixture: ProvidedFixture;
     if (mode === "callable") {
-      if (!Array.isArray(row.args) || !row.kwargs || typeof row.kwargs !== "object" || Array.isArray(row.kwargs) || !Object.hasOwn(row, "expected")) return null;
-      fixture = { id: `generated_${index + 1}`, input: JSON.stringify([row.args, row.kwargs]), output: JSON.stringify(row.expected), args: row.args, kwargs: row.kwargs as Record<string, unknown>, expected: row.expected };
+      const args = Array.isArray(row.args) ? row.args : Array.isArray(row.input) ? row.input : [];
+      const kwargs = row.kwargs && typeof row.kwargs === "object" && !Array.isArray(row.kwargs)
+        ? row.kwargs as Record<string, unknown> : {};
+      const hasExpected = Object.hasOwn(row, "expected") || Object.hasOwn(row, "output") || Object.hasOwn(row, "want");
+      if (!hasExpected) return null;
+      const expected = Object.hasOwn(row, "expected") ? row.expected : Object.hasOwn(row, "output") ? row.output : row.want;
+      fixture = { id: `generated_${index + 1}`, input: JSON.stringify([args, kwargs]), output: JSON.stringify(expected), args, kwargs, expected };
     } else {
-      if (typeof row.input !== "string" || typeof row.expected !== "string") return null;
-      fixture = { id: `generated_${index + 1}`, input: row.input, output: row.expected };
+      const expectedOutput = typeof row.expected === "string" ? row.expected : typeof row.output === "string" ? row.output : null;
+      if (typeof row.input !== "string" || expectedOutput === null) return null;
+      fixture = { id: `generated_${index + 1}`, input: row.input, output: expectedOutput };
     }
     const key = JSON.stringify(mode === "callable" ? [fixture.args, fixture.kwargs] : fixture.input);
     if (seen.has(key)) continue;
@@ -314,7 +340,8 @@ export function buildGeneratedPythonHarness(
   return {
     language: "python", runnerLanguage: "python", source: "generated",
     providedCaseCount: cases.length, question, candidateAsString: true,
-    harness: pythonDriver(cases, mode, "python", callableName(candidateCode) || (typeof spec.method === "string" ? spec.method : undefined)),
+    harness: pythonDriver(cases, mode, "python", callableName(candidateCode) || (typeof spec.method === "string" ? spec.method : undefined), order.unordered),
+    unordered: order.unordered,
     referenceCode,
   };
 }
@@ -354,7 +381,8 @@ export function buildProvidedHarness(question: string, language: string, candida
     language, runnerLanguage: "python", source: "provided",
     providedCaseCount: fixtures.length,
     question,
-    harness: pythonDriver(fixtures, callable ? "callable" : "stdin", language, name || undefined),
+    harness: pythonDriver(fixtures, callable ? "callable" : "stdin", language, name || undefined, harnessOrderMode(question).unordered),
+    unordered: harnessOrderMode(question).unordered,
   };
 }
 
