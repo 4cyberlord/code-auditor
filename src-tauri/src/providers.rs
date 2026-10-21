@@ -1648,14 +1648,14 @@ fn approved_model(model: &str) -> bool {
         "claude-opus-5.5" | "anthropic/claude-opus-5.5" | "claude/opus-5-5" | "claude/opus-5.5" |
         "claude-fable-5.1" | "claude-haiku-5.5" | "anthropic/claude-fable-5.1" | "claude/fable-5-1" | "claude/fable-5.1" |
         "gpt-5.6-sol" | "openai/gpt-5.6-sol" | "openai/gpt-5-6-sol" |
-        "gemini-3.1-pro" | "gemini-3.1-pro-preview" | "google/gemini-3.1-pro" | "google/gemini-3-1-pro" |
+        "gemini-3.1-pro" | "gemini-3.1-pro-preview" | "gemini-4-argon" | "google/gemini-3.1-pro" | "google/gemini-3-1-pro" |
         "grok-4.6" | "x-ai/grok-4.6" | "xai/grok-4-6" | "xai/grok-4.6" |
         "gpt-5.6-terra" | "openai/gpt-5.6-terra" | "openai/gpt-5-6-terra" |
         "qwen3.8-max" | "qwen/qwen3.8-max" | "qwen/qwen3-8-max" |
         "kimi-k3" | "moonshotai/kimi-k3" | "moonshot/kimi-k3" |
-        "glm-5.3" | "z-ai/glm-5.3" | "zai/glm-5-3" | "glm/5-3" | "glm/5.3" |
-        "deepseek-v4-pro-max" | "deepseek-v4-pro" | "deepseek/deepseek-v4-pro-max" |
-        "seed-2.1-pro" | "seed-2-1-turbo" | "bytedance/seed-v2-1-pro" | "bytedance/seed-2.1-pro")
+        "glm-5.3" | "gpt-6-luna" | "z-ai/glm-5.3" | "zai/glm-5-3" | "glm/5-3" | "glm/5.3" |
+        "deepseek-v4-pro-max" | "deepseek-v4-pro" | "deepseek-v4.1-flash" | "deepseek/deepseek-v4-pro-max" |
+        "seed-2.1-pro" | "seed-2-1-turbo" | "gemini-3.1-pro-preview" | "bytedance/seed-v2-1-pro" | "bytedance/seed-2.1-pro")
 }
 
 struct Gate {

@@ -226,7 +226,7 @@ export const EXPERIENTIAL_GATEWAY = {
     openai: "gpt-5.6-sol",
     moonshot: "kimi-k3",
     anthropic: "claude-opus-5.5",
-    gemini: "gemini-3.1-pro-preview",
+    gemini: "gemini-4-argon",
   } as Record<ProviderId, string>,
   coordinatorModel: "gpt-5.6-terra",
   trustyModel: "deepseek-v4-pro",
