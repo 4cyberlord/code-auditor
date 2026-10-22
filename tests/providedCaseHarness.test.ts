@@ -6,6 +6,7 @@ import {
 } from "../src/lib/providedCaseHarness.ts";
 import { spliceSuite, countCases } from "../src/lib/council.ts";
 import { contractHash } from "../src/lib/providedCaseHarness.ts";
+import { contractIdentity } from "../src/lib/problemContract.ts";
 
 const twoSum = [
   "Two Sum",
@@ -179,7 +180,7 @@ assert.equal(contractHash(twoSum, fixtureSet), contractHash(twoSum, fixtureSet))
 assert.notEqual(contractHash(twoSum, fixtureSet), contractHash(twoSum + "\n", fixtureSet));
 const registered = buildProvidedHarness(twoSum, "python", correct);
 assert.equal(registered?.harnessVersion, "v2.6");
-assert.equal(registered?.contractHash, contractHash(twoSum, fixtureSet));
+assert.equal(registered?.contractHash, contractIdentity(registered!.contract!, fixtureSet.map((fixture) => fixture.input)));
 console.log("PASS: harness registry identity is stable and contract-scoped");
 
 // ------------------------------------------------- native judge adapters
@@ -194,7 +195,7 @@ for (const [language, source] of [["cpp", cppSolution], ["rust", rustSolution]] 
   assert.ok(suite, language + " judge API should build a native suite");
   assert.equal(suite.runnerLanguage, language);
   assert.equal(suite.candidateAsString, false);
-  assert.equal(suite.contractHash, contractHash(nativeQuestion, extractProvidedFixtures(nativeQuestion)));
+  assert.equal(suite.contractHash, contractIdentity(suite.contract!, extractProvidedFixtures(nativeQuestion).map((fixture) => fixture.input)));
   const program = spliceSuite(suite, source) ?? "";
   assert.ok(program.includes("twoSum") || program.includes("two_sum"));
   assert.ok(!program.includes('"class Solution'), "native candidates splice unwrapped");

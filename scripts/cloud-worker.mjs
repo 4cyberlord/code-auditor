@@ -1497,6 +1497,7 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
         signature: suite.signature || "",
         harnessSha256: createHash("sha256").update(String(suite.harness || "")).digest("hex"),
         contractHash: suite.contractHash || "",
+        contract: suite.contract || null,
         providedCaseCount: suite.source === "provided" ? suite.providedCaseCount : 0,
         ran: true,
         ok: local.ok && !insufficientCoverage,

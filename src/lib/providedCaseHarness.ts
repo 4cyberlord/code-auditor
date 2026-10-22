@@ -32,6 +32,7 @@ export type ProvidedSuite = {
   candidateAsString?: boolean;
   templateId?: string;
   signature?: string;
+  contract?: import("./problemContract.ts").ProblemContract;
   unordered?: boolean;
 };
 
@@ -489,8 +490,50 @@ export function nodeFields(source: string, tree: boolean, owner: "ListNode" | "T
   return fields;
 }
 
+
+function contractFor(
+  question: string, language: string, code: string, source: "provided" | "generated",
+  fixtures: ProvidedFixture[], signature: NativeSignature | null, pythonName?: string,
+): ReturnType<typeof buildContract> {
+  const unordered = harnessOrderMode(question).unordered;
+  const declared = /\b(?:class|struct)\s+(?:ListNode|TreeNode)\b/.test(code);
+  if (!signature) {
+    if (pythonName) {
+      return buildContract({
+        question, language, code, fixtureCount: fixtures.length,
+        fixturesHaveExpected: fixtures.every((fixture) => Object.hasOwn(fixture, "expected") || Object.hasOwn(fixture, "output")),
+        callable: true, stdinContract: false, unordered, source,
+        nodeKind: false, nodeDeclared: false,
+      } as never);
+    }
+    return buildContract({
+      question, language, code, fixtureCount: fixtures.length,
+      fixturesHaveExpected: fixtures.every((fixture) => Object.hasOwn(fixture, "expected") || Object.hasOwn(fixture, "output")),
+      callable: false, stdinContract: true, unordered, source,
+      nodeKind: false, nodeDeclared: declared,
+    } as never);
+  }
+  const mutating = signature.ret.kind === "void"
+    ? signature.args.find((argument) => /&mut|\*/.test(argument.decl))?.name ?? null : null;
+  return buildContract({
+    question, language, code, fixtureCount: fixtures.length,
+    fixturesHaveExpected: fixtures.every((fixture) => Object.hasOwn(fixture, "expected") || Object.hasOwn(fixture, "output")),
+    callable: true, stdinContract: false,
+    unordered, source,
+    nodeKind: signature.ret.kind === "node" || signature.args.some((argument) => argument.type.kind === "node"),
+    nodeDeclared: declared,
+    signature: {
+      name: signature.name,
+      args: signature.args.map((argument) => ({ name: argument.name, decl: argument.decl, type: argument.type.kind })),
+      ret: signature.retDecl,
+      mutates: mutating,
+    },
+  });
+}
+
 /** Bump whenever a template or comparison rule changes. */
 import { bestTemplate } from "./harnessRegistry.ts";
+import { buildContract, contractIdentity } from "./problemContract.ts";
 
 export const HARNESS_ENGINE_VERSION = "v2.6";
 
@@ -953,6 +996,8 @@ export function buildProvidedHarness(question: string, language: string, candida
     signature.args.every((argument, position) => nativeValue(fixture, argument, position) !== undefined))
     ? fixtures : null;
   if (signature && callableFixtures) {
+    const compiled = contractFor(question, language, code, "provided", callableFixtures, signature);
+    if (!compiled.ok || !compiled.contract) return null;
     const treeShape = signature.ret.kind === "node" ? signature.ret.tree
       : signature.args.some((argument) => argument.type.kind === "node" && argument.type.tree);
     const fields = { list: nodeFields(code, false, "ListNode"), tree: nodeFields(code, true, "TreeNode") };
@@ -965,7 +1010,8 @@ export function buildProvidedHarness(question: string, language: string, candida
       question, harness: driver, candidateAsString: false,
       unordered: harnessOrderMode(question).unordered,
       harnessVersion: HARNESS_ENGINE_VERSION,
-      contractHash: contractHash(question, callableFixtures),
+      contractHash: contractIdentity(compiled.contract, callableFixtures.map((fixture) => fixture.input)),
+      contract: compiled.contract,
       templateId: signature && (signature.ret.kind === "node" || signature.args.some((argument) => argument.type.kind === "node"))
         ? bestTemplate(language, "callable-node")?.id
         : bestTemplate(language, callableFamily)?.id,
@@ -980,6 +1026,8 @@ export function buildProvidedHarness(question: string, language: string, candida
     : language === "cpp" ? /\bint\s+main\s*\(/.test(code) : /\bfn\s+main\s*\(/.test(code);
   const stdin = !callable && stdinContract && isStandalone && fixtures.every(f => !/(?:^|,)\s*[A-Za-z_]\w*\s*=/.test(f.input));
   if (!callable && !stdin) return null;
+  const compiled = contractFor(question, language, code, "provided", fixtures, null, callable ? name || undefined : undefined);
+  if (!compiled.ok || !compiled.contract) return null;
   return {
     language, runnerLanguage: "python", source: "provided",
     providedCaseCount: fixtures.length,
@@ -987,7 +1035,8 @@ export function buildProvidedHarness(question: string, language: string, candida
     harness: pythonDriver(fixtures, callable ? "callable" : "stdin", language, name || undefined, harnessOrderMode(question).unordered, nodeSpec),
     unordered: harnessOrderMode(question).unordered,
     harnessVersion: HARNESS_ENGINE_VERSION,
-    contractHash: contractHash(question, fixtures),
+    contractHash: contractIdentity(compiled.contract, fixtures.map((fixture) => fixture.input)),
+    contract: compiled.contract,
     templateId: nodeSpec ? "callable-node" : bestTemplate(language, callable ? callableFamily : "stdin")?.id,
   };
 }
