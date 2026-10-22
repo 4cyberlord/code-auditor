@@ -2,8 +2,8 @@ import { readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-const FILES = { python: "python-3.15", rust: "rust-1.99" };
-const PUBLIC = { python: "https://docs.python.org/3.15/", rust: "https://doc.rust-lang.org/" };
+const FILES = { python: "python-3.15", rust: "rust-1.99", cpp: "cpp-26" };
+const PUBLIC = { python: "https://docs.python.org/3.15/", rust: "https://doc.rust-lang.org/", cpp: "https://en.cppreference.com/" };
 const cache = new Map();
 
 function load(language) {
