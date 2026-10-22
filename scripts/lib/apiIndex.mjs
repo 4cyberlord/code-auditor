@@ -31,9 +31,10 @@ export function apiLinks(language, text, limit = 6) {
   const haystack = String(text || "").slice(0, 40_000);
   if (!haystack) return "";
   const hits = [];
-  for (const [symbol, path] of Object.entries(index.symbols)) {
+  for (const [symbol, value] of Object.entries(index.symbols)) {
     if (symbol.length < 3 || !haystack.includes(symbol)) continue;
-    hits.push({ symbol, path, weight: symbol.length });
+    const entry = typeof value === "string" ? { path: value, sig: "" } : value;
+    hits.push({ symbol, path: entry.path, sig: entry.sig || "", weight: symbol.length });
   }
   if (!hits.length) return "";
   hits.sort((left, right) => right.weight - left.weight);
@@ -43,7 +44,9 @@ export function apiLinks(language, text, limit = 6) {
     const family = hit.symbol.split(".").slice(0, -1).join(".") || hit.symbol;
     if (seen.has(family) && rows.length >= limit) continue;
     seen.add(family);
-    rows.push(`- ${hit.symbol}: ${PUBLIC[language]}${hit.path}`);
+    // The signature is the useful half; strip a leading copy of the symbol.
+    const sig = hit.sig.replace(new RegExp(`^${hit.symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`), "").slice(0, 120);
+    rows.push(`- ${hit.symbol}${sig ? ` — ${sig}` : ""}: ${PUBLIC[language]}${hit.path}`);
     if (rows.length >= limit) break;
   }
   return `Documented ${language} ${index.version} symbols used by this problem:\n${rows.join("\n")}`;

@@ -36,6 +36,40 @@ export type ProvidedSuite = {
 };
 
 
+interface PythonNodeSpec {
+  params: Array<{ index: number; tree: boolean }>;
+  /** Parameter names in declaration order, so kwargs become positional. */
+  order: string[];
+  returnsNode: boolean;
+}
+
+/** Only when the candidate names the node type or the parameter is node-ish. */
+export function pythonNodeSpec(question: string, code: string, name: string): PythonNodeSpec | null {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const definition = new RegExp(`def\\s+${escaped}\\s*\\(([^)]*)\\)\\s*(?:->\\s*([^:]+))?:`).exec(code);
+  if (!definition) return null;
+  const params = splitParams(definition[1]).filter((part) => !/^self\b/.test(part.trim()));
+  const treeQuestion = /\btree\b/i.test(question);
+  const specs: PythonNodeSpec["params"] = [];
+  params.forEach((param, index) => {
+    const [name, ...rest] = param.split(":");
+    const annotation = rest.join(":");
+    if (/ListNode/.test(annotation)) specs.push({ index, tree: false });
+    else if (/TreeNode/.test(annotation)) specs.push({ index, tree: true });
+    else if (!annotation) {
+      const bare = name.trim().toLowerCase();
+      if (/^(?:root|tree)$/.test(bare) || (/^node$/.test(bare) && treeQuestion)) specs.push({ index, tree: true });
+      else if (/^(?:head|node|l1|l2|list1|list2)$/.test(bare)) specs.push({ index, tree: false });
+    }
+  });
+  if (!specs.length) return null;
+  return {
+    params: specs,
+    order: params.map((param) => param.split(":")[0].trim()),
+    returnsNode: /ListNode|TreeNode/.test(definition[2] || ""),
+  } as never;
+}
+
 // ------------------------------------------------- native function adapters
 //
 // Judge-style APIs (a Solution class or a free function) need a typed call, not
@@ -488,7 +522,7 @@ export function harnessOrderMode(question: string): { unordered: boolean; compar
   return { unordered: ANY_ORDER.test(text), comparable: !HARD_TO_COMPARE.test(text) };
 }
 
-function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", language: string, method?: string, unordered = false): string {
+function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", language: string, method?: string, unordered = false, node?: PythonNodeSpec | null): string {
   // The replacement is an escaped JSON string literal. Candidate text is not
   // interpolated into Python syntax and cannot break the driver string.
   const payload = JSON.stringify(fixtures.map(pair => mode === "callable"
@@ -503,6 +537,45 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "CA_LANGUAGE = " + JSON.stringify(language),
     "CA_METHOD = " + methodLiteral,
     "CA_UNORDERED = " + (unordered ? "True" : "False"),
+    "CA_NODE = json.loads(" + JSON.stringify(JSON.stringify(node || null)) + ")",
+    "scope = {}",
+    "def ca_build(value, tree):",
+    "    cls = scope.get('TreeNode' if tree else 'ListNode')",
+    "    if not value or cls is None: return None",
+    "    if tree:",
+    "        nodes = []",
+    "        for item in value:",
+    "            if item is None: nodes.append(None); continue",
+    "            node = cls(item)",
+    "            node.left = node.right = None",
+    "            nodes.append(node)",
+    "        for index, node in enumerate(nodes):",
+    "            if node is None: continue",
+    "            left, right = 2 * index + 1, 2 * index + 2",
+    "            if left < len(nodes): node.left = nodes[left]",
+    "            if right < len(nodes): node.right = nodes[right]",
+    "        return nodes[0]",
+    "    head = tail = None",
+    "    for item in value :",
+    "        node = cls(item)",
+    "        if tail is None: head = node",
+    "        else: tail.next = node",
+    "        tail = node",
+    "    return head",
+    "def ca_ser(node, tree):",
+    "    if node is None: return None",
+    "    if not tree :",
+    "        out = []",
+    "        while node is not None: out.append(node.val); node = getattr(node, 'next', None)",
+    "        return out",
+    "    out, queue = [], [node]",
+    "    while queue:",
+    "        current = queue.pop(0)",
+    "        if current is None:",
+    "            out.append(None); continue",
+    "        out.append(current.val); queue.append(getattr(current, 'left', None)); queue.append(getattr(current, 'right', None))",
+    "    while out and out[-1] is None: out.pop()",
+    "    return out",
     "def ca_norm(value):",
     "    if isinstance(value, list):",
     "        return sorted((ca_norm(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True, default=str))",
@@ -518,7 +591,7 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "    return ok",
     "def ca_execute():",
     "    if CA_MODE == 'callable':",
-    "        scope = {'__name__': '__council_candidate__'}",
+    "        scope.update({'__name__': '__council_candidate__'})",
     "        from typing import List, Optional, Dict, Tuple, Set",
     "        scope.update({'List': List, 'Optional': Optional, 'Dict': Dict, 'Tuple': Tuple, 'Set': Set})",
     "        exec(compile(CA_SOURCE, '<candidate>', 'exec'), scope)",
@@ -532,7 +605,19 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "            names = [name for name, value in target.items() if not name.startswith('_') and callable(value)]",
     "            method = target[names[0]] if names else None",
     "        if method is None: raise RuntimeError('No public callable found in candidate')",
-    "        return all([ca_test(case, method(*copy.deepcopy(case['args']), **copy.deepcopy(case['kwargs']))) for case in CA_CASES])",
+    "        results = []",
+    "        for case in CA_CASES:",
+    "            if CA_NODE:",
+    "                args = [copy.deepcopy(case['kwargs'][key]) for key in CA_NODE['order']]",
+    "            else:",
+    "                args = copy.deepcopy(case['args'])",
+    "            for spec in (CA_NODE or {}).get('params', []):",
+    "                args[spec['index']] = ca_build(args[spec['index']], spec['tree'])",
+    "            result = method(*args) if CA_NODE else method(*args, **copy.deepcopy(case['kwargs']))",
+    "            if CA_NODE and (CA_NODE.get('returnsNode') or hasattr(result, 'val')):",
+    "                result = ca_ser(result, bool((CA_NODE.get('params') or [{}])[0].get('tree')))",
+    "            results.append(ca_test(case, result))",
+    "        return all(results)",
     "    with tempfile.TemporaryDirectory(prefix='council-fixtures-') as directory:",
     "        ext = {'python': '.py', 'cpp': '.cpp', 'rust': '.rs'}[CA_LANGUAGE]",
     "        src = os.path.join(directory, 'solution' + ext)",
@@ -659,12 +744,12 @@ export function buildProvidedHarness(question: string, language: string, candida
   if (/\b(?:any order|any valid|multiple valid|in any order|any one|arbitrary order|order does not matter|modify in.place|in.place modification|do not return anything)\b/i.test(question)) return null;
   // Judge UI serializes trees/linked lists as arrays; a raw Python method
   // expects real nodes, not that displayed serialization.
-  if (language === "python" && /\b(?:TreeNode|ListNode)\b/.test(candidateCode)) return null;
   const fixtures = extractProvidedFixtures(question);
   if (!fixtures.length) return null;
   const code = String(candidateCode || "");
   const name = language === "python" ? callableName(code) : null;
   const registryEnabled = (globalThis as { __COUNCIL_HARNESS_REGISTRY__?: boolean }).__COUNCIL_HARNESS_REGISTRY__ !== false;
+  const nodeSpec = language === "python" && name ? pythonNodeSpec(question, code, name) : null;
   const signature = registryEnabled && language === "cpp" ? cppSignature(code)
     : registryEnabled && language === "rust" ? rustSignature(code) : null;
   const signatureText = signature
@@ -685,7 +770,7 @@ export function buildProvidedHarness(question: string, language: string, candida
       unordered: harnessOrderMode(question).unordered,
       harnessVersion: HARNESS_ENGINE_VERSION,
       contractHash: contractHash(question, callableFixtures),
-      templateId: bestTemplate(language, "callable-vector")?.id,
+      templateId: nodeSpec ? bestTemplate(language, "callable-node")?.id ?? "python.callable-node" : bestTemplate(language, "callable-vector")?.id,
       signature: signatureText,
     };
   }
@@ -701,11 +786,11 @@ export function buildProvidedHarness(question: string, language: string, candida
     language, runnerLanguage: "python", source: "provided",
     providedCaseCount: fixtures.length,
     question,
-    harness: pythonDriver(fixtures, callable ? "callable" : "stdin", language, name || undefined, harnessOrderMode(question).unordered),
+    harness: pythonDriver(fixtures, callable ? "callable" : "stdin", language, name || undefined, harnessOrderMode(question).unordered, nodeSpec),
     unordered: harnessOrderMode(question).unordered,
     harnessVersion: HARNESS_ENGINE_VERSION,
     contractHash: contractHash(question, fixtures),
-    templateId: bestTemplate(language, callable ? "callable-vector" : "stdin")?.id,
+    templateId: nodeSpec ? "python.callable-node" : bestTemplate(language, callable ? "callable-vector" : "stdin")?.id,
   };
 }
 

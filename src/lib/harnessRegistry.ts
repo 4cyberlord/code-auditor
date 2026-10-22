@@ -10,7 +10,7 @@
  * caller falls back to the reference harness.
  */
 
-export type HarnessFamily = "callable-scalar" | "callable-vector" | "stdin";
+export type HarnessFamily = "callable-scalar" | "callable-vector" | "callable-node" | "stdin";
 export type HarnessLanguage = "python" | "cpp" | "rust";
 
 export interface HarnessTemplate {
@@ -62,6 +62,16 @@ export const HARNESS_REGISTRY: HarnessTemplate[] = [
     description: "Typed native call with vector arguments and declaration-typed comparison.",
     materialises: ["vector", "nested vector", "string"],
     refuses: ["TreeNode", "ListNode", "pointers", "maps", "tuples"],
+  },
+  {
+    id: "python.callable-node",
+    family: "callable-node",
+    languages: ["python"],
+    rank: 15,
+    certified: true,
+    description: "Builds ListNode chains or level-order trees from arrays, calls the method and serializes the result.",
+    materialises: ["ListNode", "TreeNode"],
+    refuses: ["node types in C++ and Rust", "graphs", "multiple node arguments of mixed shape"],
   },
   {
     id: "stdin.wrapper",

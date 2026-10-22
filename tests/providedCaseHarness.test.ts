@@ -222,3 +222,27 @@ assert.equal(buildProvidedHarness(nativeQuestion, "cpp", cppSolution), null);
 (globalThis as { __COUNCIL_HARNESS_REGISTRY__?: boolean }).__COUNCIL_HARNESS_REGISTRY__ = true;
 assert.ok(buildProvidedHarness(nativeQuestion, "cpp", cppSolution));
 console.log("PASS: registry flag falls back cleanly");
+
+// ------------------------------------------------- node adapters
+
+const listQ = ["Reverse Linked List", "Example 1:", "Input: head = [1,2,3,4,5]", "Output: [5,4,3,2,1]"].join("\n");
+const listGood = "class ListNode:\n    def __init__(self, val=0, next=None):\n        self.val=val; self.next=next\nclass Solution:\n    def reverseList(self, head):\n        prev=None\n        while head:\n            nxt=head.next; head.next=prev; prev=head; head=nxt\n        return prev";
+const treeQ = ["Maximum Depth", "Example 1:", "Input: root = [3,9,20,null,null,15,7]", "Output: 3"].join("\n");
+const treeGood = "class TreeNode:\n    def __init__(self, val=0, left=None, right=None):\n        self.val=val\nclass Solution:\n    def maxDepth(self, root):\n        if not root: return 0\n        return 1 + max(self.maxDepth(root.left), self.maxDepth(root.right))";
+
+for (const [question, code, label] of [[listQ, listGood, "list"], [treeQ, treeGood, "tree"]] as const) {
+  const suite = buildProvidedHarness(question, "python", code);
+  assert.ok(suite, label + " node problem should build a node suite");
+  assert.equal(suite.templateId, "python.callable-node");
+  const program = spliceSuite(suite, code) ?? "";
+  const file = `/tmp/fixture-node-${label}.py`;
+  writeFileSync(file, program);
+  const run = spawnSync("python3", [file]);
+  assert.equal(run.status, 0, String(run.stderr));
+  assert.equal((String(run.stdout).match(/status":\s*"passed/g) || []).length, 1);
+}
+
+// A wrong answer must still fail; the adapter must not pass anything shaped like a node.
+const wrongList = listGood.replace("prev=None", "prev=None\n        return head");
+assert.equal(buildProvidedHarness(listQ, "python", wrongList) !== null, true);
+console.log("PASS: node adapters build, run and stay strict");
