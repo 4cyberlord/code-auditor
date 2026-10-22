@@ -92,7 +92,11 @@ the declared return type, and unordered contracts sort before comparing. The
 driver is spliced with the candidate as raw source and compiled by the same E2B
 command as any other C++/Rust program.
 
-Anything outside that type set — pointers, `TreeNode`/`ListNode`, maps, pairs,
-tuples, generics — returns null and falls back to the AI reference harness. Do not
+Node types are covered in all three languages: `ListNode`/`TreeNode` are built from
+the statement arrays and returns are serialized back before comparison, with the
+struct injected when the starter omits it.
+
+Anything outside that type set — other pointers, graphs, maps, pairs, tuples,
+generics — returns null and falls back to the AI reference harness. Do not
 auto-cast unknown types or claim coverage where the question supplies no reliable
 output oracle.

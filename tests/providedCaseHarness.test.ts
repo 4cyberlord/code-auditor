@@ -233,7 +233,7 @@ const treeGood = "class TreeNode:\n    def __init__(self, val=0, left=None, righ
 for (const [question, code, label] of [[listQ, listGood, "list"], [treeQ, treeGood, "tree"]] as const) {
   const suite = buildProvidedHarness(question, "python", code);
   assert.ok(suite, label + " node problem should build a node suite");
-  assert.equal(suite.templateId, "python.callable-node");
+  assert.equal(suite.templateId, "callable-node");
   const program = spliceSuite(suite, code) ?? "";
   const file = `/tmp/fixture-node-${label}.py`;
   writeFileSync(file, program);
@@ -246,3 +246,29 @@ for (const [question, code, label] of [[listQ, listGood, "list"], [treeQ, treeGo
 const wrongList = listGood.replace("prev=None", "prev=None\n        return head");
 assert.equal(buildProvidedHarness(listQ, "python", wrongList) !== null, true);
 console.log("PASS: node adapters build, run and stay strict");
+
+// Native node adapters: compile, pass a correct answer, fail a wrong one.
+for (const [language, good, bad] of [
+  ["cpp",
+    "class Solution {\npublic:\n ListNode* reverseList(ListNode* head) { ListNode* prev=nullptr; while(head){ ListNode* n=head->next; head->next=prev; prev=head; head=n; } return prev; }\n};",
+    "class Solution {\npublic:\n ListNode* reverseList(ListNode* head) { return head; }\n};"],
+  ["rust",
+    "impl Solution {\n pub fn reverse_list(head: Option<Box<ListNode>>) -> Option<Box<ListNode>> {\n  let mut prev=None; let mut cur=head;\n  while let Some(mut node)=cur { cur=node.next.take(); node.next=prev; prev=Some(node); }\n  prev\n }\n}",
+    "impl Solution {\n pub fn reverse_list(head: Option<Box<ListNode>>) -> Option<Box<ListNode>> { head }\n}"],
+] as const) {
+  const compiler = spawnSync(language === "cpp" ? "c++" : "rustc", ["--version"]);
+  if (compiler.status !== 0) { console.log("SKIP native node:", language); continue; }
+  const suite = buildProvidedHarness(listQ, language, good);
+  assert.ok(suite, language + " node suite");
+  assert.equal(suite.templateId, "callable-node");
+  for (const [code, expectedPass] of [[good, 1], [bad, 0]] as const) {
+    const file = `/tmp/node-${language}-${expectedPass}.${language === "cpp" ? "cpp" : "rs"}`;
+    writeFileSync(file, spliceSuite(suite, code) ?? "");
+    const binary = file + ".bin";
+    const built = spawnSync(language === "cpp" ? "c++" : "rustc",
+      language === "cpp" ? ["-std=c++20", "-O1", file, "-o", binary] : ["-O", file, "-o", binary]);
+    assert.equal(built.status, 0, language + " node compile");
+    const run = spawnSync(binary);
+    assert.equal((String(run.stdout).match(/status":\s*"passed/g) || []).length, expectedPass, language + " node outcome");
+  }
+}

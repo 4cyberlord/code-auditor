@@ -78,7 +78,8 @@ export function pythonNodeSpec(question: string, code: string, name: string): Py
 
 type NativeType =
   | { kind: "int" | "float" | "bool" | "string" }
-  | { kind: "list"; item: NativeType };
+  | { kind: "list"; item: NativeType }
+  | { kind: "node"; tree: boolean };
 
 interface NativeArgument {
   name: string;
@@ -105,6 +106,8 @@ function cppTypeName(type: NativeType): string {
 
 function cppType(raw: string): NativeType | null {
   const text = raw.replace(/\bconst\b/g, "").replace(/[&\s]+$/g, "").trim();
+  if (/^TreeNode\s*\*$/.test(text)) return { kind: "node", tree: true };
+  if (/^ListNode\s*\*$/.test(text)) return { kind: "node", tree: false };
   if (text === "bool") return { kind: "bool" };
   if (text === "double" || text === "float") return { kind: "float" };
   if (text === "string" || text === "std::string") return { kind: "string" };
@@ -118,6 +121,8 @@ function cppType(raw: string): NativeType | null {
 
 function rustType(raw: string): NativeType | null {
   const text = raw.trim().replace(/^&(?!(?:str|\[))/, "").trim();
+  if (/^(?:Option<)?Box<TreeNode>>$/.test(text)) return { kind: "node", tree: true };
+  if (/^(?:Option<)?Box<ListNode>>$/.test(text)) return { kind: "node", tree: false };
   if (text === "bool") return { kind: "bool" };
   if (text === "f32" || text === "f64") return { kind: "float" };
   if (text === "String" || text === "&str" || text === "str") return { kind: "string" };
@@ -131,6 +136,19 @@ function rustType(raw: string): NativeType | null {
 }
 
 function nativeLiteral(type: NativeType, value: unknown, language: "cpp" | "rust"): string | null {
+  if (type.kind === "node") {
+    if (!Array.isArray(value)) return null;
+    const items = value.map((item) => item === null ? "null" : Number.isInteger(item) ? String(item) : null);
+    if (items.some((item) => item === null)) return null;
+    if (language === "cpp") {
+      return type.tree
+        ? `ca_tree(std::vector<std::optional<long long>>{${items.map((item) => item === "null" ? "std::nullopt" : item).join(", ")}})`
+        : `ca_list(std::vector<long long>{${items.join(", ")}})`;
+    }
+    return type.tree
+      ? `ca_tree(&vec![${items.map((item) => item === "null" ? "None" : `Some(${item})`).join(", ")}])`
+      : `ca_list(&vec![${items.join(", ")}])`;
+  }
   if (type.kind === "list") {
     if (!Array.isArray(value)) return null;
     const items = value.map((item) => nativeLiteral(type.item, item, language));
@@ -178,8 +196,8 @@ function splitParams(raw: string): string[] {
 export function cppArguments(raw: string): NativeArgument[] | null {
   const args: NativeArgument[] = [];
   for (const param of splitParams(raw)) {
-    const match = /^(.*?)[\s*&]+([A-Za-z_]\w*)\s*$/.exec(param.trim());
-    if (!match) return null;
+    const match = /^(.*?)([A-Za-z_]\w*)\s*$/.exec(param.trim());
+    if (!match || !match[1].trim()) return null;
     const type = cppType(match[1]);
     if (!type) return null;
     args.push({ name: match[2], type, decl: match[1].replace(/\bconst\b/g, "").replace(/[&\s]+/g, " ").trim() });
@@ -192,11 +210,11 @@ function nativeValue(fixture: ProvidedFixture, argument: NativeArgument, positio
   return fixture.kwargs?.[argument.name];
 }
 
-function cppSignature(code: string): NativeSignature | null {
+export function cppSignature(code: string): NativeSignature | null {
   const classAt = code.search(/\bclass\s+Solution\b/);
   if (classAt >= 0) {
     const body = code.slice(classAt).replace(/^\s*(?:public|private|protected)\s*:/gm, "");
-    const method = /([A-Za-z_][\w:<>,\s]*?(?:<[^>]*>)?)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:const\s*)?\{/.exec(body);
+    const method = /([A-Za-z_][\w:<>,*\s]*?(?:<[^>]*>)?)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:const\s*)?\{/.exec(body);
     if (!method || method[2] === "Solution") return null;
     const args = cppArguments(method[3]);
     const ret = cppType(method[1]);
@@ -231,7 +249,7 @@ export function rustSignature(code: string): NativeSignature | null {
   return { name: method[1], args, ret, retDecl: method[3].trim(), owner: implAt >= 0 ? "class" : "free", receiver };
 }
 
-function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean): string | null {
+function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, source: string): string | null {
   const blocks: string[] = [];
   for (const [index, fixture] of fixtures.entries()) {
     const declarations: string[] = [];
@@ -245,14 +263,19 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
     const args = signature.args.map((_, position) => `a${position}`).join(", ");
     const call = signature.owner === "class" ? `solution.${signature.name}(${args})` : `${signature.name}(${args})`;
     const sort = unordered && signature.ret.kind === "list" ? "    std::sort(actual.begin(), actual.end());\n" : "";
+    const serialized = signature.ret.kind === "node";
     blocks.push([
       "  {",
       ...declarations,
-      `    ${signature.retDecl} expected = ${expected};`,
       `    auto actual = ${call};`,
+      signature.ret.kind === "node" && signature.ret.tree
+        ? `    auto actualOut = ca_ser_tree(actual);\n    auto expectedOut = ca_ser_tree(${expected});`
+        : signature.ret.kind === "node"
+          ? `    auto actualOut = ca_ser_list(actual);\n    auto expectedOut = ca_ser_list(${expected});`
+          : `    ${signature.retDecl} expectedOut = ${expected};\n    auto actualOut = actual;`,
       sort.replace(/\n$/, ""),
-      `    bool ok = actual == expected;`,
-      `    std::ostringstream a, e; ca_put(a, actual); ca_put(e, expected);`,
+      `    bool ok = actualOut == expectedOut;`,
+      `    std::ostringstream a, e; ca_put(a, actualOut); ca_put(e, expectedOut);`,
       `    std::cout << "CA_CASE {\\"id\\":\\"${fixture.id}\\",\\"status\\":\\"" << (ok ? "passed" : "failed") << "\\",\\"expected\\":" << e.str() << ",\\"actual\\":" << a.str() << "}" << std::endl;`,
       "  }",
     ].filter(Boolean).join("\n"));
@@ -260,19 +283,35 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
   const instance = signature.owner === "class"
     ? `  std::vector<long long> unused;\n  (void)unused;`
     : "";
+  const nodeStructs = [
+    /(?:struct|class)\s+ListNode\b/.test(source) ? "" : "struct ListNode { long long val; ListNode* next; ListNode(long long v) : val(v), next(nullptr) {} };",
+    /(?:struct|class)\s+TreeNode\b/.test(source) ? "" : "struct TreeNode { long long val; TreeNode* left; TreeNode* right; TreeNode(long long v) : val(v), left(nullptr), right(nullptr) {} };",
+  ].filter(Boolean).join("\n");
+  const nodeFunctions = [
+    "static ListNode* ca_list(const std::vector<long long>& values) { ListNode* head = nullptr; ListNode** tail = &head; for (long long value : values) { *tail = new ListNode(value); tail = &(*tail)->next; } return head; }",
+    "static TreeNode* ca_tree(const std::vector<std::optional<long long>>& values) { if (values.empty() || !values[0]) return nullptr; std::vector<TreeNode*> nodes(values.size(), nullptr); nodes[0] = new TreeNode(*values[0]); for (size_t i = 0; i < values.size(); ++i) { if (!nodes[i]) continue; size_t l = 2*i+1, r = 2*i+2; if (l < values.size() && values[l]) { nodes[l] = new TreeNode(*values[l]); nodes[i]->left = nodes[l]; } if (r < values.size() && values[r]) { nodes[r] = new TreeNode(*values[r]); nodes[i]->right = nodes[r]; } } return nodes[0]; }",
+    "static std::vector<long long> ca_ser_list(ListNode* node) { std::vector<long long> out; while (node) { out.push_back(node->val); node = node->next; } return out; }",
+    "static std::vector<std::optional<long long>> ca_ser_tree(TreeNode* root) { std::vector<std::optional<long long>> out; if (!root) return out; std::vector<TreeNode*> queue{root}; for (size_t i = 0; i < queue.size(); ++i) { TreeNode* node = queue[i]; if (!node) { out.push_back(std::nullopt); continue; } out.push_back(node->val); queue.push_back(node->left); queue.push_back(node->right); } while (!out.empty() && !out.back()) out.pop_back(); return out; }",
+  ].filter(Boolean).join("\n");
   return [
     "#include <algorithm>",
     "#include <iostream>",
     "#include <sstream>",
     "#include <string>",
     "#include <vector>",
+    "#include <optional>",
+    "#include <queue>",
     "using namespace std;",
+    nodeStructs,
     "static void ca_put(ostringstream& o, bool v) { o << (v ? \"true\" : \"false\"); }",
     "static void ca_put(ostringstream& o, const string& v) { o << '\"'; for (char c : v) { if (c == '\"' || c == '\\\\') o << '\\\\'; o << c; } o << '\"'; }",
     "template <class T> static void ca_put(ostringstream& o, const T& v) { o << v; }",
     "template <class T> static void ca_put(ostringstream& o, const vector<T>& v) { o << '['; for (size_t i = 0; i < v.size(); ++i) { if (i) o << ','; ca_put(o, v[i]); } o << ']'; }",
+    "template <class T> static void ca_put(ostringstream& o, const optional<T>& v) { if (!v) o << \"null\"; else ca_put(o, *v); }",
     "",
     "<<<SOLUTION>>>",
+    "",
+    nodeFunctions,
     "",
     "int main() {",
     instance,
@@ -283,7 +322,7 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
   ].filter((line) => line !== "").join("\n");
 }
 
-function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, declareSolution: boolean): string | null {
+function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, declareSolution: boolean, source: string): string | null {
   const blocks: string[] = [];
   for (const fixture of fixtures) {
     const declarations: string[] = [];
@@ -299,21 +338,56 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
       ? (signature.receiver ? `solution.${signature.name}(${args})` : `Solution::${signature.name}(${args})`)
       : `${signature.name}(${args})`;
     const sort = unordered && signature.ret.kind === "list" ? "    actual.sort();\n" : "";
+    const nodeReturn = signature.ret.kind === "node";
+    const nodeSer = signature.ret.kind === "node" ? (signature.ret.tree ? "ca_ser_tree" : "ca_ser_list") : "";
     blocks.push([
       "  {",
       ...declarations,
       `    let expected = ${expected};`,
       `    let actual = ${call};`,
+      nodeReturn ? `    let actual_out = ${nodeSer}(actual);\n    let expected_out = ${nodeSer}(expected);` : "    let actual_out = actual;\n    let expected_out = expected;",
       sort.replace(/\n$/, ""),
-      "    let ok = actual == expected;",
-      `    println!("CA_CASE {{\\"id\\":\\"${fixture.id}\\",\\"status\\":\\"{}\\",\\"expected\\":{:?},\\"actual\\":{:?}}}", if ok { "passed" } else { "failed" }, expected, actual);`,
+      "    let ok = actual_out == expected_out;",
+      `    println!("CA_CASE {{\\"id\\":\\"${fixture.id}\\",\\"status\\":\\"{}\\",\\"expected\\":{:?},\\"actual\\":{:?}}}", if ok { "passed" } else { "failed" }, expected_out, actual_out);`,
       "  }",
     ].filter(Boolean).join("\n"));
   }
   return [
     signature.owner === "class" && declareSolution ? "struct Solution;" : "",
+    /\bstruct\s+ListNode\b/.test(source) ? "" : "struct ListNode { val: i64, next: Option<Box<ListNode>> }",
+    /\bstruct\s+TreeNode\b/.test(source) ? "" : "struct TreeNode { val: i64, left: Option<Box<TreeNode>>, right: Option<Box<TreeNode>> }",
     "<<<SOLUTION>>>",
     "",
+    "fn ca_list(values: &Vec<i64>) -> Option<Box<ListNode>> {",
+    "  let mut head: Option<Box<ListNode>> = None;",
+    "  for value in values.iter().rev() { head = Some(Box::new(ListNode { val: *value, next: head })); }",
+    "  head",
+    "}",
+    "fn ca_tree_at(values: &Vec<Option<i64>>, index: usize) -> Option<Box<TreeNode>> {",
+    "  if index >= values.len() { return None; }",
+    "  let val = values[index]?;",
+    "  Some(Box::new(TreeNode { val, left: ca_tree_at(values, 2 * index + 1), right: ca_tree_at(values, 2 * index + 2) }))",
+    "}",
+    "fn ca_tree(values: &Vec<Option<i64>>) -> Option<Box<TreeNode>> { ca_tree_at(values, 0) }",
+    "fn ca_ser_list(mut node: Option<Box<ListNode>>) -> Vec<i64> {",
+    "  let mut out = Vec::new();",
+    "  while let Some(current) = node { out.push(current.val); node = current.next; }",
+    "  out",
+    "}",
+    "fn ca_ser_tree(root: Option<Box<TreeNode>>) -> Vec<Option<i64>> {",
+    "  let mut out = Vec::new();",
+    "  let mut queue: Vec<Option<Box<TreeNode>>> = vec![root];",
+    "  let mut index = 0;",
+    "  while index < queue.len() {",
+    "    match queue[index].take() {",
+    "      Some(node) => { out.push(Some(node.val)); queue.push(node.left); queue.push(node.right); }",
+    "      None => out.push(None),",
+    "    }",
+    "    index += 1;",
+    "  }",
+    "  while matches!(out.last(), Some(None)) { out.pop(); }",
+    "  out",
+    "}",
     "fn main() {",
     signature.owner === "class" && signature.receiver ? "  let solution = Solution;" : "",
     ...blocks,
@@ -761,8 +835,8 @@ export function buildProvidedHarness(question: string, language: string, candida
     ? fixtures : null;
   if (signature && callableFixtures) {
     const driver = language === "cpp"
-      ? cppDriver(signature, callableFixtures, harnessOrderMode(question).unordered)
-      : rustDriver(signature, callableFixtures, harnessOrderMode(question).unordered, !/\bstruct\s+Solution\b/.test(code));
+      ? cppDriver(signature, callableFixtures, harnessOrderMode(question).unordered, code)
+      : rustDriver(signature, callableFixtures, harnessOrderMode(question).unordered, !/\bstruct\s+Solution\b/.test(code), code);
     if (driver) return {
       language, runnerLanguage: language as "cpp" | "rust", source: "provided",
       providedCaseCount: callableFixtures.length,
@@ -770,7 +844,9 @@ export function buildProvidedHarness(question: string, language: string, candida
       unordered: harnessOrderMode(question).unordered,
       harnessVersion: HARNESS_ENGINE_VERSION,
       contractHash: contractHash(question, callableFixtures),
-      templateId: nodeSpec ? bestTemplate(language, "callable-node")?.id ?? "python.callable-node" : bestTemplate(language, "callable-vector")?.id,
+      templateId: signature && (signature.ret.kind === "node" || signature.args.some((argument) => argument.type.kind === "node"))
+        ? bestTemplate(language, "callable-node")?.id
+        : bestTemplate(language, "callable-vector")?.id,
       signature: signatureText,
     };
   }
@@ -790,7 +866,7 @@ export function buildProvidedHarness(question: string, language: string, candida
     unordered: harnessOrderMode(question).unordered,
     harnessVersion: HARNESS_ENGINE_VERSION,
     contractHash: contractHash(question, fixtures),
-    templateId: nodeSpec ? "python.callable-node" : bestTemplate(language, callable ? "callable-vector" : "stdin")?.id,
+    templateId: nodeSpec ? "callable-node" : bestTemplate(language, callable ? "callable-vector" : "stdin")?.id,
   };
 }
 

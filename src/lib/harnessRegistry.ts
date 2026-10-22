@@ -64,14 +64,14 @@ export const HARNESS_REGISTRY: HarnessTemplate[] = [
     refuses: ["TreeNode", "ListNode", "pointers", "maps", "tuples"],
   },
   {
-    id: "python.callable-node",
+    id: "callable-node",
     family: "callable-node",
-    languages: ["python"],
+    languages: ALL,
     rank: 15,
     certified: true,
-    description: "Builds ListNode chains or level-order trees from arrays, calls the method and serializes the result.",
+    description: "Builds ListNode chains or level-order trees from arrays, calls the method and compares the serialized result.",
     materialises: ["ListNode", "TreeNode"],
-    refuses: ["node types in C++ and Rust", "graphs", "multiple node arguments of mixed shape"],
+    refuses: ["graphs", "mixed node/list arguments", "custom node fields"],
   },
   {
     id: "stdin.wrapper",
