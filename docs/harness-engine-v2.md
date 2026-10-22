@@ -96,7 +96,8 @@ Node types are covered in all three languages: `ListNode`/`TreeNode` are built f
 the statement arrays and returns are serialized back before comparison, with the
 struct injected when the starter omits it.
 
-Field names are read from the starter (val/value, next/nxt, left/right), node and vector
+Field names are read from the starter (val/value, next/nxt, left/right), void contracts are
+serialized from the mutated argument, node and vector
 arguments may be mixed, and anything outside the type set — other pointers, graphs,
 maps, pairs, tuples, generics — returns null and falls back to the AI reference harness. Do not
 auto-cast unknown types or claim coverage where the question supplies no reliable

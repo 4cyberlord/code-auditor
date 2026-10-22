@@ -294,3 +294,32 @@ const mixedSuite = buildProvidedHarness(
 assert.ok(mixedSuite, "mixed node/vector arguments should build");
 assert.equal(mixedSuite.templateId, "callable-node");
 console.log("PASS: mixed node and vector arguments build");
+
+// In-place contracts (no return value) serialize the mutated argument.
+const inPlaceQ = ["Pop Last", "Example 1:", "Input: head = [1,2,3]", "Output: [1,2]"].join("\n");
+const inPlacePy = "class ListNode:\n    def __init__(self, val=0, next=None):\n        self.val=val; self.next=next\nclass Solution:\n    def popLast(self, head) -> None:\n        if not head or not head.next: return\n        while head.next.next: head=head.next\n        head.next=None";
+const inPlacePyBad = inPlacePy.replace("        while head.next.next: head=head.next\n        head.next=None", "        return");
+const inPlaceCpp = "class Solution {\npublic:\n void popLast(ListNode* head) { while (head->next->next) head=head->next; head->next=nullptr; }\n};";
+const inPlaceRust = "impl Solution {\n pub fn pop_last(head: &mut Option<Box<ListNode>>) {\n  let mut cur=head; while let Some(n)=cur { if n.next.as_ref().map_or(true,|x| x.next.is_none()) { n.next=None; return; } cur=&mut n.next; }\n }\n}";
+
+for (const [language, code, bad] of [["python", inPlacePy, inPlacePyBad], ["cpp", inPlaceCpp, inPlaceCpp.replace("while (head->next->next) head=head->next; head->next=nullptr;", "return;")], ["rust", inPlaceRust, inPlaceRust.replace("let mut cur=head; while let Some(n)=cur { if n.next.as_ref().map_or(true,|x| x.next.is_none()) { n.next=None; return; } cur=&mut n.next; }", "")]] as const) {
+  const compiler = spawnSync(language === "cpp" ? "c++" : language === "rust" ? "rustc" : "python3", ["--version"]);
+  if (compiler.status !== 0) { console.log("SKIP in-place:", language); continue; }
+  const suite = buildProvidedHarness(inPlaceQ, language, code);
+  assert.ok(suite, language + " in-place suite");
+  for (const [variant, expected] of [[code, 1], [bad, 0]] as const) {
+    const ext = language === "cpp" ? "cpp" : language === "rust" ? "rs" : "py";
+    const file = `/tmp/inplace-${language}-${expected}.${ext}`;
+    writeFileSync(file, spliceSuite(suite, variant) ?? "");
+    let binary = file;
+    if (language !== "python") {
+      binary = file + ".bin";
+      const built = spawnSync(language === "cpp" ? "c++" : "rustc",
+        language === "cpp" ? ["-std=c++20", "-O1", file, "-o", binary] : ["-O", file, "-o", binary]);
+      assert.equal(built.status, 0, language + " in-place compile");
+    }
+    const run = spawnSync(language === "python" ? "python3" : binary, language === "python" ? [file] : []);
+    assert.equal((String(run.stdout).match(/status":\s*"passed/g) || []).length, expected, language + " in-place outcome");
+  }
+}
+console.log("PASS: in-place node contracts are verified");

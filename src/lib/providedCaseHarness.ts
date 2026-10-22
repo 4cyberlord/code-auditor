@@ -41,6 +41,7 @@ interface PythonNodeSpec {
   /** Parameter names in declaration order, so kwargs become positional. */
   order: string[];
   returnsNode: boolean;
+  inPlace: boolean;
   fields: NodeFields;
 }
 
@@ -69,6 +70,7 @@ export function pythonNodeSpec(question: string, code: string, name: string): Py
     params: specs,
     order: params.map((param) => param.split(":")[0].trim()),
     returnsNode: /ListNode|TreeNode/.test(definition[2] || ""),
+    inPlace: /^\s*(?:None|NoneType)\b/.test(definition[2] || ""),
     fields: nodeFields(code, tree, tree ? "TreeNode" : "ListNode"),
   };
 }
@@ -80,7 +82,7 @@ export function pythonNodeSpec(question: string, code: string, name: string): Py
 // existing reference-harness path takes over.
 
 type NativeType =
-  | { kind: "int" | "float" | "bool" | "string" }
+  | { kind: "int" | "float" | "bool" | "string" | "void" }
   | { kind: "list"; item: NativeType }
   | { kind: "node"; tree: boolean };
 
@@ -100,6 +102,7 @@ interface NativeSignature {
 }
 
 function cppTypeName(type: NativeType): string {
+  if (type.kind === "node") return type.tree ? "TreeNode*" : "ListNode*";
   if (type.kind === "list") return `std::vector<${cppTypeName(type.item)}>`;
   if (type.kind === "float") return "double";
   if (type.kind === "bool") return "bool";
@@ -111,6 +114,7 @@ function cppType(raw: string): NativeType | null {
   const text = raw.replace(/\bconst\b/g, "").replace(/[&\s]+$/g, "").trim();
   if (/^TreeNode\s*\*$/.test(text)) return { kind: "node", tree: true };
   if (/^ListNode\s*\*$/.test(text)) return { kind: "node", tree: false };
+  if (text === "void") return { kind: "void" };
   if (text === "bool") return { kind: "bool" };
   if (text === "double" || text === "float") return { kind: "float" };
   if (text === "string" || text === "std::string") return { kind: "string" };
@@ -123,9 +127,10 @@ function cppType(raw: string): NativeType | null {
 }
 
 function rustType(raw: string): NativeType | null {
-  const text = raw.trim().replace(/^&(?!(?:str|\[))/, "").trim();
+  const text = raw.trim().replace(/^&mut\s+/, "").replace(/^&(?!(?:str|\[))/, "").trim();
   if (/^(?:Option<)?Box<TreeNode>>$/.test(text)) return { kind: "node", tree: true };
   if (/^(?:Option<)?Box<ListNode>>$/.test(text)) return { kind: "node", tree: false };
+  if (text === "()" || text === "void") return { kind: "void" };
   if (text === "bool") return { kind: "bool" };
   if (text === "f32" || text === "f64") return { kind: "float" };
   if (text === "String" || text === "&str" || text === "str") return { kind: "string" };
@@ -235,7 +240,7 @@ export function cppSignature(code: string): NativeSignature | null {
 export function rustSignature(code: string): NativeSignature | null {
   const implAt = code.search(/\bimpl\s+Solution\s*\{/);
   const source = implAt >= 0 ? code.slice(implAt) : code;
-  const method = /\bpub\s+fn\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*->\s*([^{]+)\{/.exec(source);
+  const method = /\bpub\s+fn\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:->\s*([^{]+))?\{/.exec(source);
   if (!method || method[1] === "main") return null;
   const params = splitParams(method[2]);
   const receiver = params.some((part) => /^&?\s*(?:mut\s+)?self\b/.test(part));
@@ -247,14 +252,18 @@ export function rustSignature(code: string): NativeSignature | null {
     if (!type || !rawName.trim()) return null;
     args.push({ name: rawName.trim().replace(/^mut\s+/, ""), type, decl: rest.join(":").trim() });
   }
-  const ret = rustType(method[3]);
+  const ret = method[3] ? rustType(method[3]) : { kind: "void" } as NativeType;
   if (!ret) return null;
-  return { name: method[1], args, ret, retDecl: method[3].trim(), owner: implAt >= 0 ? "class" : "free", receiver };
+  return { name: method[1], args, ret, retDecl: (method[3] || "()").trim(), owner: implAt >= 0 ? "class" : "free", receiver };
 }
 
 function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, source: string, fields: { list: NodeFields; tree: NodeFields }): string | null {
   const lf = fields.list;
   const tf = fields.tree;
+  const inPlace = signature.ret.kind === "void";
+  const firstNode = signature.args.find((argument) => argument.type.kind === "node");
+  const outType = inPlace ? firstNode?.type : signature.ret;
+  if (!outType || outType.kind !== "node" && inPlace) return null;
   const blocks: string[] = [];
   for (const [index, fixture] of fixtures.entries()) {
     const declarations: string[] = [];
@@ -263,21 +272,22 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
       if (literal === null) return null;
       declarations.push(`    ${argument.decl} a${position} = ${literal};`);
     }
-    const expected = cppDeclLiteral(signature.retDecl, fixture.expected);
+    const expected = cppDeclLiteral(outType.kind === "node" ? cppTypeName(outType) : signature.retDecl, fixture.expected);
     if (expected === null) return null;
     const args = signature.args.map((_, position) => `a${position}`).join(", ");
     const call = signature.owner === "class" ? `solution.${signature.name}(${args})` : `${signature.name}(${args})`;
     const sort = unordered && signature.ret.kind === "list" ? "    std::sort(actual.begin(), actual.end());\n" : "";
     const serialized = signature.ret.kind === "node";
+    const serial = outType.kind === "node" && outType.tree ? "tree" : "list";
+    const outcome = inPlace
+      ? [`    ${call};`, `    auto actualOut = ca_ser_${serial}(a0);`, `    auto expectedOut = ca_ser_${serial}(${expected});`]
+      : serialized
+        ? [`    auto actual = ${call};`, `    auto actualOut = ca_ser_${serial}(actual);`, `    auto expectedOut = ca_ser_${serial}(${expected});`]
+        : [`    ${signature.retDecl} expectedOut = ${expected};`, `    auto actual = ${call};`, "    auto actualOut = actual;"];
     blocks.push([
       "  {",
       ...declarations,
-      `    auto actual = ${call};`,
-      signature.ret.kind === "node" && signature.ret.tree
-        ? `    auto actualOut = ca_ser_tree(actual);\n    auto expectedOut = ca_ser_tree(${expected});`
-        : signature.ret.kind === "node"
-          ? `    auto actualOut = ca_ser_list(actual);\n    auto expectedOut = ca_ser_list(${expected});`
-          : `    ${signature.retDecl} expectedOut = ${expected};\n    auto actualOut = actual;`,
+      ...outcome,
       sort.replace(/\n$/, ""),
       `    bool ok = actualOut == expectedOut;`,
       `    std::ostringstream a, e; ca_put(a, actualOut); ca_put(e, expectedOut);`,
@@ -330,29 +340,38 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
 function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, declareSolution: boolean, source: string, fields: { list: NodeFields; tree: NodeFields }): string | null {
   const lf = fields.list;
   const tf = fields.tree;
+  const inPlaceOwn = signature.ret.kind === "void";
+  const firstNodeOwn = signature.args.find((argument) => argument.type.kind === "node");
+  const outTypeOwn = inPlaceOwn ? firstNodeOwn?.type : signature.ret;
+  if (inPlaceOwn && (!outTypeOwn || outTypeOwn.kind !== "node")) return null;
   const blocks: string[] = [];
   for (const fixture of fixtures) {
     const declarations: string[] = [];
     for (const [position, argument] of signature.args.entries()) {
       const literal = nativeLiteral(argument.type, nativeValue(fixture, argument, position), "rust");
       if (literal === null) return null;
-      declarations.push(`    let a${position} = ${literal};`);
+      declarations.push(`    let ${argument.decl.startsWith("&mut") ? "mut " : ""}a${position} = ${literal};`);
     }
-    const expected = nativeLiteral(signature.ret, fixture.expected, "rust");
+    const expected = nativeLiteral(inPlaceOwn ? outTypeOwn! : signature.ret, fixture.expected, "rust");
     if (expected === null) return null;
-    const args = signature.args.map((argument, position) => argument.decl.startsWith("&") ? `&a${position}` : `a${position}`).join(", ");
+    const args = signature.args.map((argument, position) =>
+      argument.decl.startsWith("&mut") ? `&mut a${position}`
+        : argument.decl.startsWith("&") ? `&a${position}` : `a${position}`).join(", ");
     const call = signature.owner === "class"
       ? (signature.receiver ? `solution.${signature.name}(${args})` : `Solution::${signature.name}(${args})`)
       : `${signature.name}(${args})`;
     const sort = unordered && signature.ret.kind === "list" ? "    actual.sort();\n" : "";
     const nodeReturn = signature.ret.kind === "node";
-    const nodeSer = signature.ret.kind === "node" ? (signature.ret.tree ? "ca_ser_tree" : "ca_ser_list") : "";
+    const serial = outTypeOwn?.kind === "node" && outTypeOwn.tree ? "tree" : "list";
+    const outcome = inPlaceOwn
+      ? [`    ${call};`, `    let actual_out = ca_ser_${serial}(std::mem::take(&mut a0));`, `    let expected_out = ca_ser_${serial}(${expected});`]
+      : nodeReturn
+        ? [`    let actual = ${call};`, `    let actual_out = ca_ser_${serial}(actual);`, `    let expected_out = ca_ser_${serial}(${expected});`]
+        : [`    let expected_out = ${expected};`, `    let actual = ${call};`, "    let actual_out = actual;"];
     blocks.push([
       "  {",
       ...declarations,
-      `    let expected = ${expected};`,
-      `    let actual = ${call};`,
-      nodeReturn ? `    let actual_out = ${nodeSer}(actual);\n    let expected_out = ${nodeSer}(expected);` : "    let actual_out = actual;\n    let expected_out = expected;",
+      ...outcome,
       sort.replace(/\n$/, ""),
       "    let ok = actual_out == expected_out;",
       `    println!("CA_CASE {{\\"id\\":\\"${fixture.id}\\",\\"status\\":\\"{}\\",\\"expected\\":{:?},\\"actual\\":{:?}}}", if ok { "passed" } else { "failed" }, expected_out, actual_out);`,
@@ -726,6 +745,8 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "            for spec in (CA_NODE or {}).get('params', []):",
     "                args[spec['index']] = ca_build(args[spec['index']], spec['tree'])",
     "            result = method(*args) if CA_NODE else method(*args, **copy.deepcopy(case['kwargs']))",
+    "            if CA_NODE and CA_NODE.get('inPlace'):",
+    "                result = ca_ser(args[0], bool((CA_NODE.get('params') or [{}])[0].get('tree')))",
     "            if CA_NODE and (CA_NODE.get('returnsNode') or hasattr(result, CA_NODE_VALUE)):",
     "                result = ca_ser(result, bool((CA_NODE.get('params') or [{}])[0].get('tree')))",
     "            results.append(ca_test(case, result))",

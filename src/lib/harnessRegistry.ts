@@ -69,7 +69,7 @@ export const HARNESS_REGISTRY: HarnessTemplate[] = [
     languages: ALL,
     rank: 15,
     certified: true,
-    description: "Builds ListNode chains or level-order trees from arrays, calls the method and compares the serialized result.",
+    description: "Builds nodes from arrays, handles returned or in-place results and compares the serialization.",
     materialises: ["ListNode", "TreeNode"],
     refuses: ["graphs", "node classes other than ListNode/TreeNode"],
   },
