@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import {
   buildProvidedHarness, buildGeneratedPythonHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases,
 } from "../src/lib/providedCaseHarness.ts";
@@ -180,3 +181,36 @@ const registered = buildProvidedHarness(twoSum, "python", correct);
 assert.equal(registered?.harnessVersion, "v2.1");
 assert.equal(registered?.contractHash, contractHash(twoSum, fixtureSet));
 console.log("PASS: harness registry identity is stable and contract-scoped");
+
+// ------------------------------------------------- native judge adapters
+
+const nativeQuestion = ["Two Sum", "Example 1:",
+  "Input: nums = [2,7,11,15], target = 9", "Output: [0,1]"].join("\n");
+const cppSolution = "class Solution {\npublic:\n    vector<int> twoSum(vector<int>& nums, int target) {\n        return {0, 1};\n    }\n};";
+const rustSolution = "impl Solution {\n    pub fn two_sum(nums: Vec<i64>, target: i64) -> Vec<i64> { vec![0, 1] }\n}";
+
+for (const [language, source] of [["cpp", cppSolution], ["rust", rustSolution]] as const) {
+  const suite = buildProvidedHarness(nativeQuestion, language, source);
+  assert.ok(suite, language + " judge API should build a native suite");
+  assert.equal(suite.runnerLanguage, language);
+  assert.equal(suite.candidateAsString, false);
+  assert.equal(suite.contractHash, contractHash(nativeQuestion, extractProvidedFixtures(nativeQuestion)));
+  const program = spliceSuite(suite, source) ?? "";
+  assert.ok(program.includes("twoSum") || program.includes("two_sum"));
+  assert.ok(!program.includes('"class Solution'), "native candidates splice unwrapped");
+  const compiler = spawnSync(language === "cpp" ? "c++" : "rustc", ["--version"]);
+  if (compiler.status !== 0) { console.log("SKIP native compile:", language); continue; }
+  const file = `/tmp/fixture-${language}.${language === "cpp" ? "cpp" : "rs"}`;
+  writeFileSync(file, program);
+  const binary = `/tmp/fixture-${language}.bin`;
+  const build = spawnSync(language === "cpp" ? "c++" : "rustc",
+    language === "cpp" ? ["-std=c++20", "-O1", file, "-o", binary] : ["-O", file, "-o", binary]);
+  assert.equal(build.status, 0, language + " compile failed: " + String(build.stderr));
+  const run = spawnSync(binary);
+  assert.equal(run.status, 0);
+  assert.equal((String(run.stdout).match(/status":"passed"/g) || []).length, 1);
+}
+
+// Unsupported signatures fall back instead of emitting a broken driver.
+assert.equal(buildProvidedHarness(nativeQuestion, "cpp",
+  "class Solution { public: TreeNode* f(TreeNode* n) { return n; } };"), null);

@@ -20,7 +20,7 @@ export type ProvidedFixture = {
 
 export type ProvidedSuite = {
   language: string;
-  runnerLanguage: "python";
+  runnerLanguage: "python" | "cpp" | "rust";
   source: "provided" | "generated";
   providedCaseCount: number;
   /** Retained so each candidate can get an adapter for its own callable API. */
@@ -32,6 +32,258 @@ export type ProvidedSuite = {
   candidateAsString?: boolean;
   unordered?: boolean;
 };
+
+
+// ------------------------------------------------- native function adapters
+//
+// Judge-style APIs (a Solution class or a free function) need a typed call, not
+// stdin. These adapters cover the types below; anything else returns null so the
+// existing reference-harness path takes over.
+
+type NativeType =
+  | { kind: "int" | "float" | "bool" | "string" }
+  | { kind: "list"; item: NativeType };
+
+interface NativeArgument {
+  name: string;
+  type: NativeType;
+  decl: string;
+}
+
+interface NativeSignature {
+  name: string;
+  args: NativeArgument[];
+  ret: NativeType;
+  retDecl: string;
+  owner: "class" | "free";
+  receiver: boolean;
+}
+
+function cppTypeName(type: NativeType): string {
+  if (type.kind === "list") return `std::vector<${cppTypeName(type.item)}>`;
+  if (type.kind === "float") return "double";
+  if (type.kind === "bool") return "bool";
+  if (type.kind === "string") return "std::string";
+  return "long long";
+}
+
+function cppType(raw: string): NativeType | null {
+  const text = raw.replace(/\bconst\b/g, "").replace(/[&\s]+$/g, "").trim();
+  if (text === "bool") return { kind: "bool" };
+  if (text === "double" || text === "float") return { kind: "float" };
+  if (text === "string" || text === "std::string") return { kind: "string" };
+  const list = /^(?:std::)?vector<(.+)>$/.exec(text);
+  if (list) {
+    const item = cppType(list[1]);
+    return item ? { kind: "list", item } : null;
+  }
+  return /^(?:unsigned\s+)?(?:int|long|short|size_t|long long)$/.test(text) ? { kind: "int" } : null;
+}
+
+function rustType(raw: string): NativeType | null {
+  const text = raw.trim().replace(/^&(?!(?:str|\[))/, "").trim();
+  if (text === "bool") return { kind: "bool" };
+  if (text === "f32" || text === "f64") return { kind: "float" };
+  if (text === "String" || text === "&str" || text === "str") return { kind: "string" };
+  const list = /^Vec<(.+)>$/.exec(text);
+  if (list) {
+    const item = rustType(list[1]);
+    return item ? { kind: "list", item } : null;
+  }
+  if (/^(?:i|u)(?:8|16|32|64|size)$/.test(text)) return { kind: "int" };
+  return null;
+}
+
+function nativeLiteral(type: NativeType, value: unknown, language: "cpp" | "rust"): string | null {
+  if (type.kind === "list") {
+    if (!Array.isArray(value)) return null;
+    const items = value.map((item) => nativeLiteral(type.item, item, language));
+    if (items.some((item) => item === null)) return null;
+    return language === "cpp"
+      ? `std::vector<${cppTypeName(type.item)}>{${items.join(", ")}}`
+      : `vec![${items.join(", ")}]`;
+  }
+  if (type.kind === "bool") return typeof value === "boolean" ? String(value) : null;
+  if (type.kind === "float") return typeof value === "number" ? `${value}` : null;
+  if (type.kind === "int") return Number.isInteger(value) ? String(value) : null;
+  if (typeof value !== "string") return null;
+  return language === "cpp" ? JSON.stringify(value) : `String::from(${JSON.stringify(value)})`;
+}
+
+function cppDeclLiteral(decl: string, value: unknown): string | null {
+  const list = /^(?:std::)?vector<(.+)>$/.exec(decl.trim());
+  if (list) {
+    if (!Array.isArray(value)) return null;
+    const inner = list[1].trim();
+    const items = value.map((item) => cppDeclLiteral(inner, item));
+    if (items.some((item) => item === null)) return null;
+    return `${decl.trim()}{${items.join(", ")}}`;
+  }
+  return nativeLiteral(cppType(decl) || { kind: "int" }, value, "cpp");
+}
+
+function splitParams(raw: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let index = 0; index < raw.length; index += 1) {
+    const character = raw[index];
+    if (character === "<" || character === "(") depth += 1;
+    if (character === ">" || character === ")") depth -= 1;
+    if (character === "," && depth === 0) {
+      parts.push(raw.slice(start, index));
+      start = index + 1;
+    }
+  }
+  parts.push(raw.slice(start));
+  return parts.map((part) => part.trim()).filter(Boolean);
+}
+
+export function cppArguments(raw: string): NativeArgument[] | null {
+  const args: NativeArgument[] = [];
+  for (const param of splitParams(raw)) {
+    const match = /^(.*?)[\s*&]+([A-Za-z_]\w*)\s*$/.exec(param.trim());
+    if (!match) return null;
+    const type = cppType(match[1]);
+    if (!type) return null;
+    args.push({ name: match[2], type, decl: match[1].replace(/\bconst\b/g, "").replace(/[&\s]+/g, " ").trim() });
+  }
+  return args;
+}
+
+function nativeValue(fixture: ProvidedFixture, argument: NativeArgument, position: number): unknown {
+  if (Array.isArray(fixture.args) && position < fixture.args.length) return fixture.args[position];
+  return fixture.kwargs?.[argument.name];
+}
+
+function cppSignature(code: string): NativeSignature | null {
+  const classAt = code.search(/\bclass\s+Solution\b/);
+  if (classAt >= 0) {
+    const body = code.slice(classAt).replace(/^\s*(?:public|private|protected)\s*:/gm, "");
+    const method = /([A-Za-z_][\w:<>,\s]*?(?:<[^>]*>)?)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:const\s*)?\{/.exec(body);
+    if (!method || method[2] === "Solution") return null;
+    const args = cppArguments(method[3]);
+    const ret = cppType(method[1]);
+    if (!ret || !args) return null;
+    return { name: method[2], args, ret, retDecl: method[1].trim(), owner: "class", receiver: true };
+  }
+  const free = /^\s*(?:static\s+)?([A-Za-z_][\w:<>,\s]*?)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*\{/m.exec(code);
+  if (!free || free[2] === "main") return null;
+  const args = cppArguments(free[3]);
+  const ret = cppType(free[1]);
+  if (!ret || !args) return null;
+  return { name: free[2], args, ret, retDecl: free[1].trim(), owner: "free", receiver: false };
+}
+
+export function rustSignature(code: string): NativeSignature | null {
+  const implAt = code.search(/\bimpl\s+Solution\s*\{/);
+  const source = implAt >= 0 ? code.slice(implAt) : code;
+  const method = /\bpub\s+fn\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*->\s*([^{]+)\{/.exec(source);
+  if (!method || method[1] === "main") return null;
+  const params = splitParams(method[2]);
+  const receiver = params.some((part) => /^&?\s*(?:mut\s+)?self\b/.test(part));
+  const valueParams = params.filter((part) => !/^&?\s*(?:mut\s+)?self\b/.test(part));
+  const args: NativeArgument[] = [];
+  for (const param of valueParams) {
+    const [rawName, ...rest] = param.split(":");
+    const type = rustType(rest.join(":"));
+    if (!type || !rawName.trim()) return null;
+    args.push({ name: rawName.trim().replace(/^mut\s+/, ""), type, decl: rest.join(":").trim() });
+  }
+  const ret = rustType(method[3]);
+  if (!ret) return null;
+  return { name: method[1], args, ret, retDecl: method[3].trim(), owner: implAt >= 0 ? "class" : "free", receiver };
+}
+
+function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean): string | null {
+  const blocks: string[] = [];
+  for (const [index, fixture] of fixtures.entries()) {
+    const declarations: string[] = [];
+    for (const [position, argument] of signature.args.entries()) {
+      const literal = cppDeclLiteral(argument.decl, nativeValue(fixture, argument, position));
+      if (literal === null) return null;
+      declarations.push(`    ${argument.decl} a${position} = ${literal};`);
+    }
+    const expected = cppDeclLiteral(signature.retDecl, fixture.expected);
+    if (expected === null) return null;
+    const args = signature.args.map((_, position) => `a${position}`).join(", ");
+    const call = signature.owner === "class" ? `solution.${signature.name}(${args})` : `${signature.name}(${args})`;
+    const sort = unordered && signature.ret.kind === "list" ? "    std::sort(actual.begin(), actual.end());\n" : "";
+    blocks.push([
+      "  {",
+      ...declarations,
+      `    ${signature.retDecl} expected = ${expected};`,
+      `    auto actual = ${call};`,
+      sort.replace(/\n$/, ""),
+      `    bool ok = actual == expected;`,
+      `    std::ostringstream a, e; ca_put(a, actual); ca_put(e, expected);`,
+      `    std::cout << "CA_CASE {\\"id\\":\\"${fixture.id}\\",\\"status\\":\\"" << (ok ? "passed" : "failed") << "\\",\\"expected\\":" << e.str() << ",\\"actual\\":" << a.str() << "}" << std::endl;`,
+      "  }",
+    ].filter(Boolean).join("\n"));
+  }
+  const instance = signature.owner === "class"
+    ? `  std::vector<long long> unused;\n  (void)unused;`
+    : "";
+  return [
+    "#include <algorithm>",
+    "#include <iostream>",
+    "#include <sstream>",
+    "#include <string>",
+    "#include <vector>",
+    "using namespace std;",
+    "static void ca_put(ostringstream& o, bool v) { o << (v ? \"true\" : \"false\"); }",
+    "static void ca_put(ostringstream& o, const string& v) { o << '\"'; for (char c : v) { if (c == '\"' || c == '\\\\') o << '\\\\'; o << c; } o << '\"'; }",
+    "template <class T> static void ca_put(ostringstream& o, const T& v) { o << v; }",
+    "template <class T> static void ca_put(ostringstream& o, const vector<T>& v) { o << '['; for (size_t i = 0; i < v.size(); ++i) { if (i) o << ','; ca_put(o, v[i]); } o << ']'; }",
+    "",
+    "<<<SOLUTION>>>",
+    "",
+    "int main() {",
+    instance,
+    "  Solution solution;".replace("Solution solution;", signature.owner === "class" ? "  Solution solution;" : ""),
+    ...blocks,
+    "  return 0;",
+    "}",
+  ].filter((line) => line !== "").join("\n");
+}
+
+function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, declareSolution: boolean): string | null {
+  const blocks: string[] = [];
+  for (const fixture of fixtures) {
+    const declarations: string[] = [];
+    for (const [position, argument] of signature.args.entries()) {
+      const literal = nativeLiteral(argument.type, nativeValue(fixture, argument, position), "rust");
+      if (literal === null) return null;
+      declarations.push(`    let a${position} = ${literal};`);
+    }
+    const expected = nativeLiteral(signature.ret, fixture.expected, "rust");
+    if (expected === null) return null;
+    const args = signature.args.map((argument, position) => argument.decl.startsWith("&") ? `&a${position}` : `a${position}`).join(", ");
+    const call = signature.owner === "class"
+      ? (signature.receiver ? `solution.${signature.name}(${args})` : `Solution::${signature.name}(${args})`)
+      : `${signature.name}(${args})`;
+    const sort = unordered && signature.ret.kind === "list" ? "    actual.sort();\n" : "";
+    blocks.push([
+      "  {",
+      ...declarations,
+      `    let expected = ${expected};`,
+      `    let actual = ${call};`,
+      sort.replace(/\n$/, ""),
+      "    let ok = actual == expected;",
+      `    println!("CA_CASE {{\\"id\\":\\"${fixture.id}\\",\\"status\\":\\"{}\\",\\"expected\\":{:?},\\"actual\\":{:?}}}", if ok { "passed" } else { "failed" }, expected, actual);`,
+      "  }",
+    ].filter(Boolean).join("\n"));
+  }
+  return [
+    signature.owner === "class" && declareSolution ? "struct Solution;" : "",
+    "<<<SOLUTION>>>",
+    "",
+    "fn main() {",
+    signature.owner === "class" && signature.receiver ? "  let solution = Solution;" : "",
+    ...blocks,
+    "}",
+  ].filter((line) => line !== "").join("\n");
+}
 
 /** Bump whenever a template or comparison rule changes. */
 export const HARNESS_ENGINE_VERSION = "v2.1";
@@ -408,6 +660,24 @@ export function buildProvidedHarness(question: string, language: string, candida
   if (!fixtures.length) return null;
   const code = String(candidateCode || "");
   const name = language === "python" ? callableName(code) : null;
+  const signature = language === "cpp" ? cppSignature(code) : language === "rust" ? rustSignature(code) : null;
+  const callableFixtures = signature && fixtures.every((fixture) =>
+    Object.hasOwn(fixture, "expected") &&
+    signature.args.every((argument, position) => nativeValue(fixture, argument, position) !== undefined))
+    ? fixtures : null;
+  if (signature && callableFixtures) {
+    const driver = language === "cpp"
+      ? cppDriver(signature, callableFixtures, harnessOrderMode(question).unordered)
+      : rustDriver(signature, callableFixtures, harnessOrderMode(question).unordered, !/\bstruct\s+Solution\b/.test(code));
+    if (driver) return {
+      language, runnerLanguage: language as "cpp" | "rust", source: "provided",
+      providedCaseCount: callableFixtures.length,
+      question, harness: driver, candidateAsString: false,
+      unordered: harnessOrderMode(question).unordered,
+      harnessVersion: HARNESS_ENGINE_VERSION,
+      contractHash: contractHash(question, callableFixtures),
+    };
+  }
   const callable = Boolean(name && fixtures.every(f => f.args && f.kwargs && Object.hasOwn(f, "expected")));
   // Executable stdin contracts only: never pass function-call examples to a stdin runner.
   const stdinContract = /\b(?:standard input|stdin|input format|reads? from input|prints? to output)\b/i.test(question);

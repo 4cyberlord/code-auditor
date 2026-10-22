@@ -187,7 +187,7 @@ export interface TestSuite {
   /** Original statement lets each candidate receive its own deterministic adapter. */
   question?: string;
   /** The deterministic fixture adapter runs in Python for all three languages. */
-  runnerLanguage?: "python";
+  runnerLanguage?: "python" | "cpp" | "rust";
   /** The deterministic Python runner embeds candidate source as a JSON string. */
   candidateAsString?: boolean;
 }
@@ -348,10 +348,11 @@ export function spliceSuiteWithSourceMap(
   const prefix = suite.harness.slice(0, markerAt);
   const startLine = (prefix.match(/\n/g)?.length ?? 0) + 1;
   const endLine = startLine + Math.max(0, candidate.split(/\r?\n/).length - 1);
+  const asString = suite.candidateAsString ?? suite.source === "provided";
   return {
-    program: prefix + (suite.source === "provided" || suite.candidateAsString ? JSON.stringify(candidate) : candidate) +
+    program: prefix + (asString ? JSON.stringify(candidate) : candidate) +
       suite.harness.slice(markerAt + SPLICE_MARKER.length),
-    sourceMap: { startLine, endLine: suite.source === "provided" || suite.candidateAsString ? startLine : endLine },
+    sourceMap: { startLine, endLine: asString ? startLine : endLine },
   };
 }
 

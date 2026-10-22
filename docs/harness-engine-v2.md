@@ -84,7 +84,15 @@ must fail closed rather than invent an answer.
 
 ## Limits / future improvements
 
-Non-stdin Rust/C++ judge function APIs require exact typed adapters, not inferred
-templates. They should be added as strongly typed per-signature libraries with
-their own compilers and tests. Do not auto-cast unknown types or claim coverage
-where the question does not supply a reliable output oracle.
+Rust and C++ judge APIs are now handled by typed native adapters: a `Solution`
+method (with or without a `&self`/`const` receiver) or a free function, using
+`int`/`float`/`bool`/`string` and nested `vector`/`Vec` of those. Argument values
+come from the labelled case by parameter name, the expected value is typed from
+the declared return type, and unordered contracts sort before comparing. The
+driver is spliced with the candidate as raw source and compiled by the same E2B
+command as any other C++/Rust program.
+
+Anything outside that type set — pointers, `TreeNode`/`ListNode`, maps, pairs,
+tuples, generics — returns null and falls back to the AI reference harness. Do not
+auto-cast unknown types or claim coverage where the question supplies no reliable
+output oracle.
