@@ -31,6 +31,7 @@ export type ProvidedSuite = {
   referenceCode?: string;
   candidateAsString?: boolean;
   templateId?: string;
+  signature?: string;
   unordered?: boolean;
 };
 
@@ -663,7 +664,12 @@ export function buildProvidedHarness(question: string, language: string, candida
   if (!fixtures.length) return null;
   const code = String(candidateCode || "");
   const name = language === "python" ? callableName(code) : null;
-  const signature = language === "cpp" ? cppSignature(code) : language === "rust" ? rustSignature(code) : null;
+  const registryEnabled = (globalThis as { __COUNCIL_HARNESS_REGISTRY__?: boolean }).__COUNCIL_HARNESS_REGISTRY__ !== false;
+  const signature = registryEnabled && language === "cpp" ? cppSignature(code)
+    : registryEnabled && language === "rust" ? rustSignature(code) : null;
+  const signatureText = signature
+    ? `${signature.name}(${signature.args.map((argument) => argument.decl).join(", ")}) -> ${signature.retDecl}`
+    : undefined;
   const callableFixtures = signature && fixtures.every((fixture) =>
     Object.hasOwn(fixture, "expected") &&
     signature.args.every((argument, position) => nativeValue(fixture, argument, position) !== undefined))
@@ -680,6 +686,7 @@ export function buildProvidedHarness(question: string, language: string, candida
       harnessVersion: HARNESS_ENGINE_VERSION,
       contractHash: contractHash(question, callableFixtures),
       templateId: bestTemplate(language, "callable-vector")?.id,
+      signature: signatureText,
     };
   }
   const callable = Boolean(name && fixtures.every(f => f.args && f.kwargs && Object.hasOwn(f, "expected")));

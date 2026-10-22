@@ -396,6 +396,7 @@ export interface CandidateRun {
   evidenceSource?: "provided" | "generated";
   harnessVersion?: string;
   templateId?: string;
+  signature?: string;
   contractHash?: string;
   providedCaseCount?: number;
   timedOut?: boolean;

@@ -214,3 +214,11 @@ for (const [language, source] of [["cpp", cppSolution], ["rust", rustSolution]] 
 // Unsupported signatures fall back instead of emitting a broken driver.
 assert.equal(buildProvidedHarness(nativeQuestion, "cpp",
   "class Solution { public: TreeNode* f(TreeNode* n) { return n; } };"), null);
+
+// Feature flag: the certified registry can be switched off to fall back to the
+// reference harness without touching the builders.
+(globalThis as { __COUNCIL_HARNESS_REGISTRY__?: boolean }).__COUNCIL_HARNESS_REGISTRY__ = false;
+assert.equal(buildProvidedHarness(nativeQuestion, "cpp", cppSolution), null);
+(globalThis as { __COUNCIL_HARNESS_REGISTRY__?: boolean }).__COUNCIL_HARNESS_REGISTRY__ = true;
+assert.ok(buildProvidedHarness(nativeQuestion, "cpp", cppSolution));
+console.log("PASS: registry flag falls back cleanly");

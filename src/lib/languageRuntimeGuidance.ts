@@ -15,7 +15,7 @@ const PACKS: Record<string, readonly string[]> = {
     "Treat SyntaxError, NameError, TypeError, and IndentationError as harness diagnostics, not candidate failures.",
   ],
   cpp: [
-    "Use one self-contained C++20 translation unit with every required include and exactly one int main().",
+    "Use one self-contained C++ translation unit (C++20 by default, C++23 when the runtime profile allows) with every required include and exactly one int main().",
     "Compile before execution; distinguish compiler/linker diagnostics from a failed assertion.",
   ],
   rust: [

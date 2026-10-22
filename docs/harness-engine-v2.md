@@ -9,7 +9,7 @@
   Python test driver, executed inside existing E2B isolation. This driver:
   - calls Python class Solution methods or standalone Python functions when the
     inputs are JSON-compatible and the candidate API is recognizable;
-  - compiles and runs Python, C++23 and Rust stdin/stdout programs when the
+  - compiles and runs Python, C++ and Rust stdin/stdout programs when the
     question explicitly specifies that interface and supplies labelled sample I/O;
   - enforces one real comparison per supplied case and emits machine-readable
     CA_CASE evidence, not self-reported PASS text.
