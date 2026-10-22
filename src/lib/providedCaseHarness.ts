@@ -26,10 +26,30 @@ export type ProvidedSuite = {
   /** Retained so each candidate can get an adapter for its own callable API. */
   question: string;
   harness: string;
+  harnessVersion?: string;
+  contractHash?: string;
   referenceCode?: string;
   candidateAsString?: boolean;
   unordered?: boolean;
 };
+
+/** Bump whenever a template or comparison rule changes. */
+export const HARNESS_ENGINE_VERSION = "v2.1";
+
+/** Stable identity for the contract a harness was built for. */
+export function contractHash(question: string, fixtures: ProvidedFixture[]): string {
+  // Browser-safe and stable: two FNV-1a lanes, not a cryptographic digest.
+  const material = [HARNESS_ENGINE_VERSION, String(question || ""),
+    ...fixtures.flatMap((fixture) => [String(fixture.input), String(fixture.output)])].join("\u0000");
+  let a = 0x811c9dc5;
+  let b = 0x9e3779b9;
+  for (const character of material) {
+    const code = character.codePointAt(0) ?? 0;
+    a = Math.imul(a ^ code, 16777619) >>> 0;
+    b = Math.imul(b ^ code, 2246822519) >>> 0;
+  }
+  return a.toString(16).padStart(8, "0") + b.toString(16).padStart(8, "0");
+}
 
 const MAX_CASES = 16;
 const MAX_SOURCE_CHARS = 6000;
@@ -359,6 +379,8 @@ export function buildGeneratedPythonHarness(
     providedCaseCount: cases.length, question, candidateAsString: true,
     harness: pythonDriver(cases, mode, "python", callableName(candidateCode) || (typeof spec.method === "string" ? spec.method : undefined), order.unordered),
     unordered: order.unordered,
+    harnessVersion: HARNESS_ENGINE_VERSION,
+    contractHash: contractHash(question, cases),
     referenceCode,
   };
 }
@@ -400,6 +422,8 @@ export function buildProvidedHarness(question: string, language: string, candida
     question,
     harness: pythonDriver(fixtures, callable ? "callable" : "stdin", language, name || undefined, harnessOrderMode(question).unordered),
     unordered: harnessOrderMode(question).unordered,
+    harnessVersion: HARNESS_ENGINE_VERSION,
+    contractHash: contractHash(question, fixtures),
   };
 }
 

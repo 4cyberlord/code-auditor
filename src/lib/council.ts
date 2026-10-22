@@ -179,6 +179,10 @@ export interface TestSuite {
   source?: "provided" | "generated";
   /** The contract permits any ordering of list outputs. */
   unordered?: boolean;
+  /** Deterministic engine version that produced this harness. */
+  harnessVersion?: string;
+  /** Stable digest of the question and its fixtures. */
+  contractHash?: string;
   providedCaseCount?: number;
   /** Original statement lets each candidate receive its own deterministic adapter. */
   question?: string;
@@ -389,6 +393,8 @@ export interface CandidateRun {
   codeDigest?: string | null;
   /** Shows sample evidence separately from broader independent test coverage. */
   evidenceSource?: "provided" | "generated";
+  harnessVersion?: string;
+  contractHash?: string;
   providedCaseCount?: number;
   timedOut?: boolean;
   truncated?: boolean;

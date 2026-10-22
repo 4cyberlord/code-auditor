@@ -4,6 +4,7 @@ import {
   buildProvidedHarness, buildGeneratedPythonHarness, extractProvidedFixtures, providedCaseEvidence, requiredHarnessCases,
 } from "../src/lib/providedCaseHarness.ts";
 import { spliceSuite, countCases } from "../src/lib/council.ts";
+import { contractHash } from "../src/lib/providedCaseHarness.ts";
 
 const twoSum = [
   "Two Sum",
@@ -170,3 +171,12 @@ for (const [language, source] of Object.entries(programs)) {
 }
 
 console.log("Harness Engine V2 supplied-case extraction, compilation and evidence verified");
+
+// The registry identity must be stable for one contract and change with it.
+const fixtureSet = extractProvidedFixtures(twoSum);
+assert.equal(contractHash(twoSum, fixtureSet), contractHash(twoSum, fixtureSet));
+assert.notEqual(contractHash(twoSum, fixtureSet), contractHash(twoSum + "\n", fixtureSet));
+const registered = buildProvidedHarness(twoSum, "python", correct);
+assert.equal(registered?.harnessVersion, "v2.1");
+assert.equal(registered?.contractHash, contractHash(twoSum, fixtureSet));
+console.log("PASS: harness registry identity is stable and contract-scoped");

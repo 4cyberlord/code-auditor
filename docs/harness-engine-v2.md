@@ -27,6 +27,34 @@
 - E2B, independent review, mutation signals, code-digest checks and the existing
   runner error categories remain enabled.
 
+## Registry identity
+
+Every suite carries `harnessVersion` (bumped with each template or comparison
+change) and `contractHash` (a stable digest of the question plus its exact
+fixtures). Both are copied into the candidate run record, so one execution can be
+reproduced and two runs can be told apart when a previously passing harness later
+fails. Reusing the same contract produces the same hash; changing the statement
+changes it.
+
+## Failure taxonomy
+
+A run records `failureKind` separately from its pass/fail result:
+
+- `candidate` — the code produced wrong output against a sound harness.
+- `harness` — the driver, its coverage or its compilation is at fault.
+- `infrastructure` — E2B, the compiler or the network failed.
+- `timeout` — the run exceeded its budget.
+- `unknown` — evidence is insufficient to attribute the failure.
+
+Only `candidate` is sent to the solver as a repair instruction. A harness failure
+is never recorded as a wrong solution; the harness author repairs instead.
+
+## Mutation check
+
+A deliberately broken variant of a passing candidate is spliced into the same
+harness. If the harness still passes it, the suite is reported as too weak
+(`oracle` evidence) instead of the result being trusted.
+
 ## Conservative fallback
 
 The deterministic fixture compiler intentionally refuses unsupported or ambiguous
