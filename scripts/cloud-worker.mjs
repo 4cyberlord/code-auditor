@@ -47,6 +47,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { gatewayPreset } from "../src/lib/models.ts";
+import { recipePrompt } from "../src/lib/apiRecipes.ts";
+import { apiLinks } from "./lib/apiIndex.mjs";
 import { SELECTABLE_PRIMARY_MODEL_IDS, isPrimaryModel, isSelectablePrimaryModel, listedPrimaryRoute, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "../src/lib/primaryModels.ts";
 import { coordinateAndVerify } from "../src/lib/visionCoordinator.ts";
 import {
@@ -1718,6 +1720,9 @@ async function prepareProblemHarnesses(job, settings, baseUrl, models, judges, q
           languages: [language],
           knowledge: [
             languageKnowledge,
+            recipePrompt(language),
+            apiLinks(language, `${question}
+${candidateDocket(candidates) || ""}`),
             lastError ? `THE PRIOR HARNESS WAS REJECTED: ${lastError.slice(0, 650)}. Repair only the harness.` : "",
           ].filter(Boolean).join("\n\n"),
         });
