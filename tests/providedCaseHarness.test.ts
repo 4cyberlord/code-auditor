@@ -269,6 +269,28 @@ for (const [language, good, bad] of [
       language === "cpp" ? ["-std=c++20", "-O1", file, "-o", binary] : ["-O", file, "-o", binary]);
     assert.equal(built.status, 0, language + " node compile");
     const run = spawnSync(binary);
-    assert.equal((String(run.stdout).match(/status":\s*"passed/g) || []).length, expectedPass, language + " node outcome");
+    const got = (String(run.stdout).match(/status":\s*"passed/g) || []).length;
+    assert.equal(got, expectedPass, language + " node outcome");
   }
 }
+
+// Custom node field names must be honoured, not assumed.
+const customQ = ["Reverse Linked List", "Example 1:", "Input: head = [1,2]", "Output: [2,1]"].join("\n");
+const customPy = "class ListNode:\n    def __init__(self, value=0, nxt=None):\n        self.value=value; self.nxt=nxt\nclass Solution:\n    def reverseList(self, head):\n        prev=None\n        while head:\n            nxt=head.nxt; head.nxt=prev; prev=head; head=nxt\n        return prev";
+const customSuite = buildProvidedHarness(customQ, "python", customPy);
+assert.ok(customSuite);
+assert.equal(customSuite.templateId, "callable-node");
+writeFileSync("/tmp/fixture-custom.py", spliceSuite(customSuite, customPy) ?? "");
+const customRun = spawnSync("python3", ["/tmp/fixture-custom.py"]);
+assert.equal(customRun.status, 0, String(customRun.stderr));
+assert.equal((String(customRun.stdout).match(/status":\s*"passed/g) || []).length, 1);
+console.log("PASS: custom node field names are honoured");
+
+// Mixed node + vector arguments are supported (append values to a list).
+const mixedSuite = buildProvidedHarness(
+  ["Append Values", "Example 1:", "Input: head = [1,2], values = [3]", "Output: [1,2,3]"].join("\n"),
+  "cpp",
+  "class Solution {\npublic:\n ListNode* append(ListNode* head, vector<int> values) { ListNode** t=&head; while(*t) t=&(*t)->next; for(int v:values){ *t=new ListNode(v); t=&(*t)->next; } return head; }\n};");
+assert.ok(mixedSuite, "mixed node/vector arguments should build");
+assert.equal(mixedSuite.templateId, "callable-node");
+console.log("PASS: mixed node and vector arguments build");

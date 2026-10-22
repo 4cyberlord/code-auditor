@@ -41,6 +41,7 @@ interface PythonNodeSpec {
   /** Parameter names in declaration order, so kwargs become positional. */
   order: string[];
   returnsNode: boolean;
+  fields: NodeFields;
 }
 
 /** Only when the candidate names the node type or the parameter is node-ish. */
@@ -63,11 +64,13 @@ export function pythonNodeSpec(question: string, code: string, name: string): Py
     }
   });
   if (!specs.length) return null;
+  const tree = specs.some((spec) => spec.tree);
   return {
     params: specs,
     order: params.map((param) => param.split(":")[0].trim()),
     returnsNode: /ListNode|TreeNode/.test(definition[2] || ""),
-  } as never;
+    fields: nodeFields(code, tree, tree ? "TreeNode" : "ListNode"),
+  };
 }
 
 // ------------------------------------------------- native function adapters
@@ -249,7 +252,9 @@ export function rustSignature(code: string): NativeSignature | null {
   return { name: method[1], args, ret, retDecl: method[3].trim(), owner: implAt >= 0 ? "class" : "free", receiver };
 }
 
-function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, source: string): string | null {
+function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, source: string, fields: { list: NodeFields; tree: NodeFields }): string | null {
+  const lf = fields.list;
+  const tf = fields.tree;
   const blocks: string[] = [];
   for (const [index, fixture] of fixtures.entries()) {
     const declarations: string[] = [];
@@ -288,10 +293,10 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
     /(?:struct|class)\s+TreeNode\b/.test(source) ? "" : "struct TreeNode { long long val; TreeNode* left; TreeNode* right; TreeNode(long long v) : val(v), left(nullptr), right(nullptr) {} };",
   ].filter(Boolean).join("\n");
   const nodeFunctions = [
-    "static ListNode* ca_list(const std::vector<long long>& values) { ListNode* head = nullptr; ListNode** tail = &head; for (long long value : values) { *tail = new ListNode(value); tail = &(*tail)->next; } return head; }",
-    "static TreeNode* ca_tree(const std::vector<std::optional<long long>>& values) { if (values.empty() || !values[0]) return nullptr; std::vector<TreeNode*> nodes(values.size(), nullptr); nodes[0] = new TreeNode(*values[0]); for (size_t i = 0; i < values.size(); ++i) { if (!nodes[i]) continue; size_t l = 2*i+1, r = 2*i+2; if (l < values.size() && values[l]) { nodes[l] = new TreeNode(*values[l]); nodes[i]->left = nodes[l]; } if (r < values.size() && values[r]) { nodes[r] = new TreeNode(*values[r]); nodes[i]->right = nodes[r]; } } return nodes[0]; }",
-    "static std::vector<long long> ca_ser_list(ListNode* node) { std::vector<long long> out; while (node) { out.push_back(node->val); node = node->next; } return out; }",
-    "static std::vector<std::optional<long long>> ca_ser_tree(TreeNode* root) { std::vector<std::optional<long long>> out; if (!root) return out; std::vector<TreeNode*> queue{root}; for (size_t i = 0; i < queue.size(); ++i) { TreeNode* node = queue[i]; if (!node) { out.push_back(std::nullopt); continue; } out.push_back(node->val); queue.push_back(node->left); queue.push_back(node->right); } while (!out.empty() && !out.back()) out.pop_back(); return out; }",
+    `static ListNode* ca_list(const std::vector<long long>& values) { ListNode* head = nullptr; ListNode** tail = &head; for (long long value : values) { *tail = new ListNode(value); tail = &(*tail)->${lf.next}; } return head; }`,
+    `static TreeNode* ca_tree(const std::vector<std::optional<long long>>& values) { if (values.empty() || !values[0]) return nullptr; std::vector<TreeNode*> nodes(values.size(), nullptr); nodes[0] = new TreeNode(*values[0]); for (size_t i = 0; i < values.size(); ++i) { if (!nodes[i]) continue; size_t l = 2*i+1, r = 2*i+2; if (l < values.size() && values[l]) { nodes[l] = new TreeNode(*values[l]); nodes[i]->${tf.left} = nodes[l]; } if (r < values.size() && values[r]) { nodes[r] = new TreeNode(*values[r]); nodes[i]->${tf.right} = nodes[r]; } } return nodes[0]; }`,
+    `static std::vector<long long> ca_ser_list(ListNode* node) { std::vector<long long> out; while (node) { out.push_back(node->${lf.value}); node = node->${lf.next}; } return out; }`,
+    `static std::vector<std::optional<long long>> ca_ser_tree(TreeNode* root) { std::vector<std::optional<long long>> out; if (!root) return out; std::vector<TreeNode*> queue{root}; for (size_t i = 0; i < queue.size(); ++i) { TreeNode* node = queue[i]; if (!node) { out.push_back(std::nullopt); continue; } out.push_back(node->${tf.value}); queue.push_back(node->${tf.left}); queue.push_back(node->${tf.right}); } while (!out.empty() && !out.back()) out.pop_back(); return out; }`,
   ].filter(Boolean).join("\n");
   return [
     "#include <algorithm>",
@@ -322,7 +327,9 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
   ].filter((line) => line !== "").join("\n");
 }
 
-function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, declareSolution: boolean, source: string): string | null {
+function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, declareSolution: boolean, source: string, fields: { list: NodeFields; tree: NodeFields }): string | null {
+  const lf = fields.list;
+  const tf = fields.tree;
   const blocks: string[] = [];
   for (const fixture of fixtures) {
     const declarations: string[] = [];
@@ -360,18 +367,18 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
     "",
     "fn ca_list(values: &Vec<i64>) -> Option<Box<ListNode>> {",
     "  let mut head: Option<Box<ListNode>> = None;",
-    "  for value in values.iter().rev() { head = Some(Box::new(ListNode { val: *value, next: head })); }",
+    `  for value in values.iter().rev() { head = Some(Box::new(ListNode { ${lf.value}: *value, ${lf.next}: head })); }`,
     "  head",
     "}",
     "fn ca_tree_at(values: &Vec<Option<i64>>, index: usize) -> Option<Box<TreeNode>> {",
     "  if index >= values.len() { return None; }",
     "  let val = values[index]?;",
-    "  Some(Box::new(TreeNode { val, left: ca_tree_at(values, 2 * index + 1), right: ca_tree_at(values, 2 * index + 2) }))",
+    `  Some(Box::new(TreeNode { ${tf.value}: val, ${tf.left}: ca_tree_at(values, 2 * index + 1), ${tf.right}: ca_tree_at(values, 2 * index + 2) }))`,
     "}",
     "fn ca_tree(values: &Vec<Option<i64>>) -> Option<Box<TreeNode>> { ca_tree_at(values, 0) }",
     "fn ca_ser_list(mut node: Option<Box<ListNode>>) -> Vec<i64> {",
     "  let mut out = Vec::new();",
-    "  while let Some(current) = node { out.push(current.val); node = current.next; }",
+    `  while let Some(current) = node { out.push(current.${lf.value}); node = current.${lf.next}; }`,
     "  out",
     "}",
     "fn ca_ser_tree(root: Option<Box<TreeNode>>) -> Vec<Option<i64>> {",
@@ -380,7 +387,7 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
     "  let mut index = 0;",
     "  while index < queue.len() {",
     "    match queue[index].take() {",
-    "      Some(node) => { out.push(Some(node.val)); queue.push(node.left); queue.push(node.right); }",
+    `      Some(node) => { out.push(Some(node.${tf.value})); queue.push(node.${tf.left}); queue.push(node.${tf.right}); }`,
     "      None => out.push(None),",
     "    }",
     "    index += 1;",
@@ -393,6 +400,33 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
     ...blocks,
     "}",
   ].filter((line) => line !== "").join("\n");
+}
+
+
+interface NodeFields { value: string; next: string; left: string; right: string }
+
+/** Judge starter code usually uses val/next or val/left/right; honour whatever
+ * the file actually declares so a renamed field does not break the driver. */
+export function nodeFields(source: string, tree: boolean, owner: "ListNode" | "TreeNode"): NodeFields {
+  const fields: NodeFields = { value: "val", next: "next", left: "left", right: "right" };
+  const at = source.search(new RegExp(`(?:class|struct)\\s+${owner}\\b`));
+  if (at < 0) return fields;
+  const brace = source.indexOf("{", at);
+  const block = source.slice(brace + 1, source.indexOf("}", brace + 1) + 1 || undefined);
+  // Python assigns through self.<field>; Rust and C++ declare <field>: or <field>;
+  const names = [
+    ...[...block.matchAll(/self\.(\w+)\s*=/g)].map((match) => match[1]),
+    ...[...block.matchAll(/(?:pub\s+)?\b(\w+)\s*:/g)].map((match) => match[1]),
+    ...[...block.matchAll(/[^;{}\n]+?\s+(\w+)\s*;/g)].map((match) => match[1]),
+  ].filter((name) => !/^(?:self|Self|i32|i64|u32|u64|usize|f32|f64|bool|String|long|int|short|double)$/.test(name));
+  for (const name of names) {
+    if (/^(?:next|nxt|link)$/i.test(name)) fields.next = name;
+    else if (/^left$/i.test(name)) fields.left = name;
+    else if (/^right$/i.test(name)) fields.right = name;
+  }
+  const value = names.find((name) => !/^(?:next|nxt|link|left|right)$/i.test(name) && !/^_/.test(name));
+  if (value) fields.value = value;
+  return fields;
 }
 
 /** Bump whenever a template or comparison rule changes. */
@@ -612,6 +646,10 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "CA_METHOD = " + methodLiteral,
     "CA_UNORDERED = " + (unordered ? "True" : "False"),
     "CA_NODE = json.loads(" + JSON.stringify(JSON.stringify(node || null)) + ")",
+    "CA_NODE_VALUE = (CA_NODE or {}).get('fields', {}).get('value', 'val')",
+    "CA_NODE_NEXT = (CA_NODE or {}).get('fields', {}).get('next', 'next')",
+    "CA_NODE_LEFT = (CA_NODE or {}).get('fields', {}).get('left', 'left')",
+    "CA_NODE_RIGHT = (CA_NODE or {}).get('fields', {}).get('right', 'right')",
     "scope = {}",
     "def ca_build(value, tree):",
     "    cls = scope.get('TreeNode' if tree else 'ListNode')",
@@ -621,33 +659,33 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "        for item in value:",
     "            if item is None: nodes.append(None); continue",
     "            node = cls(item)",
-    "            node.left = node.right = None",
+    "            setattr(node, CA_NODE_LEFT, None); setattr(node, CA_NODE_RIGHT, None)",
     "            nodes.append(node)",
     "        for index, node in enumerate(nodes):",
     "            if node is None: continue",
     "            left, right = 2 * index + 1, 2 * index + 2",
-    "            if left < len(nodes): node.left = nodes[left]",
-    "            if right < len(nodes): node.right = nodes[right]",
+    "            if left < len(nodes): setattr(node, CA_NODE_LEFT, nodes[left])",
+    "            if right < len(nodes): setattr(node, CA_NODE_RIGHT, nodes[right])",
     "        return nodes[0]",
     "    head = tail = None",
     "    for item in value :",
     "        node = cls(item)",
     "        if tail is None: head = node",
-    "        else: tail.next = node",
+    "        else: setattr(tail, CA_NODE_NEXT, node)",
     "        tail = node",
     "    return head",
     "def ca_ser(node, tree):",
     "    if node is None: return None",
     "    if not tree :",
     "        out = []",
-    "        while node is not None: out.append(node.val); node = getattr(node, 'next', None)",
+    "        while node is not None: out.append(getattr(node, CA_NODE_VALUE)); node = getattr(node, CA_NODE_NEXT, None)",
     "        return out",
     "    out, queue = [], [node]",
     "    while queue:",
     "        current = queue.pop(0)",
     "        if current is None:",
     "            out.append(None); continue",
-    "        out.append(current.val); queue.append(getattr(current, 'left', None)); queue.append(getattr(current, 'right', None))",
+    "        out.append(getattr(current, CA_NODE_VALUE)); queue.append(getattr(current, CA_NODE_LEFT, None)); queue.append(getattr(current, CA_NODE_RIGHT, None))",
     "    while out and out[-1] is None: out.pop()",
     "    return out",
     "def ca_norm(value):",
@@ -688,7 +726,7 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "            for spec in (CA_NODE or {}).get('params', []):",
     "                args[spec['index']] = ca_build(args[spec['index']], spec['tree'])",
     "            result = method(*args) if CA_NODE else method(*args, **copy.deepcopy(case['kwargs']))",
-    "            if CA_NODE and (CA_NODE.get('returnsNode') or hasattr(result, 'val')):",
+    "            if CA_NODE and (CA_NODE.get('returnsNode') or hasattr(result, CA_NODE_VALUE)):",
     "                result = ca_ser(result, bool((CA_NODE.get('params') or [{}])[0].get('tree')))",
     "            results.append(ca_test(case, result))",
     "        return all(results)",
@@ -834,9 +872,12 @@ export function buildProvidedHarness(question: string, language: string, candida
     signature.args.every((argument, position) => nativeValue(fixture, argument, position) !== undefined))
     ? fixtures : null;
   if (signature && callableFixtures) {
+    const treeShape = signature.ret.kind === "node" ? signature.ret.tree
+      : signature.args.some((argument) => argument.type.kind === "node" && argument.type.tree);
+    const fields = { list: nodeFields(code, false, "ListNode"), tree: nodeFields(code, true, "TreeNode") };
     const driver = language === "cpp"
-      ? cppDriver(signature, callableFixtures, harnessOrderMode(question).unordered, code)
-      : rustDriver(signature, callableFixtures, harnessOrderMode(question).unordered, !/\bstruct\s+Solution\b/.test(code), code);
+      ? cppDriver(signature, callableFixtures, harnessOrderMode(question).unordered, code, fields)
+      : rustDriver(signature, callableFixtures, harnessOrderMode(question).unordered, !/\bstruct\s+Solution\b/.test(code), code, fields);
     if (driver) return {
       language, runnerLanguage: language as "cpp" | "rust", source: "provided",
       providedCaseCount: callableFixtures.length,
