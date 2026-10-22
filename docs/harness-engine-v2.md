@@ -64,9 +64,9 @@ randomised arguments are drawn from a constraint profile taken from the fixtures
 (integer range, list lengths, sortedness, non-negativity); expected values come from
 the reference and never from the candidate.
 
-The reference is loaded and exercised on the first case *before* any case runs, and
-its output is compared with that case's expected value. A reference that throws or
-disagrees disables fuzzing and shrinking rather than being trusted.
+The reference is loaded and checked against **every** named case before anything
+runs or shrinks. A reference that throws or disagrees on any fixture is discarded
+and fuzzing and shrinking stay off — one lucky first example is not enough.
 
 A failing case is shrunk by removing one element or halving one integer at a time,
 re-checked against the reference each step, up to three rounds — so a reported

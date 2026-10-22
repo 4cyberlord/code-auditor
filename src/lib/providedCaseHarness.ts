@@ -85,7 +85,8 @@ export function pythonNodeSpec(question: string, code: string, name: string): Py
 type NativeType =
   | { kind: "int" | "float" | "bool" | "string" | "void" }
   | { kind: "list"; item: NativeType }
-  | { kind: "node"; tree: boolean };
+  | { kind: "node"; tree: boolean }
+  | { kind: "optional"; item: NativeType };
 
 interface NativeArgument {
   name: string;
@@ -115,6 +116,8 @@ function cppType(raw: string): NativeType | null {
   const text = raw.replace(/\bconst\b/g, "").replace(/[&\s]+$/g, "").trim();
   if (/^TreeNode\s*\*$/.test(text)) return { kind: "node", tree: true };
   if (/^ListNode\s*\*$/.test(text)) return { kind: "node", tree: false };
+  const optCpp = /^(?:std::)?optional<(.+)>$/.exec(text);
+  if (optCpp) { const item = cppType(optCpp[1]); return item ? { kind: "optional", item } : null; }
   if (text === "void") return { kind: "void" };
   if (text === "bool") return { kind: "bool" };
   if (text === "double" || text === "float") return { kind: "float" };
@@ -131,6 +134,8 @@ function rustType(raw: string): NativeType | null {
   const text = raw.trim().replace(/^&mut\s+/, "").replace(/^&(?!(?:str|\[))/, "").trim();
   if (/^(?:Option<)?Box<TreeNode>>$/.test(text)) return { kind: "node", tree: true };
   if (/^(?:Option<)?Box<ListNode>>$/.test(text)) return { kind: "node", tree: false };
+  const opt = /^Option<(.+)>$/.exec(text);
+  if (opt) { const item = rustType(opt[1]); return item ? { kind: "optional", item } : null; }
   if (text === "()" || text === "void") return { kind: "void" };
   if (text === "bool") return { kind: "bool" };
   if (text === "f32" || text === "f64") return { kind: "float" };
@@ -157,6 +162,11 @@ function nativeLiteral(type: NativeType, value: unknown, language: "cpp" | "rust
     return type.tree
       ? `ca_tree(&vec![${items.map((item) => item === "null" ? "None" : `Some(${item})`).join(", ")}])`
       : `ca_list(&vec![${items.join(", ")}])`;
+  }
+  if (type.kind === "optional") {
+    if (value === null) return language === "cpp" ? "std::nullopt" : "None";
+    const inner = nativeLiteral(type.item, value, language);
+    return inner === null ? null : (language === "cpp" ? `std::optional<${cppTypeName(type.item)}>{${inner}}` : `Some(${inner})`);
   }
   if (type.kind === "list") {
     if (!Array.isArray(value)) return null;
@@ -376,6 +386,12 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
     const sort = unordered && comparedList ? "    actual_out.sort();\n    expected_out.sort();\n" : "";
     const nodeReturn = signature.ret.kind === "node";
     const serial = outTypeOwn?.kind === "node" && outTypeOwn.tree ? "tree" : "list";
+    const comparedNode = inPlaceOwn || nodeReturn;
+    const comparedIsList = !comparedNode && (inPlaceOwn ? outTypeOwn?.kind : signature.ret.kind) === "list";
+    const fmtExpected = comparedNode ? (serial === "tree" ? "ca_json(&expected_out)" : "ca_json_list(&expected_out)")
+      : comparedIsList ? "ca_json_list(&expected_out)"
+        : signature.retDecl.includes("Option<") ? "ca_opt(&expected_out)" : "ca_plain(&expected_out)";
+    const fmtActual = fmtExpected.replace("expected_out", "actual_out");
     const outcome = inPlaceOwn
       ? [`    ${call};`, `    let actual_out = ca_ser_${serial}(std::mem::take(&mut a0));`, `    let expected_out = ca_ser_${serial}(${expected});`]
       : nodeReturn
@@ -388,7 +404,7 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
       sort.replace(/\n$/, ""),
       "    let ok = actual_out == expected_out;",
       "    if ok { ca_passed += 1 } else { ca_failed += 1 }",
-      `    println!("CA_CASE {{\\"id\\":\\"${fixture.id}\\",\\"status\\":\\"{}\\",\\"expected\\":{:?},\\"actual\\":{:?}}}", if ok { "passed" } else { "failed" }, expected_out, actual_out);`,
+      `    println!("CA_CASE {{\\"id\\":\\"${fixture.id}\\",\\"status\\":\\"{}\\",\\"expected\\":{},\\"actual\\":{}}}", if ok { "passed" } else { "failed" }, ${fmtExpected}, ${fmtActual});`,
       "  }",
     ].filter(Boolean).join("\n"));
   }
@@ -450,6 +466,8 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
     "  let parts: Vec<String> = values.iter().map(|item| match item { Some(v) => v.to_string(), None => \"null\".to_string() }).collect();",
     "  format!(\"[{}]\", parts.join(\",\"))",
     "}",
+    "fn ca_plain<T: std::fmt::Debug>(value: &T) -> String { format!(\"{:?}\", value) }",
+    "fn ca_opt<T: std::fmt::Debug>(value: &Option<T>) -> String { match value { Some(inner) => format!(\"{:?}\", inner), None => \"null\".to_string() } }",
     "fn ca_json_list(values: &Vec<i64>) -> String {",
     "  let parts: Vec<String> = values.iter().map(|v| v.to_string()).collect();",
     "  format!(\"[{}]\", parts.join(\",\"))",
@@ -879,8 +897,9 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "                exec(compile(CA_REFERENCE, '<reference>', 'exec'), ref_scope)",
     "                ref = ref_scope.get(CA_METHOD) or next((v for k, v in ref_scope.items() if callable(v) and not k.startswith('_')), None)",
     "                if ref and CA_CASES:",
-    "                    probe = ref(*copy.deepcopy((CA_CASES[0].get('args') or [])))",
-    "                    if 'expected' in CA_CASES[0] and ca_norm(probe) != ca_norm(CA_CASES[0]['expected']): ref = None",
+    "                    for probe_case in CA_CASES:",
+    "                        if 'expected' not in probe_case: continue",
+    "                        if ca_norm(ref(*copy.deepcopy(probe_case.get('args') or []))) != ca_norm(probe_case['expected']): ref = None; break",
     "            except Exception: ref = None",
     "        results = []",
     "        for case in CA_CASES:",
@@ -899,7 +918,7 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "            results.append(ok)",
     "            if not ok and CA_NODE is None and ref is not None:",
     "                shrunk, expected_for_shrink = args, case['expected']",
-    "                locally_min = True",
+    "                locally_min = True; hit_cap = True",
     "                for _ in range(3):",
     "                    variants = []",
     "                    for position, value in enumerate(shrunk):",
@@ -919,7 +938,7 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "                            except Exception: continue",
     "                        else: expected_for_shrink = case['expected']",
     "                        if ca_norm(retry) != ca_norm(expected_for_shrink): smaller = (candidate_args, expected_for_shrink); break",
-    "                    if not smaller: break",
+    "                    if not smaller: hit_cap = False; break",
     "                    shrunk, expected_for_shrink = smaller",
     "                print('CA_SHRUNK ' + json.dumps({'id': case['id'], 'args': shrunk, 'expected': expected_for_shrink, 'reduced': shrunk != args, 'locallyMinimized': locally_min}, default=str))",
     "        if ref and CA_FUZZ:",

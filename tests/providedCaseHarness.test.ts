@@ -413,3 +413,30 @@ assert.ok(wrongRefSuite);
 const wrongRefOut = String(spawnSync("python3", ["-c", spliceSuite(wrongRefSuite, "def total(values):\n    return -1")!]).stdout);
 assert.equal((wrongRefOut.match(/fuzz_/g) || []).length, 0, "invalid reference disables fuzz");
 console.log("PASS: nested inputs and invalid references are handled");
+
+// A reference that is right on the first fixture but wrong on a later one must
+// still be rejected.
+const partialRefSpec = JSON.stringify({
+  mode: "callable", method: "total",
+  cases: Array.from({ length: 8 }, (_, index) => ({ id: `provided_${index + 1}`, args: [[index, 1]], kwargs: {}, expected: index + 1 })),
+  reference_code: "def total(values):\n    return values[0] + values[1] if values[0] > 0 else 999",
+});
+const partialSuite = buildGeneratedPythonHarness(fuzzQuestion, partialRefSpec, "def total(values):\n    return -1");
+assert.ok(partialSuite);
+const partialOut = String(spawnSync("python3", ["-c", spliceSuite(partialSuite, "def total(values):\n    return -1")!]).stdout);
+assert.equal((partialOut.match(/fuzz_/g) || []).length, 0, "a partly wrong reference is rejected");
+
+// Rust scalar Option evidence must be JSON null, never `None`.
+const optSuite = buildProvidedHarness(["Find", "Example 1:", "Input: n = 1", "Output: null"].join("\n"),
+  "rust", "impl Solution { pub fn find(n: i64) -> Option<i64> { let _ = n; None } }");
+if (spawnSync("rustc", ["--version"]).status === 0 && optSuite) {
+  writeFileSync("/tmp/fixture-opt.rs", spliceSuite(optSuite, "impl Solution { pub fn find(n: i64) -> Option<i64> { let _ = n; None } }") ?? "");
+  const built = spawnSync("rustc", ["-O", "/tmp/fixture-opt.rs", "-o", "/tmp/fixture-opt.bin"]);
+  assert.equal(built.status, 0, String(built.stderr));
+  const optOut = String(spawnSync("/tmp/fixture-opt.bin").stdout);
+  const row = optOut.split(/\r?\n/).find((line) => line.startsWith("CA_CASE"));
+  const parsed = JSON.parse(row!.slice("CA_CASE ".length));
+  assert.equal(parsed.expected, null);
+  assert.equal(parsed.actual, null);
+} else { console.log("SKIP Option evidence"); }
+console.log("PASS: references are checked on every fixture and Option evidence is JSON");
