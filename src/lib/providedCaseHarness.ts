@@ -215,13 +215,18 @@ export function cppArguments(raw: string): NativeArgument[] | null {
 
 function nativeValue(fixture: ProvidedFixture, argument: NativeArgument, position: number): unknown {
   if (Array.isArray(fixture.args) && position < fixture.args.length) return fixture.args[position];
-  return fixture.kwargs?.[argument.name];
+  const kwargs = fixture.kwargs || {};
+  if (Object.hasOwn(kwargs, argument.name)) return kwargs[argument.name];
+  // Candidates rename parameters (nums -> n); fall back to declaration order.
+  const values = Object.values(kwargs);
+  return position < values.length ? values[position] : undefined;
 }
 
 export function cppSignature(code: string): NativeSignature | null {
   const classAt = code.search(/\bclass\s+Solution\b/);
   if (classAt >= 0) {
-    const body = code.slice(classAt).replace(/^\s*(?:public|private|protected)\s*:/gm, "");
+    const brace = code.indexOf("{", classAt);
+    const body = code.slice(brace + 1).replace(/\b(?:public|private|protected)\s*:/g, "");
     const method = /([A-Za-z_][\w:<>,*\s]*?(?:<[^>]*>)?)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:const\s*)?\{/.exec(body);
     if (!method || method[2] === "Solution") return null;
     const args = cppArguments(method[3]);
@@ -261,7 +266,8 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
   const lf = fields.list;
   const tf = fields.tree;
   const inPlace = signature.ret.kind === "void";
-  const firstNode = signature.args.find((argument) => argument.type.kind === "node");
+  const firstNode = signature.args.find((argument) => argument.type.kind === "node" && /&mut|\*/.test(argument.decl))
+    || signature.args.find((argument) => argument.type.kind === "node");
   const outType = inPlace ? firstNode?.type : signature.ret;
   if (!outType || outType.kind !== "node" && inPlace) return null;
   const blocks: string[] = [];
@@ -276,7 +282,8 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
     if (expected === null) return null;
     const args = signature.args.map((_, position) => `a${position}`).join(", ");
     const call = signature.owner === "class" ? `solution.${signature.name}(${args})` : `${signature.name}(${args})`;
-    const sort = unordered && signature.ret.kind === "list" ? "    std::sort(actual.begin(), actual.end());\n" : "";
+    const comparedList = (inPlace ? outType.kind : signature.ret.kind) === "list";
+  const sort = unordered && comparedList ? "    std::sort(actualOut.begin(), actualOut.end());\n    std::sort(expectedOut.begin(), expectedOut.end());\n" : "";
     const serialized = signature.ret.kind === "node";
     const serial = outType.kind === "node" && outType.tree ? "tree" : "list";
     const outcome = inPlace
@@ -290,6 +297,7 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
       ...outcome,
       sort.replace(/\n$/, ""),
       `    bool ok = actualOut == expectedOut;`,
+      "    if (ok) ++ca_passed; else ++ca_failed;",
       `    std::ostringstream a, e; ca_put(a, actualOut); ca_put(e, expectedOut);`,
       `    std::cout << "CA_CASE {\\"id\\":\\"${fixture.id}\\",\\"status\\":\\"" << (ok ? "passed" : "failed") << "\\",\\"expected\\":" << e.str() << ",\\"actual\\":" << a.str() << "}" << std::endl;`,
       "  }",
@@ -304,9 +312,9 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
   ].filter(Boolean).join("\n");
   const nodeFunctions = [
     `static ListNode* ca_list(const std::vector<long long>& values) { ListNode* head = nullptr; ListNode** tail = &head; for (long long value : values) { *tail = new ListNode(value); tail = &(*tail)->${lf.next}; } return head; }`,
-    `static TreeNode* ca_tree(const std::vector<std::optional<long long>>& values) { if (values.empty() || !values[0]) return nullptr; std::vector<TreeNode*> nodes(values.size(), nullptr); nodes[0] = new TreeNode(*values[0]); for (size_t i = 0; i < values.size(); ++i) { if (!nodes[i]) continue; size_t l = 2*i+1, r = 2*i+2; if (l < values.size() && values[l]) { nodes[l] = new TreeNode(*values[l]); nodes[i]->${tf.left} = nodes[l]; } if (r < values.size() && values[r]) { nodes[r] = new TreeNode(*values[r]); nodes[i]->${tf.right} = nodes[r]; } } return nodes[0]; }`,
+    `static TreeNode* ca_tree(const std::vector<std::optional<long long>>& values) { if (values.empty() || !values[0]) return nullptr; TreeNode* root = new TreeNode(*values[0]); std::queue<TreeNode*> queue; queue.push(root); size_t index = 1; while (!queue.empty() && index < values.size()) { TreeNode* parent = queue.front(); queue.pop(); for (int side = 0; side < 2 && index < values.size(); ++side) { auto item = values[index++]; if (!item) continue; TreeNode* child = new TreeNode(*item); if (side == 0) parent->${tf.left} = child; else parent->${tf.right} = child; queue.push(child); } } return root; }`,
     `static std::vector<long long> ca_ser_list(ListNode* node) { std::vector<long long> out; while (node) { out.push_back(node->${lf.value}); node = node->${lf.next}; } return out; }`,
-    `static std::vector<std::optional<long long>> ca_ser_tree(TreeNode* root) { std::vector<std::optional<long long>> out; if (!root) return out; std::vector<TreeNode*> queue{root}; for (size_t i = 0; i < queue.size(); ++i) { TreeNode* node = queue[i]; if (!node) { out.push_back(std::nullopt); continue; } out.push_back(node->${tf.value}); queue.push_back(node->${tf.left}); queue.push_back(node->${tf.right}); } while (!out.empty() && !out.back()) out.pop_back(); return out; }`,
+    `static std::vector<std::optional<long long>> ca_ser_tree(TreeNode* root) { std::vector<std::optional<long long>> out; if (!root) return out; out.push_back(root->${tf.value}); std::queue<TreeNode*> queue; queue.push(root); while (!queue.empty()) { TreeNode* node = queue.front(); queue.pop(); for (TreeNode* child : {node->${tf.left}, node->${tf.right}}) { if (!child) { out.push_back(std::nullopt); continue; } out.push_back(child->${tf.value}); queue.push(child); } } while (!out.empty() && !out.back()) out.pop_back(); return out; }`,
   ].filter(Boolean).join("\n");
   return [
     "#include <algorithm>",
@@ -329,9 +337,11 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
     nodeFunctions,
     "",
     "int main() {",
+    "  int ca_passed = 0, ca_failed = 0;",
     instance,
     "  Solution solution;".replace("Solution solution;", signature.owner === "class" ? "  Solution solution;" : ""),
     ...blocks,
+    '  std::cout << "CA_DONE {\\"cases\\":" << (ca_passed + ca_failed) << ",\\"passed\\":" << ca_passed << ",\\"failed\\":" << ca_failed << "}" << std::endl;',
     "  return 0;",
     "}",
   ].filter((line) => line !== "").join("\n");
@@ -341,7 +351,8 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
   const lf = fields.list;
   const tf = fields.tree;
   const inPlaceOwn = signature.ret.kind === "void";
-  const firstNodeOwn = signature.args.find((argument) => argument.type.kind === "node");
+  const firstNodeOwn = signature.args.find((argument) => argument.type.kind === "node" && argument.decl.startsWith("&mut"))
+    || signature.args.find((argument) => argument.type.kind === "node");
   const outTypeOwn = inPlaceOwn ? firstNodeOwn?.type : signature.ret;
   if (inPlaceOwn && (!outTypeOwn || outTypeOwn.kind !== "node")) return null;
   const blocks: string[] = [];
@@ -360,7 +371,8 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
     const call = signature.owner === "class"
       ? (signature.receiver ? `solution.${signature.name}(${args})` : `Solution::${signature.name}(${args})`)
       : `${signature.name}(${args})`;
-    const sort = unordered && signature.ret.kind === "list" ? "    actual.sort();\n" : "";
+    const comparedList = (inPlaceOwn ? outTypeOwn?.kind : signature.ret.kind) === "list";
+    const sort = unordered && comparedList ? "    actual_out.sort();\n    expected_out.sort();\n" : "";
     const nodeReturn = signature.ret.kind === "node";
     const serial = outTypeOwn?.kind === "node" && outTypeOwn.tree ? "tree" : "list";
     const outcome = inPlaceOwn
@@ -374,6 +386,7 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
       ...outcome,
       sort.replace(/\n$/, ""),
       "    let ok = actual_out == expected_out;",
+      "    if ok { ca_passed += 1 } else { ca_failed += 1 }",
       `    println!("CA_CASE {{\\"id\\":\\"${fixture.id}\\",\\"status\\":\\"{}\\",\\"expected\\":{:?},\\"actual\\":{:?}}}", if ok { "passed" } else { "failed" }, expected_out, actual_out);`,
       "  }",
     ].filter(Boolean).join("\n"));
@@ -389,12 +402,30 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
     `  for value in values.iter().rev() { head = Some(Box::new(ListNode { ${lf.value}: *value, ${lf.next}: head })); }`,
     "  head",
     "}",
-    "fn ca_tree_at(values: &Vec<Option<i64>>, index: usize) -> Option<Box<TreeNode>> {",
-    "  if index >= values.len() { return None; }",
-    "  let val = values[index]?;",
-    `  Some(Box::new(TreeNode { ${tf.value}: val, ${tf.left}: ca_tree_at(values, 2 * index + 1), ${tf.right}: ca_tree_at(values, 2 * index + 2) }))`,
+    "fn ca_tree(values: &Vec<Option<i64>>) -> Option<Box<TreeNode>> {",
+    "  if values.is_empty() || values[0].is_none() { return None; }",
+    "  let mut left: Vec<Option<usize>> = vec![None; values.len()];",
+    "  let mut right: Vec<Option<usize>> = vec![None; values.len()];",
+    "  let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::from([0usize]);",
+    "  let mut index = 1usize;",
+    "  while let Some(parent) = queue.pop_front() {",
+    "    for side in 0..2 {",
+    "      if index >= values.len() { break; }",
+    "      let child = index; index += 1;",
+    "      if values[child].is_none() { continue; }",
+    "      if side == 0 { left[parent] = Some(child); } else { right[parent] = Some(child); }",
+    "      queue.push_back(child);",
+    "    }",
+    "  }",
+    "  fn build(values: &Vec<Option<i64>>, left: &Vec<Option<usize>>, right: &Vec<Option<usize>>, at: usize) -> Option<Box<TreeNode>> {",
+    "    Some(Box::new(TreeNode {",
+    `      ${tf.value}: values[at]?,`,
+    `      ${tf.left}: left[at].and_then(|child| build(values, left, right, child)),`,
+    `      ${tf.right}: right[at].and_then(|child| build(values, left, right, child)),`,
+    "    }))",
+    "  }",
+    "  build(values, &left, &right, 0)",
     "}",
-    "fn ca_tree(values: &Vec<Option<i64>>) -> Option<Box<TreeNode>> { ca_tree_at(values, 0) }",
     "fn ca_ser_list(mut node: Option<Box<ListNode>>) -> Vec<i64> {",
     "  let mut out = Vec::new();",
     `  while let Some(current) = node { out.push(current.${lf.value}); node = current.${lf.next}; }`,
@@ -414,9 +445,19 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
     "  while matches!(out.last(), Some(None)) { out.pop(); }",
     "  out",
     "}",
+    "fn ca_json(values: &Vec<Option<i64>>) -> String {",
+    "  let parts: Vec<String> = values.iter().map(|item| match item { Some(v) => v.to_string(), None => \"null\".to_string() }).collect();",
+    "  format!(\"[{}]\", parts.join(\",\"))",
+    "}",
+    "fn ca_json_list(values: &Vec<i64>) -> String {",
+    "  let parts: Vec<String> = values.iter().map(|v| v.to_string()).collect();",
+    "  format!(\"[{}]\", parts.join(\",\"))",
+    "}",
     "fn main() {",
+    "  let mut ca_passed = 0usize; let mut ca_failed = 0usize;",
     signature.owner === "class" && signature.receiver ? "  let solution = Solution;" : "",
     ...blocks,
+    "  println!(\"CA_DONE {{\\\"cases\\\":{},\\\"passed\\\":{},\\\"failed\\\":{}}}\", ca_passed + ca_failed, ca_passed, ca_failed);",
     "}",
   ].filter((line) => line !== "").join("\n");
 }
@@ -451,7 +492,7 @@ export function nodeFields(source: string, tree: boolean, owner: "ListNode" | "T
 /** Bump whenever a template or comparison rule changes. */
 import { bestTemplate } from "./harnessRegistry.ts";
 
-export const HARNESS_ENGINE_VERSION = "v2.1";
+export const HARNESS_ENGINE_VERSION = "v2.6";
 
 /** Stable identity for the contract a harness was built for. */
 export function contractHash(question: string, fixtures: ProvidedFixture[]): string {
@@ -671,40 +712,50 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "CA_NODE_RIGHT = (CA_NODE or {}).get('fields', {}).get('right', 'right')",
     "scope = {}",
     "def ca_build(value, tree):",
-    "    cls = scope.get('TreeNode' if tree else 'ListNode')",
-    "    if not value or cls is None: return None",
+    "    name = 'TreeNode' if tree else 'ListNode'",
+    "    cls = scope.get(name)",
+    "    if cls is None:",
+    "        def ca_init(self, v=0, **extra):",
+    "            setattr(self, CA_NODE_VALUE, v); setattr(self, CA_NODE_LEFT, extra.get('left')); setattr(self, CA_NODE_RIGHT, extra.get('right')); setattr(self, CA_NODE_NEXT, extra.get('next'))",
+    "        cls = type(name, (), {'__init__': ca_init}); scope[name] = cls",
+    "    if not value: return None",
     "    if tree:",
-    "        nodes = []",
-    "        for item in value:",
-    "            if item is None: nodes.append(None); continue",
-    "            node = cls(item)",
-    "            setattr(node, CA_NODE_LEFT, None); setattr(node, CA_NODE_RIGHT, None)",
-    "            nodes.append(node)",
-    "        for index, node in enumerate(nodes):",
-    "            if node is None: continue",
-    "            left, right = 2 * index + 1, 2 * index + 2",
-    "            if left < len(nodes): setattr(node, CA_NODE_LEFT, nodes[left])",
-    "            if right < len(nodes): setattr(node, CA_NODE_RIGHT, nodes[right])",
-    "        return nodes[0]",
+    "        root = None if value[0] is None else cls(value[0])",
+    "        if root is None: return None",
+    "        setattr(root, CA_NODE_LEFT, None); setattr(root, CA_NODE_RIGHT, None)",
+    "        queue, index = [root], 1",
+    "        while queue and index < len(value):",
+    "            parent = queue.pop(0)",
+    "            for side in (CA_NODE_LEFT, CA_NODE_RIGHT):",
+    "                if index >= len(value): break",
+    "                item = value[index]; index += 1",
+    "                if item is None: setattr(parent, side, None); continue",
+    "                node = cls(item)",
+    "                setattr(node, CA_NODE_LEFT, None); setattr(node, CA_NODE_RIGHT, None)",
+    "                setattr(parent, side, node); queue.append(node)",
+    "        return root",
     "    head = tail = None",
-    "    for item in value :",
+    "    for item in value:",
     "        node = cls(item)",
+    "        setattr(node, CA_NODE_NEXT, None)",
     "        if tail is None: head = node",
     "        else: setattr(tail, CA_NODE_NEXT, node)",
     "        tail = node",
     "    return head",
     "def ca_ser(node, tree):",
-    "    if node is None: return None",
-    "    if not tree :",
+    "    if node is None: return []",
+    "    if not tree:",
     "        out = []",
     "        while node is not None: out.append(getattr(node, CA_NODE_VALUE)); node = getattr(node, CA_NODE_NEXT, None)",
     "        return out",
-    "    out, queue = [], [node]",
+    "    out, queue = [getattr(node, CA_NODE_VALUE)], [node]",
     "    while queue:",
     "        current = queue.pop(0)",
-    "        if current is None:",
-    "            out.append(None); continue",
-    "        out.append(getattr(current, CA_NODE_VALUE)); queue.append(getattr(current, CA_NODE_LEFT, None)); queue.append(getattr(current, CA_NODE_RIGHT, None))",
+    "        for side in (CA_NODE_LEFT, CA_NODE_RIGHT):",
+    "            child = getattr(current, side, None)",
+    "            if child is None: out.append(None)",
+    "            else:",
+    "                out.append(getattr(child, CA_NODE_VALUE)); queue.append(child)",
     "    while out and out[-1] is None: out.pop()",
     "    return out",
     "def ca_norm(value):",
@@ -750,6 +801,7 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "            if CA_NODE and (CA_NODE.get('returnsNode') or hasattr(result, CA_NODE_VALUE)):",
     "                result = ca_ser(result, bool((CA_NODE.get('params') or [{}])[0].get('tree')))",
     "            results.append(ca_test(case, result))",
+    "        print('CA_DONE ' + json.dumps({'cases': len(CA_CASES), 'passed': sum(1 for value in results if value), 'failed': sum(1 for value in results if not value)}))",
     "        return all(results)",
     "    with tempfile.TemporaryDirectory(prefix='council-fixtures-') as directory:",
     "        ext = {'python': '.py', 'cpp': '.cpp', 'rust': '.rs'}[CA_LANGUAGE]",
@@ -764,11 +816,15 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "                print(compilation.stderr[:2000], file=sys.stderr)",
     "                raise RuntimeError('Candidate compilation failed')",
     "        passed = True",
+    "        ca_ok = 0; ca_bad = 0",
     "        for case in CA_CASES:",
     "            result = subprocess.run(command, input=case['input'], text=True, capture_output=True, timeout=12, check=False)",
     "            if result.returncode:",
     "                print(result.stderr[:2000], file=sys.stderr)",
-    "            passed = ca_test(case, result.stdout.rstrip('\\r\\n') if result.returncode == 0 else '<nonzero exit>') and passed",
+    "            one = ca_test(case, result.stdout.rstrip('\\r\\n') if result.returncode == 0 else '<nonzero exit>')",
+    "            ca_ok += 1 if one else 0; ca_bad += 0 if one else 1",
+    "            passed = one and passed",
+    "        print('CA_DONE ' + json.dumps({'cases': len(CA_CASES), 'passed': ca_ok, 'failed': ca_bad}))",
     "        return passed",
     "if __name__ == '__main__':",
     "    try:",
@@ -882,12 +938,16 @@ export function buildProvidedHarness(question: string, language: string, candida
   const code = String(candidateCode || "");
   const name = language === "python" ? callableName(code) : null;
   const registryEnabled = (globalThis as { __COUNCIL_HARNESS_REGISTRY__?: boolean }).__COUNCIL_HARNESS_REGISTRY__ !== false;
-  const nodeSpec = language === "python" && name ? pythonNodeSpec(question, code, name) : null;
+  const nodeSpec = registryEnabled && language === "python" && name ? pythonNodeSpec(question, code, name) : null;
   const signature = registryEnabled && language === "cpp" ? cppSignature(code)
     : registryEnabled && language === "rust" ? rustSignature(code) : null;
   const signatureText = signature
     ? `${signature.name}(${signature.args.map((argument) => argument.decl).join(", ")}) -> ${signature.retDecl}`
     : undefined;
+  const scalarOnly = !fixtures.some((fixture) => [
+    ...(fixture.args || []), ...Object.values(fixture.kwargs || {}),
+  ].some(Array.isArray));
+  const callableFamily = scalarOnly ? "callable-scalar" : "callable-vector";
   const callableFixtures = signature && fixtures.every((fixture) =>
     Object.hasOwn(fixture, "expected") &&
     signature.args.every((argument, position) => nativeValue(fixture, argument, position) !== undefined))
@@ -908,7 +968,7 @@ export function buildProvidedHarness(question: string, language: string, candida
       contractHash: contractHash(question, callableFixtures),
       templateId: signature && (signature.ret.kind === "node" || signature.args.some((argument) => argument.type.kind === "node"))
         ? bestTemplate(language, "callable-node")?.id
-        : bestTemplate(language, "callable-vector")?.id,
+        : bestTemplate(language, callableFamily)?.id,
       signature: signatureText,
     };
   }
@@ -928,7 +988,7 @@ export function buildProvidedHarness(question: string, language: string, candida
     unordered: harnessOrderMode(question).unordered,
     harnessVersion: HARNESS_ENGINE_VERSION,
     contractHash: contractHash(question, fixtures),
-    templateId: nodeSpec ? "callable-node" : bestTemplate(language, callable ? "callable-vector" : "stdin")?.id,
+    templateId: nodeSpec ? "callable-node" : bestTemplate(language, callable ? callableFamily : "stdin")?.id,
   };
 }
 
@@ -942,7 +1002,12 @@ export function requiredHarnessCases(suite: { source?: string; providedCaseCount
 /** Only accepted fixture IDs count; extra PASS text is not verification. */
 export function providedCaseEvidence(stdout: string, required: number): { passed: number; failed: number; complete: boolean } {
   const rows = new Map<string, string>();
+  let trailer: { cases?: number; passed?: number; failed?: number } | null = null;
   for (const line of String(stdout || "").split(/\r?\n/)) {
+    if (line.startsWith("CA_DONE ")) {
+      try { trailer = JSON.parse(line.slice(8)); } catch { trailer = null; }
+      continue;
+    }
     if (!line.startsWith("CA_CASE ")) continue;
     try {
       const row = JSON.parse(line.slice(8));
@@ -956,5 +1021,9 @@ export function providedCaseEvidence(stdout: string, required: number): { passed
     if (rows.get("provided_" + n) === "passed") passed += 1;
     if (rows.get("provided_" + n) === "failed") failed += 1;
   }
-  return { passed, failed, complete: passed + failed === required };
+  // The trailer is written after every case by the driver; a candidate that
+  // prints its own CA_CASE lines cannot quietly complete the run without it.
+  const trailerOk = !!trailer && trailer.cases === required &&
+    trailer.passed === passed && trailer.failed === failed;
+  return { passed, failed, complete: trailerOk && passed + failed === required };
 }

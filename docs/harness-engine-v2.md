@@ -27,6 +27,14 @@
 - E2B, independent review, mutation signals, code-digest checks and the existing
   runner error categories remain enabled.
 
+## Evidence integrity
+
+Comparisons are computed by the driver, not the candidate. Each case emits a
+`CA_CASE` row and the driver closes with a `CA_DONE` trailer carrying the case,
+passed and failed counts. `providedCaseEvidence` requires the trailer to match the
+parsed rows, so a candidate that prints its own `CA_CASE` lines cannot complete a
+run on its own.
+
 ## Registry identity
 
 Every suite carries `harnessVersion` (bumped with each template or comparison

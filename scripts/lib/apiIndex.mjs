@@ -15,7 +15,7 @@ function load(language) {
     const parsed = JSON.parse(gunzipSync(readFileSync(path)).toString("utf8"));
     cache.set(language, parsed);
     return parsed;
- as} catch {
+  } catch {
     cache.set(language, null);
     return null;
   }

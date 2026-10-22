@@ -178,7 +178,7 @@ const fixtureSet = extractProvidedFixtures(twoSum);
 assert.equal(contractHash(twoSum, fixtureSet), contractHash(twoSum, fixtureSet));
 assert.notEqual(contractHash(twoSum, fixtureSet), contractHash(twoSum + "\n", fixtureSet));
 const registered = buildProvidedHarness(twoSum, "python", correct);
-assert.equal(registered?.harnessVersion, "v2.1");
+assert.equal(registered?.harnessVersion, "v2.6");
 assert.equal(registered?.contractHash, contractHash(twoSum, fixtureSet));
 console.log("PASS: harness registry identity is stable and contract-scoped");
 
@@ -212,8 +212,10 @@ for (const [language, source] of [["cpp", cppSolution], ["rust", rustSolution]] 
 }
 
 // Unsupported signatures fall back instead of emitting a broken driver.
+assert.ok(buildProvidedHarness(nativeQuestion, "cpp",
+  "class Solution { public: TreeNode* f(TreeNode* n) { return n; } };"));
 assert.equal(buildProvidedHarness(nativeQuestion, "cpp",
-  "class Solution { public: TreeNode* f(TreeNode* n) { return n; } };"), null);
+  "class Solution { public: unordered_map<int,int> f(vector<int>& n) { return {}; } };"), null);
 
 // Feature flag: the certified registry can be switched off to fall back to the
 // reference harness without touching the builders.
