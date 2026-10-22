@@ -326,3 +326,32 @@ for (const [language, code, bad] of [["python", inPlacePy, inPlacePyBad], ["cpp"
   }
 }
 console.log("PASS: in-place node contracts are verified");
+
+// Fuzzing derives expectations from the reference; shrinking reduces the first
+// failing input. A candidate wrong beyond the examples must be caught and the
+// counterexample reduced.
+const fuzzSpec = JSON.stringify({
+  mode: "callable", method: "total",
+  
+  cases: Array.from({ length: 8 }, (_, index) => ({ id: `provided_${index + 1}`, args: [[index, index + 1]], kwargs: {}, expected: index * 2 + 1 })),
+  reference_code: "def total(values):\n    return sum(values)",
+});
+// The generator requires a similarly shaped example set; build once with real fixtures.
+const fuzzQuestion = ["Total", "Example 1:", "Input: values = [1,2,3]", "Output: 6"].join("\\n");
+const fuzzSpec2 = JSON.stringify({
+  mode: "callable", method: "total",
+  cases: Array.from({ length: 8 }, (_, index) => ({ id: `provided_${index + 1}`, args: [[index, index + 1]], kwargs: {}, expected: index * 2 + 1 })),
+  reference_code: "def total(values):\n    return sum(values)",
+});
+const fuzzCandidate = "def total(values):\n    return values[0] if values else 0";
+const fuzzSuite = buildGeneratedPythonHarness(fuzzQuestion, fuzzSpec2, fuzzCandidate);
+assert.ok(fuzzSuite, "generated suite with reference");
+const fuzzProgram = spliceSuite(fuzzSuite, fuzzCandidate) ?? "";
+writeFileSync("/tmp/fixture-fuzz.py", fuzzProgram);
+const fuzzRun = spawnSync("python3", ["/tmp/fixture-fuzz.py"]);
+const fuzzOut = String(fuzzRun.stdout);
+assert.ok((fuzzOut.match(/fuzz_/g) || []).length >= 1, "fuzz cases ran");
+assert.ok(fuzzOut.includes("CA_SHRUNK"), "failing input was shrunk");
+const shrunk = fuzzOut.split(/\r?\n/).find((line) => line.startsWith("CA_SHRUNK"));
+assert.ok(shrunk && shrunk.length < 200);
+console.log("PASS: fuzz cases and shrinking run against the reference");

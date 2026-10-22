@@ -57,6 +57,16 @@ A run records `failureKind` separately from its pass/fail result:
 Only `candidate` is sent to the solver as a repair instruction. A harness failure
 is never recorded as a wrong solution; the harness author repairs instead.
 
+## Fuzz and shrinking
+
+Generated Python suites carry an independent reference. After the named cases, six
+randomised arguments are derived from the fixture shapes, expected values come from
+the reference, and the candidate runs against both. A failing case is shrunk up to
+three times by halving lists and integers; the smallest still-failing input is
+printed as `CA_SHRUNK` beside the original.
+
+Native languages still rely on named cases only — fuzz/shrink there is pending.
+
 ## Mutation check
 
 A deliberately broken variant of a passing candidate is spliced into the same

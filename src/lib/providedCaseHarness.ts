@@ -733,7 +733,7 @@ export function harnessOrderMode(question: string): { unordered: boolean; compar
   return { unordered: ANY_ORDER.test(text), comparable: !HARD_TO_COMPARE.test(text) };
 }
 
-function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", language: string, method?: string, unordered = false, node?: PythonNodeSpec | null): string {
+function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", language: string, method?: string, unordered = false, node?: PythonNodeSpec | null, reference = "", fuzzCount = 0): string {
   // The replacement is an escaped JSON string literal. Candidate text is not
   // interpolated into Python syntax and cannot break the driver string.
   const payload = JSON.stringify(fixtures.map(pair => mode === "callable"
@@ -749,6 +749,10 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "CA_METHOD = " + methodLiteral,
     "CA_UNORDERED = " + (unordered ? "True" : "False"),
     "CA_NODE = json.loads(" + JSON.stringify(JSON.stringify(node || null)) + ")",
+    "CA_REFERENCE = " + JSON.stringify(reference || ""),
+    "CA_FUZZ = " + String(fuzzCount || 0),
+    "import random",
+    "random.seed(17)",
     "CA_NODE_VALUE = (CA_NODE or {}).get('fields', {}).get('value', 'val')",
     "CA_NODE_NEXT = (CA_NODE or {}).get('fields', {}).get('next', 'next')",
     "CA_NODE_LEFT = (CA_NODE or {}).get('fields', {}).get('left', 'left')",
@@ -801,6 +805,20 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "                out.append(getattr(child, CA_NODE_VALUE)); queue.append(child)",
     "    while out and out[-1] is None: out.pop()",
     "    return out",
+    "def ca_random(value):",
+    "    if isinstance(value, bool): return random.choice([True, False])",
+    "    if isinstance(value, int): return random.randint(0, 20)",
+    "    if isinstance(value, float): return round(random.uniform(-5.0, 5.0), 2)",
+    "    if isinstance(value, str): return random.choice(['', 'a', 'ab', 'abc'])",
+    "    if isinstance(value, list): return [ca_random(random.choice(value) if value else 0) for _ in range(random.randint(0, 5))]",
+    "    return value",
+    "def ca_shrink_args(args):",
+    "    out = []",
+    "    for value in args:",
+    "        if isinstance(value, list) and len(value) > 1: out.append(value[: max(1, len(value) // 2)])",
+    "        elif isinstance(value, int) and not isinstance(value, bool): out.append(value // 2)",
+    "        else: out.append(value)",
+    "    return out",
     "def ca_norm(value):",
     "    if isinstance(value, list):",
     "        return sorted((ca_norm(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True, default=str))",
@@ -844,7 +862,30 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "            if CA_NODE and (CA_NODE.get('returnsNode') or hasattr(result, CA_NODE_VALUE)):",
     "                result = ca_ser(result, bool((CA_NODE.get('params') or [{}])[0].get('tree')))",
     "            results.append(ca_test(case, result))",
-    "        print('CA_DONE ' + json.dumps({'cases': len(CA_CASES), 'passed': sum(1 for value in results if value), 'failed': sum(1 for value in results if not value)}))",
+    "            if not result and CA_NODE is None:",
+    "                shrunk = args",
+    "                for _ in range(3):",
+    "                    candidate_args = ca_shrink_args(shrunk)",
+    "                    if candidate_args == shrunk: break",
+    "                    try: retry = method(*candidate_args)",
+    "                    except Exception: break",
+    "                    if ca_norm(retry) == ca_norm(case['expected']): break",
+    "                    shrunk = candidate_args",
+    "                if shrunk != args: print('CA_SHRUNK ' + json.dumps({'id': case['id'], 'args': shrunk}, default=str))",
+    "        if CA_REFERENCE and CA_FUZZ:",
+    "            ref_scope = {'__name__': '__council_reference__'}",
+    "            exec(compile(CA_REFERENCE, '<reference>', 'exec'), ref_scope)",
+    "            ref = ref_scope.get(CA_METHOD) or next((v for k, v in ref_scope.items() if callable(v) and not k.startswith('_')), None)",
+    "            for index in range(CA_FUZZ):",
+    "                base = copy.deepcopy(CA_CASES[index % len(CA_CASES)]['args'])",
+    "                fuzz_args = [ca_random(value) for value in base]",
+    "                try: expected = ref(*copy.deepcopy(fuzz_args))",
+    "                except Exception: continue",
+    "                actual = method(*copy.deepcopy(fuzz_args))",
+    "                same = (ca_norm(actual) == ca_norm(expected)) if CA_UNORDERED else (actual == expected)",
+    "                results.append(same)",
+    "                print('CA_CASE ' + json.dumps({'id': 'fuzz_' + str(index + 1), 'input': fuzz_args, 'expected': expected, 'actual': actual, 'status': 'passed' if same else 'failed'}, default=str))",
+    "        print('CA_DONE ' + json.dumps({'cases': len(results), 'passed': sum(1 for value in results if value), 'failed': sum(1 for value in results if not value)}))",
     "        return all(results)",
     "    with tempfile.TemporaryDirectory(prefix='council-fixtures-') as directory:",
     "        ext = {'python': '.py', 'cpp': '.cpp', 'rust': '.rs'}[CA_LANGUAGE]",
@@ -950,7 +991,7 @@ export function buildGeneratedPythonHarness(
   return {
     language: "python", runnerLanguage: "python", source: "generated",
     providedCaseCount: cases.length, question, candidateAsString: true,
-    harness: pythonDriver(cases, mode, "python", callableName(candidateCode) || (typeof spec.method === "string" ? spec.method : undefined), order.unordered),
+    harness: pythonDriver(cases, mode, "python", callableName(candidateCode) || (typeof spec.method === "string" ? spec.method : undefined), order.unordered, null, typeof spec.reference_code === "string" ? spec.reference_code : "", mode === "callable" ? 6 : 0),
     unordered: order.unordered,
     harnessVersion: HARNESS_ENGINE_VERSION,
     contractHash: contractHash(question, cases),
@@ -1060,19 +1101,23 @@ export function providedCaseEvidence(stdout: string, required: number): { passed
     if (!line.startsWith("CA_CASE ")) continue;
     try {
       const row = JSON.parse(line.slice(8));
-      if (!/^provided_[1-9]\d*$/.test(row.id) || !["passed", "failed"].includes(row.status) || rows.has(row.id)) continue;
+      if (!/^(?:provided|fuzz)_[1-9]\d*$/.test(row.id) || !["passed", "failed"].includes(row.status) || rows.has(row.id)) continue;
       rows.set(row.id, row.status);
     } catch { /* malformed trace is not evidence */ }
   }
   let passed = 0;
-  let failed = 0;
+  let failed_link = 0;
+  for (const status of rows.values()) {
+    if (status === "passed") passed += 1;
+    else failed_link += 1;
+  }
+  let providedSeen = 0;
   for (let n = 1; n <= required; n += 1) {
-    if (rows.get("provided_" + n) === "passed") passed += 1;
-    if (rows.get("provided_" + n) === "failed") failed += 1;
+    if (rows.has("provided_" + n)) providedSeen += 1;
   }
   // The trailer is written after every case by the driver; a candidate that
   // prints its own CA_CASE lines cannot quietly complete the run without it.
-  const trailerOk = !!trailer && trailer.cases === required &&
-    trailer.passed === passed && trailer.failed === failed;
-  return { passed, failed, complete: trailerOk && passed + failed === required };
+  const trailerOk = !!trailer && trailer.cases === passed + failed_link &&
+    trailer.passed === passed && trailer.failed === failed_link;
+  return { passed, failed: failed_link, complete: trailerOk && providedSeen === required };
 }
