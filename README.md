@@ -88,17 +88,19 @@ Background capture helpers can also be configured for batch-style capture and su
 
 ### Background helper overlay shortcuts
 
-When the installed background helper is running, these are the overlay test shortcuts:
+The helper uses bare double-tap pairs (no modifiers) and only while the overlay is
+open. The full table — collect layer, result layer, chat, reader, history — lives in
+[docs/overlay-commands.md](docs/overlay-commands.md).
 
-| Shortcut | Action |
+| Keys | Action |
 |---|---|
-| `Control+Option+C` | Toggle the coding overlay |
-| `Control+Option+M` | Toggle the MCQ overlay |
-| `Control+Option+B` | Start a helper capture batch |
-| `Control+Option+P` | Capture the current screen into the helper batch |
-| `Control+Option+Return` | Submit the helper batch |
+| `cc` / `mm` | Open or close the coding / MCQ overlay |
+| `hh` | Toggle history |
+| `20` / `22` / `23` | Capture full / left / right |
+| `25` | Delete the last capture |
+| `vv` / `kk` | Grab the selection / import clipboard cases into the Chat |
+| `24` | Submit |
 | `Shift+Option+Arrow Keys` | Move the visible helper overlay |
-| `Option+Up / Option+Down` | Scroll the visible helper overlay |
 
 ## Planned Feature: PrivateTrigger iOS Companion
 
