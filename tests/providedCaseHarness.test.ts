@@ -363,3 +363,22 @@ const changed = idFixtures.map((fixture) => ({ ...fixture }));
 changed[0].expected = [9, 9];
 assert.notEqual(contractIdentity(idContract, idFixtures), contractIdentity(idContract, changed));
 console.log("PASS: contract identity covers expected outputs");
+
+// The reported counterexample must actually be smaller than the failing row.
+const alwaysWrong = "def total(values):\n    return sum(values) + 10";
+const shrinkSuite = buildGeneratedPythonHarness(fuzzQuestion, fuzzSpec2, alwaysWrong);
+assert.ok(shrinkSuite);
+writeFileSync("/tmp/fixture-shrink.py", spliceSuite(shrinkSuite, alwaysWrong) ?? "");
+const shrinkOut = String(spawnSync("python3", ["/tmp/fixture-shrink.py"]).stdout);
+const shrinkRow = shrinkOut.split(/\r?\n/).find((line) => line.startsWith("CA_SHRUNK"));
+assert.ok(shrinkRow, "a counterexample is reported");
+const shrinkArgs = JSON.parse(shrinkRow.slice("CA_SHRUNK ".length)).args;
+assert.ok(shrinkArgs[0].length < 2, "counterexample is shorter than the failing input");
+
+// Without a reference there is no oracle for a modified input, so no shrink claim.
+const noRefCandidate = "class Solution:\n    def twoSum(self, nums, target):\n        return [0, 0]";
+const noRefSuite = buildProvidedHarness(twoSum, "python", noRefCandidate);
+assert.ok(noRefSuite);
+const noRefOut = String(spawnSync("python3", ["-c", spliceSuite(noRefSuite, noRefCandidate)!]).stdout);
+assert.ok(!noRefOut.includes("CA_SHRUNK"), "no shrink without an oracle");
+console.log("PASS: shrinking proves a smaller counterexample and stays off without an oracle");
