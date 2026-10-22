@@ -60,10 +60,15 @@ is never recorded as a wrong solution; the harness author repairs instead.
 ## Fuzz and shrinking
 
 Generated Python suites carry an independent reference. After the named cases, six
-randomised arguments are derived from the fixture shapes, expected values come from
-the reference, and the candidate runs against both. A failing case is shrunk up to
-three times by halving lists and integers; the smallest still-failing input is
-printed as `CA_SHRUNK` beside the original.
+randomised arguments are drawn from a constraint profile taken from the fixtures
+(integer range, list lengths, sortedness, non-negativity); expected values come from
+the reference and never from the candidate.
+
+A failing case is shrunk by removing one element or halving one integer at a time,
+re-checked against the reference each step, up to three rounds. The smallest
+still-failing input is printed as `CA_SHRUNK` with its own expected value; the
+original row stays in the output. Fuzz rows emit `PASS`/`FAIL` lines like any other
+case, so trace validation counts them.
 
 Native languages still rely on named cases only — fuzz/shrink there is pending.
 

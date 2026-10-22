@@ -65,6 +65,7 @@ export interface ContractInput {
     args: Array<{ name: string; decl: string; type: string }>;
     ret: string;
     mutates: string | null;
+    owner?: "class" | "free";
   };
   unordered: boolean;
   source: "provided" | "generated";
@@ -88,7 +89,7 @@ export function buildContract(input: ContractInput): ContractResult {
     version: 1,
     language: input.language as ContractLanguage,
     questionHash: hash(`${input.language}\u0000${input.question}`),
-    interface: signature ? "method" : input.callable ? "function" : "stdin",
+    interface: signature ? (signature.owner === "free" ? "function" : "method") : input.callable ? "function" : "stdin",
     signature: signature
       ? {
         name: signature.name,
@@ -106,8 +107,13 @@ export function buildContract(input: ContractInput): ContractResult {
 }
 
 /** Identity of a full contract (statement + interface + fixtures). */
-export function contractIdentity(contract: ProblemContract, fixtureInputs: string[]): string {
-  return hash(JSON.stringify(contract) + "\u0001" + fixtureInputs.join("\u0002"));
+export function contractIdentity(
+  contract: ProblemContract,
+  fixtures: Array<{ input: string; expected?: unknown; output?: string }>,
+): string {
+  const rows = fixtures.map((fixture) =>
+    `${fixture.input}\u0001${JSON.stringify(fixture.expected ?? fixture.output ?? "")}`);
+  return hash(JSON.stringify(contract) + "\u0002" + rows.join("\u0003"));
 }
 
 export const CONTRACT_VERSION = 1;

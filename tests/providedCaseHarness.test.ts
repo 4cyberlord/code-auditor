@@ -180,7 +180,7 @@ assert.equal(contractHash(twoSum, fixtureSet), contractHash(twoSum, fixtureSet))
 assert.notEqual(contractHash(twoSum, fixtureSet), contractHash(twoSum + "\n", fixtureSet));
 const registered = buildProvidedHarness(twoSum, "python", correct);
 assert.equal(registered?.harnessVersion, "v2.6");
-assert.equal(registered?.contractHash, contractIdentity(registered!.contract!, fixtureSet.map((fixture) => fixture.input)));
+assert.equal(registered?.contractHash, contractIdentity(registered!.contract!, fixtureSet));
 console.log("PASS: harness registry identity is stable and contract-scoped");
 
 // ------------------------------------------------- native judge adapters
@@ -195,7 +195,7 @@ for (const [language, source] of [["cpp", cppSolution], ["rust", rustSolution]] 
   assert.ok(suite, language + " judge API should build a native suite");
   assert.equal(suite.runnerLanguage, language);
   assert.equal(suite.candidateAsString, false);
-  assert.equal(suite.contractHash, contractIdentity(suite.contract!, extractProvidedFixtures(nativeQuestion).map((fixture) => fixture.input)));
+  assert.equal(suite.contractHash, contractIdentity(suite.contract!, extractProvidedFixtures(nativeQuestion)));
   const program = spliceSuite(suite, source) ?? "";
   assert.ok(program.includes("twoSum") || program.includes("two_sum"));
   assert.ok(!program.includes('"class Solution'), "native candidates splice unwrapped");
@@ -355,3 +355,11 @@ assert.ok(fuzzOut.includes("CA_SHRUNK"), "failing input was shrunk");
 const shrunk = fuzzOut.split(/\r?\n/).find((line) => line.startsWith("CA_SHRUNK"));
 assert.ok(shrunk && shrunk.length < 200);
 console.log("PASS: fuzz cases and shrinking run against the reference");
+
+// Identity must change when only an expected output changes.
+const idContract = registered!.contract!;
+const idFixtures = extractProvidedFixtures(twoSum);
+const changed = idFixtures.map((fixture) => ({ ...fixture }));
+changed[0].expected = [9, 9];
+assert.notEqual(contractIdentity(idContract, idFixtures), contractIdentity(idContract, changed));
+console.log("PASS: contract identity covers expected outputs");
