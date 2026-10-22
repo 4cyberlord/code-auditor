@@ -372,8 +372,9 @@ writeFileSync("/tmp/fixture-shrink.py", spliceSuite(shrinkSuite, alwaysWrong) ??
 const shrinkOut = String(spawnSync("python3", ["/tmp/fixture-shrink.py"]).stdout);
 const shrinkRow = shrinkOut.split(/\r?\n/).find((line) => line.startsWith("CA_SHRUNK"));
 assert.ok(shrinkRow, "a counterexample is reported");
-const shrinkArgs = JSON.parse(shrinkRow.slice("CA_SHRUNK ".length)).args;
-assert.ok(shrinkArgs[0].length < 2, "counterexample is shorter than the failing input");
+const shrinkReport = JSON.parse(shrinkRow.slice("CA_SHRUNK".length));
+assert.equal(shrinkReport.reduced, true, "reduction is recorded");
+assert.ok(shrinkReport.args[0].length < 2, "counterexample is shorter than the failing input");
 
 // Without a reference there is no oracle for a modified input, so no shrink claim.
 const noRefCandidate = "class Solution:\n    def twoSum(self, nums, target):\n        return [0, 0]";
@@ -382,3 +383,33 @@ assert.ok(noRefSuite);
 const noRefOut = String(spawnSync("python3", ["-c", spliceSuite(noRefSuite, noRefCandidate)!]).stdout);
 assert.ok(!noRefOut.includes("CA_SHRUNK"), "no shrink without an oracle");
 console.log("PASS: shrinking proves a smaller counterexample and stays off without an oracle");
+
+// Nested arrays must not break the uniqueness probe.
+const matrixQ = ["Sum Matrix", "Example 1:", "Input: grid = [[1,2],[3,4]]", "Output: 10"].join("\n");
+const matrixSpec = JSON.stringify({
+  mode: "callable", method: "total",
+  cases: [
+    { id: "example", args: [[[1, 2], [3, 4]]], kwargs: {}, expected: 10 },
+    ...Array.from({ length: 7 }, (_, index) => ({ id: `provided_${index + 2}`, args: [[[index, 1], [2, 3]]], kwargs: {}, expected: index + 6 })),
+  ],
+  reference_code: "def total(grid):\n    return sum(sum(row) for row in grid)",
+});
+const matrixCandidate = "def total(grid):\n    return sum(sum(row) for row in grid)";
+const matrixSuite = buildGeneratedPythonHarness(matrixQ, matrixSpec, matrixCandidate);
+assert.ok(matrixSuite, "matrix suite with nested input");
+writeFileSync("/tmp/fixture-matrix.py", spliceSuite(matrixSuite, matrixCandidate) ?? "");
+const matrixRun = spawnSync("python3", ["/tmp/fixture-matrix.py"]);
+assert.ok(!String(matrixRun.stderr).includes("unhashable"), "nested uniqueness probe survives");
+assert.ok(String(matrixRun.stdout).includes("CA_DONE"));
+
+// A reference that disagrees with the fixtures must not be trusted for fuzz/shrink.
+const wrongRefSpec = JSON.stringify({
+  mode: "callable", method: "total",
+  cases: Array.from({ length: 8 }, (_, index) => ({ id: `provided_${index + 1}`, args: [[index, 1]], kwargs: {}, expected: index + 1 })),
+  reference_code: "def total(values):\n    return 999",
+});
+const wrongRefSuite = buildGeneratedPythonHarness(fuzzQuestion, wrongRefSpec, "def total(values):\n    return -1");
+assert.ok(wrongRefSuite);
+const wrongRefOut = String(spawnSync("python3", ["-c", spliceSuite(wrongRefSuite, "def total(values):\n    return -1")!]).stdout);
+assert.equal((wrongRefOut.match(/fuzz_/g) || []).length, 0, "invalid reference disables fuzz");
+console.log("PASS: nested inputs and invalid references are handled");

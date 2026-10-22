@@ -64,12 +64,18 @@ randomised arguments are drawn from a constraint profile taken from the fixtures
 (integer range, list lengths, sortedness, non-negativity); expected values come from
 the reference and never from the candidate.
 
-The reference is loaded and exercised on the first case *before* any case runs or
-shrinks; if it fails, fuzzing and shrinking are skipped rather than guessed.
+The reference is loaded and exercised on the first case *before* any case runs, and
+its output is compared with that case's expected value. A reference that throws or
+disagrees disables fuzzing and shrinking rather than being trusted.
 
 A failing case is shrunk by removing one element or halving one integer at a time,
 re-checked against the reference each step, up to three rounds — so a reported
-counterexample is provably still failing on a smaller input. The smallest
+counterexample is provably still failing on a smaller input. The report carries
+`reduced` and `locallyMinimized`; the latter only claims no smaller single-element
+or integer-halving variant was found.
+
+Uniqueness probing hashes items by canonical JSON, so matrices and other nested
+values do not trip the profile. The smallest
 still-failing input is printed as `CA_SHRUNK` with its own expected value; the
 original row stays in the output. Fuzz rows emit `PASS`/`FAIL` lines like any other
 case, so trace validation counts them.
