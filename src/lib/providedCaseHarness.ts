@@ -30,6 +30,7 @@ export type ProvidedSuite = {
   contractHash?: string;
   referenceCode?: string;
   candidateAsString?: boolean;
+  templateId?: string;
   unordered?: boolean;
 };
 
@@ -286,6 +287,8 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
 }
 
 /** Bump whenever a template or comparison rule changes. */
+import { bestTemplate } from "./harnessRegistry.ts";
+
 export const HARNESS_ENGINE_VERSION = "v2.1";
 
 /** Stable identity for the contract a harness was built for. */
@@ -676,6 +679,7 @@ export function buildProvidedHarness(question: string, language: string, candida
       unordered: harnessOrderMode(question).unordered,
       harnessVersion: HARNESS_ENGINE_VERSION,
       contractHash: contractHash(question, callableFixtures),
+      templateId: bestTemplate(language, "callable-vector")?.id,
     };
   }
   const callable = Boolean(name && fixtures.every(f => f.args && f.kwargs && Object.hasOwn(f, "expected")));
@@ -694,6 +698,7 @@ export function buildProvidedHarness(question: string, language: string, candida
     unordered: harnessOrderMode(question).unordered,
     harnessVersion: HARNESS_ENGINE_VERSION,
     contractHash: contractHash(question, fixtures),
+    templateId: bestTemplate(language, callable ? "callable-vector" : "stdin")?.id,
   };
 }
 

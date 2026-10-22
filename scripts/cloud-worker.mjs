@@ -1491,6 +1491,7 @@ async function executeField(job, settings, suites, candidates, opts = {}) {
         codeDigest: createHash("sha256").update(code).digest("hex"),
         evidenceSource: suite.source || "generated",
         harnessVersion: suite.harnessVersion || "v2",
+        templateId: suite.templateId || "generated.reference",
         contractHash: suite.contractHash || "",
         providedCaseCount: suite.source === "provided" ? suite.providedCaseCount : 0,
         ran: true,

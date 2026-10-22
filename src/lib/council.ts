@@ -395,6 +395,7 @@ export interface CandidateRun {
   /** Shows sample evidence separately from broader independent test coverage. */
   evidenceSource?: "provided" | "generated";
   harnessVersion?: string;
+  templateId?: string;
   contractHash?: string;
   providedCaseCount?: number;
   timedOut?: boolean;
