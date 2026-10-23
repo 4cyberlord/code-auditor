@@ -43,6 +43,7 @@ interface PythonNodeSpec {
   order: string[];
   returnsNode: boolean;
   inPlace: boolean;
+  mutation: number;
   fields: NodeFields;
 }
 
@@ -72,6 +73,7 @@ export function pythonNodeSpec(question: string, code: string, name: string): Py
     order: params.map((param) => param.split(":")[0].trim()),
     returnsNode: /ListNode|TreeNode/.test(definition[2] || ""),
     inPlace: /^\s*(?:None|NoneType)\b/.test(definition[2] || ""),
+    mutation: specs[0]?.index ?? 0,
     fields: nodeFields(code, tree, tree ? "TreeNode" : "ListNode"),
   };
 }
@@ -145,7 +147,7 @@ function rustType(raw: string): NativeType | null {
     const item = rustType(list[1]);
     return item ? { kind: "list", item } : null;
   }
-  if (/^(?:i|u)(?:8|16|32|64|size)$/.test(text)) return { kind: "int" };
+  if (/^(?:i|u)(?:8|16|32|64|128|size)$/.test(text)) return { kind: "int" };
   return null;
 }
 
@@ -273,7 +275,7 @@ export function rustSignature(code: string): NativeSignature | null {
   return { name: method[1], args, ret, retDecl: (method[3] || "()").trim(), owner: implAt >= 0 ? "class" : "free", receiver };
 }
 
-function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, source: string, fields: { list: NodeFields; tree: NodeFields }): string | null {
+function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, source: string, fields: { list: NodeFields; tree: NodeFields }, mutationIndex = 0): string | null {
   const lf = fields.list;
   const tf = fields.tree;
   const inPlace = signature.ret.kind === "void";
@@ -298,7 +300,7 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
     const serialized = signature.ret.kind === "node";
     const serial = outType.kind === "node" && outType.tree ? "tree" : "list";
     const outcome = inPlace
-      ? [`    ${call};`, `    auto actualOut = ca_ser_${serial}(a0);`, `    auto expectedOut = ca_ser_${serial}(${expected});`]
+      ? [`    ${call};`, `    auto actualOut = ca_ser_${serial}(a${mutationIndex});`, `    auto expectedOut = ca_ser_${serial}(${expected});`]
       : serialized
         ? [`    auto actual = ${call};`, `    auto actualOut = ca_ser_${serial}(actual);`, `    auto expectedOut = ca_ser_${serial}(${expected});`]
         : [`    ${signature.retDecl} expectedOut = ${expected};`, `    auto actual = ${call};`, "    auto actualOut = actual;"];
@@ -358,7 +360,7 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
   ].filter((line) => line !== "").join("\n");
 }
 
-function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, declareSolution: boolean, source: string, fields: { list: NodeFields; tree: NodeFields }): string | null {
+function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unordered: boolean, declareSolution: boolean, source: string, fields: { list: NodeFields; tree: NodeFields }, mutationIndex = 0): string | null {
   const lf = fields.list;
   const tf = fields.tree;
   const inPlaceOwn = signature.ret.kind === "void";
@@ -391,7 +393,7 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
     const fmtExpected = "expected_out.ca_json()";
     const fmtActual = "actual_out.ca_json()";
     const outcome = inPlaceOwn
-      ? [`    ${call};`, `    let actual_out = ca_ser_${serial}(std::mem::take(&mut a0));`, `    let expected_out = ca_ser_${serial}(${expected});`]
+      ? [`    ${call};`, `    let actual_out = ca_ser_${serial}(std::mem::take(&mut a${mutationIndex}));`, `    let expected_out = ca_ser_${serial}(${expected});`]
       : nodeReturn
         ? [`    let actual = ${call};`, `    let actual_out = ca_ser_${serial}(actual);`, `    let expected_out = ca_ser_${serial}(${expected});`]
         : [`    let expected_out = ${expected};`, `    let actual = ${call};`, "    let actual_out = actual;"];
@@ -462,6 +464,14 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
     "}",
     "trait CaJson { fn ca_json(&self) -> String; }",
     "impl CaJson for i64 { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for i8 { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for i16 { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for i128 { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for isize { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for u8 { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for u16 { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for u128 { fn ca_json(&self) -> String { self.to_string() } }",
+
     "impl CaJson for i32 { fn ca_json(&self) -> String { self.to_string() } }",
     "impl CaJson for u32 { fn ca_json(&self) -> String { self.to_string() } }",
     "impl CaJson for u64 { fn ca_json(&self) -> String { self.to_string() } }",
@@ -913,7 +923,7 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "                args[spec['index']] = ca_build(args[spec['index']], spec['tree'])",
     "            result = method(*args) if CA_NODE else method(*args, **copy.deepcopy(case['kwargs']))",
     "            if CA_NODE and CA_NODE.get('inPlace'):",
-    "                result = ca_ser(args[0], bool((CA_NODE.get('params') or [{}])[0].get('tree')))",
+    "                result = ca_ser(args[CA_NODE.get('mutation', 0)], bool((CA_NODE.get('params') or [{}])[0].get('tree')))",
     "            if CA_NODE and (CA_NODE.get('returnsNode') or hasattr(result, CA_NODE_VALUE)):",
     "                result = ca_ser(result, bool((CA_NODE.get('params') or [{}])[0].get('tree')))",
     "            ok = ca_test(case, result)",
@@ -1112,9 +1122,11 @@ export function buildProvidedHarness(question: string, language: string, candida
     const treeShape = signature.ret.kind === "node" ? signature.ret.tree
       : signature.args.some((argument) => argument.type.kind === "node" && argument.type.tree);
     const fields = { list: nodeFields(code, false, "ListNode"), tree: nodeFields(code, true, "TreeNode") };
+    const mutatingName = compiled.contract.signature.mutates;
+    const mutationIndex = Math.max(0, mutatingName ? signature.args.findIndex((argument) => argument.name === mutatingName) : 0);
     const driver = language === "cpp"
-      ? cppDriver(signature, callableFixtures, harnessOrderMode(question).unordered, code, fields)
-      : rustDriver(signature, callableFixtures, harnessOrderMode(question).unordered, !/\bstruct\s+Solution\b/.test(code), code, fields);
+      ? cppDriver(signature, callableFixtures, harnessOrderMode(question).unordered, code, fields, mutationIndex)
+      : rustDriver(signature, callableFixtures, harnessOrderMode(question).unordered, !/\bstruct\s+Solution\b/.test(code), code, fields, mutationIndex);
     if (driver) return {
       language, runnerLanguage: language as "cpp" | "rust", source: "provided",
       providedCaseCount: callableFixtures.length,

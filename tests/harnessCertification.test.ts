@@ -47,6 +47,14 @@ const cases: Case[] = [
   { template: "callable-node", language: "rust", question: listQ,
     good: "impl Solution { pub fn reverse(h: Option<Box<ListNode>>) -> Option<Box<ListNode>> { let mut p=None; let mut c=h; while let Some(mut n)=c { c=n.next.take(); n.next=p; p=Some(n); } p } }",
     bad: "impl Solution { pub fn reverse(h: Option<Box<ListNode>>) -> Option<Box<ListNode>> { h } }" },
+  { template: "rust.callable-scalar", language: "rust", question: addQ,
+    good: "pub fn add(a: i8, b: i8) -> u8 { (a + b) as u8 }", bad: "pub fn add(a: i8, b: i8) -> u8 { (a - b) as u8 }" },
+  { template: "rust.callable-scalar", language: "rust", question: addQ,
+    good: "pub fn add(a: isize, b: isize) -> i128 { (a + b) as i128 }", bad: "pub fn add(a: isize, b: isize) -> i128 { (a - b) as i128 }" },
+  { template: "callable-node", language: "rust",
+    question: ["Pop", "Example 1:", "Input: keep = [9], victim = [1,2]", "Output: [1]"].join("\n"),
+    good: "impl Solution { pub fn pop(keep: Option<Box<ListNode>>, victim: &mut Option<Box<ListNode>>) { let _ = keep; let mut cur = victim; while let Some(node) = cur { if node.next.as_ref().map_or(true, |n| n.next.is_none()) { node.next = None; return; } cur = &mut node.next; } } }",
+    bad: "impl Solution { pub fn pop(keep: Option<Box<ListNode>>, victim: &mut Option<Box<ListNode>>) { let _ = (keep, victim); } }" },
   { template: "stdin.wrapper", language: "python", question: stdinQ,
     good: "n = int(input())\nprint(n * 2)", bad: "n = int(input())\nprint(n)" },
   { template: "stdin.wrapper", language: "cpp", question: stdinQ,
@@ -76,7 +84,11 @@ assert.equal(covered.size, HARNESS_REGISTRY.filter((entry) => entry).length);
 for (const testCase of cases) {
   if (testCase.language !== "python") {
     const tool = testCase.language === "cpp" ? "c++" : "rustc";
-    if (spawnSync(tool, ["--version"]).status !== 0) { console.log("SKIP", testCase.template); continue; }
+    if (spawnSync(tool, ["--version"]).status !== 0) {
+      assert.ok(!process.env.REQUIRE_TOOLCHAINS, testCase.template + " skipped without " + tool);
+      console.log("SKIP", testCase.template);
+      continue;
+    }
   }
   const suite = buildProvidedHarness(testCase.question, testCase.language, testCase.good);
   assert.ok(suite, testCase.template + " did not build");

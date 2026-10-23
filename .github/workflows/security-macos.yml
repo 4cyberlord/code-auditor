@@ -121,6 +121,22 @@ jobs:
       - name: Verify container isolation and cleanup on real Docker
         run: bash tests/security/docker-containment.sh
 
+  e2b-harness-certification:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Certification slice inside E2B
+        env:
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+        run: node scripts/certify-e2b.mjs
+
   e2b-live-smoke:
     # Secrets never enter pull-request builds. Run explicitly on the trusted branch.
     if: ${{ github.event_name == 'workflow_dispatch' }}
