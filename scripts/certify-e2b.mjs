@@ -55,8 +55,15 @@ const sandbox = template ? await Sandbox.create(template, opts) : await Sandbox.
 const shellSingle = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
 let failures = 0;
+let available = "";
 try {
+  const probe = await sandbox.commands.run("bash -lc 'command -v c++ && command -v rustc || true'", { timeoutMs: 20_000 });
+  available = String(probe.stdout || "");
+  for (const missing of ["c++", "rustc"]) {
+    if (!available.split("\n").some((line) => line.trim().endsWith("/" + missing))) console.log(`SKIP ${missing} not present in this sandbox`);
+  }
   for (const testCase of cases) {
+    if (testCase.compile && !available.split("\n").some((line) => line.trim().endsWith("/" + testCase.compile[0]))) continue;
     const suite = buildProvidedHarness(testCase.question, testCase.language, testCase.good);
     if (!suite) { console.log(`FAIL ${testCase.name}: suite did not build`); failures += 1; continue; }
     for (const [variant, expectFail] of [["good", false], ["bad", true]]) {
