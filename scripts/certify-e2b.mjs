@@ -66,7 +66,13 @@ try {
       const bin = `/tmp/cert-${testCase.name}-${variant}.bin`;
       const compile = testCase.compile ? `${testCase.compile.join(" ")} ${file} -o ${bin} && ` : "";
       const command = `echo ${b64} | base64 -d > ${file} && ${compile}${testCase.language === "python" ? `python3 ${file}` : bin}`;
-      const result = await sandbox.commands.run(`bash -lc ${shellSingle(command)}`, { timeoutMs: 90_000 });
+      // The SDK throws on a non-zero exit; the bad candidate is expected to.
+      let result;
+      try {
+        result = await sandbox.commands.run(`bash -lc ${shellSingle(command)}`, { timeoutMs: 90_000 });
+      } catch (error) {
+        result = error?.result || { exitCode: 1, stdout: "", stderr: String(error) };
+      }
       const out = `${result.stdout || ""}\n${result.stderr || ""}`;
       const failedExit = result.exitCode !== 0;
       const ok = expectFail ? failedExit && /FAIL provided_/.test(out) : !failedExit && /CA_DONE/.test(out);
