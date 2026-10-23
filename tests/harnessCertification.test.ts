@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import { buildProvidedHarness } from "../src/lib/providedCaseHarness.ts";
+import { buildProvidedHarness, providedCaseEvidence } from "../src/lib/providedCaseHarness.ts";
 import { spliceSuite } from "../src/lib/council.ts";
 import { HARNESS_REGISTRY } from "../src/lib/harnessRegistry.ts";
 
@@ -49,17 +49,23 @@ const cases: Case[] = [
     bad: "impl Solution { pub fn reverse(h: Option<Box<ListNode>>) -> Option<Box<ListNode>> { h } }" },
   { template: "stdin.wrapper", language: "python", question: stdinQ,
     good: "n = int(input())\nprint(n * 2)", bad: "n = int(input())\nprint(n)" },
+  { template: "stdin.wrapper", language: "cpp", question: stdinQ,
+    good: "int main() { long long n; std::cin >> n; std::cout << n * 2; }",
+    bad: "int main() { long long n; std::cin >> n; std::cout << n; }" },
+  { template: "stdin.wrapper", language: "rust", question: stdinQ,
+    good: "fn main() { let mut s = String::new(); std::io::stdin().read_line(&mut s).unwrap(); let n: i64 = s.trim().parse().unwrap(); println!(\"{}\", n * 2); }",
+    bad: "fn main() { let mut s = String::new(); std::io::stdin().read_line(&mut s).unwrap(); let n: i64 = s.trim().parse().unwrap(); println!(\"{}\", n); }" },
 ];
 
-function execute(testCase: Case, program: string) {
+function execute(testCase: Case, program: string, runner: "python" | "cpp" | "rust" = testCase.language) {
   const file = `/tmp/cert-${testCase.template.replace(/\W/g, "-")}-${testCase.language}.${testCase.language === "cpp" ? "cpp" : testCase.language === "rust" ? "rs" : "py"}`;
   writeFileSync(file, program);
-  if (testCase.language === "python") return spawnSync("python3", [file]);
+  if (runner === "python") return spawnSync("python3", [file]);
   const binary = file + ".bin";
-  const argv = testCase.language === "cpp"
-    ? ["-std=c++20", "-O1", file, "-o", binary]
+  const argv = runner === "cpp"
+    ? ["-std=c++23", "-O1", file, "-o", binary]
     : ["-O", file, "-o", binary];
-  const built = spawnSync(testCase.language === "cpp" ? "c++" : "rustc", argv);
+  const built = spawnSync(runner === "cpp" ? "c++" : "rustc", argv);
   assert.equal(built.status, 0, testCase.template + " failed to compile: " + String(built.stderr));
   return spawnSync(binary);
 }
@@ -75,10 +81,19 @@ for (const testCase of cases) {
   const suite = buildProvidedHarness(testCase.question, testCase.language, testCase.good);
   assert.ok(suite, testCase.template + " did not build");
   assert.equal(suite.templateId, testCase.template);
-  const goodOut = String(execute(testCase, spliceSuite(suite, testCase.good) ?? "").stdout);
-  assert.ok((goodOut.match(/status":\s*"passed/g) || []).length >= 1, testCase.template + " rejected a correct answer");
-  const badOut = String(execute(testCase, spliceSuite(suite, testCase.bad) ?? "").stdout);
-  assert.equal((badOut.match(/status":\s*"passed/g) || []).length, 0, testCase.template + " accepted a wrong answer");
+  const required = suite.providedCaseCount;
+  const runner = (suite.runnerLanguage || "python") as "python" | "cpp" | "rust";
+  const goodRun = execute(testCase, spliceSuite(suite, testCase.good) ?? "", runner);
+  assert.equal(goodRun.status, 0, testCase.template + " good candidate did not exit cleanly");
+  const goodEvidence = providedCaseEvidence(String(goodRun.stdout), required);
+  assert.ok(goodEvidence.complete, testCase.template + " good evidence incomplete");
+  assert.equal(goodEvidence.failed, 0, testCase.template + " rejected a correct answer");
+  assert.equal(goodEvidence.passed, required, testCase.template + " skipped fixtures");
+  const badRun = execute(testCase, spliceSuite(suite, testCase.bad) ?? "", runner);
+  assert.notEqual(badRun.status, 0, testCase.template + " bad candidate exited cleanly");
+  const badEvidence = providedCaseEvidence(String(badRun.stdout), required);
+  assert.ok(badEvidence.complete, testCase.template + " bad evidence incomplete");
+  assert.ok(badEvidence.failed >= 1, testCase.template + " accepted a wrong answer");
 }
 
 for (const template of HARNESS_REGISTRY.filter((entry) => entry.certified)) {

@@ -89,6 +89,19 @@ jobs:
           test -d "src-tauri/target/release/bundle/macos/Activity Monitor.app"
           find src-tauri/target/release/bundle/dmg -maxdepth 1 -name '*.dmg' -type f -size +1M | grep -q .
 
+  harness-certification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      # rustc is present but may be unset on the runner image.
+      - name: Ensure native toolchains
+        run: rustup default stable >/dev/null 2>&1 || true
+      - name: Good and bad candidate per certified template
+        run: node tests/harnessCertification.test.ts
+
   docker-runtime-containment:
     runs-on: ubuntu-26.04
     steps:

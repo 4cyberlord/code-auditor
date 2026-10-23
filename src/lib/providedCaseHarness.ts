@@ -353,7 +353,7 @@ function cppDriver(signature: NativeSignature, fixtures: ProvidedFixture[], unor
     "  Solution solution;".replace("Solution solution;", signature.owner === "class" ? "  Solution solution;" : ""),
     ...blocks,
     '  std::cout << "CA_DONE {\\"cases\\":" << (ca_passed + ca_failed) << ",\\"passed\\":" << ca_passed << ",\\"failed\\":" << ca_failed << "}" << std::endl;',
-    "  return 0;",
+    "  return ca_failed ? 1 : 0;",
     "}",
   ].filter((line) => line !== "").join("\n");
 }
@@ -388,10 +388,8 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
     const serial = outTypeOwn?.kind === "node" && outTypeOwn.tree ? "tree" : "list";
     const comparedNode = inPlaceOwn || nodeReturn;
     const comparedIsList = !comparedNode && (inPlaceOwn ? outTypeOwn?.kind : signature.ret.kind) === "list";
-    const fmtExpected = comparedNode ? (serial === "tree" ? "ca_json(&expected_out)" : "ca_json_list(&expected_out)")
-      : comparedIsList ? "ca_json_list(&expected_out)"
-        : signature.retDecl.includes("Option<") ? "ca_opt(&expected_out)" : "ca_plain(&expected_out)";
-    const fmtActual = fmtExpected.replace("expected_out", "actual_out");
+    const fmtExpected = "expected_out.ca_json()";
+    const fmtActual = "actual_out.ca_json()";
     const outcome = inPlaceOwn
       ? [`    ${call};`, `    let actual_out = ca_ser_${serial}(std::mem::take(&mut a0));`, `    let expected_out = ca_ser_${serial}(${expected});`]
       : nodeReturn
@@ -462,21 +460,25 @@ function rustDriver(signature: NativeSignature, fixtures: ProvidedFixture[], uno
     "  while matches!(out.last(), Some(None)) { out.pop(); }",
     "  out",
     "}",
-    "fn ca_json(values: &Vec<Option<i64>>) -> String {",
-    "  let parts: Vec<String> = values.iter().map(|item| match item { Some(v) => v.to_string(), None => \"null\".to_string() }).collect();",
-    "  format!(\"[{}]\", parts.join(\",\"))",
-    "}",
-    "fn ca_plain<T: std::fmt::Debug>(value: &T) -> String { format!(\"{:?}\", value) }",
-    "fn ca_opt<T: std::fmt::Debug>(value: &Option<T>) -> String { match value { Some(inner) => format!(\"{:?}\", inner), None => \"null\".to_string() } }",
-    "fn ca_json_list(values: &Vec<i64>) -> String {",
-    "  let parts: Vec<String> = values.iter().map(|v| v.to_string()).collect();",
-    "  format!(\"[{}]\", parts.join(\",\"))",
-    "}",
+    "trait CaJson { fn ca_json(&self) -> String; }",
+    "impl CaJson for i64 { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for i32 { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for u32 { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for u64 { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for usize { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for f64 { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for f32 { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for bool { fn ca_json(&self) -> String { self.to_string() } }",
+    "impl CaJson for String { fn ca_json(&self) -> String { format!(\"{:?}\", self) } }",
+    "impl CaJson for char { fn ca_json(&self) -> String { format!(\"{:?}\", self.to_string()) } }",
+    "impl<T: CaJson> CaJson for Option<T> { fn ca_json(&self) -> String { match self { Some(inner) => inner.ca_json(), None => \"null\".to_string() } } }",
+    "impl<T: CaJson> CaJson for Vec<T> { fn ca_json(&self) -> String { let parts: Vec<String> = self.iter().map(|item| item.ca_json()).collect(); format!(\"[{}]\", parts.join(\",\")) } }",
     "fn main() {",
     "  let mut ca_passed = 0usize; let mut ca_failed = 0usize;",
     signature.owner === "class" && signature.receiver ? "  let solution = Solution;" : "",
     ...blocks,
     "  println!(\"CA_DONE {{\\\"cases\\\":{},\\\"passed\\\":{},\\\"failed\\\":{}}}\", ca_passed + ca_failed, ca_passed, ca_failed);",
+    "  if ca_failed > 0 { std::process::exit(1) }",
     "}",
   ].filter((line) => line !== "").join("\n");
 }
@@ -958,7 +960,8 @@ function pythonDriver(fixtures: ProvidedFixture[], mode: "callable" | "stdin", l
     "        ext = {'python': '.py', 'cpp': '.cpp', 'rust': '.rs'}[CA_LANGUAGE]",
     "        src = os.path.join(directory, 'solution' + ext)",
     "        binary = os.path.join(directory, 'solution')",
-    "        with open(src, 'w', encoding='utf-8') as file: file.write(CA_SOURCE)",
+    "        prelude = '#include <iostream>\\n#include <vector>\\n#include <string>\\n#include <algorithm>\\n#include <sstream>\\n' if CA_LANGUAGE == 'cpp' else ''",
+    "        with open(src, 'w', encoding='utf-8') as file: file.write(prelude + CA_SOURCE)",
     "        command = {'python': [sys.executable, src], 'cpp': [binary], 'rust': [binary]}[CA_LANGUAGE]",
     "        if CA_LANGUAGE != 'python':",
     "            compiler = ['g++', '-std=c++23', '-O1', '-o', binary, src] if CA_LANGUAGE == 'cpp' else ['rustc', '--edition=2021', '-O', src, '-o', binary]",
