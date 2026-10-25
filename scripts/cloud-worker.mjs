@@ -705,6 +705,9 @@ function retryDelayMs(status, text, attempt, retryAfter) {
   // revive that closed request; retrying the same job-bound request can.  Keep
   // this short and bounded so one slow route does not hold the Council hostage.
   if (status === 524) return Math.min(1_500 * (attempt + 1), 6_000);
+  // Gateway maintenance and edge errors are transient; a short bounded retry
+  // beats failing every seat during a provider upgrade window.
+  if (status === 502 || status === 503 || status === 504) return Math.min(2_000 * (attempt + 1), 8_000);
   if (status !== 429) return 0;
   const seconds = retryAfter == null ? NaN : Number(retryAfter);
   if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds * 1000, 90_000);
