@@ -76,7 +76,8 @@ try {
     for (const [variant, expectFail] of [["good", false], ["bad", true]]) {
       const program = spliceSuite(suite, testCase[variant]);
       const b64 = Buffer.from(program, "utf8").toString("base64");
-      const file = `/tmp/cert-${testCase.template}-${testCase.language}-${variant}.${ext}`;
+      const stem = `${testCase.template}-${testCase.language}-${variant}`.replace(/[^a-z0-9]+/gi, "-");
+      const file = `/tmp/cert-${stem}.${ext}`;
       const bin = file + ".bin";
       const build = compile ? `${compile} ${file} -o ${bin} && ` : "";
       const command = `export PATH="$HOME/.cargo/bin:$PATH"; echo ${b64} | base64 -d > ${file} && ${build}${runner === "python" ? `python3 ${file}` : bin}`;
