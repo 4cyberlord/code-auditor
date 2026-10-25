@@ -59,10 +59,9 @@ if (status !== "completed" || !answer.trim()) {
   // generic "no solver produced an answer" line is the consequence, not a cause.
   const outage = /503|502|504|service_upgrading|insufficient_credits|429/;
   const sawOutage = events.some((event) => outage.test(String(event.message)));
-  const onlyConsequences = events.every((event) =>
-    event.level === "info" || outage.test(String(event.message)) ||
-    /No Council solver produced an answer/i.test(String(event.message)));
-  if (sawOutage && onlyConsequences) {
+  const otherErrors = events.filter((event) => event.level === "error" &&
+    !/No Council solver produced an answer/i.test(String(event.message)));
+  if (sawOutage && otherErrors.length === 0) {
     console.log("SKIP: provider unavailable, pipeline itself did not fail");
     process.exit(0);
   }
