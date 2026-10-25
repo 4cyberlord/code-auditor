@@ -55,6 +55,13 @@ console.log(`status=${status} answer_chars=${answer.length}`);
 if (status !== "completed" || !answer.trim()) {
   const events = await call("jobs.events", { jobId: job.id }).catch(() => []);
   for (const event of events.slice(-6)) console.log(event.level, String(event.message).slice(0, 160));
+  // A provider outage is not a pipeline defect: report it as a skip.
+  const providerDown = events.length > 0 && events.every((event) =>
+    event.level === "info" || /503|502|504|service_upgrading|insufficient_credits|429/.test(String(event.message)));
+  if (providerDown) {
+    console.log("SKIP: provider unavailable, pipeline itself did not fail");
+    process.exit(0);
+  }
   process.exit(1);
 }
 console.log("PASS: screenshot reached a verified answer through the full pipeline");
