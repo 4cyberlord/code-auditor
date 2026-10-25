@@ -66,16 +66,20 @@ try {
     }
   }
   for (const testCase of cases) {
-    if (testCase.compile && !available.split("\n").some((line) => line.trim().endsWith("/" + testCase.compile[0]))) continue;
+    if (testCase.language !== "python" && !available.split("\n").some((line) => line.trim().endsWith("/" + (testCase.language === "cpp" ? "c++" : "rustc")))) continue;
     const suite = buildProvidedHarness(testCase.question, testCase.language, testCase.good);
-    if (!suite) { console.log(`FAIL ${testCase.name}: suite did not build`); failures += 1; continue; }
+    const label = `${testCase.template}/${testCase.language}`;
+    if (!suite) { console.log(`FAIL ${label}: suite did not build`); failures += 1; continue; }
+    const runner = suite.runnerLanguage || "python";
+    const ext = runner === "cpp" ? "cpp" : runner === "rust" ? "rs" : "py";
+    const compile = runner === "cpp" ? "c++ -std=c++23 -O1" : runner === "rust" ? "rustc -O" : null;
     for (const [variant, expectFail] of [["good", false], ["bad", true]]) {
       const program = spliceSuite(suite, testCase[variant]);
       const b64 = Buffer.from(program, "utf8").toString("base64");
-      const file = `/tmp/cert-${testCase.name}-${variant}.${testCase.ext}`;
-      const bin = `/tmp/cert-${testCase.name}-${variant}.bin`;
-      const compile = testCase.compile ? `${testCase.compile.join(" ")} ${file} -o ${bin} && ` : "";
-      const command = `export PATH="$HOME/.cargo/bin:$PATH"; echo ${b64} | base64 -d > ${file} && ${compile}${testCase.language === "python" ? `python3 ${file}` : bin}`;
+      const file = `/tmp/cert-${testCase.template}-${testCase.language}-${variant}.${ext}`;
+      const bin = file + ".bin";
+      const build = compile ? `${compile} ${file} -o ${bin} && ` : "";
+      const command = `export PATH="$HOME/.cargo/bin:$PATH"; echo ${b64} | base64 -d > ${file} && ${build}${runner === "python" ? `python3 ${file}` : bin}`;
       // The SDK throws on a non-zero exit; the bad candidate is expected to.
       let result;
       try {
@@ -89,7 +93,7 @@ try {
       const ok = expectFail
         ? failedExit && evidence.complete && evidence.failed >= 1
         : !failedExit && evidence.complete && evidence.failed === 0 && evidence.passed === suite.providedCaseCount;
-      console.log(`${ok ? "PASS" : "FAIL"} ${testCase.name} ${variant}`);
+      console.log(`${ok ? "PASS" : "FAIL"} ${label} ${variant}`);
       if (!ok) { console.log(out.slice(0, 500)); failures += 1; }
     }
   }
