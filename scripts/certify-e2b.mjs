@@ -30,23 +30,13 @@ if (!process.env.E2B_API_KEY?.trim()) {
 const { buildProvidedHarness, providedCaseEvidence } = await import("../src/lib/providedCaseHarness.ts");
 const { spliceSuite } = await import("../src/lib/council.ts");
 
-const addQ = ["Add", "Example 1:", "Input: a = 2, b = 3", "Output: 5"].join("\n");
-const listQ = ["Reverse", "Example 1:", "Input: head = [1,2]", "Output: [2,1]"].join("\n");
-
-const cases = [
-  { name: "python-scalar", language: "python", question: addQ,
-    good: "def add(a, b):\n    return a + b", bad: "def add(a, b):\n    return a - b", ext: "py" },
-  { name: "cpp-scalar", language: "cpp", question: addQ,
-    good: "int add(int a, int b) { return a + b; }", bad: "int add(int a, int b) { return a - b; }",
-    ext: "cpp", compile: ["c++", "-std=c++23", "-O1"] },
-  { name: "rust-scalar", language: "rust", question: addQ,
-    good: "pub fn add(a: i64, b: i64) -> i64 { a + b }", bad: "pub fn add(a: i64, b: i64) -> i64 { a - b }",
-    ext: "rs", compile: ["rustc", "-O"] },
-  { name: "python-node", language: "python", question: listQ,
-    good: "class ListNode:\n    def __init__(self, val=0, next=None):\n        self.val=val; self.next=next\nclass Solution:\n    def reverse(self, head):\n        prev=None\n        while head:\n            nxt=head.next; head.next=prev; prev=head; head=nxt\n        return prev",
-    bad: "class ListNode:\n    def __init__(self, val=0, next=None):\n        self.val=val; self.next=next\nclass Solution:\n    def reverse(self, head):\n        return head",
-    ext: "py" },
-];
+const { CERT_CASES } = await import("../tests/harnessCertificationCases.ts");
+const cases = CERT_CASES.map((testCase) => ({
+  ...testCase,
+  ext: testCase.ext || (testCase.language === "cpp" ? "cpp" : testCase.language === "rust" ? "rs" : "py"),
+  compile: testCase.compile || (testCase.language === "cpp" ? ["c++", "-std=c++23", "-O1"]
+    : testCase.language === "rust" ? ["rustc", "-O"] : null),
+}));
 
 const template = process.env.CODE_AUDITOR_E2B_TEMPLATE?.trim();
 const { Sandbox } = await import("@e2b/code-interpreter");
@@ -60,8 +50,8 @@ try {
   const probe = await sandbox.commands.run("bash -lc 'command -v c++ || true; command -v rustc || true'", { timeoutMs: 20_000 });
   available = String(probe.stdout || "");
   const has = (tool) => available.split("\n").some((line) => line.trim().endsWith("/" + tool));
-  if (!has("rustc")) {
-    console.log("rustc missing — installing a minimal toolchain in the sandbox");
+  if (!has("rustc") && !template) {
+    console.log("rustc missing — installing a minimal toolchain in the sandbox (no pinned template set)");
     await sandbox.commands.run(
       "bash -lc 'curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/tmp/rustup.log 2>&1 || true'",
       { timeoutMs: 180_000 }
