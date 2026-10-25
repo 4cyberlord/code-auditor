@@ -40,6 +40,7 @@ for (const testCase of cases) {
   const suite = buildProvidedHarness(testCase.question, testCase.language, testCase.good);
   assert.ok(suite, testCase.template + " did not build");
   assert.equal(suite.templateId, testCase.template);
+  if (testCase.minCases) assert.ok(suite.providedCaseCount >= testCase.minCases, testCase.template + " lost fixtures");
   const required = suite.providedCaseCount;
   const runner = (suite.runnerLanguage || "python") as "python" | "cpp" | "rust";
   const goodRun = execute(testCase, spliceSuite(suite, testCase.good) ?? "", runner);

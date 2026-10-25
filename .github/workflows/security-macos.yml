@@ -137,7 +137,23 @@ jobs:
       - name: Certification slice inside E2B
         env:
           E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+          CODE_AUDITOR_E2B_TEMPLATE: ${{ vars.CODE_AUDITOR_E2B_TEMPLATE }}
+          REQUIRE_PINNED_E2B: ${{ vars.CODE_AUDITOR_E2B_TEMPLATE != '' && '1' || '0' }}
         run: node scripts/certify-e2b.mjs
+
+  e2e-acceptance:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Screenshot to verified answer
+        env:
+          COUNCIL_E2E_TOKEN: ${{ secrets.COUNCIL_E2E_TOKEN }}
+        run: node scripts/e2e-acceptance.mjs
 
   e2b-live-smoke:
     # Secrets never enter pull-request builds. Run explicitly on the trusted branch.

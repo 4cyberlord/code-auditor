@@ -59,6 +59,10 @@ try {
     const again = await sandbox.commands.run("bash -lc 'command -v rustc || true'", { timeoutMs: 15_000 });
     if (String(again.stdout || "").trim()) available += "\n" + String(again.stdout).trim();
   }
+  if (process.env.REQUIRE_PINNED_E2B === "1" && !template) {
+    console.log("MISSING pinned E2B template (CODE_AUDITOR_E2B_TEMPLATE)");
+    failures += 1;
+  }
   for (const tool of ["c++", "rustc"]) {
     if (!has(tool)) {
       console.log(`MISSING ${tool} in the sandbox`);

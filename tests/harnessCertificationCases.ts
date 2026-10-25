@@ -7,6 +7,7 @@ export interface CertCase {
   bad: string;
   ext?: string;
   compile?: string[];
+  minCases?: number;
 }
 
 const addQ = ["Add", "Example 1:", "Input: a = 2, b = 3", "Output: 5"].join("\n");
@@ -46,6 +47,31 @@ export const CERT_CASES: CertCase[] = [
     question: ["Pop", "Example 1:", "Input: keep = [9], victim = [1,2]", "Output: [1]"].join("\n"),
     good: "impl Solution { pub fn pop(keep: Option<Box<ListNode>>, victim: &mut Option<Box<ListNode>>) { let _ = keep; let mut cur = victim; while let Some(node) = cur { if node.next.as_ref().map_or(true, |n| n.next.is_none()) { node.next = None; return; } cur = &mut node.next; } } }",
     bad: "impl Solution { pub fn pop(keep: Option<Box<ListNode>>, victim: &mut Option<Box<ListNode>>) { let _ = (keep, victim); } }" },
+  // Multi-case coverage: nested arrays, tree gaps, optionals, mutation, unordered.
+  { template: "native.callable-vector", language: "cpp", minCases: 2,
+    question: ["Sum Grid", "Example 1:", "Input: grid = [[1,2],[3,4]]", "Output: 10",
+      "Example 2:", "Input: grid = [[5],[6,7]]", "Output: 18"].join("\n"),
+    good: "class Solution { public: int total(vector<vector<int>>& g) { int s=0; for (auto& r : g) for (int v : r) s += v; return s; } };",
+    bad: "class Solution { public: int total(vector<vector<int>>& g) { return g.size(); } };" },
+  { template: "callable-node", language: "rust", minCases: 2,
+    question: ["Depth", "Example 1:", "Input: root = [1,null,2,3]", "Output: 3",
+      "Example 2:", "Input: root = [1,null,2]", "Output: 2"].join("\n"),
+    good: "impl Solution { pub fn depth(root: Option<Box<TreeNode>>) -> i64 { match root { None => 0, Some(n) => 1 + std::cmp::max(Self::depth(n.left), Self::depth(n.right)) } } }",
+    bad: "impl Solution { pub fn depth(root: Option<Box<TreeNode>>) -> i64 { if root.is_some() { 1 } else { 0 } } }" },
+  { template: "rust.callable-scalar", language: "rust", minCases: 2,
+    question: ["Maybe", "Example 1:", "Input: n = 1", "Output: null", "Example 2:", "Input: n = 2", "Output: 4"].join("\n"),
+    good: "pub fn maybe(n: i64) -> Option<i64> { if n == 1 { None } else { Some(n * 2) } }",
+    bad: "pub fn maybe(n: i64) -> Option<i64> { Some(n) }" },
+  { template: "callable-node", language: "rust", minCases: 2,
+    question: ["Pop", "Example 1:", "Input: keep = [9], victim = [1,2]", "Output: [1]",
+      "Example 2:", "Input: keep = [7], victim = [5,6,7]", "Output: [5,6]"].join("\n"),
+    good: "impl Solution { pub fn pop(keep: Option<Box<ListNode>>, victim: &mut Option<Box<ListNode>>) { let _ = keep; let mut cur = victim; while let Some(node) = cur { if node.next.as_ref().map_or(true, |n| n.next.is_none()) { node.next = None; return; } cur = &mut node.next; } } }",
+    bad: "impl Solution { pub fn pop(keep: Option<Box<ListNode>>, victim: &mut Option<Box<ListNode>>) { let _ = (keep, victim); } }" },
+  { template: "python.callable-vector", language: "python", minCases: 2,
+    question: ["Pairs", "Example 1:", "Input: nums = [1,2,3]", "Output: [[1,2],[2,3]]",
+      "Example 2:", "Input: nums = [4,5]", "Output: [[4,5]]", "You may return the answer in any order."].join("\n"),
+    good: "def pairs(nums):\n    return [[nums[i], nums[i+1]] for i in range(len(nums)-1)][::-1]",
+    bad: "def pairs(nums):\n    return [[nums[i], nums[i+1]] for i in range(len(nums)-2)]" },
   { template: "stdin.wrapper", language: "python", question: stdinQ,
     good: "n = int(input())\nprint(n * 2)", bad: "n = int(input())\nprint(n)" },
   { template: "stdin.wrapper", language: "cpp", question: stdinQ,

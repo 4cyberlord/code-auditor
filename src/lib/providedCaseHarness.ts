@@ -689,11 +689,21 @@ export function extractProvidedFixtures(question: string): ProvidedFixture[] {
         const parsed = callableInputs(rawInput);
         let expected: unknown;
         let expectedValid = false;
-        try { expected = literal(rawOutput); expectedValid = true; } catch { /* stdin text is still usable */ }
+        // A trailing prose line ("You may return ... in any order") must not
+        // poison the value; drop trailing lines until the literal parses.
+        let valueText = rawOutput;
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          try { expected = literal(valueText); expectedValid = true; break; }
+          catch {
+            const cut = valueText.lastIndexOf("\n");
+            if (cut < 0) break;
+            valueText = valueText.slice(0, cut).trim();
+          }
+        }
         pairs.push({
           id: "provided_" + (pairs.length + 1),
           input: rawInput,
-          output: rawOutput,
+          output: expectedValid ? valueText : rawOutput,
           ...(parsed && expectedValid ? { args: parsed.args, kwargs: parsed.kwargs, expected } : {}),
         });
       }
@@ -751,7 +761,7 @@ export function extractProvidedFixtures(question: string): ProvidedFixture[] {
   }).map((pair, index) => ({ ...pair, id: "provided_" + (index + 1) }));
 }
 
-function callableName(code: string): string | null {
+export function callableName(code: string): string | null {
   if (/^\s*from\s+__future__\s+import\s+/m.test(code)) return null;
   const lines = code.split(/\r?\n/);
   const classIndex = lines.findIndex(line => /^\s*class\s+Solution\s*(?:\([^)]*\))?\s*:\s*(?:#.*)?$/.test(line));
@@ -1107,8 +1117,9 @@ export function pythonHarnessJsonSystemPrompt(): string {
 
 export function buildProvidedHarness(question: string, language: string, candidateCode: string): ProvidedSuite | null {
   if (!["python", "cpp", "rust"].includes(language)) return null;
-  // Multiple acceptable answers require a property comparator, not example equality.
-  if (/\b(?:any order|any valid|multiple valid|in any order|any one|arbitrary order|order does not matter|modify in.place|in.place modification|do not return anything)\b/i.test(question)) return null;
+  // Ordering-only contracts are comparable once normalized; genuinely
+  // multiple-valid contracts still fall back.
+  if (!harnessOrderMode(question).comparable) return null;
   // Judge UI serializes trees/linked lists as arrays; a raw Python method
   // expects real nodes, not that displayed serialization.
   const fixtures = extractProvidedFixtures(question);
