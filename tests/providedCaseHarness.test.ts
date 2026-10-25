@@ -440,3 +440,11 @@ if (spawnSync("rustc", ["--version"]).status === 0 && optSuite) {
   assert.equal(parsed.actual, null);
 } else { console.log("SKIP Option evidence"); }
 console.log("PASS: references are checked on every fixture and Option evidence is JSON");
+
+// An in-place contract with two node arguments and no unique target refuses.
+assert.equal(buildProvidedHarness(listQ, "cpp",
+  "class Solution { public: void f(ListNode* a, ListNode* b) { a = b; } };"), null);
+assert.equal(buildProvidedHarness(listQ, "python",
+  "class ListNode:\n    def __init__(self, val=0, next=None):\n        self.val=val; self.next=next\nclass Solution:\n    def f(self, a, b) -> None:\n        return"),
+  null);
+console.log("PASS: ambiguous mutation targets refuse instead of guessing");

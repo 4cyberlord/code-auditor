@@ -27,7 +27,7 @@ if (!process.env.E2B_API_KEY?.trim()) {
   process.exit(2);
 }
 
-const { buildProvidedHarness } = await import("../src/lib/providedCaseHarness.ts");
+const { buildProvidedHarness, providedCaseEvidence } = await import("../src/lib/providedCaseHarness.ts");
 const { spliceSuite } = await import("../src/lib/council.ts");
 
 const addQ = ["Add", "Example 1:", "Input: a = 2, b = 3", "Output: 5"].join("\n");
@@ -57,10 +57,23 @@ const shellSingle = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 let failures = 0;
 let available = "";
 try {
-  const probe = await sandbox.commands.run("bash -lc 'command -v c++ && command -v rustc || true'", { timeoutMs: 20_000 });
+  const probe = await sandbox.commands.run("bash -lc 'command -v c++ || true; command -v rustc || true'", { timeoutMs: 20_000 });
   available = String(probe.stdout || "");
-  for (const missing of ["c++", "rustc"]) {
-    if (!available.split("\n").some((line) => line.trim().endsWith("/" + missing))) console.log(`SKIP ${missing} not present in this sandbox`);
+  const has = (tool) => available.split("\n").some((line) => line.trim().endsWith("/" + tool));
+  if (!has("rustc")) {
+    console.log("rustc missing — installing a minimal toolchain in the sandbox");
+    await sandbox.commands.run(
+      "bash -lc 'curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/tmp/rustup.log 2>&1 || true'",
+      { timeoutMs: 180_000 }
+    ).catch(() => {});
+    const again = await sandbox.commands.run("bash -lc 'command -v rustc || true'", { timeoutMs: 15_000 });
+    if (String(again.stdout || "").trim()) available += "\n" + String(again.stdout).trim();
+  }
+  for (const tool of ["c++", "rustc"]) {
+    if (!has(tool)) {
+      console.log(`MISSING ${tool} in the sandbox`);
+      if (process.env.ALLOW_PARTIAL_E2B !== "1") failures += 1;
+    }
   }
   for (const testCase of cases) {
     if (testCase.compile && !available.split("\n").some((line) => line.trim().endsWith("/" + testCase.compile[0]))) continue;
@@ -72,7 +85,7 @@ try {
       const file = `/tmp/cert-${testCase.name}-${variant}.${testCase.ext}`;
       const bin = `/tmp/cert-${testCase.name}-${variant}.bin`;
       const compile = testCase.compile ? `${testCase.compile.join(" ")} ${file} -o ${bin} && ` : "";
-      const command = `echo ${b64} | base64 -d > ${file} && ${compile}${testCase.language === "python" ? `python3 ${file}` : bin}`;
+      const command = `export PATH="$HOME/.cargo/bin:$PATH"; echo ${b64} | base64 -d > ${file} && ${compile}${testCase.language === "python" ? `python3 ${file}` : bin}`;
       // The SDK throws on a non-zero exit; the bad candidate is expected to.
       let result;
       try {
@@ -82,7 +95,10 @@ try {
       }
       const out = `${result.stdout || ""}\n${result.stderr || ""}`;
       const failedExit = result.exitCode !== 0;
-      const ok = expectFail ? failedExit && /FAIL provided_/.test(out) : !failedExit && /CA_DONE/.test(out);
+      const evidence = providedCaseEvidence(out, suite.providedCaseCount);
+      const ok = expectFail
+        ? failedExit && evidence.complete && evidence.failed >= 1
+        : !failedExit && evidence.complete && evidence.failed === 0 && evidence.passed === suite.providedCaseCount;
       console.log(`${ok ? "PASS" : "FAIL"} ${testCase.name} ${variant}`);
       if (!ok) { console.log(out.slice(0, 500)); failures += 1; }
     }

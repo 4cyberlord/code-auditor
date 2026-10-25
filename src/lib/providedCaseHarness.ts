@@ -43,6 +43,7 @@ interface PythonNodeSpec {
   order: string[];
   returnsNode: boolean;
   inPlace: boolean;
+  ambiguous: boolean;
   mutation: number;
   fields: NodeFields;
 }
@@ -66,13 +67,18 @@ export function pythonNodeSpec(question: string, code: string, name: string): Py
       else if (/^(?:head|node|l1|l2|list1|list2)$/.test(bare)) specs.push({ index, tree: false });
     }
   });
+  const inPlaceVoid = /^\s*(?:None|NoneType)\b/.test(definition[2] || "");
+  if (!specs.length && inPlaceVoid && params.length > 1) {
+    params.forEach((_, index) => specs.push({ index, tree: treeQuestion }));
+  }
   if (!specs.length) return null;
   const tree = specs.some((spec) => spec.tree);
   return {
     params: specs,
     order: params.map((param) => param.split(":")[0].trim()),
     returnsNode: /ListNode|TreeNode/.test(definition[2] || ""),
-    inPlace: /^\s*(?:None|NoneType)\b/.test(definition[2] || ""),
+    inPlace: inPlaceVoid,
+    ambiguous: inPlaceVoid && specs.length > 1,
     mutation: specs[0]?.index ?? 0,
     fields: nodeFields(code, tree, tree ? "TreeNode" : "ListNode"),
   };
@@ -545,8 +551,14 @@ function contractFor(
       nodeKind: false, nodeDeclared: declared,
     } as never);
   }
-  const mutating = signature.ret.kind === "void"
-    ? signature.args.find((argument) => /&mut|\*/.test(argument.decl))?.name ?? null : null;
+  let mutating: string | null = null;
+  if (signature.ret.kind === "void") {
+    const nodeArgs = signature.args.filter((argument) => argument.type.kind === "node");
+    const explicit = nodeArgs.filter((argument) => /&mut/.test(argument.decl) || /\*/.test(argument.decl));
+    if (explicit.length === 1) mutating = explicit[0].name;
+    else if (nodeArgs.length === 1) mutating = nodeArgs[0].name;
+    else return { ok: false, reason: "ambiguous mutation target" } as never;
+  }
   return buildContract({
     question, language, code, fixtureCount: fixtures.length,
     fixturesHaveExpected: fixtures.every((fixture) => Object.hasOwn(fixture, "expected") || Object.hasOwn(fixture, "output")),
@@ -1105,6 +1117,7 @@ export function buildProvidedHarness(question: string, language: string, candida
   const name = language === "python" ? callableName(code) : null;
   const registryEnabled = (globalThis as { __COUNCIL_HARNESS_REGISTRY__?: boolean }).__COUNCIL_HARNESS_REGISTRY__ !== false;
   const nodeSpec = registryEnabled && language === "python" && name ? pythonNodeSpec(question, code, name) : null;
+  if (nodeSpec?.ambiguous) return null;
   const signature = registryEnabled && language === "cpp" ? cppSignature(code)
     : registryEnabled && language === "rust" ? rustSignature(code) : null;
   const signatureText = signature
