@@ -329,6 +329,7 @@ function CodingSettingsCard() {
   const keys = useStore((s) => s.keys);
   const gatewayKey = useStore((s) => s.gatewayKey);
   const [trustyKey, setTrustyKey] = useState("");
+  const [trustyNote, setTrustyNote] = useState<string | null>(null);
   const patch = useStore((s) => s.patchSettings);
   const [note, setNote] = useState<string | null>(null);
 
@@ -1522,6 +1523,7 @@ function CouncilCard() {
   const keys = useStore((s) => s.keys);
   const refreshKeys = useStore((s) => s.refreshKeys);
   const [trustyKey, setTrustyKey] = useState("");
+  const [trustyNote, setTrustyNote] = useState<string | null>(null);
   const patch = useStore((s) => s.patchSettings);
   const probes = useStore((st) => st.settings.probes);
   const probing = useStore((st) => st.probing);
@@ -1666,13 +1668,17 @@ function CouncilCard() {
           onChange={(event) => setTrustyKey(event.target.value)} />
       </div>
       <div className="row">
-        <button onClick={async () => {
+        <button type="button" onClick={async () => {
           if (!trustyKey.trim()) return;
-          await bridge.setApiKey("trusty", trustyKey.trim());
-          setTrustyKey("");
-          await refreshKeys();
+          try {
+            await bridge.setApiKey("trusty", trustyKey.trim());
+            setTrustyKey("");
+            await refreshKeys();
+          } catch (error) {
+            setTrustyNote(String(error));
+          }
         }}>Save Trusty key</button>
-        <span className="hint">{(keys as Record<string, boolean>).trusty ? "key saved" : "no key"}</span>
+        <span className="hint">{trustyNote || ((keys as Record<string, boolean>).trusty ? "key saved" : "no key")}</span>
       </div>
       <details className="settings-inline-help"><summary>How Council mode works</summary><p>The council re-solves the problem, tests each code candidate, reviews the results, and produces a final recommendation. Failed tests cannot win. Expect about 36 extra requests per run, so low gateway limits make council runs slower.</p></details>
 
@@ -2150,6 +2156,7 @@ export default function SettingsDialog() {
   const gatewayId = useStore((s) => s.settings.gatewayId);
   const gatewayKey = useStore((s) => s.gatewayKey);
   const [trustyKey, setTrustyKey] = useState("");
+  const [trustyNote, setTrustyNote] = useState<string | null>(null);
   const councilEnabled = useStore((s) => s.settings.councilEnabled);
   const councilModelCount = useStore((s) => s.settings.councilModels.length);
   const theme = useStore((s) => s.settings.theme);
