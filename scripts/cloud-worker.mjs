@@ -653,6 +653,8 @@ async function generateTrusty(args, models) {
 
 function gatewayCredential(settings) {
   const id = gatewayId(settings);
+  // Trusty may share the Experiential key instead of holding its own.
+  if (id === "trusty") return secret("trusty") || secret("experientiallabs");
   return secret(id) || secret(`${id.toUpperCase()}_API_KEY`) ||
     (id === "tokenrouter" ? secret("TOKENROUTER_API_KEY") : "");
 }

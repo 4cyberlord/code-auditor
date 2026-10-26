@@ -5228,7 +5228,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
       try {
         const trustyGateway = settings.trustyMode ? "trusty" : isGatewayId(settings.gatewayId) ? settings.gatewayId : "cleanapis";
         const hasTrustyKey = trustyGateway === "trusty"
-          ? await bridge.hasApiKey("trusty")
+          ? (await bridge.hasApiKey("trusty")) || (await bridge.hasApiKey("experientiallabs"))
           : trustyGateway === settings.gatewayId && settings.gatewayId !== "cleanapis"
             ? s0.gatewayKey : await bridge.hasApiKey(trustyGateway);
         if (!hasTrustyKey) {

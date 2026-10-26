@@ -746,7 +746,10 @@ async fn run_once_responses(req: &RunRequest) -> Result<String, String> {
         .filter(|b| !b.trim().is_empty())
         .unwrap_or_else(|| "https://api.tokenrouter.com/v1".into());
     let url = format!("{}/responses", base.trim_end_matches('/'));
-    let key = secrets::read_api_key(&req.provider)?;
+    let key = secrets::read_api_key(&req.provider).or_else(|error| {
+        // Trusty may share the Experiential key instead of holding its own.
+        if req.provider == "trusty" { secrets::read_api_key("experientiallabs") } else { Err(error) }
+    })?;
     let body = build_responses_body(req);
     let client = http_client()?;
     let build = || {
@@ -942,7 +945,10 @@ async fn execute_responses(
         .filter(|b| !b.trim().is_empty())
         .unwrap_or_else(|| "https://api.tokenrouter.com/v1".into());
     let url = format!("{}/responses", base.trim_end_matches('/'));
-    let key = secrets::read_api_key(&req.provider)?;
+    let key = secrets::read_api_key(&req.provider).or_else(|error| {
+        // Trusty may share the Experiential key instead of holding its own.
+        if req.provider == "trusty" { secrets::read_api_key("experientiallabs") } else { Err(error) }
+    })?;
     let body = build_responses_body(req);
 
     let client = http_client()?;
@@ -1873,7 +1879,10 @@ fn build_request(
     req: &RunRequest,
     stream: bool,
 ) -> Result<(String, Vec<(String, String)>, Value), String> {
-    let key = secrets::read_api_key(&req.provider)?;
+    let key = secrets::read_api_key(&req.provider).or_else(|error| {
+        // Trusty may share the Experiential key instead of holding its own.
+        if req.provider == "trusty" { secrets::read_api_key("experientiallabs") } else { Err(error) }
+    })?;
     match req.provider.as_str() {
         "openai" | "moonshot" | "tokenrouter" | "wiro" | "cleanapis" | "experientiallabs" => {
             let base = req
