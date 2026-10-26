@@ -2080,6 +2080,7 @@ fn show_overlay(window: &Window, visible: bool) -> Result<(), String> {
             );
             ns_window.orderFrontRegardless();
             ns_window.displayIfNeeded();
+            trace(&format!("overlay level={}", ns_window.level()));
         }
     }
 
