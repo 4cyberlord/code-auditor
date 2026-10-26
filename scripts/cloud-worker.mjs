@@ -49,6 +49,7 @@ import { pathToFileURL } from "node:url";
 import { gatewayPreset } from "../src/lib/models.ts";
 import { recipePrompt } from "../src/lib/apiRecipes.ts";
 import { apiLinks } from "./lib/apiIndex.mjs";
+import { THEORETICAL_COMPLEXITY_RECORDS } from "../src/lib/theoreticalComplexityKnowledge.ts";
 import { SELECTABLE_PRIMARY_MODEL_IDS, isPrimaryModel, isSelectablePrimaryModel, listedPrimaryRoute, preferredPrimaryRoute, primaryCatalog, primaryModelId } from "../src/lib/primaryModels.ts";
 import { coordinateAndVerify } from "../src/lib/visionCoordinator.ts";
 import {
@@ -605,6 +606,7 @@ function gatewayBaseUrl(settings) {
 
 function gatewayId(settings) {
   const baseUrl = String(settings?.gatewayBaseUrl || "");
+  if (settings?.gatewayId === "trusty") return "trusty";
   if (settings?.gatewayId === "cleanapis" || baseUrl.includes("cleanapis.com")) return "cleanapis";
   if (settings?.gatewayId === "experientiallabs" || baseUrl.includes("experientiallabs.ai")) return "experientiallabs";
   if (settings?.gatewayId === "wiro" || baseUrl.includes("llm.wiro.ai")) return "wiro";
@@ -619,11 +621,21 @@ function usesDirectGateway(settings) {
 
 /** Trusty rides the selected gateway, falling back to Clean API on TokenRouter. */
 function trustyGateway(settings) {
+  // Trusty has its own route and key, independent of the active gateway.
+  if (settings.trustyMode && settings.trustyMode !== "off") return "trusty";
   const id = gatewayId(settings);
   return id === "tokenrouter" ? "cleanapis" : id;
 }
 
-function trustyModelsFor(gateway) {
+/** Compact complexity brief for the Trusty prompt; the full library is too big. */
+function complexityBrief() {
+  return THEORETICAL_COMPLEXITY_RECORDS.slice(0, 6)
+    .map((record) => `- ${record.title}: ${record.guidance?.[0] || record.summary}`)
+    .join("\n");
+}
+
+function trustyModelsFor(gateway, settings) {
+  if (gateway === "trusty") return [settings?.trustyModel || "gpt-6.1-sol"];
   const preset = gatewayPreset(gateway);
   const primary = preset.trustyModel ?? preferredPrimaryRoute("claude-fable-5.1", gateway);
   return [...new Set([primary, preset.trustyFallbackModel].filter(Boolean))];
@@ -2748,10 +2760,10 @@ export async function runCouncilJob(job) {
     `Prepared ${images.length} direct image link${images.length === 1 ? "" : "s"} for the solving lanes.`,
     { count: images.length, positions: images.map((image) => image.position) });
 
-  const startTrustyBeforeSelection = settings.codingTrustyEnabled !== false &&
+  const startTrustyBeforeSelection = settings.trustyMode !== "off" &&
     settings.source === "overlay" && settings.overlayMode === "code";
   const trustyGatewayForRun = trustyGateway(settings);
-  const trustyModelsForRun = trustyModelsFor(trustyGatewayForRun);
+  const trustyModelsForRun = trustyModelsFor(trustyGatewayForRun, settings);
   const trustyModelForRun = trustyModelsForRun[0];
   let earlyTrustyDraftPromise = null;
   if (startTrustyBeforeSelection) {
@@ -2765,7 +2777,7 @@ export async function runCouncilJob(job) {
       await addEvent(job.id, "info", "coding_trusty_started",
         `Coding Trusty (Claude Fable 5.1 · ${trustyGatewayForRun}) is starting from the uploaded screenshots before Council model selection.`,
         { model: trustyModelForRun, language: trustyLanguage, screenshotCount: images.length });
-      const trustyBaseUrl = gatewayBaseUrl({ gatewayId: trustyGatewayForRun });
+      const trustyBaseUrl = trustyGatewayForRun === "trusty" ? (settings.trustyBaseUrl || "https://api.experientiallabs.ai/v1") : gatewayBaseUrl({ gatewayId: trustyGatewayForRun });
       const trustySettings = { ...settings, gatewayId: trustyGatewayForRun, gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
       earlyTrustyDraftPromise = generateTrusty({
         settings: trustySettings,
@@ -2776,6 +2788,7 @@ export async function runCouncilJob(job) {
           "Read every supplied original screenshot and solve the exact coding problem now; do not wait for Council model selection or screenshot-reader results.",
           `Use ${languageLabel} unless the problem explicitly requires a different language. Preserve the exact judge signature or input/output interface shown in the screenshots.`,
           "Before returning, mentally check the function signature, visible example inputs and outputs, and common edge cases. Return one complete Council FINAL block with KIND: code, LANGUAGE, ANSWER, COMPLEXITY, and a closed fenced source block. Do not claim tests were executed; E2B will check the code before display.",
+          "Theoretical complexity rules to apply when stating COMPLEXITY:\n" + complexityBrief(),
         ].join("\n\n"),
         images,
         maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
@@ -2789,9 +2802,10 @@ export async function runCouncilJob(job) {
   // Do not decide solver seats from the stored Council roster.  Main and
   // overlay both begin with every enabled approved model; a coordinator reads
   // this job's original screenshots and chooses the four independent solvers.
+  const fullTrusty = settings.trustyMode === "full";
   const useAdaptiveSolverSelection = hasAdaptiveSolverSelection(settings);
   let models = approvedSolverPool(settings);
-  const judges = chatJudges(settings);
+  const judges = fullTrusty ? [] : chatJudges(settings);
 
   // A seat the key has no access to is not worth a request to discover. The
   // router's catalogue already answered that for every model at once, so the
@@ -2813,7 +2827,7 @@ export async function runCouncilJob(job) {
       { models: missing, catalogueSize: settings.availableModels?.length ?? 0 }
     );
   }
-  if (models.length < 2) {
+  if (!fullTrusty && models.length < 2) {
     throw new Error(
       missing.length
         ? `Cloud Council needs at least two reachable approved models, and this key cannot reach judge route(s): ${missing.join(", ")}. ` +
@@ -2947,7 +2961,7 @@ export async function runCouncilJob(job) {
   // cannot weaken the evidence rule for a screenshot job. A text-only route
   // must never be promoted merely because readers agreed about their transcript.
   const showPicture = images.length > 0;
-  let solving = showPicture ? seeing : available;
+  let solving = fullTrusty ? [] : (showPicture ? seeing : available);
   const solveImages = showPicture ? images : [];
   if (showPicture && !solving.length) {
     throw new Error("No reachable vision-capable solver is available for this screenshot. Verify the selected model roster and image-capability probes.");
@@ -3299,7 +3313,7 @@ export async function runCouncilJob(job) {
   // uses the owner's Clean API credential, the same screenshot/contract/
   // knowledge evidence, and the same E2B execution gate as every candidate.
   // The bounded self-review happens before its source is sent to E2B.
-  const trustyEligible = settings.codingTrustyEnabled !== false && inferredKind === "code" &&
+  const trustyEligible = settings.trustyMode !== "off" && inferredKind === "code" &&
     ["python", "cpp", "rust"].includes(primaryLanguage);
   let trustyCandidate = null;
   let trustyRunPromise = Promise.resolve(null);
@@ -3307,9 +3321,9 @@ export async function runCouncilJob(job) {
   if (trustyEligible) {
     trustyPromise = (async () => {
       const trustyGatewayForRun = trustyGateway(settings);
-      const trustyBaseUrl = gatewayBaseUrl({ gatewayId: trustyGatewayForRun });
+      const trustyBaseUrl = trustyGatewayForRun === "trusty" ? (settings.trustyBaseUrl || "https://api.experientiallabs.ai/v1") : gatewayBaseUrl({ gatewayId: trustyGatewayForRun });
       const trustySettings = { ...settings, gatewayId: trustyGatewayForRun, gatewayBaseUrl: trustyBaseUrl, availableModels: [] };
-      const trustyModels = trustyModelsFor(trustyGatewayForRun);
+      const trustyModels = trustyModelsFor(trustyGatewayForRun, settings);
       const trustyModel = trustyModels[0];
       try {
         if (!secret(trustyGatewayForRun)) {
@@ -3582,6 +3596,12 @@ export async function runCouncilJob(job) {
   // selected solvers but is joined before Council verification/review so its
   // independently E2B-tested answer can be included in the same judge docket.
   trustyCandidate = await trustyPromise;
+  if (fullTrusty && !trustyCandidate) {
+    const reason = "Full Trusty is on but the Trusty model produced no verified answer; no other solver ran.";
+    await addEvent(job.id, "error", "full_trusty_failed", reason).catch(() => {});
+    await patchJob(job.id, { status: "needs_attention", progress_phase: "needs_attention", error: reason, finished_at: new Date().toISOString() });
+    return;
+  }
   const answered = candidates.filter((candidate) => candidate?.text || candidate?.final);
   if (answered.length < 1 && !trustyCandidate) {
     const errors = candidates.filter(Boolean).map((candidate) => candidate.error || "").filter(Boolean);

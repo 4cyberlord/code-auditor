@@ -328,6 +328,7 @@ function CodingSettingsCard() {
   const settings = useStore((s) => s.settings);
   const keys = useStore((s) => s.keys);
   const gatewayKey = useStore((s) => s.gatewayKey);
+  const [trustyKey, setTrustyKey] = useState("");
   const patch = useStore((s) => s.patchSettings);
   const [note, setNote] = useState<string | null>(null);
 
@@ -1518,6 +1519,9 @@ function UpdateCard() {
 function CouncilCard() {
   const settings = useStore((s) => s.settings);
   const gatewayKey = useStore((s) => s.gatewayKey);
+  const keys = useStore((s) => s.keys);
+  const refreshKeys = useStore((s) => s.refreshKeys);
+  const [trustyKey, setTrustyKey] = useState("");
   const patch = useStore((s) => s.patchSettings);
   const probes = useStore((st) => st.settings.probes);
   const probing = useStore((st) => st.probing);
@@ -1635,11 +1639,41 @@ function CouncilCard() {
         </div>
       </div>
       <div className="row">
-        <label htmlFor="coding-trusty-on">Coding Trusty preflight</label>
-        <input id="coding-trusty-on" type="checkbox" checked={settings.codingTrustyEnabled}
-          onChange={(event) => patch({ codingTrustyEnabled: event.target.checked })} />
+        <label htmlFor="trusty-mode">Coding Trusty</label>
+        <div className="segmented" id="trusty-mode" style={{ display: "flex", gap: 6, flex: 1 }}>
+          {(["off", "limited", "full"] as const).map((mode) => (
+            <button key={mode} data-on={settings.trustyMode === mode} style={{ flex: 1 }}
+              onClick={() => patch({ trustyMode: mode, codingTrustyEnabled: mode !== "off" })}>
+              {mode === "off" ? "Off" : mode === "limited" ? "Limited" : "Full Trusty"}
+            </button>
+          ))}
+        </div>
       </div>
-      <p className="settings-form-caption">When enabled, Claude Fable 5.1 on Clean API starts a separate provisional solution while Council solvers work. It uses the local language knowledge and the same E2B-validated test cases; it is never counted as one of your four selected agents. A passing preflight appears early, then Council may replace it only with a stronger answer that passes verification.</p>
+      <p className="settings-form-caption">Limited runs Trusty first and still lets the Council and judges review. Full Trusty is the solver alone: it answers, E2B validates the code, and the result publishes without judges or extra solvers. Trusty has its own route and key, independent of the active gateway.</p>
+      <div className="row">
+        <label htmlFor="trusty-model">Trusty model</label>
+        <input id="trusty-model" className="field mono" value={settings.trustyModel}
+          onChange={(event) => patch({ trustyModel: event.target.value })} />
+      </div>
+      <div className="row">
+        <label htmlFor="trusty-base">Trusty base URL</label>
+        <input id="trusty-base" className="field mono" value={settings.trustyBaseUrl}
+          onChange={(event) => patch({ trustyBaseUrl: event.target.value })} />
+      </div>
+      <div className="row">
+        <label htmlFor="trusty-key">Trusty key</label>
+        <input id="trusty-key" className="field mono" type="password" placeholder="saved key" value={trustyKey}
+          onChange={(event) => setTrustyKey(event.target.value)} />
+      </div>
+      <div className="row">
+        <button onClick={async () => {
+          if (!trustyKey.trim()) return;
+          await bridge.setApiKey("trusty", trustyKey.trim());
+          setTrustyKey("");
+          await refreshKeys();
+        }}>Save Trusty key</button>
+        <span className="hint">{(keys as Record<string, boolean>).trusty ? "key saved" : "no key"}</span>
+      </div>
       <details className="settings-inline-help"><summary>How Council mode works</summary><p>The council re-solves the problem, tests each code candidate, reviews the results, and produces a final recommendation. Failed tests cannot win. Expect about 36 extra requests per run, so low gateway limits make council runs slower.</p></details>
 
       <div className="row">
@@ -2115,6 +2149,7 @@ export default function SettingsDialog() {
   const patch = useStore((s) => s.patchSettings);
   const gatewayId = useStore((s) => s.settings.gatewayId);
   const gatewayKey = useStore((s) => s.gatewayKey);
+  const [trustyKey, setTrustyKey] = useState("");
   const councilEnabled = useStore((s) => s.settings.councilEnabled);
   const councilModelCount = useStore((s) => s.settings.councilModels.length);
   const theme = useStore((s) => s.settings.theme);

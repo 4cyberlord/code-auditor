@@ -604,8 +604,13 @@ interface Settings {
    * by vendor key, so with the gateway off it cannot form.
    */
   councilEnabled: boolean;
-  /** Run an early, separate Claude Fable 5.1 / Clean API preflight answer. */
+  /** Run an early, separate preflight answer. */
   codingTrustyEnabled: boolean;
+  /** off = none, limited = preflight + Council, full = Trusty alone, no judges. */
+  trustyMode: "off" | "limited" | "full";
+  /** Dedicated Trusty route; independent of the active gateway. */
+  trustyModel: string;
+  trustyBaseUrl: string;
   /**
    * The models that solve. Round 1 is still the visible panel; the panel's own
    * answers are always candidates, and this list is asked through the gateway
@@ -1074,6 +1079,9 @@ const defaultSettings = (): Settings => ({
   // all when something executed the code.
   councilEnabled: true,
   codingTrustyEnabled: true,
+  trustyMode: "limited",
+  trustyModel: "gpt-6.1-sol",
+  trustyBaseUrl: "https://api.experientiallabs.ai/v1",
   councilModels: COUNCIL_DEFAULT_MODELS,
   councilJudges: COUNCIL_DEFAULT_JUDGES,
   verifiedModelOutcomes: [],
@@ -1234,6 +1242,9 @@ function normalizeSettings(s: Settings): Settings {
         : base.gatewayBaseUrl,
     councilEnabled: typeof s.councilEnabled === "boolean" ? s.councilEnabled : base.councilEnabled,
     codingTrustyEnabled: typeof s.codingTrustyEnabled === "boolean" ? s.codingTrustyEnabled : base.codingTrustyEnabled,
+    trustyMode: s.trustyMode === "off" || s.trustyMode === "full" || s.trustyMode === "limited" ? s.trustyMode : base.trustyMode,
+    trustyModel: typeof s.trustyModel === "string" && s.trustyModel.trim() ? s.trustyModel.trim() : base.trustyModel,
+    trustyBaseUrl: typeof s.trustyBaseUrl === "string" && s.trustyBaseUrl.trim() ? s.trustyBaseUrl.trim() : base.trustyBaseUrl,
     councilIncludePanel:
       typeof s.councilIncludePanel === "boolean" ? s.councilIncludePanel : base.councilIncludePanel,
     councilProblemContract:
@@ -5208,16 +5219,18 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
   let trustyCandidate: Candidate | null = null;
   let trustyPromise: Promise<Candidate | null> = Promise.resolve(null);
   if (codingTrustyEligible({
-    enabled: settings.codingTrustyEnabled,
+    enabled: settings.trustyMode !== "off",
     mode: settings.mode,
     taskKinds: [reading?.kind, contract?.kind, ...readers.map(item => item.kind)],
   })) {
     set(st => ({ council: { ...st.council, codingTrusty: { status: "solving", candidate: null, error: null } } }));
     trustyPromise = (async () => {
       try {
-        const trustyGateway = isGatewayId(settings.gatewayId) ? settings.gatewayId : "cleanapis";
-        const hasTrustyKey = trustyGateway === settings.gatewayId && settings.gatewayId !== "cleanapis"
-          ? s0.gatewayKey : await bridge.hasApiKey(trustyGateway);
+        const trustyGateway = settings.trustyMode ? "trusty" : isGatewayId(settings.gatewayId) ? settings.gatewayId : "cleanapis";
+        const hasTrustyKey = trustyGateway === "trusty"
+          ? await bridge.hasApiKey("trusty")
+          : trustyGateway === settings.gatewayId && settings.gatewayId !== "cleanapis"
+            ? s0.gatewayKey : await bridge.hasApiKey(trustyGateway);
         if (!hasTrustyKey) {
           set(st => ({ council: { ...st.council, codingTrusty: {
             status: "unavailable", candidate: null,
@@ -5226,7 +5239,9 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
           return null;
         }
           const trustyPreset = gatewayPreset(trustyGateway);
-          const trustyModel = trustyPreset.trustyModel ?? preferredPrimaryRoute("claude-fable-5.1", trustyGateway);
+          const trustyModel = trustyGateway === "trusty"
+            ? settings.trustyModel
+            : trustyPreset.trustyModel ?? preferredPrimaryRoute("claude-fable-5.1", trustyGateway);
           const trustyModels = [trustyModel, trustyPreset.trustyFallbackModel]
             .filter((value, index, all): value is string => !!value && all.indexOf(value) === index);
           let text = "";
@@ -5251,7 +5266,7 @@ async function runCouncil(get: GetStore, set: SetStore): Promise<void> {
                 images: allImages,
                 maxTokens: Math.max(Number(settings.maxTokens || 4096), 8192),
                 temperature: 0,
-                baseUrl: trustyPreset.defaultBaseUrl,
+                baseUrl: trustyGateway === "trusty" ? settings.trustyBaseUrl : trustyPreset.defaultBaseUrl,
                 endpoint: "chat",
               });
               const parsed = parseFinal(attempt);

@@ -39,7 +39,7 @@ const MODEL_LABELS: Record<PrimaryModelId, string> = {
 const ROUTE_ALIASES: Record<PrimaryModelId, readonly string[]> = {
   "claude-opus-5.5": ["claude-opus-5.5", "anthropic/claude-opus-5.5", "claude/opus-5-5", "claude/opus-5.5"],
   "claude-fable-5.1": ["claude-fable-5.1", "claude-haiku-5.5", "anthropic/claude-fable-5.1", "claude/fable-5-1", "claude/fable-5.1"],
-  "gpt-5.6-sol": ["gpt-5.6-sol", "openai/gpt-5.6-sol", "openai/gpt-5-6-sol"],
+  "gpt-5.6-sol": ["gpt-5.6-sol", "gpt-6.1-sol", "openai/gpt-5.6-sol", "openai/gpt-5-6-sol"],
   "gemini-3.1-pro": ["gemini-3.1-pro", "gemini-3.1-pro-preview", "gemini-4-argon", "google/gemini-3.1-pro", "google/gemini-3-1-pro"],
   "grok-4.6": ["grok-4.6", "x-ai/grok-4.6", "xai/grok-4-6", "xai/grok-4.6"],
   "gpt-5.6-terra": ["gpt-5.6-terra", "openai/gpt-5.6-terra", "openai/gpt-5-6-terra"],

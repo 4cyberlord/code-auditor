@@ -470,7 +470,7 @@ export const isGatewayId = (id: string): id is GatewayId =>
 export const gatewayPreset = (id: string | null | undefined): GatewayPreset =>
   KNOWN_GATEWAYS.find((gateway) => gateway.id === id) ?? KNOWN_GATEWAYS[0];
 
-export type TransportId = ProviderId | GatewayId;
+export type TransportId = ProviderId | GatewayId | "trusty";
 
 /**
  * Anything with a Keychain entry.
@@ -495,7 +495,7 @@ export const STORAGE = {
 
 export type StorageId = typeof STORAGE.id;
 
-export type KeyId = TransportId | "database-url" | StorageId | "azure_storage_connection_string";
+export type KeyId = TransportId | "database-url" | StorageId | "azure_storage_connection_string" | "trusty";
 
 /** The transcriber's human label. No key: the engine is on the device. */
 export const TRANSCRIBER_LABEL = "Apple Vision";
