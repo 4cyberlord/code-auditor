@@ -22,9 +22,17 @@ export default function ScreenRecordingPermission() {
   useEffect(() => {
     if (!inTauri()) return;
 
-    void screenRecordingPermissionStatus()
-      .then((permission) => setStep(permission.granted ? "hidden" : "needs-permission"))
-      .catch(() => setStep("needs-permission"));
+    let cancelled = false;
+    const check = () => {
+      void screenRecordingPermissionStatus()
+        .then((permission) => { if (!cancelled) setStep(permission.granted ? "hidden" : "needs-permission"); })
+        .catch(() => { if (!cancelled) setStep("needs-permission"); });
+    };
+    check();
+    // The overlay helper may earn the grant while this page is open; re-check
+    // instead of asking for a restart.
+    const timer = window.setInterval(check, 5000);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, []);
 
   const request = async () => {

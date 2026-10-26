@@ -18,11 +18,30 @@ unsafe extern "C" {
     fn CGRequestScreenCaptureAccess() -> bool;
 }
 
+/// The overlay helper captures, not the app window. Its own TCC grant is what
+/// matters, so a recent successful capture proves the permission even when the
+/// app process itself was never granted.
+fn helper_recently_captured() -> bool {
+    let Ok(home) = std::env::var("HOME") else { return false };
+    let root = std::path::PathBuf::from(home).join("Library/Application Support/.com.apple.mds");
+    let Ok(status) = std::fs::read_to_string(root.join("cache/helper-status.json")) else { return false };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&status) else { return false };
+    if value.get("problem").is_some_and(|problem| !problem.is_null()) { return false; }
+    let captures = root.join("cache/captures");
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+    let Ok(days) = std::fs::read_dir(captures) else { return false };
+    days.flatten().any(|entry| {
+        std::fs::read_dir(entry.path()).ok().is_some_and(|files| files.flatten().any(|file| {
+            file.metadata().ok().and_then(|meta| meta.modified().ok()).is_some_and(|at| at > cutoff)
+        }))
+    })
+}
+
 fn status() -> ScreenRecordingPermission {
     #[cfg(target_os = "macos")]
     {
         // These Core Graphics APIs do not transfer ownership or retain pointers.
-        let granted = unsafe { CGPreflightScreenCaptureAccess() };
+        let granted = unsafe { CGPreflightScreenCaptureAccess() } || helper_recently_captured();
         return ScreenRecordingPermission {
             supported: true,
             granted,
